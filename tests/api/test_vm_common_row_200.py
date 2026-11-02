@@ -300,6 +300,8 @@ def world(monkeypatch, tmp_path):
     seen = {}
 
     class Cli:
+        GESTURES = {"start": ("start", {"running"}), "destroy": ("destroy", {"shut off"})}
+
         @staticmethod
         def read_all(hosts, details=False, deadline=None, folders=False):
             seen["folders"] = folders
@@ -374,6 +376,24 @@ def test_one_list_for_harvester_and_kvm(world):
     assert fdb.memberships(conn)["kvm/db540746-4fb3-4d1a-9d61-eb283bd776e0"]["folder_path"] == "/Kept"
     conn.close()
     assert d["clusters"] and json.dumps(d)          # `clusters` gardé pour all-vms.js
+
+
+@pytest.mark.parametrize("qs,served", [("?kinds=harvester,kvm", True), ("?kinds=kvm", True),
+                                       ("?kinds=harvester", False), ("", False)])
+def test_kvm_rows_come_with_the_tables_of_the_host_page_menu(world, qs, served):
+    """2.2.2 : le menu d'une VM KVM de la vue Machines virtuelles est celui
+    de la page de l'hôte ; ses tables (gestes, opérations, modification)
+    sont celles de /api/kvm/vms, servies avec la liste."""
+    with wapp.app.test_client() as c:
+        st, d = get(c, qs)
+    assert st == 200
+    if not served:
+        assert "kvm_tables" not in d
+        return
+    assert d["kvm_tables"] == {"gestures": {"start": ["running"], "destroy": ["shut off"]},
+                               "operations": wapp.KVM_VM_OPERATIONS,
+                               "edit_operations": wapp.KVM_VM_EDIT_OPERATIONS}
+    assert d["kvm_tables"] == {k: v for k, v in wapp._kvm_vm_tables().items()}
 
 
 def test_an_object_that_lost_its_folder_drops_the_cached_vm_membership(world):

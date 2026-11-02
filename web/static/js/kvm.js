@@ -580,13 +580,6 @@ const KVM = (() => {
     return '';
   }
 
-  function opItem(op, v) {
-    const why = !window.KVMVm ? tr('kvm.op.unavailable') : operationWhy(cur.data.operations, op, v, role());
-    return `<button type="button" class="vma-item tip${op === 'delete' ? ' danger' : ''}" role="menuitem" data-kvm-op="${op}"
-        data-tip="${esc(why || OP_TIP[op]())}"${why ? ' aria-disabled="true"' : ''}>
-        <span class="vma-ic">${icon(OP_ICON[op])}</span> ${esc(OP_LABEL[op]())}</button>`;
-  }
-
   // le menu d'une VM (même allure que celui des VMs Harvester)
   let menu = null;
   function closeMenu() {
@@ -598,27 +591,45 @@ const KVM = (() => {
     menu = null;
   }
 
-  function openMenu(anchor, v) {
-    if (menu && menu.anchor === anchor) { closeMenu(); return; }
-    closeMenu();
-    const gestures = cur.data.gestures || {};
-    const el = document.createElement('div');
-    el.className = 'vma-menu kvm-menu';
-    el.setAttribute('role', 'menu');
-    el.setAttribute('aria-label', tr('kvm.menuLabel', { name: v.name }));
+  /** Groupes du menu d'une VM : gestes d'alimentation, console et opérations,
+   *  puis « Modifier » (kvm-form.js). Partagé par la page de l'hôte et la vue
+   *  Machines virtuelles (2.2.2) : `tables` = { gestures, operations,
+   *  edit_operations } servies par la console, `have` = rôle de la personne. */
+  function vmMenuHtml(v, tables, have) {
+    const t = tables || {};
+    const can = ['operator', 'admin'].includes(have);
     const item = (g) => {
-      const why = !canOperate() ? tr('kvm.operatorOnly') : gestureWhy(gestures, g, v.state);
+      const why = !can ? tr('kvm.operatorOnly') : gestureWhy(t.gestures || {}, g, v.state);
       return `<button type="button" class="vma-item tip${g === 'destroy' ? ' danger' : ''}" role="menuitem" data-kvm-gesture="${g}"
         data-tip="${esc(why || GESTURE_TIP[g]())}"${why ? ' aria-disabled="true"' : ''}>
         <span class="vma-ic">${icon(GESTURE_ICON[g])}</span> ${esc(GESTURE_LABEL[g]())}</button>`;
     };
-    el.innerHTML = `<div class="vma-head">${icon('vm', 13)} <strong>${esc(v.name)}</strong> <span class="res-dim">${esc(v.host)} · ${esc(stateLabel(v.state))}</span></div>
-      <div class="vma-group">${GESTURES.map(item).join('')}</div>
+    const opItem = (op) => {
+      const why = !window.KVMVm ? tr('kvm.op.unavailable') : operationWhy(t.operations, op, v, have);
+      return `<button type="button" class="vma-item tip${op === 'delete' ? ' danger' : ''}" role="menuitem" data-kvm-op="${op}"
+        data-tip="${esc(why || OP_TIP[op]())}"${why ? ' aria-disabled="true"' : ''}>
+        <span class="vma-ic">${icon(OP_ICON[op])}</span> ${esc(OP_LABEL[op]())}</button>`;
+    };
+    return `<div class="vma-group">${GESTURES.map(item).join('')}</div>
       <div class="vma-group"><button type="button" class="vma-item tip" role="menuitem" data-kvm-console="1"
-        data-tip="${esc(canOperate() ? tr('kvm.consoleTip') : tr('kvm.operatorOnly'))}"${canOperate() ? '' : ' aria-disabled="true"'}>
+        data-tip="${esc(can ? tr('kvm.consoleTip') : tr('kvm.operatorOnly'))}"${can ? '' : ' aria-disabled="true"'}>
         <span class="vma-ic">${icon('console')}</span> ${esc(tr('kvm.console'))}</button>
-        ${OPERATIONS.map((op) => opItem(op, v)).join('')}</div>
-      ${window.KVMForm ? KVMForm.menuGroupHtml(v, cur.data.edit_operations, role()) : ''}`;
+        ${OPERATIONS.map(opItem).join('')}</div>
+      ${window.KVMForm ? KVMForm.menuGroupHtml(v, t.edit_operations, have) : ''}`;
+  }
+
+  /** Ouvre le menu d'une VM sous `anchor`. `o` : { tables, role, onGesture(v, g),
+   *  cls (classe en plus), extraHtml (groupes en plus, en fin de menu),
+   *  onExtra(e, close) (clic dans ces groupes : rend vrai s'il est traité) }. */
+  function openVmMenu(anchor, v, o) {
+    if (menu && menu.anchor === anchor) { closeMenu(); return; }
+    closeMenu();
+    const el = document.createElement('div');
+    el.className = `vma-menu kvm-menu${o.cls ? ` ${o.cls}` : ''}`;
+    el.setAttribute('role', 'menu');
+    el.setAttribute('aria-label', tr('kvm.menuLabel', { name: v.name }));
+    el.innerHTML = `<div class="vma-head">${icon('vm', 13)} <strong>${esc(v.name)}</strong> <span class="res-dim">${esc(v.host)} · ${esc(stateLabel(v.state))}</span></div>
+      ${vmMenuHtml(v, o.tables, o.role)}${o.extraHtml || ''}`;
     document.body.appendChild(el);
     const r = anchor.getBoundingClientRect();
     const wd = el.offsetWidth || 260, h = el.offsetHeight || 200;
@@ -646,6 +657,7 @@ const KVM = (() => {
     document.addEventListener('keydown', menu.keys, true);
     el.querySelector('.vma-item:not([aria-disabled])')?.focus();
     el.addEventListener('click', (e) => {
+      if (o.onExtra && o.onExtra(e, closeMenu)) return;
       if (window.KVMForm && KVMForm.onMenuClick(e, v, closeMenu)) return;
       const c = e.target.closest('[data-kvm-console]');
       if (c) {
@@ -655,20 +667,24 @@ const KVM = (() => {
         if (window.VMConsole && VMConsole.openKvm) VMConsole.openKvm(v.host, v.name);
         return;
       }
-      const o = e.target.closest('[data-kvm-op]');
-      if (o) {
-        if (o.getAttribute('aria-disabled')) return;
+      const x = e.target.closest('[data-kvm-op]');
+      if (x) {
+        if (x.getAttribute('aria-disabled')) return;
         closeMenu();
         // v1.98.0 : instantanés, clonage, suppression (kvm-vm.js)
-        const fn = window.KVMVm && OP_OPEN[o.dataset.kvmOp] && KVMVm[OP_OPEN[o.dataset.kvmOp]];
+        const fn = window.KVMVm && OP_OPEN[x.dataset.kvmOp] && KVMVm[OP_OPEN[x.dataset.kvmOp]];
         if (fn) fn(v.host, v.name);
         return;
       }
       const b = e.target.closest('[data-kvm-gesture]');
       if (!b || b.getAttribute('aria-disabled')) return;
       closeMenu();
-      ask(v, b.dataset.kvmGesture);
+      if (o.onGesture) o.onGesture(v, b.dataset.kvmGesture);
     });
+  }
+
+  function openMenu(anchor, v) {
+    openVmMenu(anchor, v, { tables: cur.data, role: role(), onGesture: ask });
   }
 
   /** Un geste ; l'arrêt forcé demande une confirmation dans la page. */
@@ -690,31 +706,66 @@ const KVM = (() => {
     return tr('kvm.done.state', { name: v.name, state: stateLabel(o.state) });
   }
 
-  async function gesture(v, g) {
-    const fb = cur.host.querySelector('[data-kvm="feedback"]');
+  /** Envoie un geste et suit son action ; le retour s'écrit dans `fb` et
+   *  `onEnd(followed)` est appelé à la fin. Partagé avec la vue des VMs. */
+  async function sendGesture(v, g, fb, onEnd) {
     fb.textContent = tr('kvm.sending', { gesture: GESTURE_LABEL[g](), name: v.name });
-    const c = cur;
-    c.busy += 1;
     try {
       const out = await send('POST', `/api/kvm/vms/${enc(v.host)}/${enc(v.name)}/${enc(g)}`, {});
-      follow(out.action_id, (s) => { if (s.message && cur) fb.textContent = s.message; }, (ok, run) => {
-        c.busy = Math.max(0, c.busy - 1);
-        if (c !== cur) return;
-        const o = (run.result && run.result.output) || {};
-        if (ok) {
-          fb.innerHTML = `<span>${icon('ok')} ${esc(doneText(v, g, o))}</span>`;
-        } else {
-          const sugg = (o.suggest || []).filter((x) => GESTURES.includes(x));
-          fb.innerHTML = `<span class="res-error">${icon('fail')} ${esc(o.error || run.error_summary || '?')}</span>
-            ${sugg.map((x) => `<button type="button" class="btn btn-sm btn-secondary tip" data-kvm="suggest" data-gesture="${esc(x)}" data-vm="${esc(vmKey(v))}"
-              data-tip="${esc(GESTURE_TIP[x]())}">${icon(GESTURE_ICON[x])} ${esc(GESTURE_LABEL[x]())}</button>`).join(' ')}`;
+      follow(out.action_id, (s) => { if (s.message && fb.isConnected) fb.textContent = s.message; }, (ok, run) => {
+        if (fb.isConnected) {
+          const o = (run.result && run.result.output) || {};
+          if (ok) {
+            fb.innerHTML = `<span>${icon('ok')} ${esc(doneText(v, g, o))}</span>`;
+          } else {
+            const sugg = (o.suggest || []).filter((x) => GESTURES.includes(x));
+            fb.innerHTML = `<span class="res-error">${icon('fail')} ${esc(o.error || run.error_summary || '?')}</span>
+              ${sugg.map((x) => `<button type="button" class="btn btn-sm btn-secondary tip" data-kvm="suggest" data-gesture="${esc(x)}" data-vm="${esc(vmKey(v))}"
+                data-tip="${esc(GESTURE_TIP[x]())}">${icon(GESTURE_ICON[x])} ${esc(GESTURE_LABEL[x]())}</button>`).join(' ')}`;
+          }
         }
-        load(true);
+        onEnd(true);
       });
     } catch (e) {
-      c.busy = Math.max(0, c.busy - 1);
       fb.innerHTML = `<span class="res-error">${icon('fail')} ${esc(e.message)}</span>`;
+      onEnd(false);
     }
+  }
+
+  async function gesture(v, g) {
+    const fb = cur.host.querySelector('[data-kvm="feedback"]');
+    const c = cur;
+    c.busy += 1;
+    sendGesture(v, g, fb, (followed) => {
+      c.busy = Math.max(0, c.busy - 1);
+      if (followed && c === cur) load(true);
+    });
+  }
+
+  /** Un geste lancé hors de la page de l'hôte (vue Machines virtuelles,
+   *  2.2.2) : même envoi, même confirmation de l'arrêt forcé, écrites dans
+   *  `fb` ; `onEnd()` relit la vue. */
+  function runGesture(v, g, fb, onEnd) {
+    if (!fb) return;
+    if (!fb.dataset.kvmRun) {
+      // boutons de confirmation et suggestions (« démarrer », ...) du retour
+      fb.dataset.kvmRun = '1';
+      fb.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-kvm]');
+        if (!b || !fb.contains(b)) return;
+        const p = fb.kvmPending;
+        if (b.dataset.kvm === 'confirm-no') { fb.kvmPending = null; fb.innerHTML = ''; return; }
+        if (b.dataset.kvm === 'destroy-yes' && p) { fb.kvmPending = null; sendGesture(p.v, 'destroy', fb, () => p.onEnd()); return; }
+        if (b.dataset.kvm === 'suggest' && p) runGesture(p.v, b.dataset.gesture, fb, p.onEnd);
+      });
+    }
+    fb.kvmPending = { v, onEnd };
+    if (g !== 'destroy') { sendGesture(v, g, fb, () => onEnd()); return; }
+    fb.innerHTML = `<div class="bkg-confirm kvm-confirm" role="group" aria-label="${esc(tr('kvm.destroyConfirm', { name: v.name, host: v.host }))}">
+        <span>${icon('warn')} ${esc(tr('kvm.destroyConfirm', { name: v.name, host: v.host }))}</span>
+        <button type="button" class="btn btn-sm btn-danger tip" data-kvm="destroy-yes" data-tip="${esc(tr('kvm.destroyYesTip'))}">${icon('stop')} ${esc(tr('kvm.destroyYes'))}</button>
+        <button type="button" class="btn btn-sm btn-secondary tip" data-kvm="confirm-no" data-tip="${esc(tr('kvm.confirmNoTip'))}">${esc(tr('kvm.confirmNo'))}</button></div>`;
+    fb.querySelector('[data-kvm="confirm-no"]').focus();
   }
 
   // -- Stockage et Réseaux : un bloc par hôte ------------------------------------
@@ -1224,7 +1275,9 @@ const KVM = (() => {
   // busy : gestes en cours de la vue affichée (un compteur négatif bloquerait
   // l'actualisation automatique), lu par les tests
   // follow : partagé avec kvm-vm.js (fenêtres instantanés, clonage, suppression)
-  return { start, stop, load, follow, openDeclare, testHost, removeHost, kindLabel, gestureWhy, operationWhy, stateLabel, cachedVms, preset,
+  // openVmMenu, closeVmMenu, runGesture : menu d'une VM partagé avec la vue
+  // Machines virtuelles (all-vms.js, 2.2.2)
+  return { start, stop, load, follow, openDeclare, openVmMenu, closeVmMenu: closeMenu, runGesture, testHost, removeHost, kindLabel, gestureWhy, operationWhy, stateLabel, cachedVms, preset,
            busy: () => (cur ? cur.busy : null) };
 })();
 

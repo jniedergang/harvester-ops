@@ -352,9 +352,12 @@ full redraw of the 300 rows (new sort): 0.22 s with 2,000 VMs and 0.23 to
 0.29 s with 10,000 (2.0.2: 0.5 to 0.57 s and 0.9 s, the cost being the six
 icon buttons of each row; 1.x: 3.6 s for every refresh and every key at
 2,000). A render without change takes about 0.05 s. The row menu follows
-the family: the Harvester VM menu, or for a KVM VM the console, snapshots,
-clone, delete, **Move to folder** and **Open on its host** (start and stop
-are on the host page). Start, stop, restart, force stop and migrate of a
+the family: the Harvester VM menu, or for a KVM VM the menu of its host
+page (since 2.2.2): start, shut down, reboot, suspend, resume, force off,
+console, snapshots, clone, delete and **Edit**, greyed with the same reasons
+(role, state, transient VM), then **Move to folder** and **Open on its
+host**. A gesture reports in the view, and force off asks for confirmation
+there. Start, stop, restart, force stop and migrate of a
 selection apply to its Harvester VMs.
 
 On the left, a panel with two modes, like vCenter. **Folders**: All VMs,

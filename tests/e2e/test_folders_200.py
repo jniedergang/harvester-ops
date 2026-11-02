@@ -20,6 +20,7 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+import kvm_form_fakes as KF  # noqa: E402  (tables du menu d'une VM KVM, 2.2.2)
 from nav import goto  # noqa: E402
 
 KUUID = "49960a5e-a239-42da-95f6-f55383ea5c62"
@@ -147,7 +148,8 @@ def world(context, flask_server):
         "sources": [{"kind": "harvester", "source": "harv-fake", "state": "ok", "count": 3},
                     {"kind": "harvester", "source": "gpudemo", "state": "ok", "count": 1},
                     {"kind": "kvm", "source": "node2", "state": "ok", "count": 2}],
-        "vms": state["vms"], "clusters": [], "folder_warnings": []}))
+        "vms": state["vms"], "clusters": [], "folder_warnings": [],
+        "kvm_tables": {"gestures": KF.GESTURES, "operations": KF.OPERATIONS, "edit_operations": KF.EDIT_OPS}}))
     page.route(re.compile(r".*/api/replication/plans(\?.*)?$"), lambda r, q: ok(r, {
         "plans": [{"id": "rp-0123456789ab", "resources": [{"resource_uid": "uid-db"}]}]}))
     page.route(re.compile(r".*/api/containers-all(\?.*)?$"), lambda r, q: ok(r, {
