@@ -4,6 +4,128 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.3.0] - 2026-11-02 - Terraform declarations for KVM hosts
+
+### Added
+- **Terraform declarations can target a KVM host** (decision 107). One list
+  of declarations for every target: at creation, a declaration chooses a
+  Harvester cluster or a KVM host declared in the console; a family filter
+  (all targets, Harvester clusters, KVM hosts) sits above the list, and each
+  card and the declaration header name the target. Plan read before
+  applying, apply of the reviewed plan, destroy, history and per-declaration
+  state work as for a cluster.
+- **KVM resources in the declaration forms**: virtual machine (base image of
+  the host catalogue in copy on write, same pool, or blank disk, libvirt network or
+  bridge, CPU model, cloud-init configuration or SSH key), volume and
+  network (isolated, NAT, routed, DHCP range). Pools, networks and images
+  are read from the host.
+- **Template "RKE2 on libvirt VMs"** (decision 108, instead of Cluster API
+  on KVM): N servers (1, 3, 5, 7) and M agents from a cloud image, static
+  addresses by cloud-init matched on a fixed MAC address, RKE2 installed by
+  cloud-init from a channel or an exact version. The RKE2 token is drawn by
+  the console, kept in the declaration workspace and passed to OpenTofu as a
+  sensitive variable by the environment; it is never shown. Outputs (node
+  addresses, how to read the kubeconfig) appear under "Outputs of the last
+  apply". The VMs need Internet access; an airgap install is not covered.
+- **Provider `dmacvicar/libvirt` 0.9.9 embedded** (Apache-2.0), pinned in
+  `scripts/embedded-providers.env`. `package.sh` checks the GPG signature of
+  the release `SHA256SUMS` with the pinned key
+  (`config/terraform-provider-keys/dmacvicar-libvirt.asc`, fingerprint
+  `F6D373750D6F5983E70634DC0833E38C51E74D26`) and then the archive checksum
+  (`scripts/fetch-libvirt-provider.sh`); `install.sh` installs it. The
+  Installation tab shows its version and signer.
+- API: `POST /api/terraform/kvm/<host>/apply_declaration` and
+  `/destroy_declaration` (operator, by declaration id);
+  `POST /api/tf-declarations` takes `target_kind` (`harvester` by default,
+  or `kvm`); `GET /api/tf-declarations?family=harvester|kvm`; a declaration
+  carries `target_kind`, every address of each resource (`addresses`) and
+  its non sensitive `outputs`. `GET /api/terraform/info` gives the libvirt
+  provider version, checksum and signer.
+
+### Security
+- **Terraform workspaces are private.** A Terraform or OpenTofu state can
+  hold secrets (provider credentials, generated tokens, cloud-init data, the
+  RKE2 token of the new template); the states and their backups were created
+  0644. Every workspace directory (root, cluster, `decls`, declaration, KVM)
+  is now 0700 and its files 0600 (0700 for an executable), whatever the
+  umask: OpenTofu runs under umask 077 and the console tightens the files it
+  writes, before and after each run. Existing workspaces are repaired once
+  when the console starts, and the count is logged. Same code for the
+  service (`/var/lib/harvester-ops/terraform`) and a development state.
+- **Strict host key checking for KVM declarations.** The provider connects
+  through `qemu+sshcmd` and a script of the workspace that starts OpenSSH
+  with strict options first (`-F /dev/null`, `StrictHostKeyChecking=yes`,
+  the pinned host key only, the host key only, no agent, no multiplexing);
+  OpenSSH keeps the first value of each option. The host key, its pinned
+  host key and the script are copied for the run (0600, workspace 0700) and
+  removed afterwards, failed or not; never in argv, in the code or in an
+  answer. The URI never carries `no_verify`: the provider turns verification
+  off as soon as the parameter appears, whatever its value. A connection
+  through the same script runs first and says why a host is refused
+  (`hostkey: Host key verification failed.`).
+- **Base images come from the host catalogue only.** A base image must be a
+  catalogue image of the host, in the pool of the new disk, of the declared
+  format, not used as a disk by a domain; the console reads the catalogue on
+  the host before every plan and apply. A free path (block device, disk of
+  another VM) is refused.
+- **Rights aligned on the KVM module**: applying a reviewed plan that
+  destroys or replaces, applying a declaration with a network, and
+  destroying a KVM declaration need an administrator; a KVM declaration is
+  applied only from a reviewed plan (`plan_hash`). Free Terraform code
+  (`raw`) is refused on KVM targets: the workspace holds the host key during
+  a run. Only the known outputs of the RKE2 template are kept.
+- **Cloud-init hidden from viewers**: declaration reads replace `user_data`
+  and `network_data` with `(hidden)` for the viewer role (Harvester
+  declarations too), and `GET /api/tf-declarations/<id>/code` needs an
+  operator, as the KVM and Harvester cloud-init reads already did.
+- A KVM declaration cannot be deleted while it runs (`409`); staged SSH
+  files left by an interrupted console are removed at start.
+- Every form value written into the generated Terraform code is checked
+  (names, paths, addresses, numbers, keys) or escaped (quotes, backslashes,
+  new lines, `${` and `%{` template sequences); no heredoc.
+- KVM run output is cleaned of the workspace path before it reaches the
+  history or the page.
+
+### Fixed
+- **Providers are always taken from the local mirror.** OpenTofu resolves
+  `harvester/harvester` to `registry.opentofu.org` and fetched it from the
+  Internet, since the mirror only existed under `registry.terraform.io`.
+  Every provider is now laid out under both registry names, included in the
+  mirror and excluded from direct downloads, and the `terraformrc` of a
+  workspace follows its mirror. A workspace whose lock file was written from
+  an Internet download refused the mirror at its next `init` (checksums
+  differ, seen with OpenTofu 1.12): the stale lock file is recreated once.
+
+### Internal
+- `web/tf_kvm.py` (pure): HCL escaping, provider block, OpenSSH script and
+  the four KVM resource kinds. `tf_store`: additive `target_kind` column
+  (old rows target Harvester), names unique per target, each resource kind
+  limited to its family. One KVM run at a time per declaration.
+- Every generated domain carries `cpu = host-model` and
+  `features = { acpi, apic }`: on node2, Leap 16 panicked on the default
+  qemu64 CPU, and without ACPI/APIC the disk and the network card of a q35
+  domain stayed silent.
+
+### Tests
+- `tests/api/test_tf_kvm_render_230.py`: escaping read back by OpenTofu
+  (and an escape without the template guard caught), URI and SSH script,
+  every refused value in a table, RKE2 nodes, cloud-init and network
+  configuration.
+- Workspace permissions: fresh workspaces under umask 002, OpenTofu run
+  under umask 077, existing 0644 states repaired once, links not followed;
+  five mutations caught.
+- `tests/api/test_tf_kvm_decl_230.py`: store migration and families, routes
+  and error paths, roles, runner with OpenTofu simulated (key staged only
+  for the run, removed after a failure or an exception, token by
+  environment only, outputs), local mirror, `install_bundles`, and the
+  fetch script against a signed fake release (bad pin, second key, other
+  signer, altered archive, altered checksums).
+- Real check on node2 (objects `kvmtest-*` only): VM, volume and network
+  declaration planned, applied, checked with `virsh` and destroyed; RKE2
+  template with 1 server and 1 agent, both nodes `Ready` 153 s and 167 s
+  after apply over two runs; wrong pinned host key and a `/dev/sda` base
+  image refused before OpenTofu.
+
 ## [2.2.2] - 2026-11-02 - Edit KVM VMs from the Virtual machines view
 
 ### Fixed

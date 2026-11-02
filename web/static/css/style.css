@@ -4606,6 +4606,16 @@ body.login-page {
 .tfd-card-top strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tfd-card-desc, .tfd-card-meta, .tfd-foot, .tfd-meta, .tfd-hint { font-size: 11.5px; color: var(--text-dim); }
 .tfd-foot { margin-top: auto; }
+/* 2.3.0 : cible d'une déclaration (cluster Harvester ou hôte KVM) et filtre de famille */
+.tfd-list-head { flex-wrap: wrap; }
+.tfd-family { flex: 1 1 100%; order: 3; }
+.tfd-card-target { font-size: 11.5px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
+.tfd-card-target::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: var(--accent); flex: none; }
+.tfd-card-target.tfd-fam-kvm::before { background: var(--info); }
+.tfd-target-badge.tfd-fam-kvm { border-color: var(--info); }
+.tfd-outputs { margin: 10px 0; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+.tfd-outputs summary { cursor: pointer; font-weight: 600; }
+.tfd-outputs pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .tfd-empty { color: var(--text-dim); font-size: 13px; }
 .tfd-main { display: flex; flex-direction: column; min-width: 0; }
 .tfd-placeholder { margin: auto; text-align: center; color: var(--text-dim); display: flex; flex-direction: column;

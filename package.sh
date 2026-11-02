@@ -135,6 +135,13 @@ else
     [[ -x "$WORK_DIR/bundles/terraform-provider/bin/terraform-provider-harvester" ]] || {
         err "Terraform provider ${TF_PROVIDER_VERSION} could not be fetched"; exit 1; }
     ok "Terraform provider embedded: v${TF_PROVIDER_VERSION} (checksum verified)"
+    # 2.3.0 : le provider libvirt des déclarations KVM, vérifié par la
+    # signature GPG de la release (clé épinglée) puis par sa somme
+    scripts/fetch-libvirt-provider.sh "$TF_LIBVIRT_PROVIDER_VERSION" "$TF_LIBVIRT_PROVIDER_FPR" \
+        config/terraform-provider-keys/dmacvicar-libvirt.asc \
+        "$WORK_DIR/bundles/terraform-provider-libvirt" "embedded in harvester-ops ${VERSION}" >/dev/null || {
+        err "libvirt Terraform provider ${TF_LIBVIRT_PROVIDER_VERSION} could not be fetched or verified"; exit 1; }
+    ok "libvirt Terraform provider embedded: v${TF_LIBVIRT_PROVIDER_VERSION} (signature and checksum verified)"
 fi
 # web/ above already carries web/vendor (wheels). A second
 # `cp -r web/vendor "$WORK_DIR/web/vendor"` used to nest a duplicate

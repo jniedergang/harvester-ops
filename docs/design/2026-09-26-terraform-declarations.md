@@ -124,3 +124,32 @@ par le bouton « Appliquer » sur le plan relu, 2Gi lu sur la VM ; clé retirée
 plan « 1 à détruire », clé détruite ; historique des six passages ;
 destruction par confirmation tapée, VM et disque partis ; déclaration
 supprimée.
+
+## 2.3.0 : cibles KVM (décisions 107 et 108)
+
+Une déclaration vise un cluster Harvester ou un hôte KVM déclaré dans la
+console (`target_kind`, colonne ajoutée sans réécriture : les anciennes
+lignes visent Harvester). Une seule liste, un filtre de famille. Espace d'une
+déclaration KVM : `<espaces>/.kvm/<hôte>/decls/<id>/` en 0700. Pas de Cluster
+API sur KVM : un modèle « RKE2 sur des VMs libvirt ». Le détail (connexion,
+ressources, modèle, essai réel) est dans la section 10 de
+`docs/fr/capabilites.md` (`docs/en/capabilities.md`).
+
+Ce que le réel a appris (node2, 02/11/2026) :
+
+- **Transport `qemu+ssh` du provider (client SSH en Go) inutilisable avec
+  l'empreinte épinglée** : il négocie un type de clé d'hôte sans regarder
+  ceux épinglés (« knownhosts: key mismatch » quand seule l'ed25519 l'est).
+  D'où `qemu+sshcmd` et un script OpenSSH aux options strictes en tête.
+- **`no_verify` coupe la vérification dès qu'il apparaît** (`query.Has`),
+  `no_verify=0` compris : l'URI n'en porte aucun.
+- **Le provider ne dit pas pourquoi ssh refuse** (« procedure
+  interrupted ») : une connexion préalable par le même script le dit.
+- **Sans `<features>` ACPI/APIC, un domaine q35 a des périphériques PCIe
+  muets** (disque introuvable à l'initrd, carte sans porteuse) ; **sans
+  `<cpu>`, qemu64** et Leap 16 panique au démarrage d'init.
+- **OpenTofu résout `harvester/harvester` en `registry.opentofu.org`** : un
+  miroir sous le seul `registry.terraform.io` le laissait télécharger sur
+  Internet. Miroir sous les deux noms depuis 2.3.0.
+- L'ISO cloud-init du provider s'écrit dans `$TMPDIR` en 0644 : TMPDIR privé
+  par espace.

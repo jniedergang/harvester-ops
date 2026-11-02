@@ -40,7 +40,16 @@ def test_every_kind_has_backend_handler():
     kinds = _kinds_in_schema()
     assert kinds, "no kinds found in TF_SCHEMA"
     app = APP_PY.read_text()
+    import sys
+    sys.path.insert(0, str(ROOT / "web"))
+    import tf_kvm
+    import tf_store
     for kind in kinds:
+        if kind.startswith("kvm_"):
+            # 2.3.0 : ressources KVM, rendues par tf_kvm et connues du magasin
+            assert kind in tf_store.KVM_KINDS
+            assert kind in tf_kvm.RENDERERS or kind == "kvm_rke2"
+            continue
         # _render_tf_for_kind() dispatches with `if kind == "X":` blocks
         assert f'if kind == "{kind}"' in app, (
             f"TF_SCHEMA declares kind {kind!r} but app.py "
@@ -155,3 +164,14 @@ def test_the_stacked_declaration_windows_are_gone():
     html = (ROOT / "web" / "templates" / "index.html").read_text()
     assert "tf-decl-panel.js" not in html and "tf-sections.js" not in html
     assert not (ROOT / "web" / "static" / "js" / "tf-decl-panel.js").exists()
+
+
+def test_every_ref_url_has_flask_route():
+    """2.3.0 : les listes des formulaires KVM (`ref_url` à {target}) lisent
+    les routes d'hôte KVM existantes."""
+    urls = sorted(set(re.findall(r"ref_url:\s*'([^']+)'", SCHEMA_JS.read_text())))
+    assert urls, "no ref_url in TF_SCHEMA"
+    app = APP_PY.read_text()
+    for url in urls:
+        assert "{target}" in url
+        assert f'@app.route("{url.replace("{target}", "<host>")}")' in app, url
