@@ -216,8 +216,8 @@ sauf choix contraire) et `App.openHost(famille, nom, sub, onglet, pane)`.
 
 ### Pages d'un hôte
 
-Une page d'hôte est un bandeau (famille, nom, état, version, nombre de VMs,
-sous-menu, Activité de cet hôte) posé au-dessus de la section existante que
+Une page d'hôte est un bandeau sur une ligne (famille, nom, état, version,
+nombre de VMs, sous-menu, Activité de cet hôte) posé au-dessus de la section existante que
 l'adresse désigne ; les sections elles-mêmes ne sont pas réécrites. Sur un
 hôte Harvester, les Paramètres sont des onglets sur les anciennes sections
 Cluster (`Sections.DEF` donne leurs panneaux) ; la Vue d'ensemble montre les

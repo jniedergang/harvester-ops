@@ -148,27 +148,65 @@ const HostPage = (() => {
     } else if (kvm) {
       bar = '';
     } else if (sub === 'params') {
+      // 2.0.3 : Démarrage / Arrêt ne sont plus une seconde barre ici, mais un
+      // sélecteur dans le panneau (renderPowerSeg)
       bar = tabBar(PARAM_TABS(), route.tab, (id) => href({ sub: 'params', tab: id }), tr('hnav.sub.params'));
-      if (route.tab === 'power') {
-        bar += tabBar(POWER_TABS(), route.pane || 'startup', (id) => href({ sub: 'params', tab: 'power', pane: id }),
-                      tr('hp.tab.power'));
-      }
     } else if (sub === 'imports') {
       bar = tabBar(IMPORT_TABS(), route.tab, (id) => href({ sub: 'imports', tab: id }), tr('hnav.sub.imports'));
     }
+    // 2.0.3 : le bandeau tient sur une ligne (famille, nom, état, version et
+    // nombre de VMs, sous-menu, Activité en bouton icône)
     head.innerHTML = `
       <div class="hp-title">
         <span class="badge hp-family tip" data-tip="${esc(kvm ? tr('hp.kvm.familyTip') : tr('hp.familyTip'))}" title="${esc(kvm ? tr('hp.kvm.familyTip') : tr('hp.familyTip'))}">${kvm ? 'KVM' : 'Harvester'}</span>
-        <span class="hp-name">${esc(route.host)}</span>
+        <span class="hp-name" title="${esc(route.host)}">${esc(route.host)}</span>
         <span class="badge ${STATE_BADGE[st] || 'dim'} hp-state" title="${esc(h && h.error ? `${stateText}: ${h.error}` : stateText)}">${esc(stateText)}</span>
         ${meta.length ? `<span class="hp-meta">${meta.join(' &middot; ')}</span>` : ''}
         <nav class="hp-sub" aria-label="${esc(route.host)}">${(kvm ? KVM_SUBS() : SUBS()).map(([id, text, tip]) =>
           `<a class="hp-sub-link${id === sub ? ' active' : ''}" data-hp-sub="${esc(id)}" href="${esc(subHref(id))}"
               title="${esc(tip)}"${id === sub ? ' aria-current="page"' : ''}>${esc(text)}</a>`).join('')}</nav>
-        <a class="btn btn-sm btn-secondary hp-activity tip" href="${esc(window.Routes.format({ name: 'activity', kind: kindOf(), host: route.host }))}"
-           title="${esc(tr('hp.activityTip'))}" data-tip="${esc(tr('hp.activityTip'))}">${icon('activity')} <span>${esc(tr('hp.activity'))}</span></a>
+        <a class="btn-icon-action hp-activity tip" href="${esc(window.Routes.format({ name: 'activity', kind: kindOf(), host: route.host }))}"
+           title="${esc(tr('hp.activityTip'))}" data-tip="${esc(tr('hp.activityTip'))}" aria-label="${esc(tr('hp.activity'))}">${icon('activity')}</a>
       </div>
       ${bar ? `<div class="hp-bars">${bar}</div>` : ''}`;
+    renderPowerSeg();
+    const nav = head.querySelector('.hp-sub');
+    if (nav) {
+      nav.addEventListener('scroll', () => overflowCue(nav), { passive: true });
+      // l'entrée active reste visible quand le sous-menu défile
+      const act = nav.querySelector('.hp-sub-link.active');
+      if (act && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = Math.max(0, act.offsetLeft - nav.offsetLeft - 24);
+      overflowCue(nav);
+    }
+  }
+
+  /** Fondu de chaque côté du sous-menu où il reste des entrées cachées. */
+  function overflowCue(nav) {
+    const over = nav.scrollWidth > nav.clientWidth + 1;
+    nav.classList.toggle('hp-sub-l', over && nav.scrollLeft > 1);
+    nav.classList.toggle('hp-sub-r', over && nav.scrollLeft + nav.clientWidth < nav.scrollWidth - 1);
+  }
+  window.addEventListener('resize', () => {
+    const nav = document.querySelector('#host-page-head .hp-sub');
+    if (nav) overflowCue(nav);
+  });
+
+  /** Paramètres > Alimentation : Démarrage et Arrêt en sélecteur dans le
+   *  panneau (un seul niveau d'onglets sous le bandeau). */
+  function renderPowerSeg() {
+    const on = !!(route && route.name === 'host' && route.host && kindOf() === 'harvester'
+                  && route.sub === 'params' && route.tab === 'power');
+    const cur = (route && route.pane) || 'startup';
+    document.querySelectorAll('[data-hp-power-seg]').forEach((el) => {
+      el.hidden = !on;
+      el.innerHTML = !on ? '' : Object.entries(POWER_TABS()).map(([id, [text, tip, ic]]) => {
+        const sel = id === cur;
+        return `<a class="seg-item tip${sel ? ' active' : ''}" role="tab" data-hp-power="${esc(id)}"
+            href="${esc(href({ sub: 'params', tab: 'power', pane: id }))}" aria-selected="${sel ? 'true' : 'false'}"
+            title="${esc(tip)}" data-tip="${esc(tip)}">${icon(ic, 13)} <span>${esc(text)}</span></a>`;
+      }).join('');
+      el.setAttribute('aria-label', tr('hp.tab.power'));
+    });
   }
 
   /** Le routeur a appliqué une adresse (ou l'écran a suivi un clic). */

@@ -103,7 +103,12 @@ def test_vm_actions_row_uses_svg_not_emoji():
     cell = app.split("vm-actions-cell", 1)[1].split("</td>", 1)[0]
     assert not EMOJI_RE.search(cell), (
         f"emoji left in the VM actions row: {EMOJI_RE.findall(cell)}")
-    assert cell.count("Icons.svg(") >= 6
+    # 2.0.3 : la ligne n'a plus qu'un bouton « ⋮ » ; les six gestes de ligne
+    # sont en tête du menu, chacun avec son icône SVG
+    assert cell.count("<button") == 1 and "data-vm-more" in cell
+    lead = app.split("const lead = [", 1)[1].split("];", 1)[0]
+    assert not EMOJI_RE.search(lead)
+    assert lead.count("ico: '") + lead.count("Icons.svg(") >= 5
 
 
 def test_console_toolbar_uses_the_same_icons():

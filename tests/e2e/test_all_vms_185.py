@@ -146,7 +146,9 @@ def test_a_selection_across_two_clusters_starts_each_vm_on_its_cluster(view):
 def test_row_gestures_carry_the_row_s_cluster(view):
     page, rows, sent = view
     row = rows.filter(has_text="api")
-    row.locator('[data-avm-act="stop"]').click()
+    # 2.0.3 : Arrêter est en tête du menu « ⋮ » de la ligne
+    row.locator('[data-avm-act="more"]').click()
+    page.locator('.vma-menu [data-vma-lead][data-act="stop"]').click()
     page.wait_for_timeout(300)
     assert sent == [("bravo/default/api/runStrategy", {"runStrategy": "Halted"})]
     calls = []

@@ -151,11 +151,14 @@ const AllVMs = (() => {
     const dir = prefs.dir === 'desc' ? -1 : 1;
     return rows.sort((a, b) => {
       const x = get(a); const y = get(b);
-      const c = typeof x === 'number' && typeof y === 'number' ? x - y
-        : String(x).localeCompare(String(y), undefined, { numeric: true, sensitivity: 'base' });
-      return (c || a.name.localeCompare(b.name) || src(a).localeCompare(src(b))) * dir;
+      const c = typeof x === 'number' && typeof y === 'number' ? x - y : NUMERIC.compare(String(x), String(y));
+      return (c || PLAIN.compare(a.name, b.name) || PLAIN.compare(src(a), src(b))) * dir;
     });
   }
+  // 2.0.3 : comparateurs créés une fois ; localeCompare avec options en
+  // recrée un à chaque comparaison (120 ms pour trier 10 000 VMs)
+  const NUMERIC = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+  const PLAIN = new Intl.Collator();
 
   // -- squelette (monté une fois : la saisie du filtre n'est jamais perdue) --
   function skeleton() {
@@ -245,7 +248,8 @@ const AllVMs = (() => {
       const k = h.dataset.avmSort;
       if (prefs.sort === k) prefs.dir = prefs.dir === 'asc' ? 'desc' : 'asc';
       else { prefs.sort = k; prefs.dir = 'asc'; }
-      savePrefs(); render();
+      // un tri ne change que la liste : ni le panneau, ni les puces, ni les namespaces
+      savePrefs(); renderList();
     }));
     host.querySelectorAll('[data-avm-bulk]').forEach((b) => b.addEventListener('click', () => bulk(b.dataset.avmBulk)));
     q('[data-avm="bulkfolder"]').addEventListener('click', (e) => {
@@ -369,15 +373,13 @@ const AllVMs = (() => {
     const k = keyOf(v);
     const phase = v.phase || 'Stopped';
     const kvm = v.kind === 'kvm';
-    const halted = v.runStrategy === 'Halted';
-    const b = (attr, ic, tip, cls = '', disabled = false) => `<button type="button" class="btn-icon-action ${cls} tip" data-avm-act="${attr}"
-        data-tip="${esc(tip)}" aria-label="${esc(tip)}"${disabled ? ' disabled' : ''}>${ic}</button>`;
     const ips = v.ips || [];
     const plan = dr && v.uuid ? dr[v.uuid] : null;
-    const op = window.Folders && Folders.canOperate();
     const fam = kvm ? 'KVM' : 'Harvester';
     const hostCell = kvm ? `<a class="avm-cluster" href="#kvm/${enc(src(v))}/vms" title="${esc(tr('vmf.hostTip', { host: src(v) }))}">${esc(src(v))}</a>`
       : `<span class="avm-cluster">${esc(src(v))}</span>`;
+    // 2.0.3 : un seul bouton « ⋮ » par ligne (les gestes de ligne sont en tête
+    // du menu) ; le dessin de 300 lignes ne paie plus six boutons à icône
     return `<tr data-avm-row="${esc(k)}" class="${selection.has(k) ? 'selected' : ''}">
       <td class="check-col"><input type="checkbox" data-avm-key="${esc(k)}" ${selection.has(k) ? 'checked' : ''}
           aria-label="${esc(`${src(v)}/${v.namespace ? `${v.namespace}/` : ''}${v.name}`)}"></td>
@@ -391,15 +393,8 @@ const AllVMs = (() => {
       <td>${ips.length ? `<code>${esc(ips[0])}</code>${ips.length > 1 ? ` <span class="res-dim tip" data-tip="${esc(ips.slice(1).join(', '))}">+${ips.length - 1}</span>` : ''}` : '<span class="res-dim">–</span>'}</td>
       <td>${v.node ? esc(v.node) : '<span class="res-dim">–</span>'}</td>
       <td class="vmf-folder">${folderCell(v)}</td>
-      <td class="vm-actions-cell">
-        ${kvm ? '' : (halted ? b('start', `<span class="icon-green">${icon('play')}</span>`, tr('vm.tooltip.start'), 'start')
-                 : b('stop', `<span class="icon-red">${icon('stop')}</span>`, tr('vm.tooltip.stop'), 'stop'))}
-        ${b('console', icon('console'), tr('vm.tooltip.console'), 'console')}
-        ${kvm ? '' : b('edit', icon('settings'), tr('vm.tooltip.edit'), 'edit')}
-        ${kvm ? '' : b('notes', icon('notes'), tr('vm.tooltip.notes'), 'notes')}
-        ${b('folder', icon('folder'), op ? tr('fld.moveOneTip') : tr('fld.operatorOnly'), 'folder', !op)}
-        ${b('more', icon('more'), kvm ? tr('vmf.kvmMenuTip') : tr('vma.moreTip'), 'more')}
-      </td></tr>`;
+      <td class="vm-actions-cell"><button type="button" class="btn-icon-action row-menu tip" data-avm-act="more" aria-haspopup="menu" aria-expanded="false"
+          data-tip="${esc(menuTip)}" aria-label="${esc(tr('vma.label', { name: v.name }))}">&#8942;</button></td></tr>`;
   }
 
   function renderBulk(vis = visible()) {
@@ -418,12 +413,21 @@ const AllVMs = (() => {
     all.checked = vis.length > 0 && vis.every((v) => selection.has(keyOf(v)));
   }
 
+  let menuTip = '';                     // info-bulle du bouton « ⋮ », lue une fois par rendu
   function render() {
     if (!host) return;
     renderPanel();
     renderScope();
     renderClusters();
     renderNamespaces();
+    renderList();
+  }
+
+  /** Le tableau, ses en-têtes de tri, « Afficher plus », le compte et la barre
+   *  de sélection (sans le panneau ni les filtres). */
+  function renderList() {
+    if (!host) return;
+    menuTip = tr('avm.menuTip');
     const rows = visible();
     const tbody = host.querySelector('tbody');
     // une autre liste (filtre, tri, périmètre) repart des PAGE premières lignes
@@ -542,7 +546,7 @@ const AllVMs = (() => {
     kmenu.el.remove();
     document.removeEventListener('pointerdown', kmenu.outside, true);
     document.removeEventListener('keydown', kmenu.keys, true);
-    if (kmenu.anchor && kmenu.anchor.isConnected) kmenu.anchor.focus();
+    if (kmenu.anchor && kmenu.anchor.isConnected) { kmenu.anchor.setAttribute('aria-expanded', 'false'); kmenu.anchor.focus(); }
     kmenu = null;
   }
   function openKvmMenu(anchor, v) {
@@ -552,15 +556,17 @@ const AllVMs = (() => {
     el.className = 'vma-menu kvm-menu vmf-kvm-menu';
     el.setAttribute('role', 'menu');
     el.setAttribute('aria-label', tr('kvm.menuLabel', { name: v.name }));
-    const item = (act, ic, label, tip) => `<button type="button" class="vma-item tip${act === 'delete' ? ' danger' : ''}" role="menuitem"
-        data-vmf-kvm="${act}" data-tip="${esc(tip)}"><span class="vma-ic">${icon(ic)}</span> ${esc(label)}</button>`;
+    const op = window.Folders && Folders.canOperate();
+    const item = (act, ic, label, tip, off = false) => `<button type="button" class="vma-item tip${act === 'delete' ? ' danger' : ''}" role="menuitem"
+        data-vmf-kvm="${act}" data-tip="${esc(tip)}"${off ? ' aria-disabled="true"' : ''}><span class="vma-ic">${icon(ic)}</span> ${esc(label)}</button>`;
     el.innerHTML = `<div class="vma-head">${icon('vm', 13)} <strong>${esc(v.name)}</strong> <span class="res-dim">${esc(src(v))} · ${esc(v.state || v.phase || '')}</span></div>
       <div class="vma-group">
         ${item('console', 'console', tr('kvm.console'), tr('kvm.consoleTip'))}
         ${item('snapshots', 'snapshot', tr('kvm.op.snapshots'), tr('kvm.op.snapshotsTip'))}
         ${item('clone', 'clone', tr('kvm.op.clone'), tr('kvm.op.cloneTip'))}
         ${item('delete', 'trash', tr('kvm.op.delete'), tr('kvm.op.deleteTip'))}</div>
-      <div class="vma-group">${item('page', 'compute', tr('vmf.kvmOpenHost'), tr('vmf.kvmOpenHostTip', { host: src(v) }))}</div>`;
+      <div class="vma-group">${item('folder', 'folder', tr('fld.move'), op ? tr('fld.moveOneTip') : tr('fld.operatorOnly'), !op)}
+        ${item('page', 'compute', tr('vmf.kvmOpenHost'), tr('vmf.kvmOpenHostTip', { host: src(v) }))}</div>`;
     document.body.appendChild(el);
     const r = anchor.getBoundingClientRect();
     const wd = el.offsetWidth || 260, h = el.offsetHeight || 200;
@@ -572,16 +578,27 @@ const AllVMs = (() => {
     kmenu = {
       el, anchor,
       outside: (e) => { if (!el.contains(e.target) && !anchor.contains(e.target)) closeKvmMenu(); },
-      keys: (e) => { if (e.key === 'Escape') { e.preventDefault(); closeKvmMenu(); } },
+      keys: (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); closeKvmMenu(); return; }
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          const items = [...el.querySelectorAll('.vma-item')];
+          const i = items.indexOf(document.activeElement);
+          const n = e.key === 'ArrowDown' ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
+          e.preventDefault();
+          items[n]?.focus();
+        }
+      },
     };
+    anchor.setAttribute('aria-expanded', 'true');
     document.addEventListener('pointerdown', kmenu.outside, true);
     document.addEventListener('keydown', kmenu.keys, true);
     el.querySelector('.vma-item')?.focus();
     el.addEventListener('click', (e) => {
       const b = e.target.closest('[data-vmf-kvm]');
-      if (!b) return;
+      if (!b || b.getAttribute('aria-disabled')) return;
       const act = b.dataset.vmfKvm;
       closeKvmMenu();
+      if (act === 'folder') { moveRows([keyOf(v)]); return; }
       if (act === 'console' && window.VMConsole && VMConsole.openKvm) VMConsole.openKvm(src(v), v.name);
       else if (act === 'snapshots' && window.KVMVm) KVMVm.openSnapshots(src(v), v.name);
       else if (act === 'clone' && window.KVMVm) KVMVm.openClone(src(v), v.name);
@@ -590,28 +607,39 @@ const AllVMs = (() => {
     });
   }
 
+  /** Gestes de tête du menu d'une VM Harvester : ceux qui étaient des
+   *  boutons de ligne avant 2.0.3, mêmes droits et mêmes raisons de grisé. */
+  function harvLead(row_) {
+    const v = { cluster: src(row_), ns: row_.namespace, name: row_.name };
+    const halted = row_.runStrategy === 'Halted';
+    const op = window.Folders && Folders.canOperate();
+    const power = (target) => setStrategy(v, target).then(() => later(600))
+      .catch((err) => alert(tr('avm.actFailed', { vm: `${v.cluster}/${v.ns}/${v.name}`, msg: err.message })));
+    return [
+      halted ? { act: 'start', label: tr('namespaces.bulkStart'), tip: tr('vm.tooltip.start'),
+                 icoHtml: `<span class="icon-green">${icon('play')}</span>`, run: () => power('Always') }
+        : { act: 'stop', label: tr('namespaces.bulkStop'), tip: tr('vm.tooltip.stop'),
+            icoHtml: `<span class="icon-red">${icon('stop')}</span>`, run: () => power('Halted') },
+      { act: 'console', label: tr('kvm.console'), tip: tr('vm.tooltip.console'), ico: 'console',
+        run: () => { if (window.VMConsole) VMConsole.open(v.cluster, v.ns, v.name); } },
+      { act: 'edit', label: tr('avm.lead.edit'), tip: tr('vm.tooltip.edit'), ico: 'settings',
+        run: () => { if (window.VMEdit) VMEdit.open(v.cluster, v.ns, v.name); } },
+      { act: 'notes', label: tr('avm.lead.notes'), tip: tr('vm.tooltip.notes'), ico: 'notes',
+        run: () => { if (window.Notes) Notes.open('vm', v.cluster, v.ns, v.name); } },
+      { act: 'folder', label: tr('fld.move'), tip: tr('fld.moveOneTip'), why: op ? '' : tr('fld.operatorOnly'), ico: 'folder',
+        run: () => moveRows([keyOf(row_)]) },
+    ];
+  }
+
   function onRowAction(e) {
     const btn = e.target.closest('[data-avm-act]');
     if (!btn || btn.disabled) return;
     const row_ = findRow(btn);
-    if (!row_) return;
-    const act = btn.dataset.avmAct;
-    if (act === 'folder') { moveRows([keyOf(row_)]); return; }
-    if (row_.kind === 'kvm') {
-      if (act === 'console' && window.VMConsole && VMConsole.openKvm) VMConsole.openKvm(src(row_), row_.name);
-      else if (act === 'more') openKvmMenu(btn, row_);
-      return;
+    if (!row_ || btn.dataset.avmAct !== 'more') return;
+    if (row_.kind === 'kvm') { openKvmMenu(btn, row_); return; }
+    if (window.VMActions) {
+      VMActions.open(btn, src(row_), row_.namespace, row_.name, { onDone: () => later(800), lead: harvLead(row_) });
     }
-    const v = { cluster: src(row_), ns: row_.namespace, name: row_.name };
-    if (act === 'start' || act === 'stop') {
-      setStrategy(v, act === 'start' ? 'Always' : 'Halted').then(() => later(600))
-        .catch((err) => alert(tr('avm.actFailed', { vm: `${v.cluster}/${v.ns}/${v.name}`, msg: err.message })));
-    } else if (act === 'console' && window.VMConsole) VMConsole.open(v.cluster, v.ns, v.name);
-    else if (act === 'snapshot' && window.VMSnapshots) VMSnapshots.open(v.cluster, v.ns, v.name);
-    else if (act === 'migrate' && window.VMMigrate) VMMigrate.open(v.cluster, v.ns, v.name);
-    else if (act === 'edit' && window.VMEdit) VMEdit.open(v.cluster, v.ns, v.name);
-    else if (act === 'notes' && window.Notes) Notes.open('vm', v.cluster, v.ns, v.name);
-    else if (act === 'more' && window.VMActions) VMActions.open(btn, v.cluster, v.ns, v.name, { onDone: () => later(800) });
   }
 
   async function bulk(action) {

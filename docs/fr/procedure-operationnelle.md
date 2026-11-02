@@ -295,11 +295,14 @@ après la mise à jour, c'est le dernier écran ouvert qui s'affiche.
 
 ### Page d'un hôte (Harvester)
 
-Un hôte Harvester s'ouvre sur une page avec un bandeau en tête : la famille,
-le nom, l'état, la version et le nombre de VMs, le sous-menu de l'hôte (Vue
-d'ensemble, Machines virtuelles, Conteneurs, Imports et migrations,
-Paramètres, Disaster Recovery) et **Activité de cet hôte**. Chaque vue déjà
-construite garde sa place ; le bandeau ne fait que l'encadrer.
+Un hôte Harvester s'ouvre sur une page avec un bandeau en tête, sur une
+ligne : la famille, le nom, l'état, la version et le nombre de VMs, le
+sous-menu de l'hôte (Vue d'ensemble, Machines virtuelles, Conteneurs,
+Imports et migrations, Paramètres, Disaster Recovery) et le bouton icône
+**Activité de cet hôte**. Dans une fenêtre étroite, le sous-menu défile de
+côté au lieu de passer à la ligne, et un fondu montre le côté où il reste
+des entrées. Chaque vue déjà construite garde sa place ; le bandeau ne fait
+que l'encadrer.
 
 - **Vue d'ensemble** (`#harvester/<c>`) : métriques, jauges d'usage, tableau
   des nœuds, et le bloc **Événements** en dessous (les sous-onglets Cluster
@@ -321,7 +324,9 @@ construite garde sa place ; le bandeau ne fait que l'encadrer.
   - **Sécurité** : Secrets, Clés SSH, et **Comptes du cluster** (venus des
     Réglages).
   - **Mise à jour** : le contenu de la fenêtre Upgrade, dans la page.
-  - **Alimentation** : Démarrage et Arrêt (avec l'ordre des VMs).
+  - **Alimentation** : Démarrage et Arrêt (avec l'ordre des VMs). Les deux
+    sont dans un sélecteur à côté du titre du panneau : la page n'a qu'une
+    barre d'onglets.
   - **Connexion** : qui a déclaré le cluster (`config.yaml` ou la console),
     ses nœuds déclarés, **Tester le kubeconfig** et **Tester SSH**
     (administrateur), et un raccourci vers Réglages > Clusters.

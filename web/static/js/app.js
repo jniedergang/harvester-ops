@@ -656,23 +656,9 @@ const App = (() => {
         <td class="num">${escapeHtml(vm.memory || '–')}</td>
         <td>${(vm.ips || []).length ? `<code>${escapeHtml(vm.ips[0])}</code>${vm.ips.length > 1 ? ` <span class="res-dim tip" data-tip="${escapeHtml(vm.ips.slice(1).join(', '))}">+${vm.ips.length - 1}</span>` : ''}` : '<span class="res-dim">–</span>'}</td>
         <td>${vm.node ? escapeHtml(vm.node) : '<span class="res-dim">–</span>'}</td>
-        <td class="vm-actions-cell">
-          ${vm.runStrategy === 'Halted'
-            ? `<button class="btn-icon-action start tip" data-tip="${i18n.t('vm.tooltip.start')}" data-action="start" data-ns="${vm.namespace}" data-name="${vm.name}"><span class="icon-green">${Icons.svg('play')}</span></button>`
-            : `<button class="btn-icon-action stop tip" data-tip="${i18n.t('vm.tooltip.stop')}" data-action="stop" data-ns="${vm.namespace}" data-name="${vm.name}"><span class="icon-red">${Icons.svg('stop')}</span></button>`}
-          <button class="btn-icon-action snapshot tip" data-tip="${i18n.t('vm.tooltip.snapshot')}"
-                  data-vm-snapshot data-ns="${vm.namespace}" data-name="${vm.name}">${Icons.svg('snapshot')}</button>
-          <button class="btn-icon-action migrate tip" data-tip="${i18n.t('vm.tooltip.migrate')}"
-                  data-vm-migrate data-ns="${vm.namespace}" data-name="${vm.name}">${Icons.svg('migrate')}</button>
-          <button class="btn-icon-action edit tip" data-tip="${i18n.t('vm.tooltip.edit')}"
-                  data-vm-edit data-ns="${vm.namespace}" data-name="${vm.name}">${Icons.svg('settings')}</button>
-          <button class="btn-icon-action console tip" data-tip="${i18n.t('vm.tooltip.console')}"
-                  data-vm-console data-ns="${vm.namespace}" data-name="${vm.name}">${Icons.svg('console')}</button>
-          <button class="btn-icon-action notes tip" data-tip="${i18n.t('vm.tooltip.notes')}"
-                  data-vm-notes data-ns="${vm.namespace}" data-name="${vm.name}">${Icons.svg('notes')}</button>
-          <button class="btn-icon-action more tip" data-tip="${i18n.t('vma.moreTip')}" aria-haspopup="menu" aria-expanded="false"
-                  data-vm-more data-ns="${vm.namespace}" data-name="${vm.name}">${Icons.svg('more')}</button>
-        </td>`;
+        <td class="vm-actions-cell"><button type="button" class="btn-icon-action row-menu tip" data-tip="${escapeHtml(i18n.t('avm.menuTip'))}"
+            aria-haspopup="menu" aria-expanded="false" aria-label="${escapeHtml(i18n.t('vma.label', { name: vm.name }))}"
+            data-vm-more data-ns="${escapeHtml(vm.namespace)}" data-name="${escapeHtml(vm.name)}">&#8942;</button></td>`;
 
       tr.querySelector('input[type="checkbox"]').addEventListener('change', (e) => {
         if (e.target.checked) nsSelection.add(key); else nsSelection.delete(key);
@@ -682,29 +668,29 @@ const App = (() => {
       tr.querySelector('select').addEventListener('change', (e) => {
         changeRunStrategy(vm.namespace, vm.name, e.target.value);
       });
-      tr.querySelector('.btn-icon-action.start, .btn-icon-action.stop')?.addEventListener('click', (e) => {
-        const action = e.currentTarget.dataset.action;
-        changeRunStrategy(vm.namespace, vm.name, action === 'start' ? 'Always' : 'Halted');
-      });
-      tr.querySelector('[data-vm-edit]')?.addEventListener('click', () => {
-        if (window.VMEdit) window.VMEdit.open(currentCluster, vm.namespace, vm.name);
-      });
-      tr.querySelector('[data-vm-console]')?.addEventListener('click', () => {
-        if (window.VMConsole) window.VMConsole.open(currentCluster, vm.namespace, vm.name);
-      });
-      tr.querySelector('[data-vm-notes]')?.addEventListener('click', () => {
-        if (window.Notes) window.Notes.open('vm', currentCluster, vm.namespace, vm.name);
-      });
-      tr.querySelector('[data-vm-snapshot]')?.addEventListener('click', () => {
-        if (window.VMSnapshots) window.VMSnapshots.open(currentCluster, vm.namespace, vm.name);
-      });
-      tr.querySelector('[data-vm-migrate]')?.addEventListener('click', () => {
-        if (window.VMMigrate) window.VMMigrate.open(currentCluster, vm.namespace, vm.name);
-      });
-      // v1.60.0 : le menu d'actions, comme celui de Harvester
+      // 2.0.3 : un seul bouton « ⋮ » ; les anciens boutons de ligne sont en
+      // tête du menu d'actions (VMActions, opts.lead). Les instantanés y sont
+      // déjà (« Prendre un instantané » ouvre la même fenêtre).
       tr.querySelector('[data-vm-more]')?.addEventListener('click', (e) => {
-        if (window.VMActions) VMActions.open(e.currentTarget, currentCluster, vm.namespace, vm.name,
-          { onDone: () => setTimeout(() => selectNamespace(currentNamespace), 800) });
+        if (!window.VMActions) return;
+        const c = currentCluster, ns = vm.namespace, name = vm.name;
+        const lead = [
+          vm.runStrategy === 'Halted'
+            ? { act: 'start', label: i18n.t('namespaces.bulkStart'), tip: i18n.t('vm.tooltip.start'),
+                icoHtml: `<span class="icon-green">${Icons.svg('play')}</span>`, run: () => changeRunStrategy(ns, name, 'Always') }
+            : { act: 'stop', label: i18n.t('namespaces.bulkStop'), tip: i18n.t('vm.tooltip.stop'),
+                icoHtml: `<span class="icon-red">${Icons.svg('stop')}</span>`, run: () => changeRunStrategy(ns, name, 'Halted') },
+          { act: 'console', label: i18n.t('kvm.console'), tip: i18n.t('vm.tooltip.console'), ico: 'console',
+            run: () => { if (window.VMConsole) window.VMConsole.open(c, ns, name); } },
+          { act: 'edit', label: i18n.t('avm.lead.edit'), tip: i18n.t('vm.tooltip.edit'), ico: 'settings',
+            run: () => { if (window.VMEdit) window.VMEdit.open(c, ns, name); } },
+          { act: 'notes', label: i18n.t('avm.lead.notes'), tip: i18n.t('vm.tooltip.notes'), ico: 'notes',
+            run: () => { if (window.Notes) window.Notes.open('vm', c, ns, name); } },
+          { act: 'migrate-any', label: i18n.t('avm.lead.migrateAny'), tip: i18n.t('vm.tooltip.migrate'), ico: 'migrate',
+            run: () => { if (window.VMMigrate) window.VMMigrate.open(c, ns, name); } },
+        ];
+        VMActions.open(e.currentTarget, c, ns, name,
+          { onDone: () => setTimeout(() => selectNamespace(currentNamespace), 800), lead });
       });
       tbody.appendChild(tr);
     });

@@ -139,8 +139,10 @@ def test_sidebar_tabs_present(page):
     go(page, address("startup"))
     for sub in ["overview", "vms", "params"]:
         expect(page.locator(f'#hnav-families .hnav-sub a[data-sub="{sub}"]')).to_be_visible()
+    # 2.0.3 : Démarrage et Arrêt dans le sélecteur du panneau, plus en seconde barre
+    expect(page.locator('#host-page-head .hp-tabs [data-hp-tab="power"]')).to_be_visible()
     for tab in ["startup", "shutdown"]:
-        expect(page.locator(f'#host-page-head .hp-tabs [data-hp-tab="{tab}"]')).to_be_visible()
+        expect(page.locator(f'#tab-startup [data-hp-power="{tab}"]')).to_be_visible()
     expect(page.locator(entry("activity"))).to_be_visible()
 
 
@@ -300,11 +302,12 @@ def test_current_tab_persists_across_reload(page):
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(400)
     expect(page.locator('#tab-shutdown')).to_have_class("tab-content active")
-    # 2.0.0 : l'entrée active est Paramètres dans le sous-menu de l'hôte, et
-    # l'onglet Alimentation > Arrêt dans le bandeau de la page d'hôte
+    # 2.0.0 : l'entrée active est Paramètres dans le sous-menu de l'hôte ;
+    # 2.0.3 : Alimentation dans le bandeau, Arrêt dans le sélecteur du panneau
     cls = page.locator('#hnav-families .hnav-sub a[data-sub="params"]').get_attribute("class") or ""
     assert "active" in cls.split(), f"expected `active` in classes, got: {cls!r}"
-    expect(page.locator('#host-page-head .hp-tabs [data-hp-tab="shutdown"]')).to_have_class(re.compile(r"\bactive\b"))
+    expect(page.locator('#host-page-head .hp-tabs [data-hp-tab="power"]')).to_have_class(re.compile(r"\bactive\b"))
+    expect(page.locator('#tab-shutdown [data-hp-power="shutdown"]')).to_have_class(re.compile(r"\bactive\b"))
 
 
 def test_cluster_selection_persists_across_reload(page, flask_server):

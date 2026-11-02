@@ -201,8 +201,9 @@ clusters VMs**, every VM of every declared cluster in one table with a
   IP, node, cluster, label `key=value`). **Sort** on any column, both ways.
   Filters and sort are remembered by the browser. The list refreshes every
   15 seconds while it is on screen.
-- **Gestures**, with the cluster of the row: start or stop, console,
-  snapshots, migration, settings, notes, and the full actions menu. The
+- **Gestures**, with the cluster of the row: one **⋮** button per row
+  opens the actions menu (start or stop, console, settings, notes, move to
+  folder at the top, then the full Harvester menu). The
   **selection can span clusters**: start, stop, restart, force stop and
   migrate go cluster by cluster, each gesture a tracked action.
 
@@ -335,13 +336,20 @@ sorted list; **Show 300 more** adds the next ones. The selection, **Select
 all** and dragging act on the whole filtered list, not only on the rows
 drawn. The text filter applies 150 ms after the last key, and a refresh that
 brings the same list redraws nothing (only the rows that changed are
-redrawn otherwise). Measured in headless Chromium: with 2,000 VMs a render
-without change takes about 0.1 s and a full redraw (new sort) about 0.6 s;
-with 10,000 VMs about 0.15 s and 0.9 s (before, 3.6 s for every refresh
-and every key at 2,000). The row menu follows the family: the Harvester VM menu,
-or for a KVM VM the console, snapshots, clone, delete and **Open on its
-host** (start and stop are on the host page). Start, stop, restart, force
-stop and migrate of a selection apply to its Harvester VMs.
+redrawn otherwise). Each row has a single **⋮** button; the gestures that
+were row buttons until 2.0.2 (start or stop, console, settings, notes, move
+to folder) sit at the top of its menu, available before the VM state is
+read, with the same roles and greyed reasons. The menu is one shared element
+and works from the keyboard (Enter opens it, arrows move, Escape closes it
+and gives the focus back to the button). Measured in headless Chromium, a
+full redraw of the 300 rows (new sort): 0.22 s with 2,000 VMs and 0.23 to
+0.29 s with 10,000 (2.0.2: 0.5 to 0.57 s and 0.9 s, the cost being the six
+icon buttons of each row; 1.x: 3.6 s for every refresh and every key at
+2,000). A render without change takes about 0.05 s. The row menu follows
+the family: the Harvester VM menu, or for a KVM VM the console, snapshots,
+clone, delete, **Move to folder** and **Open on its host** (start and stop
+are on the host page). Start, stop, restart, force stop and migrate of a
+selection apply to its Harvester VMs.
 
 On the left, a panel with two modes, like vCenter. **Folders**: All VMs,
 Unfiled (both cannot be changed) and the shared tree with, per folder, the
@@ -477,7 +485,11 @@ declared cluster in one table with a **Cluster** column.
   `Failed`, `Completed`, `Suspended`). **Unfold a row** to see its pods:
   node, state, restarts, age.
 - **Row menu**: the YAML (read-only window, or download) and the **logs of
-  a pod**, the last 500 lines at most, container of your choice.
+  a pod**, the last 500 lines at most, container of your choice. Since 2.0.3
+  the **⋮** button is the only button of a row (the logs button moved into
+  the menu), and the table draws the first 300 rows of the filtered and
+  sorted list, **Show 300 more** adding the next ones: a full redraw takes
+  about 0.2 s with 2,000 workloads (1.5 s before).
 - **Filters and sort** as in All clusters VMs: text (name, image, pod, node,
   label), cluster, namespace, type, state; every column sorts both ways.
 - A banner says, without alarm, that the feature is experimental before
@@ -547,8 +559,10 @@ refused by the server check (name already taken), a scale in
 
 ### The actions menu of a VM, as in Harvester (1.60.0)
 
-Each VM row has a **⋮** button. It opens a menu grouped the way Harvester's
-is, built from the VM's actual state (read when the menu opens): an action
+Each VM row has a **⋮** button (the only button of the row since 2.0.3,
+whose former row gestures open the menu: start or stop, console, settings,
+notes, move to folder, and on a host page **Migrate or transfer**). It opens
+a menu grouped the way Harvester's is, built from the VM's actual state (read when the menu opens): an action
 that does not apply is greyed out and says why, instead of failing after the
 click (a soft reboot without a guest agent, a migration with no other ready
 node).
@@ -853,11 +867,12 @@ CHANGELOG (2.0.0) and in the operating procedure.
   column, **Move to folder** on a selection. The KVM family adds Declare a
   host, Test and Remove per row, and three tabs over all KVM hosts:
   Capacity, Pools and Networks.
-- **Harvester host page** (`#harvester/<c>`): a band (family, name, state,
-  version, VM count, sub-menu, Activity of this host) over the existing
-  sections. Overview = metrics with the Events block below; Parameters =
-  Nodes, Storage, Network, Add-ons, Security (with Cluster accounts),
-  Monitoring & Logging, Advanced, Upgrade, Power (Startup, Shutdown) and
+- **Harvester host page** (`#harvester/<c>`): a one-line band (family, name,
+  state, version, VM count, sub-menu, Activity of this host as an icon
+  button) over the existing sections. Overview = metrics with the Events
+  block below; Parameters = Nodes, Storage, Network, Add-ons, Security (with
+  Cluster accounts), Monitoring & Logging, Advanced, Upgrade, Power (Startup
+  and Shutdown in a selector inside the panel, one tab bar only) and
   Connection; Imports and migrations = VM Import and VMware migrations.
   Clicking another Harvester host keeps the screen.
 - **KVM host page** (`#kvm/<h>`): see section 10.

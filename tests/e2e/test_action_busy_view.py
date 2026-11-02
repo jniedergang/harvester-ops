@@ -31,9 +31,10 @@ def test_a_refused_shutdown_is_written_in_the_log(context, flask_server, lang, n
     page.wait_for_load_state("networkidle")
     page.route("**/api/action", _refuse)
     page.on("dialog", lambda d: d.accept())
-    # 2.0.0 : Paramètres > Alimentation > Arrêt, par la barre d'onglets de l'hôte
+    # 2.0.0 : Paramètres > Alimentation, par la barre d'onglets de l'hôte ;
+    # 2.0.3 : Arrêt par le sélecteur du panneau (un seul niveau d'onglets)
     page.locator('#host-page-head .hp-tabs [data-hp-tab="power"]').click()
-    page.locator('#host-page-head .hp-tabs [data-hp-tab="shutdown"]').click()
+    page.locator('#tab-startup [data-hp-power="shutdown"]').click()
     expect(page.locator("#tab-shutdown")).to_have_class(re.compile(r"\bactive\b"))
     # 2.0.0 : le bandeau de l'hôte décale la page ; le menu ouvert en calque
     # au survol couvrirait le bouton : écarter la souris, comme un exploitant

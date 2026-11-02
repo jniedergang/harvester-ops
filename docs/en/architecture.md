@@ -208,8 +208,8 @@ visited unless chosen) and `App.openHost(kind, name, sub, tab, pane)`.
 
 ### Pages of a host
 
-A host page is a band (family, name, state, version, VM count, sub-menu,
-Activity of this host) on top of the existing section that the address
+A host page is a one-line band (family, name, state, version, VM count,
+sub-menu, Activity of this host) on top of the existing section that the address
 selects; the sections themselves are not rewritten. On a Harvester host,
 Parameters are tabs over the former Cluster sections (`Sections.DEF` gives
 their panes); the Overview shows the metrics and, below, the Events block,

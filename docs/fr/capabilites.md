@@ -219,8 +219,9 @@ dans un tableau avec une colonne **Cluster**.
   **Tri** sur chaque colonne, dans les deux sens. Filtres et tri sont
   retenus par le navigateur. La liste se rafraîchit toutes les 15 secondes
   tant qu'elle est à l'écran.
-- **Gestes**, avec le cluster de la ligne : démarrer ou arrêter, console,
-  snapshots, migration, réglages, notes, et le menu d'actions complet. La
+- **Gestes**, avec le cluster de la ligne : un bouton **⋮** par ligne
+  ouvre le menu d'actions (démarrer ou arrêter, console, paramètres, notes,
+  déplacer vers un dossier en tête, puis le menu complet de Harvester). La
   **sélection peut mêler plusieurs clusters** : démarrer, arrêter,
   redémarrer, arrêt forcé et migrer partent cluster par cluster, chaque
   geste étant une action suivie.
@@ -361,13 +362,21 @@ triée ; **Afficher 300 de plus** ajoute les suivantes. La sélection, **Tout
 cocher** et le glisser portent sur toute la liste filtrée, pas seulement sur
 les lignes dessinées. Le filtre de texte s'applique 150 ms après la dernière
 touche, et une relecture qui rapporte la même liste ne redessine rien
-(sinon, seules les lignes qui ont changé sont refaites). Mesuré dans
-Chromium sans affichage : à 2 000 VMs, un rendu sans changement prend
-environ 0,1 s et un rendu complet (nouveau tri) environ 0,6 s ; à 10 000 VMs
-environ 0,15 s et 0,9 s (avant : 3,6 s à chaque relecture et à chaque
-touche, à 2 000). Le menu d'une ligne suit sa famille : celui des VMs Harvester, ou pour
-une VM KVM la console, les instantanés, le clonage, la suppression et
-**Ouvrir sur son hôte** (démarrer et arrêter sont sur la page de l'hôte).
+(sinon, seules les lignes qui ont changé sont refaites). Chaque ligne n'a
+qu'un bouton **⋮** ; les gestes qui étaient des boutons de ligne jusqu'en
+2.0.2 (démarrer ou arrêter, console, paramètres, notes, déplacer vers un
+dossier) sont en tête de son menu, disponibles avant la lecture de l'état
+de la VM, avec les mêmes rôles et les mêmes raisons de grisé. Le menu est
+un seul élément partagé et se pilote au clavier (Entrée l'ouvre, les
+flèches parcourent, Échap le ferme et rend le focus au bouton). Mesuré
+dans Chromium sans affichage, un redessin complet des 300 lignes (nouveau
+tri) : 0,22 s à 2 000 VMs et 0,23 à 0,29 s à 10 000 (2.0.2 : 0,5 à 0,57 s
+et 0,9 s, le coût venant des six boutons à icône de chaque ligne ; 1.x :
+3,6 s à chaque relecture et à chaque touche, à 2 000). Un rendu sans
+changement prend environ 0,05 s. Le menu d'une ligne suit sa famille :
+celui des VMs Harvester, ou pour une VM KVM la console, les instantanés, le
+clonage, la suppression, **Déplacer vers un dossier** et **Ouvrir sur son
+hôte** (démarrer et arrêter sont sur la page de l'hôte).
 Démarrer, arrêter, redémarrer, arrêt forcé et migrer une sélection
 s'appliquent à ses VMs Harvester.
 
@@ -513,6 +522,11 @@ clusters déclarés dans un tableau avec une colonne **Cluster**.
 - **Menu de la ligne** : le YAML (fenêtre en lecture seule, ou
   téléchargement) et les **journaux d'un pod**, les 500 dernières lignes au
   plus, conteneur au choix.
+  Depuis 2.0.3, le bouton **⋮** est le seul bouton d'une ligne (celui des
+  journaux est passé dans le menu), et le tableau dessine les 300 premières
+  lignes de la liste filtrée et triée, **Afficher 300 de plus** ajoutant les
+  suivantes : un redessin complet prend environ 0,2 s à 2 000 charges
+  (1,5 s avant).
 - **Filtres et tri** comme la vue de toutes les VM : texte (nom, image, pod,
   nœud, étiquette), cluster, namespace, type, état ; chaque colonne se trie
   dans les deux sens.
@@ -586,8 +600,10 @@ supprimées.
 
 ### Le menu d'actions d'une VM, comme dans Harvester (1.60.0)
 
-Chaque VM de la liste a un bouton **⋮**. Il ouvre un menu rangé comme celui
-de Harvester, construit d'après l'état réel de la VM (lu à l'ouverture) : un
+Chaque VM de la liste a un bouton **⋮** (le seul bouton de la ligne depuis
+2.0.3 ; les anciens gestes de ligne ouvrent le menu : démarrer ou arrêter,
+console, paramètres, notes, déplacer vers un dossier, et sur une page d'hôte
+**Migrer ou transférer**). Il ouvre un menu rangé comme celui de Harvester, construit d'après l'état réel de la VM (lu à l'ouverture) : un
 geste qui ne s'applique pas est grisé et dit pourquoi, au lieu d'échouer
 après le clic (redémarrage doux sans agent invité, migration sans autre nœud
 prêt).
@@ -951,12 +967,14 @@ CHANGELOG (2.0.0) et dans la procédure opérationnelle.
   colonne, **Déplacer vers un dossier** sur une sélection. La famille KVM
   ajoute Déclarer un hôte, Tester et Retirer par ligne, et trois onglets
   sur tous les hôtes KVM : Capacité, Pools et Réseaux.
-- **Page d'un hôte Harvester** (`#harvester/<c>`) : un bandeau (famille,
-  nom, état, version, nombre de VMs, sous-menu, Activité de cet hôte)
-  au-dessus des sections existantes. Vue d'ensemble = métriques avec le
-  bloc Événements dessous ; Paramètres = Nœuds, Stockage, Réseau, Modules,
-  Sécurité (avec les Comptes du cluster), Monitoring et journaux, Avancé,
-  Mise à jour, Alimentation (Démarrage, Arrêt) et Connexion ; Imports et
+- **Page d'un hôte Harvester** (`#harvester/<c>`) : un bandeau sur une
+  ligne (famille, nom, état, version, nombre de VMs, sous-menu, Activité de
+  cet hôte en bouton icône) au-dessus des sections existantes. Vue
+  d'ensemble = métriques avec le bloc Événements dessous ; Paramètres =
+  Nœuds, Stockage, Réseau, Modules, Sécurité (avec les Comptes du cluster),
+  Monitoring et journaux, Avancé, Mise à jour, Alimentation (Démarrage et
+  Arrêt dans un sélecteur du panneau, une seule barre d'onglets) et
+  Connexion ; Imports et
   migrations = Import de VM et Migrations VMware. Cliquer un autre hôte
   Harvester garde l'écran.
 - **Page d'un hôte KVM** (`#kvm/<h>`) : voir la section 10.
