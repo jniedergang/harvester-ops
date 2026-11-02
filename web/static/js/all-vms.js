@@ -203,6 +203,7 @@ const AllVMs = (() => {
         <button class="btn btn-sm tip" data-avm-bulk="clear" data-tip="${esc(tr('avm.bulk.clearTip'))}">
           ${esc(tr('namespaces.clearSelection'))}</button>
       </div>
+      <div class="res-feedback avm-feedback" data-avm="feedback" role="status" aria-live="polite"></div>
       <div class="tbl-scroll"><table class="data-table ns-vm-table avm-table">
         <thead><tr>
           <th class="check-col"><input type="checkbox" data-avm="all" class="tip"
@@ -541,71 +542,33 @@ const AllVMs = (() => {
 
   const later = (ms = 1200) => setTimeout(() => load(), ms);
 
-  // le menu d'une VM KVM : console, fenêtres de kvm-vm.js, page de l'hôte
-  let kmenu = null;
-  function closeKvmMenu() {
-    if (!kmenu) return;
-    kmenu.el.remove();
-    document.removeEventListener('pointerdown', kmenu.outside, true);
-    document.removeEventListener('keydown', kmenu.keys, true);
-    if (kmenu.anchor && kmenu.anchor.isConnected) { kmenu.anchor.setAttribute('aria-expanded', 'false'); kmenu.anchor.focus(); }
-    kmenu = null;
-  }
+  // le menu d'une VM KVM (2.2.2) : celui de la page de l'hôte (kvm.js), avec
+  // les mêmes gestes et les mêmes raisons de grisé, d'après les tables de la
+  // console servies avec la liste (`kvm_tables`) ; dossiers et page de l'hôte
+  // en fin de menu
+  const closeKvmMenu = () => { if (window.KVM && KVM.closeVmMenu) KVM.closeVmMenu(); };
   function openKvmMenu(anchor, v) {
-    if (kmenu && kmenu.anchor === anchor) { closeKvmMenu(); return; }
-    closeKvmMenu();
-    const el = document.createElement('div');
-    el.className = 'vma-menu kvm-menu vmf-kvm-menu';
-    el.setAttribute('role', 'menu');
-    el.setAttribute('aria-label', tr('kvm.menuLabel', { name: v.name }));
+    if (!window.KVM || !KVM.openVmMenu) return;
     const op = window.Folders && Folders.canOperate();
-    const item = (act, ic, label, tip, off = false) => `<button type="button" class="vma-item tip${act === 'delete' ? ' danger' : ''}" role="menuitem"
+    const item = (act, ic, label, tip, off = false) => `<button type="button" class="vma-item tip" role="menuitem"
         data-vmf-kvm="${act}" data-tip="${esc(tip)}"${off ? ' aria-disabled="true"' : ''}><span class="vma-ic">${icon(ic)}</span> ${esc(label)}</button>`;
-    el.innerHTML = `<div class="vma-head">${icon('vm', 13)} <strong>${esc(v.name)}</strong> <span class="res-dim">${esc(src(v))} · ${esc(v.state || v.phase || '')}</span></div>
-      <div class="vma-group">
-        ${item('console', 'console', tr('kvm.console'), tr('kvm.consoleTip'))}
-        ${item('snapshots', 'snapshot', tr('kvm.op.snapshots'), tr('kvm.op.snapshotsTip'))}
-        ${item('clone', 'clone', tr('kvm.op.clone'), tr('kvm.op.cloneTip'))}
-        ${item('delete', 'trash', tr('kvm.op.delete'), tr('kvm.op.deleteTip'))}</div>
-      <div class="vma-group">${item('folder', 'folder', tr('fld.move'), op ? tr('fld.moveOneTip') : tr('fld.operatorOnly'), !op)}
-        ${item('page', 'compute', tr('vmf.kvmOpenHost'), tr('vmf.kvmOpenHostTip', { host: src(v) }))}</div>`;
-    document.body.appendChild(el);
-    const r = anchor.getBoundingClientRect();
-    const wd = el.offsetWidth || 260, h = el.offsetHeight || 200;
-    let left = r.right - wd, top = r.bottom + 4;
-    if (left < 8) left = 8;
-    if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 4);
-    el.style.left = `${left + window.scrollX}px`;
-    el.style.top = `${top + window.scrollY}px`;
-    kmenu = {
-      el, anchor,
-      outside: (e) => { if (!el.contains(e.target) && !anchor.contains(e.target)) closeKvmMenu(); },
-      keys: (e) => {
-        if (e.key === 'Escape') { e.preventDefault(); closeKvmMenu(); return; }
-        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-          const items = [...el.querySelectorAll('.vma-item')];
-          const i = items.indexOf(document.activeElement);
-          const n = e.key === 'ArrowDown' ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
-          e.preventDefault();
-          items[n]?.focus();
-        }
+    const kv = Object.assign({}, v, { host: v.host || src(v) });
+    KVM.openVmMenu(anchor, kv, {
+      cls: 'vmf-kvm-menu',
+      tables: (data && data.kvm_tables) || null,
+      role: (window.App && App.role && App.role()) || 'viewer',
+      onGesture: (x, g) => KVM.runGesture(x, g, host && host.querySelector('[data-avm="feedback"]'), () => load({ fresh: true })),
+      extraHtml: `<div class="vma-group">${item('folder', 'folder', tr('fld.move'), op ? tr('fld.moveOneTip') : tr('fld.operatorOnly'), !op)}
+        ${item('page', 'compute', tr('vmf.kvmOpenHost'), tr('vmf.kvmOpenHostTip', { host: src(v) }))}</div>`,
+      onExtra: (e, close) => {
+        const b = e.target.closest('[data-vmf-kvm]');
+        if (!b) return false;
+        if (b.getAttribute('aria-disabled')) return true;
+        close();
+        if (b.dataset.vmfKvm === 'folder') moveRows([keyOf(v)]);
+        else if (b.dataset.vmfKvm === 'page' && window.Router) Router.go(`#kvm/${enc(src(v))}/vms`);
+        return true;
       },
-    };
-    anchor.setAttribute('aria-expanded', 'true');
-    document.addEventListener('pointerdown', kmenu.outside, true);
-    document.addEventListener('keydown', kmenu.keys, true);
-    el.querySelector('.vma-item')?.focus();
-    el.addEventListener('click', (e) => {
-      const b = e.target.closest('[data-vmf-kvm]');
-      if (!b || b.getAttribute('aria-disabled')) return;
-      const act = b.dataset.vmfKvm;
-      closeKvmMenu();
-      if (act === 'folder') { moveRows([keyOf(v)]); return; }
-      if (act === 'console' && window.VMConsole && VMConsole.openKvm) VMConsole.openKvm(src(v), v.name);
-      else if (act === 'snapshots' && window.KVMVm) KVMVm.openSnapshots(src(v), v.name);
-      else if (act === 'clone' && window.KVMVm) KVMVm.openClone(src(v), v.name);
-      else if (act === 'delete' && window.KVMVm) KVMVm.openDelete(src(v), v.name);
-      else if (act === 'page' && window.Router) Router.go(`#kvm/${enc(src(v))}/vms`);
     });
   }
 

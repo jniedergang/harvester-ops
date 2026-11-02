@@ -381,9 +381,12 @@ tri) : 0,22 s à 2 000 VMs et 0,23 à 0,29 s à 10 000 (2.0.2 : 0,5 à 0,57 s
 et 0,9 s, le coût venant des six boutons à icône de chaque ligne ; 1.x :
 3,6 s à chaque relecture et à chaque touche, à 2 000). Un rendu sans
 changement prend environ 0,05 s. Le menu d'une ligne suit sa famille :
-celui des VMs Harvester, ou pour une VM KVM la console, les instantanés, le
-clonage, la suppression, **Déplacer vers un dossier** et **Ouvrir sur son
-hôte** (démarrer et arrêter sont sur la page de l'hôte).
+celui des VMs Harvester, ou pour une VM KVM le menu de la page de son hôte
+(depuis 2.2.2) : démarrer, arrêter, redémarrer, suspendre, reprendre, arrêt
+forcé, console, instantanés, clonage, suppression et **Modifier**, grisés
+avec les mêmes raisons (rôle, état, VM transitoire), puis **Déplacer vers
+un dossier** et **Ouvrir sur son hôte**. Un geste rend compte dans la vue,
+et l'arrêt forcé y demande une confirmation.
 Démarrer, arrêter, redémarrer, arrêt forcé et migrer une sélection
 s'appliquent à ses VMs Harvester.
 
