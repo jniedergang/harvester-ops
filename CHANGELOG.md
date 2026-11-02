@@ -125,6 +125,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   template with 1 server and 1 agent, both nodes `Ready` 153 s and 167 s
   after apply over two runs; wrong pinned host key and a `/dev/sda` base
   image refused before OpenTofu.
+
 ## [2.2.2] - 2026-11-02 - Edit KVM VMs from the Virtual machines view
 
 ### Fixed
