@@ -134,7 +134,8 @@ LEGACY_ROWS = [
     ("#forklift", "forklift", f"#harvester/{A}/imports/forklift/prep"),
     ("#vmio", "vmimport", f"#harvester/{A}/imports/vmimport/imports"),
     ("#forkliftglobal", "forkliftglobal", "#migrations"),
-    ("#automation", "automation", "#automation/capi"),
+    # 2.2.0 : l'ancien jeton s'écrit avec l'onglet par défaut de Cluster API
+    ("#automation", "automation", "#automation/capi/clusters"),
     ("#clusterdr", "clusterdr", f"#harvester/{A}/dr"),
     ("#drplans", "drplans", "#dr"),
     ("#drlinks", "drlinks", "#dr/links"),

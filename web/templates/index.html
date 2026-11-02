@@ -692,13 +692,27 @@
                     title="The cluster Cluster API and Terraform work from; changing it does not change the host you have open"></select>
           </div>
         </div>
-        <div class="sub-tabs sub-tabs-inline" role="tablist" data-only-for="capi">
-          <button class="sub-tab active" data-capi-tab="install"
-                  data-i18n-title="capi.tab.install.tip" title="Install / uninstall the CAPI + CAPHV controllers on the management cluster"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="capi.tab.install">Installation</span></button>
-          <button class="sub-tab" data-capi-tab="k8s"
-                  data-i18n-title="capi.tab.k8s.tip" title="List + manage the downstream Kubernetes clusters reconciled by CAPHV"><span class="tab-icon" data-icon="node"></span> <span data-i18n="capi.tab.k8s">Clusters K8S</span></button>
-          <button class="sub-tab" data-capi-tab="services"
-                  data-i18n-title="capi.tab.services.tip" title="Deploy services (Helm charts) on the clusters created by Cluster API"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="capi.tab.services">Services</span></button>
+        <!-- 2.2.0 : onglets de Cluster API (#automation/capi/<onglet>), peints par capi.js -->
+        <div class="sub-tabs sub-tabs-inline capi-tabs" role="tablist" data-only-for="capi" aria-label="Cluster API">
+          <button type="button" class="sub-tab tip active" role="tab" aria-selected="true" data-capi-tab="clusters"
+                  data-tip-i18n="capi.tab.clusters.tip" data-i18n-title="capi.tab.clusters.tip" title="The Kubernetes clusters created by Cluster API on the management cluster: create, scale, delete, kubeconfig"><span class="tab-icon" data-icon="node"></span> <span data-i18n="capi.tab.clusters">Clusters</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="services"
+                  data-tip-i18n="capi.tab.services.tip" data-i18n-title="capi.tab.services.tip" title="Deploy services (Helm charts) on the clusters created by Cluster API"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="capi.tab.services">Services</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="history"
+                  data-tip-i18n="capi.tab.history.tip" data-i18n-title="capi.tab.history.tip" title="Cluster API actions, running and past, with their logs: clusters, services, installation"><span class="tab-icon" data-icon="activity"></span> <span data-i18n="capi.tab.history">History</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="installation"
+                  data-tip-i18n="capi.tab.install.tip" data-i18n-title="capi.tab.install.tip" title="Install / uninstall the CAPI + CAPHV controllers on the management cluster"><span class="tab-icon" data-icon="install"></span> <span data-i18n="capi.tab.install">Installation</span></button>
+        </div>
+        <!-- 2.2.0 : onglets de Terraform (#automation/terraform/<onglet>), peints par terraform.js -->
+        <div class="sub-tabs sub-tabs-inline tf-tabs hidden" role="tablist" data-only-for="terraform" aria-label="Terraform">
+          <button type="button" class="sub-tab tip active" role="tab" aria-selected="true" data-tf-tab="declarations"
+                  data-tip-i18n="tf.ui.t.decls" data-i18n-title="tf.ui.t.decls" title="Named groups of resources, each with its own Terraform state"><span class="tab-icon" data-icon="terraform"></span> <span data-i18n="tf.ui.decls">Declarations</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-tf-tab="resources"
+                  data-tip-i18n="tf.ui.t.live" data-i18n-title="tf.ui.t.live" title="Everything Terraform manages on this cluster"><span class="tab-icon" data-icon="network"></span> <span data-i18n="tf.ui.live">Resources</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-tf-tab="history"
+                  data-tip-i18n="tf.ui.t.history" data-i18n-title="tf.ui.t.history" title="Terraform plans, applies and destroys, running and past, with their logs"><span class="tab-icon" data-icon="activity"></span> <span data-i18n="tf.ui.history">History</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-tf-tab="installation"
+                  data-tip-i18n="tf.ui.t.install" data-i18n-title="tf.ui.t.install" title="OpenTofu or Terraform command, embedded Harvester provider, airgap bundle"><span class="tab-icon" data-icon="install"></span> <span data-i18n="tf.ui.install">Installation</span></button>
         </div>
         <!-- 2.1.0 : onglets de Bare-metal (#automation/pxe/<onglet>), peints par bmc.js -->
         <div class="sub-tabs sub-tabs-inline bm-tabs hidden" role="tablist" data-only-for="pxe" aria-label="Bare-metal">
@@ -715,19 +729,9 @@
 
       <div class="sub-tab-content active" data-subtab="capi">
 
-        <div class="capi-tab-content active" data-capi-tab="install">
-          <div class="card">
-            <div class="card-header">
-              <h2><span data-icon="bundle" data-icon-size="18"></span> <span data-i18n="capi.install.title">Installation CAPI / CAPHV</span></h2>
-              <button class="btn btn-sm btn-secondary" id="btn-capi-refresh" data-i18n="overview.refresh" data-i18n-title="capi.tip.refresh" title="Re-run the diagnostic against the selected cluster">Refresh</button>
-            </div>
-            <div class="card-body" id="capi-status-body">
-              <p class="form-hint" data-i18n="common.loading">Loading…</p>
-            </div>
-          </div>
-        </div>
-
-        <div class="capi-tab-content" data-capi-tab="k8s">
+        <div class="capi-tab-content active" data-capi-tab="clusters" role="tabpanel">
+          <!-- 2.2.0 : pile Cluster API absente du cluster de gestion -> lien vers Installation -->
+          <div id="capi-stack-banner"></div>
           <div class="card">
             <div class="card-header">
               <h2><span data-icon="node" data-icon-size="18"></span> <span data-i18n="capi.k8s.title">Clusters Kubernetes managés</span></h2>
@@ -742,7 +746,7 @@
           </div>
         </div>
 
-        <div class="capi-tab-content" data-capi-tab="services">
+        <div class="capi-tab-content" data-capi-tab="services" role="tabpanel">
           <div class="card">
             <div class="card-header">
               <h2><span data-icon="bundle" data-icon-size="18"></span> <span data-i18n="capi.services.title">Services sur les clusters créés</span></h2>
@@ -753,6 +757,29 @@
             </div>
           </div>
         </div>
+
+        <div class="capi-tab-content" data-capi-tab="history" role="tabpanel">
+          <div class="card">
+            <div class="card-header">
+              <h2><span data-icon="activity" data-icon-size="18"></span> <span data-i18n="capi.hist.title">Cluster API history</span></h2>
+              <button class="btn btn-sm btn-secondary tip" id="btn-capi-history-refresh" data-i18n="overview.refresh" data-tip-i18n="capi.hist.refreshTip" data-i18n-title="capi.hist.refreshTip" title="Read the Cluster API actions of Activity again">Refresh</button>
+            </div>
+            <div class="card-body" id="capi-history-body"></div>
+          </div>
+        </div>
+
+        <div class="capi-tab-content" data-capi-tab="installation" role="tabpanel">
+          <div class="card">
+            <div class="card-header">
+              <h2><span data-icon="bundle" data-icon-size="18"></span> <span data-i18n="capi.install.title">Installation CAPI / CAPHV</span></h2>
+              <button class="btn btn-sm btn-secondary" id="btn-capi-refresh" data-i18n="overview.refresh" data-i18n-title="capi.tip.refresh" title="Re-run the diagnostic against the selected cluster">Refresh</button>
+            </div>
+            <div class="card-body" id="capi-status-body">
+              <p class="form-hint" data-i18n="common.loading">Loading…</p>
+            </div>
+          </div>
+        </div>
+
       </div>
 
       <div class="sub-tab-content" data-subtab="terraform">
@@ -1333,6 +1360,7 @@
 <script src="/static/js/vm-transfer.js"></script>
 <script src="/static/js/vm-migrate.js"></script>
 <script src="/static/js/clusters.js"></script>
+<script src="/static/js/auto-history.js"></script>
 <script src="/static/js/capi-create.js"></script>
 <script src="/static/js/capi.js"></script>
 <script src="/static/js/tf-schema.js"></script>

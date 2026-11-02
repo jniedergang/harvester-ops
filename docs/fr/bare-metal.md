@@ -226,6 +226,37 @@ contrôle, et ils sont retirés de la liste envoyée à l'installeur.
 Le token et le mot de passe n'apparaissent jamais dans une réponse, dans
 un libellé d'action, ni dans une ligne de log.
 
+**Une machine qui porte déjà un système (2.2.0).** Avant le bouton
+Installer, la fenêtre dit si un système semble présent sur la machine,
+d'après ce que le BMC publie déjà (lecture seule, rien n'est changé) :
+
+- une entrée de démarrage UEFI qui lance un chargeur `\EFI\...` depuis
+  une partition de disque (clés USB, CD et entrées réseau écartés), nommée
+  avec le chargeur et le disque, par exemple `L'entrée de démarrage
+  « elemental-shim » lance \EFI\elemental\shim.efi depuis une partition
+  de disque (HD.Emb.1.3)` ;
+- la même entrée en tête de l'ordre de démarrage (« démarre d'abord sur ») ;
+- un volume logique (RAID) sur un contrôleur.
+
+Sur un iLO 4, ces signes viennent de `Systems/1/BIOS/Boot/` (l'iLO 4 ne
+publie ni disque ni volume), au dernier démarrage de la machine ; sur un
+iDRAC 9 ou un iLO 5, de `Systems/<id>/BootOptions` et `Boot.BootOrder`.
+Quand un système semble présent, les signes sont listés et l'installation
+demande de taper exactement le nom de la machine : son numéro de série, ou
+l'adresse du BMC quand la série est inconnue ; Installer reste inactif tant
+qu'il ne correspond pas. **Aucun signe** n'est dit que si les entrées de
+démarrage ont pu être lues et qu'aucune ne mène à un système (un système
+lancé en mode BIOS ancien n'y apparaîtrait pas) ; quand le BMC ne dit rien,
+la fenêtre dit **Inconnu**, jamais vide. La console revérifie à
+l'installation, sur sa propre lecture Redfish, et refuse en `409` avec
+`fields: ["system_confirm"]` quand un système semble présent et que le nom
+tapé (`system_confirm`) ne correspond pas. `POST /api/bmc/system-check`
+(`{host, user, password}`, administrateur) rend `state` (`present`,
+`absent`, `unknown`), `evidence` et `confirm_name`. Une entrée de démarrage
+peut survivre à l'effacement d'un disque : le contrôle demande alors le nom
+une fois de plus, ce qui est le côté sûr. Les séries d'un profil ne passent
+pas encore par ce contrôle.
+
 ### 4. Suivre l'installation
 
 L'installation est une action trackée comme les autres : elle apparaît

@@ -2230,6 +2230,20 @@ their header which cluster they work from (**Management cluster**): the last
 Harvester host visited, unless you pick another one in the menu next to it.
 That choice is kept per browser and does not change the host you have open.
 
+**Four tabs (2.2.0).** In the header, in this order: **Clusters** (default:
+the clusters created by Cluster API, with **Create a cluster**, details,
+kubeconfig, scale and delete), **Services** (Helm charts through CAAPH),
+**History** (the Cluster API actions of Activity: clusters created, scaled or
+deleted, services deployed or removed, stack installed or removed, bundles
+built; running and past, each with a link to its log, read again every five
+seconds while one runs and only while the tab is shown) and **Installation**
+(the stack, its providers and the bundles; it was the first tab before
+2.2.0). Addresses `#automation/capi/<tab>`; `#automation/capi` opens
+Clusters. **Check before acting:** when the Cluster API stack is not
+installed on the management cluster, Clusters says so, with what is
+missing and a link to Installation (nothing is said when the cluster cannot
+be read).
+
 ### Installing the stack (1.48.0)
 
 - **Harvester v1.9 and later** embed Rancher Turtles, which already runs the
@@ -2254,7 +2268,7 @@ That choice is kept per browser and does not change the host you have open.
 
 ### Creating a cluster (1.48.0, window with menus in 1.53.0)
 
-The **Create a cluster** button of the K8S Clusters tab opens a window that
+The **Create a cluster** button of the Clusters tab opens a window that
 can be minimised to the window bar, to check a setting elsewhere, and
 reopened as it was. It is organised in menus, like the creation of a VM,
 and filled from the cluster itself:
@@ -2359,6 +2373,17 @@ API, through the Cluster API add-on provider for Helm (CAAPH v0.6.4):
 
 Drive the Terraform provider for Harvester from saved declarations.
 
+- **Four tabs (2.2.0)** in the header, in this order: **Declarations**
+  (default), **Resources** (was "Cluster resources"), **History** (the
+  Terraform plans, applies and destroys of Activity, on every management
+  cluster, each with a link to its log; read again every five seconds while
+  one runs and only while the tab is shown) and **Installation** (OpenTofu,
+  the embedded Harvester provider and its updates, the airgap bundle; the
+  "ready" line moved here). Addresses `#automation/terraform/<tab>`;
+  `#automation/terraform` opens Declarations. **Check before acting:** when
+  the Harvester provider that declarations need, or the OpenTofu (or
+  Terraform) command, is missing, Declarations says so with a link to
+  Installation.
 - **Declarations**: named groups of resources (VMs, VM images, SSH keys,
   Terraform code written by hand) applied together, each with its own
   Terraform state (1.54.0). They are kept by the console (shared between
@@ -2386,14 +2411,14 @@ Drive the Terraform provider for Harvester from saved declarations.
   changed since, the console refuses and asks for a new plan. The last
   plan stays available from the "Apply" button.
 - A resource removed from a declaration is destroyed by its next apply
-  (the plan says so); a resource destroyed on its own from the cluster
-  resources tab leaves its declaration. Destroying a declaration asks for
+  (the plan says so); a resource destroyed on its own from the Resources
+  tab leaves its declaration. Destroying a declaration asks for
   its name to be typed; a declaration with deployed resources cannot be
   deleted. Two operators editing the same declaration do not overwrite
   each other: the later one is told and sees the current version.
 - A destroyed VM takes its disks with it unless "delete with the VM" is
   unchecked on the disk (1.52.1).
-- **Cluster resources**: everything Terraform manages on the cluster,
+- **Resources**: everything Terraform manages on the cluster,
   declaration by declaration; a resource of the shared workspace (applied
   before 1.54) can be adopted into a declaration, which takes it over at
   its next plan without recreating it.
@@ -2402,7 +2427,7 @@ Drive the Terraform provider for Harvester from saved declarations.
   version (the official release is downloaded and checked against the
   published `SHA256SUMS`), a URL to an internal mirror, or upload the
   archive from a machine that has no outbound network at all. The
-  Install sub-tab names the active binary, its version and where it came
+  Installation tab names the active binary, its version and where it came
   from, and one click reverts to the provider shipped in the package.
   Every workspace is re-initialised on its next apply; Terraform state is
   never touched. The same install runs from the CLI:
@@ -2421,6 +2446,14 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   `#automation/pxe` opens Machines. The console remembers the last
   discovery (read cache in the state directory, never the credentials):
   the list survives a reload, with its date and a **Re-read** button.
+
+- **A machine that already carries a system is guarded (2.2.0)**: the
+  install window lists what the BMC shows (UEFI boot entries of a loader
+  on a disk partition, the head of the boot order, logical drives) and,
+  when a system seems present, installing requires typing the machine name
+  (serial number, or BMC address); the console checks again on its own
+  Redfish read and refuses otherwise. "Unknown" is said plainly when the
+  BMC tells nothing. Details in [bare-metal.md](bare-metal.md).
 
 - **BMC / Redfish discovery** — point at one or many BMC endpoints and
   read back node profiles: model, serial, BIOS, memory, NICs with their

@@ -77,6 +77,11 @@ def address_table():
         "#automation/capi", "#automation/terraform", "#automation/pxe",
         # 2.1.0 : onglets de Bare-metal
         "#automation/pxe/machines", "#automation/pxe/profiles", "#automation/pxe/images", "#automation/pxe/history",
+        # 2.2.0 : onglets de Cluster API et de Terraform
+        "#automation/capi/clusters", "#automation/capi/services", "#automation/capi/history",
+        "#automation/capi/installation",
+        "#automation/terraform/declarations", "#automation/terraform/resources", "#automation/terraform/history",
+        "#automation/terraform/installation",
         "#activity", f"#activity/host/harvester/{c}", f"#activity/host/kvm/{h}",
         # nom Harvester à point
         "#harvester/lab.home.lo/params/storage/images",
@@ -194,6 +199,14 @@ ERRORS = [
     ("#automation/capi/machines", "onglet de Bare-metal sous un autre sous-onglet"),
     ("#automation/pxe/machines/x", "segment de trop après l'onglet"),
     ("#automation/pxe/Machines", "onglet en majuscules"),
+    # 2.2.0 : onglets de Cluster API et de Terraform
+    ("#automation/capi/k8s", "ancien nom interne de Clusters"),
+    ("#automation/capi/install", "ancien nom interne d'Installation"),
+    ("#automation/terraform/decls", "ancien nom interne de Déclarations"),
+    ("#automation/terraform/live", "ancien nom interne de Ressources"),
+    ("#automation/terraform/clusters", "onglet de Cluster API sous Terraform"),
+    ("#automation/capi/declarations", "onglet de Terraform sous Cluster API"),
+    ("#automation/terraform/history/x", "segment de trop après l'onglet"),
     ("#gpus/x", "racine avec segment"),
     ("#activity/host/harvester/-a", "activité, nom invalide"),
     ("#activity/action", "action sans identifiant"),

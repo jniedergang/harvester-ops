@@ -2127,8 +2127,10 @@ const App = (() => {
       activityFilters.cluster = t.activityHost;
       saveActivityFilters();
     }
-    // 2.1.0 : l'onglet de Bare-metal de l'adresse, posé avant le rendu
-    if (t.tab === 'automation' && t.bmTab && window.BMC && BMC.setTab) BMC.setTab(t.bmTab, { render: false });
+    // L'onglet d'Automatisation de l'adresse (2.1.0 Bare-metal, 2.2.0 Cluster
+    // API et Terraform), posé avant le rendu
+    const autoMod = t.tab === 'automation' ? automationModule(t.automation) : null;
+    if (autoMod && t.autoTab && autoMod.setTab) autoMod.setTab(t.autoTab, { render: false });
     const show = () => {
       if (t.overview) paintOverviewMode(t.overview);
       setTab(t.tab);
@@ -2171,6 +2173,11 @@ const App = (() => {
     }
   }
 
+  /** Module qui tient les onglets d'un sous-onglet d'Automatisation. */
+  function automationModule(sub) {
+    return { capi: window.CAPI, terraform: window.TF, pxe: window.BMC }[sub] || null;
+  }
+
   /** L'écran affiché, pour que le routeur en écrive l'adresse. */
   function screen() {
     const tab = activeTab();
@@ -2179,7 +2186,8 @@ const App = (() => {
     const kvm = KVM_SCREENS.includes(tab) ? navKvm : null;
     return {
       tab, cluster: currentCluster, overview: overviewMode(), automation,
-      bmTab: tab === 'automation' && automation === 'pxe' && window.BMC && BMC.tab ? BMC.tab() : null,
+      autoTab: tab === 'automation' && automationModule(automation) && automationModule(automation).tab
+        ? automationModule(automation).tab() : null,
       pane: tab && window.Sections && Sections.isSection(tab) ? Sections.current(tab) : null,
       kvm, kvmTab: kvm ? navKvmTab : null,
       hostsKind: tab === 'hosts' && window.HostsIndex ? (HostsIndex.kind() || null) : null,

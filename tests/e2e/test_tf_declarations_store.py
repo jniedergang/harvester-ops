@@ -34,8 +34,7 @@ def clean(page):
 
 
 def open_decls(page):
-    page.evaluate("""() => { localStorage.setItem('harvester_ops_automation_subtab', 'terraform');
-      localStorage.setItem('harvester_ops_tf_subtab', 'decls'); }""")
+    page.evaluate("() => { localStorage.setItem('harvester_ops_automation_subtab', 'terraform'); }")
     # 2.0.0 : Automatisation > Terraform par son adresse, rechargée
     page.evaluate("history.replaceState(null, '', '#automation/terraform')")
     page.reload()

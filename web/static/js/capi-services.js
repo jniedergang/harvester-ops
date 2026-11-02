@@ -93,11 +93,11 @@ const CapiServices = (() => {
     const parts = [];
     if (!d.caaph) {
       parts.push(`<div class="sto-finding sev-watch" data-code="caaph-missing"><div class="sto-finding-title">${esc(FINDINGS['caaph-missing']({}))}
-        <button type="button" class="btn btn-sm btn-secondary tip" data-svc-goto="install"
+        <button type="button" class="btn btn-sm btn-secondary tip" data-svc-goto="installation"
                 data-tip="${esc(tr('svc.t.gotoInstall', 'Open the Installation tab'))}">${esc(tr('capi.tab.install', 'Installation'))}</button></div></div>`);
     }
     if (!(d.clusters || []).length) {
-      parts.push(`<p class="empty-state">${esc(tr('svc.noCluster', 'No cluster created by Cluster API on {cluster} yet: create one with "{tab}" in the K8S Clusters tab, then deploy services on it.', { cluster, tab: tr('capi.k8s.create', 'Create a cluster') }))}</p>`);
+      parts.push(`<p class="empty-state">${esc(tr('svc.noCluster', 'No cluster created by Cluster API on {cluster} yet: create one with "{tab}" in the Clusters tab, then deploy services on it.', { cluster, tab: tr('capi.k8s.create', 'Create a cluster') }))}</p>`);
     }
     const cat = (d.catalog || []).map(c => c.key).concat(['custom']);
     const canDeploy = d.caaph && (d.clusters || []).length;
@@ -405,7 +405,7 @@ const CapiServices = (() => {
       let el;
       if ((el = e.target.closest('[data-svc-deploy]'))) { openForm(el.dataset.svcDeploy); return; }
       if ((el = e.target.closest('[data-svc-remove]'))) { remove(el.dataset.svcRemove); return; }
-      if ((el = e.target.closest('[data-svc-goto]')) && window.CAPI && CAPI.selectCapiTab) CAPI.selectCapiTab(el.dataset.svcGoto);
+      if ((el = e.target.closest('[data-svc-goto]')) && window.CAPI && CAPI.setTab) CAPI.setTab(el.dataset.svcGoto, { sync: true });
     });
   }
 

@@ -181,6 +181,7 @@ def _load_shared_module(name):
 
 _ufg = _load_shared_module("url_fetch_guard")
 import bm_discover as _bmd  # noqa: E402
+import bm_presence as _bmpres  # noqa: E402
 import baremetal_disks as _bmdisks  # noqa: E402
 import cluster_decl as _cd  # noqa: E402
 HTPASSWD_PATH = Path(os.environ.get("HARVESTER_OPS_HTPASSWD", "/etc/harvester-ops/htpasswd"))
@@ -3719,6 +3720,41 @@ def _bmc_storage(host, user, pwd, system_path=None):
     return out
 
 
+def _bm_system_presence(host, user, pwd, system_path=None):
+    """2.2.0 : une machine porte-t-elle déjà un système ? Lecture seule de
+    ce que le BMC publie (entrées UEFI, ordre de démarrage, volumes) ;
+    l'analyse est dans bin/lib/bm_presence.py. Rend {state, evidence,
+    confirm_name, source} ; « unknown » quand rien n'est lisible."""
+    sp = (system_path or _redfish_system_path(host, user, pwd) or "").rstrip("/")
+    if not sp:
+        return {"state": _bmpres.UNKNOWN, "evidence": [], "confirm_name": _bmpres.confirm_name(None, host),
+                "source": None}
+    s = _redfish_get(host, sp + "/", user, pwd, timeout=8) or {}
+    entries, order, source = None, [], None
+    # Redfish standard (iDRAC 9, iLO 5) ; l'iLO 4 répond 404
+    coll = _redfish_get(host, sp + "/BootOptions", user, pwd, timeout=8)
+    if isinstance(coll, dict) and isinstance(coll.get("Members"), list):
+        docs = [d for d in (_redfish_get(host, m.get("@odata.id") or "", user, pwd, timeout=6)
+                            for m in coll["Members"][:64] if isinstance(m, dict)) if d]
+        entries, order = _bmpres.entries_from_standard(docs, (s.get("Boot") or {}).get("BootOrder"))
+        source = "redfish"
+    if entries is None:
+        entries, order = _bmpres.entries_from_hpe(_redfish_get(host, sp + "/BIOS/Boot/", user, pwd, timeout=8))
+        source = "hpe-oem" if entries is not None else None
+    try:
+        st = _bmc_storage(host, user, pwd, sp)
+        # un disque présenté tel quel par un HBA (RawDevice) n'est pas un volume créé
+        volumes = [{"name": v.get("name") or v.get("id") or "",
+                    "controller": c.get("name") or c.get("model") or c.get("id") or ""}
+                   for c in st.get("controllers") or [] for v in c.get("volumes") or []
+                   if v.get("volume_type") != "RawDevice"]
+    except Exception:                      # jamais de détail qui porterait un secret
+        volumes = None
+    out = _bmpres.evaluate(entries, order, volumes)
+    out.update(confirm_name=_bmpres.confirm_name(s.get("SerialNumber"), host), source=source)
+    return out
+
+
 def _bmc_discover_one(host, user, pwd):
     """Walk Redfish to produce a node profile (system info + NICs)."""
     root = _redfish_get(host, "/redfish/v1/", user, pwd, timeout=6)
@@ -3908,6 +3944,23 @@ def api_bmc_storage():
         out = _bmc_storage(host, str(data.get("user") or ""), str(data.get("password") or ""))
     except Exception as e:                      # jamais de détail qui porterait un secret
         return jsonify({"error": f"storage inventory failed: {type(e).__name__}"}), 502
+    return jsonify(dict(out, host=host))
+
+
+@app.route("/api/bmc/system-check", methods=["POST"])
+@requires_auth
+@_rate_limit("12/minute")
+def api_bmc_system_check():
+    """2.2.0 : un système semble-t-il déjà présent sur la machine ? Corps :
+    {host, user, password}, comme /api/bmc/storage ; lecture seule."""
+    data = request.get_json(force=True, silent=True) or {}
+    host = data.get("host")
+    if not isinstance(host, str) or not BMC_HOST_RE.fullmatch(host):
+        return jsonify({"error": "invalid host", "fields": ["host"]}), 400
+    try:
+        out = _bm_system_presence(host, str(data.get("user") or ""), str(data.get("password") or ""))
+    except Exception as e:                      # jamais de détail qui porterait un secret
+        return jsonify({"error": f"system check failed: {type(e).__name__}"}), 502
     return jsonify(dict(out, host=host))
 
 
@@ -7557,6 +7610,9 @@ def api_baremetal_install():
     if mode not in ("create", "join"):
         return jsonify({"error": "invalid mode", "fields": ["mode"]}), 400
     data["mode"] = mode
+    # 2.2.0 : nom tapé pour une machine qui porte déjà un système ; hors des
+    # données de l'installation (contrôlé par _bm_presence_refusal)
+    typed = data.pop("system_confirm", None)
     # v1.77.0 : jeton et mot de passe vides repris d'un fichier importé
     err = _bm_apply_import(data)
     if err:
@@ -7564,12 +7620,32 @@ def api_baremetal_install():
     data, err = _bm_prepare_install(data)
     if err:
         return err
+    # 2.2.0 : une machine qui semble porter un système ne s'installe que si
+    # son nom (série, sinon adresse du BMC) a été tapé ; contrôlé ici, sur
+    # une lecture du BMC faite par la console, jamais sur ce que dit la page.
+    refused = _bm_presence_refusal(data, typed)
+    if refused:
+        return refused
     # Le label de l'action ne porte ni token ni mot de passe.
     action_id, busy = _bm_track(f"baremetal-install:{data['hostname']}",
                                 data["bmc_host"], _baremetal_install_runner, data)
     if busy:
         return busy
     return jsonify({"action_id": action_id, "hostname": data["hostname"]}), 202
+
+
+def _bm_presence_refusal(data, typed):
+    """Refus (réponse 409) quand un système semble présent et que le nom
+    tapé (`typed`, champ `system_confirm`) n'est pas celui de la machine ;
+    None sinon.
+    « Inconnu » n'est pas un refus : le BMC ne permet pas de le dire."""
+    chk = _bm_system_presence(data["bmc_host"], data.get("bmc_user") or "", data.get("bmc_password") or "")
+    if chk["state"] != _bmpres.PRESENT:
+        return None
+    if str(typed or "").strip() == chk["confirm_name"]:
+        return None
+    return jsonify({"error": "a system seems present on this machine: type its name to install",
+                    "fields": ["system_confirm"], "system": chk}), 409
 
 
 def _bm_prepare_install(data, defer_join=False):

@@ -10,6 +10,7 @@ relevés, contrôle, aperçu et flux de l'action sont simulés.
 """
 
 import json
+import re
 
 import pytest
 
@@ -286,7 +287,7 @@ def test_the_window_opens_from_the_k8s_clusters_tab_and_minimises(context, flask
     """Demandé par l'exploitant : plus de sous-onglet de création, un bouton
     dans Clusters K8S qui ouvre une fenêtre qu'on replie dans la barre."""
     context.add_init_script("""localStorage.setItem('harvester_ops_language','fr');
-      localStorage.setItem('harvester_ops_capi_subtab','clusters');""")      # ancien choix mémorisé
+      localStorage.setItem('harvester_ops_capi_subtab','install');""")      # ancien choix mémorisé, ignoré (2.2.0)
     page = context.new_page()
     page.route("**/api/capi/harv-fake/inventory*", lambda r, q: fulfill(r, INVENTORY))
     page.route("**/api/capi/harv-fake/diag*", lambda r, q: fulfill(r, {"capi_clusters": []}))
@@ -294,8 +295,9 @@ def test_the_window_opens_from_the_k8s_clusters_tab_and_minimises(context, flask
     # 2.0.0 : Automatisation > Cluster API par son adresse
     goto(page, flask_server["base_url"], address("automation", sub="capi"))
     page.wait_for_function("window.CapiCreate && window.CAPI && window.i18n")
-    assert page.locator('#tab-automation .sub-tab[data-capi-tab="clusters"]').count() == 0
-    expect(page.locator('#tab-automation .sub-tab[data-capi-tab="k8s"]')).to_have_class("sub-tab active")
+    # 2.2.0 : #automation/capi ouvre Clusters, quel que soit le choix mémorisé
+    assert page.locator('#tab-automation .sub-tab[data-capi-tab="k8s"]').count() == 0
+    expect(page.locator('#tab-automation .sub-tab[data-capi-tab="clusters"]')).to_have_class(re.compile(r"\bactive\b"))
     btn = page.locator("#btn-capi-create")
     expect(btn).to_be_visible()
     assert btn.get_attribute("data-tip")

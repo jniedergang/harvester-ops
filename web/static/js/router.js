@@ -29,7 +29,7 @@
     const t = (tab, extra) => Object.assign({ tab, cluster: null, pane: null, overview: null, automation: null,
                                               kvm: null, kvmTab: null, hostsKind: null, activityHost: null,
                                               vms: null, folderId: null, drPlan: null, activityAction: null,
-                                              bmTab: null }, extra || {});
+                                              autoTab: null }, extra || {});
     switch (route.name) {
       case 'host': {
         if (route.kind === 'kvm') {
@@ -85,9 +85,14 @@
       case 'dr': return route.tab === 'links' ? t('drlinks') : t('drplans', { drPlan: route.id || null });
       case 'migrations': return t('forkliftglobal');
       case 'gpus': case 'bookings': case 'usage': return t(route.name);
-      // 2.1.0 : onglet de Bare-metal ; #automation/pxe seul ouvre Machines
-      case 'automation': return t('automation', { automation: route.tab || 'capi',
-                                                  bmTab: route.tab === 'pxe' ? (route.pane || 'machines') : null });
+      // Onglet d'un sous-onglet d'Automatisation (2.1.0 Bare-metal, 2.2.0
+      // Cluster API et Terraform) ; sans onglet, le premier de sa liste
+      // (#automation/pxe = Machines, /capi = Clusters, /terraform = Déclarations)
+      case 'automation': {
+        const a = route.tab || 'capi';
+        const panes = R().AUTOMATION_PANES[a] || [];
+        return t('automation', { automation: a, autoTab: panes.length ? (route.pane || panes[0]) : null });
+      }
       // 2.0.0 (tâche 9) : Activité filtrée sur un hôte (filtre `cluster`
       // existant ; les actions d'un hôte KVM portent l'étiquette kvm:<hôte>)
       case 'activity':
@@ -152,7 +157,7 @@
       case 'automation': {
         const a = Rt.AUTOMATION.includes(s.automation) ? s.automation : 'capi';
         const panes = Rt.AUTOMATION_PANES[a] || [];
-        return '#automation/' + a + (panes.includes(s.bmTab) ? '/' + s.bmTab : '');
+        return '#automation/' + a + (panes.includes(s.autoTab) ? '/' + s.autoTab : '');
       }
       default: return null;
     }

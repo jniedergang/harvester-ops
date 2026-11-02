@@ -34,8 +34,6 @@ const BMC = (() => {
   let discovering = false;
   const TABS = ['machines', 'profiles', 'images', 'history'];
   let tab = 'machines';
-  let historyTimer = null;
-  const HISTORY_POLL_MS = 5000;
   // Actions de l'historique : installations et jonctions, séries, démarrages
   // de découverte (baremetal-*), gestes d'alimentation (bmc-power:*). Filtre
   // `action` de l'Activité (sous-chaîne, côté serveur).
@@ -140,7 +138,7 @@ const BMC = (() => {
   }
 
   function renderTab(force) {
-    if (tab !== 'history') stopHistoryPoll();
+    if (tab !== 'history') bmHistory.stop();
     if (tab === 'machines') {
       if (force || !machinesLoaded) loadLast(); else paintMachines();
       paintIsoMissing();
@@ -150,7 +148,7 @@ const BMC = (() => {
     } else if (tab === 'images') {
       renderIsoStore();
     } else {
-      renderHistory();
+      bmHistory.render();
     }
   }
 
@@ -393,10 +391,6 @@ const BMC = (() => {
   const historyShown = () => tab === 'history'
     && !!document.querySelector('#tab-automation.active > .sub-tab-content[data-subtab="pxe"].active');
 
-  function stopHistoryPoll() {
-    if (historyTimer) { clearTimeout(historyTimer); historyTimer = null; }
-  }
-
   // Libellé d'une action (verbe de l'Activité) ; table littérale, visible des
   // tests de traduction
   function kindLabel(action) {
@@ -410,60 +404,11 @@ const BMC = (() => {
     }
   }
 
-  function statusBadge(st) {
-    const cls = st === 'done' ? 'ok' : (st === 'error' ? 'fail' : (st === 'running' || st === 'starting' ? 'info' : 'dim'));
-    return `<span class="badge ${cls}">${esc(st || '?')}</span>`;
-  }
-
-  async function renderHistory() {
-    const box = $('#bm-history');
-    if (!box) return;
-    stopHistoryPoll();
-    let runs = [];
-    let failed = false;
-    try {
-      const lists = await Promise.all(HISTORY_KINDS.map(k =>
-        fetch('/api/activity?limit=100&action=' + encodeURIComponent(k)).then(r => (r.ok ? r.json() : Promise.reject(r.status)))));
-      const seen = new Set();
-      lists.forEach(d => (d.in_progress || []).concat(d.actions_done || []).forEach(a => {
-        if (!a || !a.id || seen.has(a.id)) return;
-        seen.add(a.id);
-        runs.push(a);
-      }));
-    } catch (e) { failed = true; }
-    // l'onglet a changé pendant la lecture
-    if (tab !== 'history' || !document.body.contains(box)) return;
-    const running = runs.filter(a => ['starting', 'running'].includes(a.status));
-    const past = runs.filter(a => !['starting', 'running'].includes(a.status));
-    running.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
-    past.sort((a, b) => (b.ended_at || b.started_at || 0) - (a.ended_at || a.started_at || 0));
-    const row = (a) => {
-      const target = String(a.action || '').split(':').slice(1).join(':');
-      const dur = a.ended_at && a.started_at ? Math.max(0, a.ended_at - a.started_at) : null;
-      return `<tr class="bm-history-row" data-action-id="${esc(a.id)}">
-          <td>${statusBadge(a.status)}</td>
-          <td>${esc(kindLabel(a.action))}</td>
-          <td><code>${esc(target)}</code></td>
-          <td>${esc(fmtDate(a.started_at))}</td>
-          <td class="bm-num">${dur == null ? '' : esc(dur < 120 ? dur.toFixed(0) + ' s' : (dur / 60).toFixed(0) + ' min')}</td>
-          <td><a class="tip bm-history-log" href="#activity/action/${encodeURIComponent(a.id)}"
-                 data-tip="${esc(tr('bmh.logTip'))}">${Icons.svg('logs', { size: 14 })} ${esc(tr('bmh.log'))}</a></td>
-        </tr>`;
-    };
-    const table = (list, title) => `<h3 class="bm-history-title">${esc(title)} <span class="form-hint">${list.length}</span></h3>
-        <div class="tbl-scroll"><table class="data-table bm-history">
-          <thead><tr><th>${esc(tr('bmh.col.status'))}</th><th>${esc(tr('bmh.col.kind'))}</th><th>${esc(tr('bmh.col.target'))}</th>
-            <th>${esc(tr('bmh.col.started'))}</th><th>${esc(tr('bmh.col.duration'))}</th><th>${esc(tr('bmh.col.log'))}</th></tr></thead>
-          <tbody>${list.map(row).join('')}</tbody></table></div>`;
-    box.innerHTML = `<p class="form-hint">${esc(tr('bmh.hint'))}</p>`
-      + (failed ? `<div class="summary-bar bad">${esc(tr('bmh.failed'))}</div>` : '')
-      + (!runs.length && !failed ? `<div class="empty-state bm-history-empty">${esc(tr('bmh.empty'))}</div>` : '')
-      + (running.length ? table(running, tr('bmh.running')) : '')
-      + (past.length ? table(past, tr('bmh.past')) : '');
-    // une action en cours : relue tant que l'onglet reste affiché (quitter
-    // Bare-metal arrête la relecture ; y revenir la relance)
-    if (running.length) historyTimer = setTimeout(() => { if (historyShown()) renderHistory(); }, HISTORY_POLL_MS);
-  }
+  // 2.2.0 : l'historique est partagé avec Terraform et Cluster API (auto-history.js)
+  const bmHistory = AutoHistory.create({
+    box: () => $('#bm-history'), queries: HISTORY_KINDS, cls: 'bm', shown: historyShown,
+    label: (a) => kindLabel(a.action), hint: () => tr('bmh.hint'), empty: () => tr('bmh.empty'),
+  });
 
   // -------------------------------------------------------------------------
   // Installation
@@ -768,8 +713,10 @@ const BMC = (() => {
                         autocapitalize="off" placeholder="os:&#10;  write_files:&#10;  - path: /etc/example.conf&#10;    content: |&#10;      key=value"></textarea>
               <span class="form-hint">${esc(tr('bmc.f.advYamlHint'))}</span></label>
           </fieldset>
+          <!-- 2.2.0 : un système semble-t-il déjà présent ? (vérifier avant d'agir) -->
+          <div class="bm-system" data-bm="system" role="status"></div>
           <div class="apply-bar">
-            <button type="submit" class="btn btn-primary btn-sm btn-ico tip"
+            <button type="submit" class="btn btn-primary btn-sm btn-ico tip" data-bm="install-go"
                     data-tip="${esc(tr('bmc.installTip'))}">${Icons.svg('install')} ${esc(tr('bmc.installGo'))}</button>
             <span class="apply-result" id="bm-install-result"></span>
           </div>
@@ -842,6 +789,71 @@ const BMC = (() => {
     }
     onboardEnabled.addEventListener('change', syncOnboarding);
     field('onboard_profile').addEventListener('change', renderStoragePorts);
+
+    // --- Système déjà présent (2.2.0) ----------------------------------------
+    // Ce que le BMC publie (entrées UEFI, ordre de démarrage, volumes) dit
+    // si la machine porte déjà un système. Présent : le nom de la machine
+    // (série, sinon adresse du BMC) doit être tapé, et la console le revérifie
+    // à l'installation. Inconnu : dit tel quel, jamais « vide ».
+    const sysBox = form.querySelector('[data-bm="system"]');
+    const goBtn = form.querySelector('[data-bm="install-go"]');
+    let sysCheck = null;
+    const evidenceText = (ev) => (ev.code === 'boots-from-disk' ? tr('bmc.sys.ev.bootsFromDisk', { name: ev.name })
+      : ev.code === 'boot-entry' ? tr('bmc.sys.ev.bootEntry', { name: ev.name, loader: ev.loader, disk: ev.disk })
+        : ev.code === 'volume' ? tr('bmc.sys.ev.volume', { name: ev.name, controller: ev.controller }) : ev.code);
+    function syncSystemGate() {
+      const typed = field('system_confirm');
+      const need = sysCheck && sysCheck.state === 'present';
+      const ok = !need || (typed && typed.value.trim() === sysCheck.confirm_name);
+      goBtn.disabled = !ok;
+      const hint = sysBox.querySelector('.bm-system-mismatch');
+      if (hint) hint.hidden = ok || !typed || !typed.value.trim();
+    }
+    function paintSystem(d, refusedNow) {
+      sysCheck = d;
+      const recheck = `<button type="button" class="btn btn-sm btn-secondary btn-ico tip" data-bm="system-recheck"
+          data-tip="${esc(tr('bmc.sys.recheckTip'))}">${Icons.svg('refresh')} ${esc(tr('bmc.sys.recheck'))}</button>`;
+      if (!d) {
+        sysBox.innerHTML = `<p class="form-hint">${esc(tr('bmc.sys.checking'))}</p>`;
+      } else if (d.state === 'present') {
+        const keep = field('system_confirm') ? field('system_confirm').value : '';
+        sysBox.innerHTML = `<div class="ct-banner auto-banner-warn bm-system-present">${Icons.svg('warn', { size: 14 })}
+            <div><strong>${esc(tr('bmc.sys.present'))}</strong>
+              ${refusedNow ? `<p class="bm-system-refused">${esc(tr('bmc.sys.refused'))}</p>` : ''}
+              <ul class="bm-system-evidence">${(d.evidence || []).map(ev => `<li>${esc(evidenceText(ev))}</li>`).join('')}</ul>
+              <label class="bm-system-confirm tip" data-tip="${esc(tr('bmc.sys.typeTip'))}">${esc(tr('bmc.sys.typeName'))}
+                <code class="bm-system-name">${esc(d.confirm_name)}</code>
+                <input name="system_confirm" autocomplete="off" spellcheck="false" value="${esc(keep)}"
+                       title="${esc(tr('bmc.sys.typeTip'))}" aria-label="${esc(tr('bmc.sys.typeTip'))}"></label>
+              <span class="form-hint bm-system-mismatch" hidden>${esc(tr('bmc.sys.mismatch'))}</span>
+            </div>${recheck}</div>`;
+      } else if (d.state === 'absent') {
+        sysBox.innerHTML = `<div class="ct-banner bm-system-absent">${Icons.svg('info', { size: 14 })}
+            <span>${esc(tr('bmc.sys.absent'))}</span>${recheck}</div>`;
+      } else {
+        sysBox.innerHTML = `<div class="ct-banner bm-system-unknown">${Icons.svg('info', { size: 14 })}
+            <span>${esc(d.noCreds ? tr('bmc.sys.noCreds') : tr('bmc.sys.unknown'))}</span>${recheck}</div>`;
+      }
+      field('system_confirm')?.addEventListener('input', syncSystemGate);
+      syncSystemGate();
+    }
+    async function checkSystem() {
+      paintSystem(null);
+      if (!creds.password) { paintSystem({ state: 'unknown', evidence: [], noCreds: true }); return; }
+      let d = null;
+      try {
+        const r = await fetch('/api/bmc/system-check', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host, user: creds.user, password: creds.password }),
+        });
+        if (r.ok) d = await r.json();
+      } catch (e) { d = null; }
+      paintSystem(d && d.state ? d : { state: 'unknown', evidence: [] });
+    }
+    sysBox.addEventListener('click', (e) => {
+      if (e.target.closest('[data-bm="system-recheck"]')) checkSystem();
+    });
+    checkSystem();
 
     // Secrets d'un fichier importé : gardés par le serveur, désignés par cet
     // identifiant ; le navigateur ne les voit jamais.
@@ -1607,6 +1619,10 @@ const BMC = (() => {
         res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.join.needConfirm'))}</span>`;
         return;
       }
+      if (sysCheck && sysCheck.state === 'present' && String(body.system_confirm || '').trim() !== sysCheck.confirm_name) {
+        res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.sys.mismatch'))}</span>`;
+        return;
+      }
       body.bmc_host = host;
       body.bmc_user = creds.user;
       body.bmc_password = creds.password;
@@ -1621,6 +1637,11 @@ const BMC = (() => {
         const d = await r.json().catch(() => ({}));
         if (r.ok) {
           res.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${esc(d.action_id)}</span>`;
+        } else if ((d.fields || []).includes('system_confirm') && d.system) {
+          // 2.2.0 : la console a relu le BMC et refuse ; la fenêtre le montre
+          paintSystem(d.system, true);
+          res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.sys.refused'))}</span>`;
+          sysBox.scrollIntoView({ block: 'nearest' });
         } else {
           msg.innerHTML = refusalFor(d, r.status);
           res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(d.error || r.status)}</span>`;
