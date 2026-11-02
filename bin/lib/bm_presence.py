@@ -77,6 +77,16 @@ def confirm_name(serial, host):
     return s or str(host or "").strip()
 
 
+def confirmed(check, typed):
+    """Vrai quand l'installation peut partir sur cette machine : aucun
+    système présent (« absent » ou « inconnu »), ou le nom tapé est exactement
+    `confirm_name` (espaces autour tolérés). Partagé par la fenêtre
+    d'installation et les séries de profils (2.2.1)."""
+    if (check or {}).get("state") != PRESENT:
+        return True
+    return str(typed or "").strip() == check.get("confirm_name")
+
+
 def entries_from_hpe(boot):
     """Entrées de `Systems/1/BIOS/Boot/` (iLO 4), ou None si illisible."""
     if not isinstance(boot, dict) or not isinstance(boot.get("BootSources"), list):

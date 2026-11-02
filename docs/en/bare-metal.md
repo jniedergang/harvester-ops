@@ -244,7 +244,8 @@ name (`system_confirm`) does not match. `POST /api/bmc/system-check`
 (`{host, user, password}`, administrator) returns `state` (`present`,
 `absent`, `unknown`), `evidence` and `confirm_name`. A boot entry can
 outlive a wiped disk: the check then asks for the name once more, which is
-the safe side. Batches of a profile are not covered by this check yet.
+the safe side. Batches of a profile go through the same check, machine by
+machine (2.2.1, below).
 
 ### 4. Watch it install
 
@@ -434,11 +435,30 @@ most 512 characters, without control characters.
   each machine is its own `baremetal-install:<hostname>` action in the
   dock. Cancelling the batch cancels the install in progress and skips
   the rows not started.
+- **Machines that already carry a system (2.2.1).** The batch window
+  runs the check of the install window (above) on every machine of the
+  table: **Check the machines** reads each BMC, read only, and shows one
+  banner per machine, `Row <n> · <BMC>`, with **present** and its evidence,
+  **No sign**, or **Unknown** said plainly. For every machine where a
+  system seems present, type its name (serial number, or BMC address when
+  the serial is unknown) exactly; a wrong name is said. **Start the batch**
+  reads the machines first when the table changed since the last check,
+  and does not start while a name is missing or wrong. The console then
+  reads every BMC again itself, after the row checks and before anything
+  is powered on, and refuses the whole batch with `409`,
+  `fields: ["system_confirm"]`, `refused` (BMC hosts) and `machines` (each
+  machine with its row, state, evidence, name to type and `confirmed`)
+  when a machine where a system seems present lacks its name; nothing
+  starts, and the window shows what the console read. "Unknown" is not a
+  refusal, as for one machine. The typed names go in
+  `rows[].system_confirm` and never reach the install options.
 - API: `GET|POST /api/baremetal/profiles`, `GET|PUT|DELETE
   /api/baremetal/profiles/<name>`, `POST .../from-config`,
   `POST .../<name>/csv`, `POST .../<name>/render`, `POST .../<name>/batch`
   (`cluster_name`, `vip`, `iso`, `rows`, `token`, `password`,
-  `bmc_password`, `import_id`, `concurrency`). Reads are open to every
+  `bmc_password`, `import_id`, `concurrency`; `rows[].system_confirm`,
+  2.2.1), `POST .../<name>/system-check` (same body, read only: returns
+  `machines`, 2.2.1). Reads are open to every
   role, writes need **admin**.
 - Command line, same code (the batch runs inside the command), secrets
   never on argv:
@@ -455,7 +475,10 @@ most 512 characters, without control characters.
   (common) and `bmc_passwords` (per BMC host). The CSV must not hold
   passwords. `--state-dir` points to the console state directory,
   `--port` sets the artifact server port when a console already listens
-  on 8091.
+  on 8091. When a system seems present on a machine, the command prints
+  each machine with its state and evidence, starts nothing and exits 2;
+  `--confirm-system <BMC host>=<name>` (once per machine, the name as
+  printed) confirms it (2.2.1).
 - Verified by automated tests (substitution, store, ordering, refusals,
   secrets) and on the window with mocked routes. **Run for real (1.83.2)**
   on two machines behind two Redfish BMCs (the bmcfg bench): row 1 created
@@ -463,6 +486,12 @@ most 512 characters, without control characters.
   itself with both nodes. That run found three defects, fixed in 1.83.2:
   `skipchecks: true` did not reach the installer, a failed row did not say
   why, and the joined node was missing from the declaration.
+  **Checked for real (2.2.1), read only**: a batch window with node3
+  (iLO 4, `172.16.1.33`) and node4 (iLO 4, `172.16.1.34`) showed both as
+  present, node3 with `sles-secureboot` (`\EFI\sles\shim.efi` on
+  `HD.Emb.5.2`) and the name `USE6236S00`, node4 with `elemental-shim` and
+  `sles-secureboot` and the name `USE6236RY3`; a wrong name was said and the
+  batch did not start. The batch was never submitted.
 
 ### History of the bare-metal actions (2.1.0)
 

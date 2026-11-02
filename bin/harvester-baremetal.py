@@ -239,10 +239,31 @@ def cmd_profile(args):
         "cluster_name": args.cluster_name, "vip": args.vip, "iso": args.iso, "rows": rows,
         "token": sec.get("token"), "password": sec.get("password"),
         "bmc_password": sec.get("bmc_password")})
-    action_id, errors = app._bm_batch_start(prof, batch, secrets_, args.concurrency)
+    # 2.2.1 : nom tapé pour chaque machine qui porte déjà un système
+    confirms = {}
+    for item in args.confirm_system or []:
+        host, sep, typed = item.partition("=")
+        if not sep or not host.strip():
+            print(f"--confirm-system {item}: expected HOST=NAME", file=sys.stderr)
+            return 2
+        confirms[host.strip()] = typed
+    action_id, errors, machines = app._bm_batch_start(prof, batch, secrets_, args.concurrency,
+                                                      confirms=confirms)
     if errors:
         for where, why in errors:
             print(f"{where}: {why}", file=sys.stderr)
+        return 2
+    if machines:
+        for m in machines:
+            line = f"row {m['row']} {m['bmc_host']}: {m['state']}"
+            if not m.get("confirmed"):
+                line += (f", a system seems present; to install, add "
+                         f"--confirm-system {m['bmc_host']}={m['confirm_name']}")
+            print(line, file=sys.stderr)
+            if m["state"] == "present":
+                for ev in m.get("evidence") or []:
+                    print("  " + ", ".join(f"{k}={v}" for k, v in ev.items()), file=sys.stderr)
+        print("refused: a system seems present on some machines (nothing was started)", file=sys.stderr)
         return 2
     with app.ACTIONS_LOCK:
         run = app.ACTIONS[action_id]
@@ -298,6 +319,9 @@ def main(argv=None):
     pa.add_argument("--concurrency", type=int, default=bm_profiles.DEFAULT_CONCURRENCY,
                     help="joins running at once (default 2, at most 4)")
     pa.add_argument("--port", type=int, help="artifact server port (default 8091)")
+    pa.add_argument("--confirm-system", action="append", metavar="HOST=NAME",
+                    help="install a machine that already carries a system: its BMC host and its "
+                         "name (serial number, or BMC address), as the refusal prints it; repeat per machine")
     sg = pa.add_mutually_exclusive_group(required=True)
     sg.add_argument("--secrets-file", help="YAML file (mode 0600): token, password, bmc_password, bmc_passwords")
     sg.add_argument("--secrets-stdin", action="store_true", help="read the same YAML from stdin")

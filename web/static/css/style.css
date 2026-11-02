@@ -5952,3 +5952,6 @@ html[data-mode="dark"] .tbl-scroll { --tbl-shade: rgba(0, 0, 0, 0.42); }
 .bm-system-confirm input { width: 240px; }
 .bm-system-refused { margin: 4px 0; color: var(--danger); }
 .bm-system-mismatch { display: block; margin-top: 4px; color: var(--danger); }
+/* 2.2.1 : système déjà présent, une bannière par machine (fenêtre de série) */
+.bmp-system .ct-banner { margin: 0 0 6px; }
+.bmp-sys-machine { margin-right: 4px; }

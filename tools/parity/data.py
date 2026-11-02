@@ -3,7 +3,7 @@
 # Statuts : ok (fait), part (partiel), todo (manquant), plus (console seulement), na (hors périmètre).
 # v : version où c'est arrivé (ok/part) ou prévue (todo).
 
-AS_OF = "2.2.0"
+AS_OF = "2.2.1"
 DATE = "2026-11-02"
 
 S = []  # sections
@@ -267,7 +267,7 @@ r("plus", "1.48", "Clusters RKE2 par Cluster API, services par CAAPH", "RKE2 clu
   "Rancher les crée aussi, par son pilote de nœud Harvester ; la console le fait sans Rancher ; écran en onglets Clusters, Services, Historique, Installation (2.2)",
   "Rancher also creates them, with its Harvester node driver; the console does it without Rancher; screen in tabs Clusters, Services, History, Installation (2.2)")
 r("plus", "1.19", "Installation bare-metal de Harvester par Redfish", "Bare-metal Harvester install over Redfish",
-  "configuration complète de l'installeur, import d'un fichier existant et aperçu (1.77) ; découverte des disques, rôles, pools, cluster déclaré tout seul (1.78) ; écran en onglets Machines, Profils, Images, Historique, dernière découverte gardée (2.1) ; machine qui porte déjà un système gardée (2.2)", "complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78); screen in tabs Machines, Profiles, Images, History, last discovery remembered (2.1); a machine that already carries a system is guarded (2.2)")
+  "configuration complète de l'installeur, import d'un fichier existant et aperçu (1.77) ; découverte des disques, rôles, pools, cluster déclaré tout seul (1.78) ; écran en onglets Machines, Profils, Images, Historique, dernière découverte gardée (2.1) ; machine qui porte déjà un système gardée, séries de profils comprises (2.2)", "complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78); screen in tabs Machines, Profiles, Images, History, last discovery remembered (2.1); a machine that already carries a system is guarded, profile batches included (2.2)")
 r("plus", "1.6", "Activité : chaque geste suivi, dock des actions", "Activity: every action tracked, action dock")
 r("plus", "1.4", "Notes collaboratives sur les VMs et nœuds", "Collaborative notes on VMs and nodes")
 r("plus", "1.29", "Allouable Longhorn réel par classe", "Real Longhorn allocatable per class")

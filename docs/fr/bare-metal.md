@@ -254,8 +254,8 @@ tapé (`system_confirm`) ne correspond pas. `POST /api/bmc/system-check`
 (`{host, user, password}`, administrateur) rend `state` (`present`,
 `absent`, `unknown`), `evidence` et `confirm_name`. Une entrée de démarrage
 peut survivre à l'effacement d'un disque : le contrôle demande alors le nom
-une fois de plus, ce qui est le côté sûr. Les séries d'un profil ne passent
-pas encore par ce contrôle.
+une fois de plus, ce qui est le côté sûr. Les séries d'un profil passent
+par le même contrôle, machine par machine (2.2.1, plus bas).
 
 ### 4. Suivre l'installation
 
@@ -460,11 +460,31 @@ tient sur une ligne, 512 caractères au plus, sans caractère de contrôle.
   d'hôte, BMC, mode, identifiant de son installation) ; chaque machine est
   sa propre action `baremetal-install:<hostname>` dans le dock. Arrêter la
   série arrête l'installation en cours et saute les lignes non commencées.
+- **Machines qui portent déjà un système (2.2.1).** La fenêtre de série
+  fait le contrôle de la fenêtre d'installation (plus haut) sur chaque
+  machine du tableau : **Vérifier les machines** lit chaque BMC, en lecture
+  seule, et montre une bannière par machine, `Ligne <n> · <BMC>`, avec
+  **présent** et ses signes, **Aucun signe**, ou **Inconnu** dit tel quel.
+  Pour chaque machine où un système semble présent, tapez exactement son
+  nom (numéro de série, ou adresse du BMC quand la série est inconnue) ; un
+  nom faux est signalé. **Lancer la série** relit d'abord les machines si
+  le tableau a changé depuis la dernière lecture, et ne part pas tant qu'un
+  nom manque ou est faux. La console relit ensuite elle-même chaque BMC,
+  après les contrôles des lignes et avant que rien ne soit allumé, et
+  refuse toute la série en `409`, avec `fields: ["system_confirm"]`,
+  `refused` (hôtes des BMC) et `machines` (chaque machine avec sa ligne,
+  son état, ses signes, le nom à taper et `confirmed`) quand une machine où
+  un système semble présent n'a pas son nom ; rien ne part, et la fenêtre
+  montre ce que la console a lu. « Inconnu » n'est pas un refus, comme pour
+  une machine seule. Les noms tapés passent dans `rows[].system_confirm` et
+  n'atteignent jamais les options d'installation.
 - API : `GET|POST /api/baremetal/profiles`, `GET|PUT|DELETE
   /api/baremetal/profiles/<nom>`, `POST .../from-config`,
   `POST .../<nom>/csv`, `POST .../<nom>/render`, `POST .../<nom>/batch`
   (`cluster_name`, `vip`, `iso`, `rows`, `token`, `password`,
-  `bmc_password`, `import_id`, `concurrency`). La lecture est ouverte à
+  `bmc_password`, `import_id`, `concurrency` ; `rows[].system_confirm`,
+  2.2.1), `POST .../<nom>/system-check` (même corps, lecture seule : rend
+  `machines`, 2.2.1). La lecture est ouverte à
   tous les rôles, l'écriture demande **admin**.
 - Ligne de commande, même code (la série tourne dans la commande), secrets
   jamais en argument :
@@ -481,7 +501,10 @@ tient sur une ligne, 512 caractères au plus, sans caractère de contrôle.
   (commun) et `bmc_passwords` (par hôte de BMC). Le CSV ne porte aucun mot
   de passe. `--state-dir` désigne le répertoire d'état de la console,
   `--port` le port du serveur d'artefacts quand une console écoute déjà sur
-  8091.
+  8091. Quand un système semble présent sur une machine, la commande
+  affiche chaque machine avec son état et ses signes, ne lance rien et sort
+  en 2 ; `--confirm-system <hôte du BMC>=<nom>` (une fois par machine, le
+  nom tel qu'affiché) la confirme (2.2.1).
 - Vérifié par les tests automatiques (substitution, magasin, ordre, refus,
   secrets) et sur la fenêtre avec des routes simulées. **Faite en réel
   (1.83.2)** sur deux machines derrière deux BMC Redfish (banc bmcfg) : la
@@ -490,6 +513,12 @@ tient sur une ligne, 512 caractères au plus, sans caractère de contrôle.
   défauts, corrigés en 1.83.2 : `skipchecks: true` n'atteignait pas
   l'installeur, une ligne en échec ne disait pas pourquoi, et le nœud qui
   rejoint manquait à la déclaration.
+  **Vérifié en réel (2.2.1), en lecture seule** : une fenêtre de série avec
+  node3 (iLO 4, `172.16.1.33`) et node4 (iLO 4, `172.16.1.34`) a montré les
+  deux comme présents, node3 avec `sles-secureboot` (`\EFI\sles\shim.efi`
+  sur `HD.Emb.5.2`) et le nom `USE6236S00`, node4 avec `elemental-shim` et
+  `sles-secureboot` et le nom `USE6236RY3` ; un nom faux a été signalé et la
+  série n'est pas partie. La série n'a jamais été envoyée.
 
 ### Historique des actions bare-metal (2.1.0)
 

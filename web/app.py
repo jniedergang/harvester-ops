@@ -7640,9 +7640,7 @@ def _bm_presence_refusal(data, typed):
     None sinon.
     « Inconnu » n'est pas un refus : le BMC ne permet pas de le dire."""
     chk = _bm_system_presence(data["bmc_host"], data.get("bmc_user") or "", data.get("bmc_password") or "")
-    if chk["state"] != _bmpres.PRESENT:
-        return None
-    if str(typed or "").strip() == chk["confirm_name"]:
+    if _bmpres.confirmed(chk, typed):
         return None
     return jsonify({"error": "a system seems present on this machine: type its name to install",
                     "fields": ["system_confirm"], "system": chk}), 409
@@ -7989,6 +7987,51 @@ def _bm_batch_input(data):
     return batch, secrets_
 
 
+def _bm_batch_confirms(data):
+    """2.2.1 : noms tapés pour les machines d'une série qui portent déjà un
+    système, {bmc_host: nom}, lus dans `rows[].system_confirm` ; hors des
+    données de l'installation."""
+    out = {}
+    for r in data.get("rows") or []:
+        if isinstance(r, dict) and r.get("system_confirm") is not None:
+            out[str(r.get("bmc_host") or "").strip()] = str(r.get("system_confirm"))
+    return out
+
+
+def _bm_batch_presence(targets):
+    """2.2.1 : la lecture de la fenêtre d'installation (_bm_system_presence),
+    faite pour chaque machine d'une série, en parallèle. `targets` :
+    [(ligne, hôte, utilisateur, mot de passe)] ; rend, dans l'ordre des
+    lignes, [{row, bmc_host, state, evidence, confirm_name, source}]."""
+    def one(t):
+        row, host, user, pwd = t
+        try:
+            chk = _bm_system_presence(host, user, pwd)
+        except Exception:                      # jamais de détail qui porterait un secret
+            chk = {"state": _bmpres.UNKNOWN, "evidence": [], "confirm_name": _bmpres.confirm_name(None, host),
+                   "source": None}
+        return dict(chk, row=row, bmc_host=host)
+    if not targets:
+        return []
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
+        return list(pool.map(one, targets))
+
+
+def _bm_batch_presence_refusal(plan, confirms):
+    """2.2.1 : (machines lues, hôtes refusés) pour une série prête à partir.
+    Refusée dès qu'une machine semble porter un système sans son nom tapé ;
+    « inconnu » n'est pas un refus, comme pour une machine seule."""
+    machines = _bm_batch_presence([(i + 1, o["bmc_host"], o.get("bmc_user") or "", o.get("bmc_password") or "")
+                                   for i, o in enumerate(plan)])
+    refused = []
+    for m in machines:
+        m["confirmed"] = _bmpres.confirmed(m, confirms.get(m["bmc_host"]))
+        if not m["confirmed"]:
+            refused.append(m["bmc_host"])
+    return machines, refused
+
+
 def _bm_batch_plan(prof, batch, secrets_):
     """Options d'installation complètes et contrôlées de chaque ligne
     (jonctions contrôlées sans leur cluster, qui n'existe pas encore), ou
@@ -8132,20 +8175,35 @@ def _baremetal_batch_steps(run, plan, concurrency):
     run.close()
 
 
-def _bm_batch_start(prof, batch, secrets_, concurrency=_bmp.DEFAULT_CONCURRENCY):
+def _bm_batch_start(prof, batch, secrets_, concurrency=_bmp.DEFAULT_CONCURRENCY, confirms=None):
     """Contrôle toute la série puis lance son action parente : (action_id,
-    None) ou (None, refus [(où, raison)])."""
+    None, None), (None, refus [(où, raison)], None), ou, 2.2.1, (None, None,
+    machines) quand une machine semble porter un système sans son nom tapé
+    dans `confirms` ({bmc_host: nom})."""
     plan, errors = _bm_batch_plan(prof, batch, secrets_)
     if errors:
-        return None, errors
+        return None, errors, None
     for o in plan:
         busy = _bm_busy(o["bmc_host"])
         if busy:
-            return None, [(o["bmc_host"], f"{busy.action} is already driving this BMC")]
+            return None, [(o["bmc_host"], f"{busy.action} is already driving this BMC")], None
+    # 2.2.1 : chaque machine est relue par la console, jamais sur ce que dit la page
+    machines, refused = _bm_batch_presence_refusal(plan, confirms or {})
+    if refused:
+        plan.clear()                            # secrets : rien ne part
+        return None, None, machines
     concurrency = max(1, min(4, int(concurrency or _bmp.DEFAULT_CONCURRENCY)))
     action_id = track_action(f"baremetal-batch:{batch['cluster_name']}", "(local)",
                              _baremetal_batch_runner, plan, concurrency)
-    return action_id, None
+    return action_id, None, None
+
+
+def _bm_presence_batch_json(machines):
+    """Refus 409 d'une série : la liste des machines lues, chacune avec son
+    état, ses signes, le nom à taper et `confirmed`."""
+    refused = [m["bmc_host"] for m in machines if not m.get("confirmed")]
+    return jsonify({"error": "a system seems present on some machines: type each name to start the batch",
+                    "fields": ["system_confirm"], "refused": refused, "machines": machines}), 409
 
 
 @app.route("/api/baremetal/profiles/<name>/render", methods=["POST"])
@@ -8181,6 +8239,29 @@ def api_bm_profile_render(name):
     return jsonify({"rows": out, "ok": all("yaml" in r for r in out)})
 
 
+@app.route("/api/baremetal/profiles/<name>/system-check", methods=["POST"])
+@requires_auth
+@_rate_limit("12/minute")
+def api_bm_profile_system_check(name):
+    """2.2.1 : un système semble-t-il déjà présent sur les machines d'une
+    série ? Même corps que /batch (lignes, mot de passe du BMC commun ou par
+    ligne) ; lecture seule, chaque BMC lu comme par la fenêtre
+    d'installation."""
+    prof = _bmp.load_profile(_bm_profiles_state(), name)
+    if prof is None:
+        return jsonify({"error": "no such profile"}), 404
+    batch, secrets_ = _bm_batch_input(request.get_json(force=True, silent=True) or {})
+    rows = batch["rows"]
+    bad = [f"row {i + 1} bmc_host" for i, r in enumerate(rows)
+           if not isinstance(r, dict) or not BMC_HOST_RE.fullmatch(r.get("bmc_host") or "")]
+    if not rows or len(rows) > _bmp.MAX_ROWS or bad:
+        return jsonify({"error": "invalid rows", "fields": bad or ["rows"]}), 400
+    machines = _bm_batch_presence([(i + 1, r["bmc_host"], r.get("bmc_user") or "",
+                                    r.get("bmc_password") or secrets_.get("bmc_password") or "")
+                                   for i, r in enumerate(rows)])
+    return jsonify({"machines": machines})
+
+
 @app.route("/api/baremetal/profiles/<name>/batch", methods=["POST"])
 @requires_auth
 @_rate_limit("6/minute")
@@ -8199,9 +8280,12 @@ def api_bm_profile_batch(name):
         concurrency = int(data.get("concurrency") or _bmp.DEFAULT_CONCURRENCY)
     except (TypeError, ValueError):
         return _bm_errors_json([("concurrency", "not a number")], "invalid batch")
-    action_id, errors = _bm_batch_start(prof, batch, secrets_, concurrency)
+    action_id, errors, machines = _bm_batch_start(prof, batch, secrets_, concurrency,
+                                                  confirms=_bm_batch_confirms(data))
     if errors:
         return _bm_errors_json(errors, "invalid batch")
+    if machines:
+        return _bm_presence_batch_json(machines)
     return jsonify({"action_id": action_id, "cluster": batch["cluster_name"],
                     "nodes": len(batch["rows"])}), 202
 
