@@ -341,7 +341,13 @@ were row buttons until 2.0.2 (start or stop, console, settings, notes, move
 to folder) sit at the top of its menu, available before the VM state is
 read, with the same roles and greyed reasons. The menu is one shared element
 and works from the keyboard (Enter opens it, arrows move, Escape closes it
-and gives the focus back to the button). Measured in headless Chromium, a
+and gives the focus back to the button). Since 2.0.4 the **⋮** column stays
+on the right edge of the table when the table scrolls sideways (a light
+shadow shows that columns pass under it), here as in the VM list of a host
+(Harvester or KVM) and in Containers. Names stay on one line: a host,
+namespace or VM name longer than its column ends with an ellipsis and shows
+in full when hovered. At 1,440 px with the menu pinned, Host to Folder fit
+without scrolling. Measured in headless Chromium, a
 full redraw of the 300 rows (new sort): 0.22 s with 2,000 VMs and 0.23 to
 0.29 s with 10,000 (2.0.2: 0.5 to 0.57 s and 0.9 s, the cost being the six
 icon buttons of each row; 1.x: 3.6 s for every refresh and every key at

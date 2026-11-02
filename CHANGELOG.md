@@ -4,6 +4,44 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.0.4] - 2026-11-02 - Row menu always visible
+
+### Fixed
+- **The "⋮" button of a row stays in view.** At 1,440 px with the menu
+  pinned, the Virtual machines table was wider than its frame: the **⋮**
+  button of each row was off-screen until you scrolled sideways, and
+  scrolling hid the Host column. The table now scrolls inside its own frame
+  and the **⋮** column stays on its right edge, with the row background and
+  a light shadow on its left while columns pass under it, in every theme
+  and mode. Same for the VM list of a Harvester host, the VM list of KVM
+  hosts and Containers.
+- **Names stay on one line.** Host, namespace and VM names (and in
+  Containers the cluster, namespace and workload) no longer wrap ("lyon-/lab"):
+  a name longer than its column ends with an ellipsis and keeps its full
+  value in its tooltip, so every row is one line high.
+
+### Changed
+- **Denser columns**: narrower cell padding, a smaller family pill and IP
+  address, and the "Actions" header kept for screen readers only. At
+  1,440 px with the menu pinned, Host to Folder fit without horizontal
+  scrolling; on a narrower window the table scrolls and the **⋮** stays
+  visible.
+
+### Internal
+- `table-scroll.js`: `TableScroll.watch()` sets `tbl-more-r` on a
+  `.tbl-scroll` frame while content passes under the sticky column
+  (ResizeObserver on the frame and its table, scroll listener).
+
+### Tests
+- `tests/e2e/test_row_menu_sticky_204.py`: at 1,440 px with the pinned menu
+  the first row's **⋮** is in the viewport without scrolling and Host to
+  Folder fit; at narrower widths it stays visible and uncovered at the start,
+  the middle and the end of the horizontal scroll (Virtual machines, host VM
+  list, KVM VMs, Containers); the sticky cell takes the page background in
+  light and dark; a long name ends with an ellipsis and keeps its full value
+  in its title, rows staying one line high. Removing the sticky rule fails
+  six of them.
+
 ## [2.0.3] - 2026-11-02 - Lighter VM rows and compact host band
 
 ### Changed

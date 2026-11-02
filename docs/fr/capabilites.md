@@ -368,7 +368,14 @@ qu'un bouton **⋮** ; les gestes qui étaient des boutons de ligne jusqu'en
 dossier) sont en tête de son menu, disponibles avant la lecture de l'état
 de la VM, avec les mêmes rôles et les mêmes raisons de grisé. Le menu est
 un seul élément partagé et se pilote au clavier (Entrée l'ouvre, les
-flèches parcourent, Échap le ferme et rend le focus au bouton). Mesuré
+flèches parcourent, Échap le ferme et rend le focus au bouton). Depuis
+2.0.4, la colonne **⋮** reste au bord droit du tableau quand il défile à
+l'horizontale (une ombre légère montre que des colonnes passent dessous),
+ici comme dans la liste des VMs d'un hôte (Harvester ou KVM) et dans
+Conteneurs. Les noms tiennent sur une ligne : un nom d'hôte, d'espace de noms
+ou de VM plus long que sa colonne finit par une ellipse et s'affiche en
+entier au survol. À 1 440 px, menu épinglé, les colonnes Hôte à Dossier
+tiennent sans défilement. Mesuré
 dans Chromium sans affichage, un redessin complet des 300 lignes (nouveau
 tri) : 0,22 s à 2 000 VMs et 0,23 à 0,29 s à 10 000 (2.0.2 : 0,5 à 0,57 s
 et 0,9 s, le coût venant des six boutons à icône de chaque ligne ; 1.x :

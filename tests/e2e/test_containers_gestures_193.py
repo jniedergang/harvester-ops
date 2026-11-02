@@ -85,7 +85,7 @@ def closed_with_toast(page, panel, text):
 
 
 def menu_of(page, rows, name):
-    rows.filter(has=page.locator(f'td:text-is("{name}")')).locator('[data-ct-act="more"]').click()
+    rows.filter(has=page.locator(f'td .avm-name:text-is("{name}")')).locator('[data-ct-act="more"]').click()
     menu = page.locator(".ct-menu")
     expect(menu).to_be_visible()
     return menu

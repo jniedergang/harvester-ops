@@ -299,7 +299,7 @@ const KVM = (() => {
     }
     const warn = (d.warnings || []).map((w) => `<p class="res-error">${icon('warn')} ${esc(w)}</p>`).join('');
     if (cur.view === 'hosts') body.innerHTML = warn + hostsHtml(d);
-    else if (cur.view === 'vms') body.innerHTML = warn + vmsHtml(d);
+    else if (cur.view === 'vms') { body.innerHTML = warn + vmsHtml(d); if (window.TableScroll) TableScroll.watch(body); }
     else if (cur.view === 'storage' && cur.prefs.sub === 'images') body.innerHTML = warn + perHost(d, imagesHtml, imagesHead, cur.images);
     else if (cur.view === 'storage') body.innerHTML = warn + perHost(d, storageHtml, storageHead);
     else body.innerHTML = warn + perHost(d, networksHtml, networksHead);
@@ -490,10 +490,10 @@ const KVM = (() => {
     const bad = hosts.filter((h) => h.state !== 'ok' && (!cur.fixed || h.name === cur.fixed)).map((h) => `<span class="kvm-host-state">${icon('node', 12)} ${esc(h.name)} ${badge('fail', kindLabel(h.state), h.error)}</span>`).join(' ');
     if (!hosts.length || (cur.fixed && !names.includes(cur.fixed))) return emptyHosts();
     const th = (k, label) => `<th${k ? ` data-sort="${k}" class="tip${p.sort === k ? (p.dir > 0 ? ' sort-asc' : ' sort-desc') : ''}" data-tip="${esc(tr('kvm.sortTip'))}"` : ''}>${esc(label)}</th>`;
-    const table = rows.length ? `<table class="data-table sortable kvm-vms"><thead><tr>${th('', '')}
+    const table = rows.length ? `<div class="tbl-scroll"><table class="data-table sortable kvm-vms"><thead><tr>${th('', '')}
         ${th('name', tr('kvm.col.name'))}${th('host', tr('kvm.col.host'))}${th('state', tr('kvm.col.state'))}
-        ${th('vcpus', tr('kvm.col.vcpus'))}${th('memory', tr('kvm.col.memory'))}${th('', tr('kvm.col.flags'))}${th('', '')}</tr></thead><tbody>
-      ${rows.map((v) => vmRow(v)).join('')}</tbody></table>` : `<p class="form-hint kvm-empty">${esc(tr('kvm.noVms'))}</p>`;
+        ${th('vcpus', tr('kvm.col.vcpus'))}${th('memory', tr('kvm.col.memory'))}${th('', tr('kvm.col.flags'))}<th class="vm-actions-cell"><span class="tbl-vh">${esc(tr('col.actions'))}</span></th></tr></thead><tbody>
+      ${rows.map((v) => vmRow(v)).join('')}</tbody></table></div>` : `<p class="form-hint kvm-empty">${esc(tr('kvm.noVms'))}</p>`;
     return `${bad ? `<div class="kvm-host-states">${bad}</div>` : ''}${table}`;
   }
 
@@ -507,10 +507,10 @@ const KVM = (() => {
     return `<tr data-kvm-vm="${esc(k)}" data-state="${esc(v.state)}">
         <td class="check-col"><button type="button" class="btn-icon-action tip" data-kvm="detail" data-vm="${esc(k)}" aria-expanded="${open}"
           data-tip="${esc(tr('kvm.detailTip'))}" aria-label="${esc(tr('kvm.detailTip'))}">${icon(open ? 'chevronDown' : 'chevronRight', 13)}</button></td>
-        <td class="kvm-vm-name">${esc(v.name)}</td>
-        <td>${esc(v.host)}</td><td>${stateBadge(v.state)}</td>
+        <td class="kvm-vm-name"><span class="cell-trunc avm-name" title="${esc(v.name)}">${esc(v.name)}</span></td>
+        <td><span class="cell-trunc" title="${esc(v.host)}">${esc(v.host)}</span></td><td>${stateBadge(v.state)}</td>
         <td>${v.vcpus == null ? '–' : esc(v.vcpus)}</td><td>${esc(kib(v.memory_kib))}</td><td>${flags}</td>
-        <td class="kvm-vm-acts"><button type="button" class="btn-icon-action tip" data-kvm="menu" data-vm="${esc(k)}" aria-haspopup="menu" aria-expanded="false"
+        <td class="kvm-vm-acts vm-actions-cell"><button type="button" class="btn-icon-action tip" data-kvm="menu" data-vm="${esc(k)}" aria-haspopup="menu" aria-expanded="false"
           data-tip="${esc(tr('kvm.menuTip'))}" aria-label="${esc(tr('kvm.menuLabel', { name: v.name }))}">${icon('more')}</button></td></tr>
       ${open ? `<tr class="kvm-detail-row" data-kvm-detail="${esc(k)}"><td colspan="8"><div class="kvm-detail">${esc(tr('common.loading'))}</div></td></tr>` : ''}`;
   }
