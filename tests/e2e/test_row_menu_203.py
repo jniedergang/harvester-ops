@@ -108,12 +108,17 @@ def test_the_lead_gestures_open_their_windows(world):
                                          ["notes", "vm", "harv-fake", "lab", "cirros"]]
 
 
-def test_the_kvm_menu_has_console_and_folder(world):
+def test_the_kvm_menu_has_the_host_page_gestures_then_folder_and_host(world):
+    """2.2.2 : le menu d'une VM KVM est celui de la page de l'hôte (gestes,
+    console, opérations, Modifier), suivi du rangement et de la page de l'hôte."""
     go, page, state = world
     go("#vms")
     _, menu = open_menu(page, f"kvm/{KUUID}")
-    acts = menu.locator("[data-vmf-kvm]").evaluate_all("els => els.map(e => e.dataset.vmfKvm)")
-    assert acts == ["console", "snapshots", "clone", "delete", "folder", "page"]
+    acts = menu.locator(".vma-item").evaluate_all(
+        "els => els.map(e => e.dataset.kvmGesture || e.dataset.kvmOp || e.dataset.kvmHot"
+        " || (e.dataset.kvmConsole && 'console') || e.dataset.vmfKvm)")
+    assert acts == ["start", "shutdown", "reboot", "suspend", "resume", "destroy", "console",
+                    "snapshots", "clone", "delete", "edit", "folder", "page"]
     menu.locator('[data-vmf-kvm="folder"]').click()
     expect(page.locator("#fp-fld-move")).to_be_visible()
 

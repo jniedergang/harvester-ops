@@ -9975,8 +9975,11 @@ def api_vms_all():
             c = cache.get(r.get("key"))
             r["folder"], r["folder_source"] = (c["folder_path"], c["source"]) if c else (None, None)
     rows.sort(key=lambda r: (r["name"] or "", r["kind"], r["source"] or "", r["namespace"] or ""))
-    return jsonify({"sources": sources, "vms": rows, "clusters": clusters, "folder_warnings": warnings,
-                    "hidden_count": hidden})
+    out = {"sources": sources, "vms": rows, "clusters": clusters, "folder_warnings": warnings,
+           "hidden_count": hidden}
+    if "kvm" in kinds:
+        out["kvm_tables"] = _kvm_vm_tables()       # même menu que la page de l'hôte (2.2.2)
+    return jsonify(out)
 
 
 # -----------------------------------------------------------------------------
@@ -12104,10 +12107,16 @@ def api_kvm_vms():
     except OSError as e:
         log.warning("KVM: restart markers not read: %s", e)
     vms.sort(key=lambda v: (v["name"], v["host"]))
-    return jsonify({"vms": vms, "hosts": hosts, "warnings": warnings, "role": current_role(),
-                    "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()},
-                    "operations": KVM_VM_OPERATIONS,
-                    "edit_operations": KVM_VM_EDIT_OPERATIONS})
+    return jsonify(dict(_kvm_vm_tables(), vms=vms, hosts=hosts, warnings=warnings, role=current_role()))
+
+
+def _kvm_vm_tables():
+    """Tables du menu d'une VM KVM (refus des gestes par état, droits et
+    états des opérations, de la modification) : servies par /api/kvm/vms et
+    par /api/vms-all, qui rendent le même menu (2.2.2)."""
+    return {"gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()} if _kvm_cli else {},
+            "operations": KVM_VM_OPERATIONS,
+            "edit_operations": KVM_VM_EDIT_OPERATIONS}
 
 
 @app.route("/api/kvm/vms/<host>/<domain>")

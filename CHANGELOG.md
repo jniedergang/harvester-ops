@@ -4,6 +4,44 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.2.2] - 2026-11-02 - Edit KVM VMs from the Virtual machines view
+
+### Fixed
+- **Virtual machines: a KVM VM has the menu of its host page.** In the
+  unified view the row menu of a KVM VM only offered console, snapshots,
+  clone, delete, Move to folder and Open on its host: no **Edit** and no
+  power gesture, so editing a VM meant going to its host first. The menu is
+  now built by the same code as the host page: start, shut down, reboot,
+  suspend, resume, force off, console, snapshots, clone, delete and
+  **Edit** (opens the Edit window), each greyed with the same reason (role,
+  state, transient VM), then Move to folder and Open on its host. A gesture
+  reports its outcome above the table; force off asks for confirmation
+  there. The tooltip of Open on its host no longer says that start and stop
+  are only there.
+
+### Changed
+- `GET /api/vms-all?kinds=...kvm...` also returns `kvm_tables`
+  (`gestures`, `operations`, `edit_operations`), the same tables as
+  `GET /api/kvm/vms`: the view greys the menu without reading the KVM hosts
+  again.
+
+### Internal
+- `kvm.js` exposes `openVmMenu`, `closeVmMenu` and `runGesture`; the host
+  page menu goes through `openVmMenu` too, and `all-vms.js` keeps no copy
+  of the rules.
+
+### Tests
+- `tests/e2e/test_kvm_menu_222.py`: same entries, greys and reasons as the
+  host page for a running, a shut off and a transient VM, as operator,
+  administrator and viewer; Edit opens the window of that VM without
+  writing; a gesture goes to its host; force off asks then cancels or
+  sends; a greyed entry does nothing; the host page menu still offers Edit.
+- `tests/api/test_kvm_menu_source_222.py`: the unified view uses the shared
+  builder with the served tables and copies no rule.
+- `tests/api/test_vm_common_row_200.py`: `kvm_tables` served with the KVM
+  rows only. Mutations checked (tables not passed, role forced to viewer,
+  Edit group removed, force off without confirmation): each one fails.
+
 ## [2.2.1] - 2026-11-02 - Profile batches guard machines that already carry a system
 
 ### Security
