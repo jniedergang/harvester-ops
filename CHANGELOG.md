@@ -4,6 +4,418 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.3.0] - 2026-11-02 - Terraform declarations for KVM hosts
+
+### Added
+- **Terraform declarations can target a KVM host** (decision 107). One list
+  of declarations for every target: at creation, a declaration chooses a
+  Harvester cluster or a KVM host declared in the console; a family filter
+  (all targets, Harvester clusters, KVM hosts) sits above the list, and each
+  card and the declaration header name the target. Plan read before
+  applying, apply of the reviewed plan, destroy, history and per-declaration
+  state work as for a cluster.
+- **KVM resources in the declaration forms**: virtual machine (base image of
+  the host catalogue in copy on write, same pool, or blank disk, libvirt network or
+  bridge, CPU model, cloud-init configuration or SSH key), volume and
+  network (isolated, NAT, routed, DHCP range). Pools, networks and images
+  are read from the host.
+- **Template "RKE2 on libvirt VMs"** (decision 108, instead of Cluster API
+  on KVM): N servers (1, 3, 5, 7) and M agents from a cloud image, static
+  addresses by cloud-init matched on a fixed MAC address, RKE2 installed by
+  cloud-init from a channel or an exact version. The RKE2 token is drawn by
+  the console, kept in the declaration workspace and passed to OpenTofu as a
+  sensitive variable by the environment; it is never shown. Outputs (node
+  addresses, how to read the kubeconfig) appear under "Outputs of the last
+  apply". The VMs need Internet access; an airgap install is not covered.
+- **Provider `dmacvicar/libvirt` 0.9.9 embedded** (Apache-2.0), pinned in
+  `scripts/embedded-providers.env`. `package.sh` checks the GPG signature of
+  the release `SHA256SUMS` with the pinned key
+  (`config/terraform-provider-keys/dmacvicar-libvirt.asc`, fingerprint
+  `F6D373750D6F5983E70634DC0833E38C51E74D26`) and then the archive checksum
+  (`scripts/fetch-libvirt-provider.sh`); `install.sh` installs it. The
+  Installation tab shows its version and signer.
+- API: `POST /api/terraform/kvm/<host>/apply_declaration` and
+  `/destroy_declaration` (operator, by declaration id);
+  `POST /api/tf-declarations` takes `target_kind` (`harvester` by default,
+  or `kvm`); `GET /api/tf-declarations?family=harvester|kvm`; a declaration
+  carries `target_kind`, every address of each resource (`addresses`) and
+  its non sensitive `outputs`. `GET /api/terraform/info` gives the libvirt
+  provider version, checksum and signer.
+
+### Security
+- **Terraform workspaces are private.** A Terraform or OpenTofu state can
+  hold secrets (provider credentials, generated tokens, cloud-init data, the
+  RKE2 token of the new template); the states and their backups were created
+  0644. Every workspace directory (root, cluster, `decls`, declaration, KVM)
+  is now 0700 and its files 0600 (0700 for an executable), whatever the
+  umask: OpenTofu runs under umask 077 and the console tightens the files it
+  writes, before and after each run. Existing workspaces are repaired once
+  when the console starts, and the count is logged. Same code for the
+  service (`/var/lib/harvester-ops/terraform`) and a development state.
+- **Strict host key checking for KVM declarations.** The provider connects
+  through `qemu+sshcmd` and a script of the workspace that starts OpenSSH
+  with strict options first (`-F /dev/null`, `StrictHostKeyChecking=yes`,
+  the pinned host key only, the host key only, no agent, no multiplexing);
+  OpenSSH keeps the first value of each option. The host key, its pinned
+  host key and the script are copied for the run (0600, workspace 0700) and
+  removed afterwards, failed or not; never in argv, in the code or in an
+  answer. The URI never carries `no_verify`: the provider turns verification
+  off as soon as the parameter appears, whatever its value. A connection
+  through the same script runs first and says why a host is refused
+  (`hostkey: Host key verification failed.`).
+- **Base images come from the host catalogue only.** A base image must be a
+  catalogue image of the host, in the pool of the new disk, of the declared
+  format, not used as a disk by a domain; the console reads the catalogue on
+  the host before every plan and apply. A free path (block device, disk of
+  another VM) is refused.
+- **Rights aligned on the KVM module**: applying a reviewed plan that
+  destroys or replaces, applying a declaration with a network, and
+  destroying a KVM declaration need an administrator; a KVM declaration is
+  applied only from a reviewed plan (`plan_hash`). Free Terraform code
+  (`raw`) is refused on KVM targets: the workspace holds the host key during
+  a run. Only the known outputs of the RKE2 template are kept.
+- **Cloud-init hidden from viewers**: declaration reads replace `user_data`
+  and `network_data` with `(hidden)` for the viewer role (Harvester
+  declarations too), and `GET /api/tf-declarations/<id>/code` needs an
+  operator, as the KVM and Harvester cloud-init reads already did.
+- A KVM declaration cannot be deleted while it runs (`409`); staged SSH
+  files left by an interrupted console are removed at start.
+- Every form value written into the generated Terraform code is checked
+  (names, paths, addresses, numbers, keys) or escaped (quotes, backslashes,
+  new lines, `${` and `%{` template sequences); no heredoc.
+- KVM run output is cleaned of the workspace path before it reaches the
+  history or the page.
+
+### Fixed
+- **Providers are always taken from the local mirror.** OpenTofu resolves
+  `harvester/harvester` to `registry.opentofu.org` and fetched it from the
+  Internet, since the mirror only existed under `registry.terraform.io`.
+  Every provider is now laid out under both registry names, included in the
+  mirror and excluded from direct downloads, and the `terraformrc` of a
+  workspace follows its mirror. A workspace whose lock file was written from
+  an Internet download refused the mirror at its next `init` (checksums
+  differ, seen with OpenTofu 1.12): the stale lock file is recreated once.
+
+### Internal
+- `web/tf_kvm.py` (pure): HCL escaping, provider block, OpenSSH script and
+  the four KVM resource kinds. `tf_store`: additive `target_kind` column
+  (old rows target Harvester), names unique per target, each resource kind
+  limited to its family. One KVM run at a time per declaration.
+- Every generated domain carries `cpu = host-model` and
+  `features = { acpi, apic }`: on node2, Leap 16 panicked on the default
+  qemu64 CPU, and without ACPI/APIC the disk and the network card of a q35
+  domain stayed silent.
+
+### Tests
+- `tests/api/test_tf_kvm_render_230.py`: escaping read back by OpenTofu
+  (and an escape without the template guard caught), URI and SSH script,
+  every refused value in a table, RKE2 nodes, cloud-init and network
+  configuration.
+- Workspace permissions: fresh workspaces under umask 002, OpenTofu run
+  under umask 077, existing 0644 states repaired once, links not followed;
+  five mutations caught.
+- `tests/api/test_tf_kvm_decl_230.py`: store migration and families, routes
+  and error paths, roles, runner with OpenTofu simulated (key staged only
+  for the run, removed after a failure or an exception, token by
+  environment only, outputs), local mirror, `install_bundles`, and the
+  fetch script against a signed fake release (bad pin, second key, other
+  signer, altered archive, altered checksums).
+- Real check on node2 (objects `kvmtest-*` only): VM, volume and network
+  declaration planned, applied, checked with `virsh` and destroyed; RKE2
+  template with 1 server and 1 agent, both nodes `Ready` 153 s and 167 s
+  after apply over two runs; wrong pinned host key and a `/dev/sda` base
+  image refused before OpenTofu.
+
+## [2.2.2] - 2026-11-02 - Edit KVM VMs from the Virtual machines view
+
+### Fixed
+- **Virtual machines: a KVM VM has the menu of its host page.** In the
+  unified view the row menu of a KVM VM only offered console, snapshots,
+  clone, delete, Move to folder and Open on its host: no **Edit** and no
+  power gesture, so editing a VM meant going to its host first. The menu is
+  now built by the same code as the host page: start, shut down, reboot,
+  suspend, resume, force off, console, snapshots, clone, delete and
+  **Edit** (opens the Edit window), each greyed with the same reason (role,
+  state, transient VM), then Move to folder and Open on its host. A gesture
+  reports its outcome above the table; force off asks for confirmation
+  there. The tooltip of Open on its host no longer says that start and stop
+  are only there.
+
+### Changed
+- `GET /api/vms-all?kinds=...kvm...` also returns `kvm_tables`
+  (`gestures`, `operations`, `edit_operations`), the same tables as
+  `GET /api/kvm/vms`: the view greys the menu without reading the KVM hosts
+  again.
+
+### Internal
+- `kvm.js` exposes `openVmMenu`, `closeVmMenu` and `runGesture`; the host
+  page menu goes through `openVmMenu` too, and `all-vms.js` keeps no copy
+  of the rules.
+
+### Tests
+- `tests/e2e/test_kvm_menu_222.py`: same entries, greys and reasons as the
+  host page for a running, a shut off and a transient VM, as operator,
+  administrator and viewer; Edit opens the window of that VM without
+  writing; a gesture goes to its host; force off asks then cancels or
+  sends; a greyed entry does nothing; the host page menu still offers Edit.
+- `tests/api/test_kvm_menu_source_222.py`: the unified view uses the shared
+  builder with the served tables and copies no rule.
+- `tests/api/test_vm_common_row_200.py`: `kvm_tables` served with the KVM
+  rows only. Mutations checked (tables not passed, role forced to viewer,
+  Edit group removed, force off without confirmation): each one fails.
+
+## [2.2.1] - 2026-11-02 - Profile batches guard machines that already carry a system
+
+### Security
+- **Bare-metal: profile batches guard the machines that already carry a
+  system** (check before acting, decision 132). In 2.2.0 only the install
+  window of one machine read what the BMC publishes; a batch of a profile
+  installed every machine of its table without that check. The batch window
+  now runs the same check on every machine (**Check the machines**, read
+  only) and shows one banner per machine, `Row <n> · <BMC>`: present with
+  its evidence (UEFI boot entries of a loader on a disk partition, the head
+  of the boot order, logical drives), no sign, or unknown said plainly. For
+  every machine where a system seems present, its name (serial number, or
+  BMC address when the serial is unknown) must be typed exactly; a wrong
+  name is said. **Start the batch** reads the machines again when the table
+  changed since the last check, and does not start while a name is missing
+  or wrong.
+
+### Fixed
+- `POST /api/baremetal/profiles/<name>/batch` reads every BMC itself, after
+  the row checks and before anything is powered on, and refuses the whole
+  batch with `409`, `fields: ["system_confirm"]`, `refused` (BMC hosts) and
+  `machines` (row, state, evidence, name to type, `confirmed`) when a
+  machine where a system seems present lacks its typed name
+  (`rows[].system_confirm`); nothing starts, and the window shows what the
+  console read. "Unknown" is not a refusal, as for one machine. The typed
+  names never reach the install options.
+- Command line: `harvester-baremetal profile apply` goes through the same
+  check; it prints each machine with its state and evidence, starts nothing
+  and exits 2, and `--confirm-system <BMC host>=<name>` (once per machine)
+  confirms a machine.
+
+### Added
+- `POST /api/baremetal/profiles/<name>/system-check` (administrator, same
+  body as `/batch`, read only): the check of each machine of a batch, in
+  row order, with the row password or the common one.
+
+### Internal
+- `bm_presence.confirmed()`: the rule (no system present, or the exact
+  name typed) shared by the install window and the batches;
+  `_bm_batch_presence()` runs `_bm_system_presence()`, the read of the
+  install window, on every machine in parallel (8 at most); a read that
+  fails is unknown and carries no detail.
+- `BMC.evidenceText()`: the sentence of each evidence code, shared by the
+  install window and the batch window.
+
+### Tests
+- `tests/api/test_bm_batch_presence_221.py`: mixed batch (absent, present
+  confirmed, present without a name, unknown) refused with the machine
+  list and nothing started; wrong names (case, partial, BMC address,
+  empty); a confirmed batch starts without the typed names; row errors
+  before any BMC read; the check route (row or common password, bad rows,
+  unknown profile, administrators, authenticated and rate limited); the
+  command line; a failing read is unknown and leaks nothing; mutations: no
+  server check lets the batch go, a rule that confirms everything is seen.
+- `tests/e2e/test_bm_batch_presence_221.py`: banners per machine with
+  their evidence (escaped), the batch held while a name is missing or
+  wrong, the names sent only for the machines where a system seems present,
+  the table read again when it changed, the server refusal shown.
+- Checked for real, read only: a batch window with node3 and node4 (iLO 4)
+  showed both present with their evidence and serial numbers; a wrong name
+  held the batch. The batch was never submitted.
+
+## [2.2.0] - 2026-11-02 - Terraform and Cluster API in tabs
+
+### Changed
+- **Automation > Cluster API and Automation > Terraform are in four tabs
+  each**, in the header like Bare-metal (2.1.0). Each tab has its address;
+  F5 shows the same tab, and Back works as for any other screen. The
+  **Management cluster** header of 2.0 stays on both screens. Nothing is
+  removed; every function keeps its place in a tab:
+
+  | 2.1 place | 2.2.0 address |
+  | --- | --- |
+  | Cluster API > K8S Clusters (list, Create a cluster, details, kubeconfig, scale, delete) | `#automation/capi/clusters` (also `#automation/capi`) |
+  | Cluster API > Services (catalog, deploy, remove, state) | `#automation/capi/services` |
+  | (new) Cluster API actions of Activity | `#automation/capi/history` |
+  | Cluster API > Installation, was the first tab (stack, providers, fixes, old installation, bundles: build, upload, choose, inspect, delete) | `#automation/capi/installation` |
+  | Terraform > Declarations (list, forms, plan, apply, destroy, code, history of a declaration) | `#automation/terraform/declarations` (also `#automation/terraform`) |
+  | Terraform > Cluster resources (resources, open or adopt, destroy one, clean stale files, destroy all) | `#automation/terraform/resources` |
+  | (new) Terraform plans, applies and destroys of Activity | `#automation/terraform/history` |
+  | Terraform > Installation (command, provider, provider update and revert, airgap bundle) | `#automation/terraform/installation` |
+
+- Cluster API opens on **Clusters**, no longer on Installation; Terraform
+  opens on **Declarations**. The tab comes from the address: the choice a
+  browser remembered before 2.2.0 is no longer read.
+- Terraform: the tabs move from the second strip inside the card to the
+  header; **Cluster resources** is now **Resources**; the "ready" line of
+  OpenTofu and the provider moves to Installation.
+
+### Added
+- **History** on both screens: Activity filtered on the actions of the
+  screen (Cluster API: `capi-*`; Terraform: plans, applies and destroys),
+  running and past, with the cluster, the duration and a link to each
+  action and its log (`#activity/action/<id>`). It reads Activity again
+  every five seconds while an action runs, and only while the tab is shown.
+  An action of another kind whose name merely contains the filter (a VM
+  called `capi-demo`) does not enter it.
+- **Check before acting.** Cluster API > Clusters says when the Cluster API
+  stack is not installed on the management cluster, with what is missing
+  and a link to Installation; nothing is said when the cluster cannot be
+  read. Terraform > Declarations says when the Harvester provider that
+  declarations need, or the OpenTofu (or Terraform) command, is missing,
+  with a link to Installation.
+
+### Security
+- **Bare-metal: a machine that already carries a system is guarded**
+  (check before acting). The install window reads what the BMC already
+  publishes, read only: UEFI boot entries that start a loader `\EFI\...`
+  from a disk partition (USB, CD and network entries left out), the same
+  entry at the head of the boot order, logical drives (RAID volumes). It
+  lists the evidence before the Install button, for example `Boot entry
+  "elemental-shim" starts \EFI\elemental\shim.efi from a disk partition
+  (HD.Emb.1.3)`; when a system seems present, installing requires typing
+  the machine name exactly (serial number, or BMC address when the serial
+  is unknown), and Install stays off until it matches. "No sign" is said
+  only when the boot entries were read; when the BMC tells nothing the
+  window says "Unknown", never empty. The install route reads the BMC
+  again itself and refuses with `409` and `fields: ["system_confirm"]` when
+  a system seems present and the typed name does not match; the window
+  then shows what the console read. New read route
+  `POST /api/bmc/system-check` (administrator). iLO 4: from
+  `Systems/1/BIOS/Boot/`, as of the last boot; iDRAC 9 and iLO 5: from
+  `BootOptions` and `Boot.BootOrder`. Batches of a profile do not go
+  through this check yet (they do from 2.2.1).
+
+### Internal
+- `bin/lib/bm_presence.py`: the pure analysis of the boot entries, the
+  boot order and the volumes (present, absent, unknown, evidence, name to
+  type).
+- `auto-history.js`: the History tab shared by Bare-metal, Terraform and
+  Cluster API (one poll per screen, stopped by `stop()` or when its tab is
+  hidden); Bare-metal uses it instead of its own copy.
+- `routes.js`: `AUTOMATION_PANES` holds the tabs of the three sub-tabs, in
+  order (the first is the default); `router.js` and `app.js` carry
+  `autoTab` (was `bmTab`); `CAPI.setTab()`/`CAPI.tab()` and
+  `TF.setTab()`/`TF.tab()` like `BMC`.
+- `capi.js`: only the shown tab is rendered (opening Clusters no longer
+  renders Installation and its bundle list); the remembered sub-tabs
+  (`harvester_ops_capi_subtab`, `harvester_ops_tf_subtab`) and the unused
+  `.sub-tabs-2nd` and `.tf-subtab-content` styles are removed.
+
+### Tests
+- `tests/api/test_auto_tabs_220.py`: the `#automation/capi/<tab>` and
+  `#automation/terraform/<tab>` addresses and their default tabs, one error
+  path per row, the order and tooltips of the strips, the new keys in the
+  five languages, a History label for every Cluster API and Terraform verb
+  the server creates, `auto-history.js` in node (exact prefixes,
+  deduplication, escaping, error and empty paths, polling only while
+  shown); mutations: a tab list removed, the order changed, a verb without
+  label, the prefix check removed, the shown check removed.
+- `tests/e2e/test_auto_tabs_220.py`: default tabs and the old addresses,
+  each tab (content, address without history entry, F5), the strips follow
+  the Automation sub-tab and the management header stays, Resources opens
+  its declaration, the banners and their links, both Histories (filters,
+  labels, log links, refresh, error and empty paths, escaping), polling
+  stopped when leaving the screen or the tab; a mutation that ignores the
+  shown check is seen.
+- `tests/api/test_bm_presence_220.py`: loader detection (disk partitions,
+  USB, CD, network, raw disk), present, absent and unknown on the boot
+  entries read from node3 and node4 and on the standard dialect, volumes,
+  the name to type, the read route (address refused, administrator only,
+  authenticated and rate limited, no secret in the answer), the install
+  refused without the name, with a wrong name or another case, accepted
+  with the right name, absent or unknown; mutations: no server check, a
+  loader rule that accepts USB, unknown read as absent.
+- `tests/e2e/test_bm_presence_220.py`: the install window for a present
+  system (evidence, name to type, Install off until it matches, wrong name
+  said, the name sent), absent, unknown, a failed read, no credentials in
+  the page, Check again, the server refusal shown in the window, escaping;
+  a mutation that leaves Install on is seen.
+- Navigation inventory, address and router tables: one row per tab;
+  existing Cluster API and Terraform tests follow the new tabs.
+
+## [2.1.0] - 2026-11-02 - Bare-metal in tabs
+
+### Changed
+- **Automation > Bare-metal is in four tabs**, in the header like the Cluster
+  API tabs: **Machines** (default), **Profiles**, **Images** and **History**.
+  Each tab has its address; F5 shows the same tab, and Back works as for
+  any other screen:
+
+  | 2.0 place (one column) | 2.1.0 address |
+  | --- | --- |
+  | Discovery form and its results | `#automation/pxe/machines` (also `#automation/pxe`) |
+  | Multi-node installation profiles, batch launch | `#automation/pxe/profiles` |
+  | Installation images (ISO store) | `#automation/pxe/images` |
+  | (new) Bare-metal actions of Activity | `#automation/pxe/history` |
+
+- **Machines** lists the discovered machines, one row each: BMC, model,
+  serial and BIOS, CPU and memory, disks, network cards (MAC and link
+  state), power state, and the gestures **Install** (or **Join** *cluster*
+  during a join), power on, graceful shutdown, force off and restart, each
+  with its tooltip. **Discover...** opens the discovery form in a window.
+  The "Join to cluster X" banner of **Join a node** stays on top of
+  Machines.
+
+### Added
+- **The console remembers the last discovery.** The addresses, the date
+  and what each BMC answered stay after a reload or the next day; the line
+  above the list gives the date, and **Re-read** reads the same BMCs again
+  (it asks for the credentials when the page was reloaded). Kept in
+  `<state>/baremetal-last-discovery.json` (0600, relative to the state
+  directory); only the known fields of a machine are kept, never a
+  credential: the BMC user and password stay in the page, as before.
+  It is a read cache like the folders cache, written during the Redfish
+  read with no tracked action, since nothing changes on a machine.
+  Reading it needs the admin role.
+- **Check before acting: no ISO.** Machines says **No ISO in the store**
+  when the store is empty and, during a join, **No ISO of version X in the
+  store** when no ISO has the cluster's version, with a link to Images.
+  `GET /api/clusters/<c>/join-url` now also returns `harvester_version`
+  and `isos_of_version` (version read in `harvester-release.yaml` of each
+  ISO, or from its name).
+- **History**: installs and joins, batches, discovery boots and power
+  gestures, running and past, from the action filter of Activity (server
+  side), each with a link to the action and its log
+  (`#activity/action/<id>`); read again every five seconds while an action
+  runs.
+
+### Fixed
+- **Refresh** no longer wipes a discovery: it reads the open tab again.
+- **A BMC address is checked before any read** (`POST /api/bmc/discover`):
+  a host name or IP with an optional port; a path, a scheme or a user name
+  is refused with `fields: ["hosts"]`. Duplicates are read once.
+- A power gesture without credentials (page reloaded) opens the discovery
+  window to ask for them, instead of an alert.
+
+### Internal
+- `routes.js`: `AUTOMATION_PANES` (`#automation/pxe/<tab>`); `router.js`
+  carries `bmTab` both ways; `BMC.setTab()` and `BMC.tab()`.
+- `capi.js`: each inline strip of Automation belongs to one sub-tab
+  (`data-only-for`), and the Cluster API strip handlers only take its own
+  buttons.
+- Unused `bmc.speed` translation removed.
+
+### Tests
+- `tests/api/test_bm_tabs_210.py`: the discovery is remembered without
+  credentials (0600, no temporary file left, moves with the state
+  directory, known fields only, bounded), absent or unreadable file reads
+  as null, a storage failure keeps the answer, one refused BMC address per
+  row, admin-only read, the cluster version and its ISOs in `join-url`,
+  `#automation/pxe/<tab>` addresses; mutations: a whitelisted `password`,
+  an unchecked address, `routes.js` without the tab list.
+- `tests/e2e/test_bm_tabs_210.py`: default tab and the old address, each
+  tab (content, address without history entry, F5), the strip follows the
+  Automation sub-tab, discovery window, last discovery after a reload
+  through the real route with no credential in the state file and Re-read
+  asking for them, the "no ISO" banners and their link, the join banner,
+  History filtered on bare-metal actions with its log links, its error and
+  empty paths, and escaping.
+- Navigation inventory and address tables: one row per tab.
+
 ## [2.0.4] - 2026-11-02 - Row menu always visible
 
 ### Fixed

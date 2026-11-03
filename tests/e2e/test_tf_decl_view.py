@@ -31,7 +31,6 @@ def open_view(page, lang="fr"):
     page.evaluate(f"""async () => {{
       localStorage.setItem('harvester_ops_language', '{lang}');
       localStorage.setItem('harvester_ops_automation_subtab', 'terraform');
-      localStorage.setItem('harvester_ops_tf_subtab', 'decls');
       localStorage.removeItem('harvester_ops_tfd_tab');
       localStorage.removeItem('harvester_ops_tf_active_decl');
       const d = await fetch('/api/tf-declarations').then(r => r.json());
@@ -246,7 +245,7 @@ def test_a_shared_resource_is_adopted_into_a_declaration(page):
         "kind": "ssh_key", "spec": {"name": "legacy", "namespace": "default", "public_key": KEY},
         "declaration_name": "old-bundle"}))
     page.evaluate("window.TF.refresh()")
-    page.click('#tf-status-body .sub-tab[data-tf-tab="live"]')
+    page.click('#tab-automation .sub-tab[data-tf-tab="resources"]')
     row = page.locator("tr", has_text="harvester_ssh_key.legacy")
     expect(row).to_contain_text("espace partagé", timeout=5000)
     row.locator(".tf-edit-resource").click()

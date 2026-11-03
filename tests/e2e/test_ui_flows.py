@@ -582,28 +582,26 @@ def test_automation_subtabs(page):
 
 
 def test_automation_capi_inline_subtabs(page):
-    """The Installation / Clusters K8S / Services inline strip on the
-    automation header swaps which .capi-tab-content is visible. v1.53.0:
-    no "Création de clusters" sub-tab any more, a button in Clusters K8S
-    opens the creation window."""
+    """2.2.0 : la bande de Cluster API de l'en-tête, dans l'ordre Clusters
+    (défaut), Services, Historique, Installation ; chaque clic montre son
+    panneau et écrit son adresse. v1.53.0 : pas de sous-onglet de création,
+    un bouton de Clusters ouvre la fenêtre."""
     click_entry(page, "automation", "capi")
     page.wait_for_timeout(200)
-    for tab in ("install", "k8s", "services"):
-        expect(page.locator(f'.sub-tabs-inline .sub-tab[data-capi-tab="{tab}"]')).to_be_visible()
-    assert page.locator('.sub-tabs-inline .sub-tab[data-capi-tab="clusters"]').count() == 0
-    # Default: install tab active
-    expect(page.locator('.capi-tab-content[data-capi-tab="install"]')).to_have_class("capi-tab-content active")
-    # Click "Clusters K8S": the create button is there
-    page.click('.sub-tabs-inline .sub-tab[data-capi-tab="k8s"]')
-    page.wait_for_timeout(200)
-    expect(page.locator('.capi-tab-content[data-capi-tab="k8s"]')).to_have_class("capi-tab-content active")
-    expect(page.locator('.capi-tab-content[data-capi-tab="install"]')).not_to_have_class("active")
+    order = page.evaluate("""() => [...document.querySelectorAll(
+        '#tab-automation .sub-tabs-inline[data-only-for="capi"] .sub-tab')].map(b => b.dataset.capiTab)""")
+    assert order == ["clusters", "services", "history", "installation"]
+    for tab in ("k8s", "install"):
+        assert page.locator(f'.sub-tabs-inline .sub-tab[data-capi-tab="{tab}"]').count() == 0
+    # Défaut : Clusters, avec le bouton de création
+    expect(page.locator('.capi-tab-content[data-capi-tab="clusters"]')).to_have_class("capi-tab-content active")
     expect(page.locator("#btn-capi-create")).to_be_visible()
-    # Click "Services"
-    page.click('.sub-tabs-inline .sub-tab[data-capi-tab="services"]')
-    page.wait_for_timeout(200)
-    expect(page.locator('.capi-tab-content[data-capi-tab="services"]')).to_have_class("capi-tab-content active")
-    expect(page.locator('.capi-tab-content[data-capi-tab="k8s"]')).not_to_have_class("active")
+    for tab in ("services", "history", "installation", "clusters"):
+        page.click(f'.sub-tabs-inline .sub-tab[data-capi-tab="{tab}"]')
+        page.wait_for_timeout(150)
+        expect(page.locator(f'.capi-tab-content[data-capi-tab="{tab}"]')).to_have_class("capi-tab-content active")
+        assert page.evaluate("location.hash") == f"#automation/capi/{tab}"
+        assert page.locator(".capi-tab-content.active").count() == 1
 
 
 # v1.5.0: the inline single-resource Terraform form was replaced by the
@@ -630,7 +628,6 @@ def _clear_tf_decls(page):
     part d'un magasin vide (et plus seulement d'un navigateur vide)."""
     page.evaluate("""async () => {
       try { localStorage.removeItem('harvester_ops_tf_declarations'); } catch {}
-      try { localStorage.removeItem('harvester_ops_tf_subtab'); } catch {}
       const d = await fetch('/api/tf-declarations').then(r => r.json());
       for (const x of d.declarations || []) {
         await fetch('/api/tf-declarations/' + x.id, { method: 'DELETE' });
@@ -646,55 +643,50 @@ def _open_terraform(page):
     page.wait_for_selector('#tf-decls-view .tfd', timeout=5000)
 
 
+def _tf_active(page):
+    return page.evaluate("document.querySelector('#tab-automation .sub-tab.active[data-tf-tab]')?.dataset.tfTab")
+
+
+def _tf_visible(page):
+    return page.evaluate("""() => [...document.querySelectorAll('#tf-status-body [data-tf-pane]')]
+        .filter(p => !p.hidden).map(p => p.dataset.tfPane)""")
+
+
 def test_tf_subtabs_default_to_declarations(page):
-    """v1.5.4: the Terraform tab opens on "Declarations" by default
-    and the three sub-tab buttons are visible."""
+    """2.2.0 : Terraform s'ouvre sur Déclarations ; les quatre onglets sont
+    dans la bande de l'en-tête, dans l'ordre."""
     _open_terraform(page)
-    for tid in ('decls', 'live', 'install'):
-        expect(page.locator(
-            f'#tf-status-body .sub-tab[data-tf-tab="{tid}"]')).to_be_visible()
-    active = page.evaluate(
-        "document.querySelector('#tf-status-body .sub-tab.active')"
-        "?.dataset.tfTab"
-    )
-    assert active == "decls"
+    order = page.evaluate("""() => [...document.querySelectorAll(
+        '#tab-automation .sub-tabs-inline[data-only-for="terraform"] .sub-tab')].map(b => b.dataset.tfTab)""")
+    assert order == ["declarations", "resources", "history", "installation"]
+    for tid in order:
+        expect(page.locator(f'#tab-automation .sub-tab[data-tf-tab="{tid}"]')).to_be_visible()
+    assert _tf_active(page) == "declarations"
+    assert _tf_visible(page) == ["declarations"]
+    # plus de seconde bande dans le corps de la carte
+    assert page.locator("#tf-status-body .sub-tab").count() == 0
 
 
 def test_tf_subtabs_swap_panes_on_click(page):
-    """Clicking a sub-tab toggles which pane is `.active` so only one
-    section is visible at a time."""
+    """Un clic montre un seul panneau et écrit l'adresse de l'onglet."""
     _open_terraform(page)
-    page.click('#tf-status-body .sub-tab[data-tf-tab="install"]')
+    page.click('#tab-automation .sub-tab[data-tf-tab="installation"]')
     page.wait_for_timeout(150)
-    active = page.evaluate(
-        "document.querySelector('#tf-status-body .sub-tab.active')"
-        "?.dataset.tfTab")
-    assert active == "install"
-    visible = page.evaluate(
-        "Array.from(document.querySelectorAll("
-        "  '#tf-status-body .tf-subtab-content.active'))"
-        ".map(s => s.dataset.tfTab)"
-    )
-    assert visible == ["install"]
+    assert _tf_active(page) == "installation"
+    assert _tf_visible(page) == ["installation"]
+    assert page.evaluate("location.hash") == "#automation/terraform/installation"
 
 
 def test_tf_subtabs_persist_across_reload(page):
-    """The active sub-tab is saved in localStorage; F5 restores it."""
+    """2.2.0 : l'onglet est dans l'adresse ; F5 le rend."""
     _open_terraform(page)
-    page.click('#tf-status-body .sub-tab[data-tf-tab="live"]')
+    page.click('#tab-automation .sub-tab[data-tf-tab="resources"]')
     page.wait_for_timeout(150)
-    assert page.evaluate(
-        "() => localStorage.getItem('harvester_ops_tf_subtab')") == "live"
+    assert page.evaluate("location.hash") == "#automation/terraform/resources"
     page.reload()
     page.wait_for_load_state("networkidle")
-    page.wait_for_selector('#tf-status-body .sub-tab[data-tf-tab="live"]',
-                           timeout=5000)
-    page.wait_for_timeout(300)
-    active = page.evaluate(
-        "document.querySelector('#tf-status-body .sub-tab.active')"
-        "?.dataset.tfTab"
-    )
-    assert active == "live"
+    page.wait_for_selector('#tf-status-body [data-tf-pane="resources"]:not([hidden])', timeout=5000)
+    assert _tf_active(page) == "resources"
 
 
 def test_state_table_shows_edit_button_only_when_sidecar_present(page):
@@ -724,8 +716,8 @@ def test_state_table_shows_edit_button_only_when_sidecar_present(page):
       };
       await window.TF.refresh();
     }""")
-    # v1.5.4: the state table lives behind the "Live resources" sub-tab.
-    page.click('#tf-status-body .sub-tab[data-tf-tab="live"]')
+    # 2.2.0: the state table lives behind the "Resources" tab.
+    page.click('#tab-automation .sub-tab[data-tf-tab="resources"]')
     page.wait_for_timeout(150)
     # Exactly one Edit button (for alpha) and one "no sidecar" hint
     expect(page.locator('.tf-edit-resource')).to_have_count(1)
@@ -747,12 +739,15 @@ def _open_editor(page, name, kind="vm"):
 
 
 def test_terraform_add_kind_selector_lists_every_schema_entry(page):
-    """Les boutons « Ajouter » de la vue proposent chaque type du schéma."""
+    """Les boutons « Ajouter » de la vue proposent chaque type du schéma de
+    la famille de la cible (2.3.0 : un cluster Harvester ici)."""
     _open_terraform(page)
     page.evaluate("""async () => { const d = await window.TFDecl.createAsync('kind-test', 'harv-fake');
       window.TFDecl.setActive(d.id); window.TFDeclView.render(); }""")
     page.wait_for_selector('.tfd-add-kind', timeout=5000)
-    schema_kinds = page.evaluate("Object.keys(window.TF_SCHEMA || {})")
+    schema_kinds = page.evaluate(
+        "Object.keys(window.TF_SCHEMA || {}).filter(k => window.TF_SCHEMA[k].family === 'harvester')")
+    assert len(schema_kinds) == 4
     offered = page.evaluate("Array.from(document.querySelectorAll('.tfd-add-kind')).map(b => b.dataset.kind)")
     assert sorted(schema_kinds) == sorted(offered), (schema_kinds, offered)
 
@@ -791,6 +786,8 @@ def test_capi_diag_renders(page, api):
     """REGRESSION: when CAPI diag returns, the components table is rendered."""
     # 2.0.0 : l'entrée Automatisation > Cluster API du menu des hôtes
     click_entry(page, "automation", "capi")
+    # 2.2.0 : le diagnostic est dans l'onglet Installation (dernier onglet)
+    page.click('#tab-automation .sub-tab[data-capi-tab="installation"]')
     page.wait_for_timeout(2000)
     # Wait for the components table to appear (driven by /api/capi/<>/diag)
     # We can't rely on a real cluster, but the structure must be there.

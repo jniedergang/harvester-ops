@@ -3,6 +3,10 @@ import json
 import re
 
 from playwright.sync_api import expect
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from nav import bm_discover  # noqa: E402
 
 HOST = '192.0.2.31'
 MACS = ['02:00:00:00:00:%02x' % i for i in range(1, 5)]
@@ -49,10 +53,7 @@ def test_optional_vm_nics_preview_and_launch_payload(context, flask_server):
     page.wait_for_function("window.BMC && window.FloatingPanels && window.i18n")
     page.click('#host-nav [data-hnav-root="automation"][data-hnav-tab="pxe"]')   # 2.0.0 : entrée du menu des hôtes
     page.mouse.move(1300, 450)
-    form = page.locator('#bmc-discover-form')
-    form.locator('[name="hosts"]').fill(HOST)
-    form.locator('[name="password"]').fill('mock-bmc-password')
-    form.locator('button[type="submit"]').click()
+    bm_discover(page, HOST, 'mock-bmc-password')
     page.locator('.bmc-install').click()
     win = page.locator('#bm-install-form')
     expect(win.locator('.bm-vm-network')).to_be_hidden()

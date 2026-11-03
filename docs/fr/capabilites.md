@@ -381,9 +381,12 @@ tri) : 0,22 s à 2 000 VMs et 0,23 à 0,29 s à 10 000 (2.0.2 : 0,5 à 0,57 s
 et 0,9 s, le coût venant des six boutons à icône de chaque ligne ; 1.x :
 3,6 s à chaque relecture et à chaque touche, à 2 000). Un rendu sans
 changement prend environ 0,05 s. Le menu d'une ligne suit sa famille :
-celui des VMs Harvester, ou pour une VM KVM la console, les instantanés, le
-clonage, la suppression, **Déplacer vers un dossier** et **Ouvrir sur son
-hôte** (démarrer et arrêter sont sur la page de l'hôte).
+celui des VMs Harvester, ou pour une VM KVM le menu de la page de son hôte
+(depuis 2.2.2) : démarrer, arrêter, redémarrer, suspendre, reprendre, arrêt
+forcé, console, instantanés, clonage, suppression et **Modifier**, grisés
+avec les mêmes raisons (rôle, état, VM transitoire), puis **Déplacer vers
+un dossier** et **Ouvrir sur son hôte**. Un geste rend compte dans la vue,
+et l'arrêt forcé y demande une confirmation.
 Démarrer, arrêter, redémarrer, arrêt forcé et migrer une sélection
 s'appliquent à ses VMs Harvester.
 
@@ -2453,6 +2456,20 @@ gestion**) : le dernier hôte Harvester visité, sauf si vous en choisissez un
 autre dans le menu à côté. Ce choix est gardé par le navigateur et ne change
 pas l'hôte ouvert.
 
+**Quatre onglets (2.2.0).** Dans l'en-tête, dans cet ordre : **Clusters**
+(par défaut : les clusters créés par Cluster API, avec **Créer un cluster**,
+détails, kubeconfig, mise à l'échelle et suppression), **Services** (charts
+Helm par CAAPH), **Historique** (les actions Cluster API de l'Activité :
+clusters créés, mis à l'échelle ou supprimés, services déployés ou retirés,
+pile installée ou retirée, paquets construits ; en cours et passées, chacune
+avec un lien vers son journal, relues toutes les cinq secondes tant que l'une
+tourne et seulement quand l'onglet est affiché) et **Installation** (la pile,
+ses fournisseurs et les paquets ; c'était le premier onglet avant la 2.2.0).
+Adresses `#automation/capi/<onglet>` ; `#automation/capi` ouvre Clusters.
+**Vérifier avant d'agir :** quand la pile Cluster API n'est pas installée
+sur le cluster de gestion, Clusters le dit, avec ce qui manque et un lien
+vers Installation (rien n'est dit quand le cluster ne peut pas être lu).
+
 ### Installer la pile (1.48.0)
 
 - **Harvester v1.9 et suivants** embarquent Rancher Turtles, qui fait déjà
@@ -2479,7 +2496,7 @@ pas l'hôte ouvert.
 
 ### Créer un cluster (1.48.0, fenêtre à menus en 1.53.0)
 
-Le bouton **Créer un cluster** de l'onglet Clusters K8S ouvre une fenêtre
+Le bouton **Créer un cluster** de l'onglet Clusters ouvre une fenêtre
 qu'on peut replier dans la barre des fenêtres, le temps de vérifier un
 réglage ailleurs, et rouvrir telle quelle. Elle est organisée en menus,
 comme la création d'une VM, et remplie à partir du cluster lui-même :
@@ -2593,6 +2610,37 @@ v0.6.4) :
 Piloter le provider Terraform pour Harvester depuis des déclarations
 sauvegardées.
 
+- **Quatre onglets (2.2.0)** dans l'en-tête, dans cet ordre :
+  **Déclarations** (par défaut), **Ressources** (ex « Ressources du
+  cluster »), **Historique** (les plans, applications et destructions
+  Terraform de l'Activité, sur tous les clusters de gestion, chacun avec un
+  lien vers son journal ; relus toutes les cinq secondes tant que l'un tourne
+  et seulement quand l'onglet est affiché) et **Installation** (OpenTofu, le
+  provider Harvester embarqué et ses mises à jour, le paquet airgap ; la
+  ligne « prêt » y est passée). Adresses `#automation/terraform/<onglet>` ;
+  `#automation/terraform` ouvre Déclarations. **Vérifier avant d'agir :**
+  quand le provider Harvester dont les déclarations ont besoin, ou la
+  commande OpenTofu (ou Terraform), manque, Déclarations le dit avec un
+  lien vers Installation.
+- **Cibles : un cluster Harvester ou un hôte KVM (2.3.0)**. Une seule liste
+  de déclarations pour toutes les cibles : chaque déclaration choisit, à sa
+  création, un cluster Harvester (provider `harvester/harvester`) ou un hôte
+  KVM déclaré dans la console (provider `dmacvicar/libvirt`, embarqué). Un
+  filtre de famille (toutes les cibles, clusters Harvester, hôtes KVM) tient
+  la liste ; chaque carte et l'en-tête de la déclaration nomment la cible.
+  Une déclaration KVM propose les ressources libvirt (VM, volume, réseau) et
+  le modèle « RKE2 sur des VMs libvirt », décrits en section 10 ; le code
+  libre reste sur les cibles Harvester. Plan,
+  lecture, application, destruction et historique marchent de la même façon.
+- **Espaces privés (2.3.0)** : un état peut porter des secrets ; chaque
+  répertoire d'espace est donc en 0700 et ses fichiers (états, copies, plans,
+  code) en 0600, quel que soit l'umask ; les espaces d'avant sont réparés
+  une fois au démarrage de la console (journalisé).
+- **Providers hors ligne (2.3.0)** : chaque provider d'un espace vient d'un
+  miroir local posé sous les deux noms de registre (`registry.opentofu.org`
+  et `registry.terraform.io`), inclus au miroir et exclu des téléchargements
+  directs. Avant, OpenTofu résolvait `harvester/harvester` en
+  `registry.opentofu.org` et le téléchargeait sur Internet.
 - **Déclarations** : des groupes nommés de ressources (VMs, images de VM,
   clés SSH, code Terraform écrit à la main) appliquées ensemble, chacune
   avec son propre état Terraform (1.54.0). Elles sont gardées par la
@@ -2624,14 +2672,14 @@ sauvegardées.
   « Appliquer ».
 - Une ressource retirée d'une déclaration est détruite par son prochain
   apply (le plan le dit) ; une ressource détruite à l'unité depuis
-  l'onglet des ressources du cluster sort de sa déclaration. Détruire une
+  l'onglet Ressources sort de sa déclaration. Détruire une
   déclaration demande de taper son nom ; une déclaration qui a des
   ressources déployées ne peut pas être supprimée. Deux opérateurs qui
   modifient la même déclaration ne s'écrasent pas : le second est prévenu
   et voit la version courante.
 - Une VM détruite emporte ses disques, sauf si « supprimé avec la VM » est
   décoché sur le disque (1.52.1).
-- **Ressources du cluster** : tout ce que Terraform gère sur le cluster,
+- **Ressources** : tout ce que Terraform gère sur le cluster,
   déclaration par déclaration ; une ressource de l'espace partagé
   (appliquée avant la 1.54) peut être adoptée par une déclaration, qui la
   reprend à son prochain plan sans la recréer.
@@ -2640,7 +2688,7 @@ sauvegardées.
   Au choix : une version (la release officielle est téléchargée puis
   comparée au `SHA256SUMS` publié), une URL vers un miroir interne, ou le
   téléversement de l'archive depuis un poste sans aucun accès réseau
-  sortant. Le sous-onglet Install nomme le binaire actif, sa version et sa
+  sortant. L'onglet Installation nomme le binaire actif, sa version et sa
   provenance, et un clic rend la main à celui du livrable. Chaque
   workspace est réinitialisé à son prochain apply ; le state Terraform
   n'est jamais touché. La même installation se fait en CLI :
@@ -2650,6 +2698,28 @@ sauvegardées.
 
 Transformer un serveur vierge en node Harvester opérationnel sans y
 toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
+
+- **Quatre onglets (2.1.0)** : **Machines** (par défaut : les machines de
+  la dernière découverte avec leurs gestes, la découverte dans sa propre
+  fenêtre, le bandeau de jonction et un contrôle « aucun ISO de la version
+  X » avant d'agir), **Profils**, **Images** (le magasin d'ISO) et
+  **Historique** (les actions bare-metal de l'Activité, avec leur journal).
+  Adresses `#automation/pxe/<onglet>` ; `#automation/pxe` ouvre Machines.
+  La console garde la dernière découverte (cache de lecture dans le
+  répertoire d'état, jamais les identifiants) : la liste survit à un
+  rechargement, avec sa date et un bouton **Relire**.
+
+- **Une machine qui porte déjà un système est gardée (2.2.0)** : la
+  fenêtre d'installation liste ce que montre le BMC (entrées de démarrage
+  UEFI d'un chargeur sur une partition de disque, tête de l'ordre de
+  démarrage, volumes logiques) et, quand un système semble présent,
+  l'installation demande de taper le nom de la machine (numéro de série, ou
+  adresse du BMC) ; la console revérifie sur sa propre lecture Redfish et
+  refuse sinon. « Inconnu » est dit tel quel quand le BMC ne dit rien.
+  **Les séries de profils aussi (2.2.1)** : la fenêtre de série vérifie
+  chaque machine et demande le nom de chacune où un système semble
+  présent ; la console relit chaque BMC et refuse toute la série (`409`,
+  liste des machines) sinon. Détails dans [bare-metal.md](bare-metal.md).
 
 - **Découverte BMC / Redfish** — pointer un ou plusieurs endpoints BMC et
   lire les profils des nodes : modèle, numéro de série, BIOS, mémoire,
@@ -3780,6 +3850,102 @@ vérifié : cartes macvtap, pools NFS, disques SCSI, baisse de vCPU, invité
 sans pilote de ballon.
 
 ---
+
+### Déclarations Terraform sur un hôte KVM (2.3.0)
+
+Une déclaration Terraform peut viser un hôte KVM au lieu d'un cluster
+Harvester (Automatisation, Terraform, Déclarations, « Nouvelle
+déclaration », famille de cible KVM). Décisions de l'exploitant : une seule
+liste de déclarations avec un filtre de famille, pas de menus en double
+(107) ; pas de Cluster API sur KVM, un modèle Terraform « RKE2 sur des VMs
+libvirt » à la place (108).
+
+- **Provider** : `dmacvicar/libvirt` 0.9.9 (Apache-2.0), embarqué dans la
+  livraison et vérifié à la construction (signature GPG du `SHA256SUMS` de
+  la release par la clé épinglée, puis somme). Il tourne depuis un miroir
+  local : rien n'est téléchargé à l'exécution, airgap compris.
+- **Connexion** : `qemu+sshcmd://<user>@<adresse>/system?command=<espace>/kvm_ssh`.
+  À chaque exécution, la console copie la clé SSH de l'hôte et son empreinte
+  épinglée dans l'espace de la déclaration (0600) et écrit `kvm_ssh`, un
+  script qui lance OpenSSH avec les options strictes en tête :
+  `-F /dev/null`, `StrictHostKeyChecking=yes`, l'empreinte épinglée seule
+  (`UserKnownHostsFile`, `GlobalKnownHostsFile=/dev/null`), la clé de l'hôte
+  seule (`IdentitiesOnly`, sans agent), `BatchMode`, sans multiplexage ni
+  redirection. OpenSSH garde la première valeur de chaque option : rien de ce
+  que le provider ajoute ne peut les affaiblir. Les trois fichiers sont
+  retirés après l'exécution, échec compris ; ni clé ni chemin dans argv,
+  dans le code, dans une réponse ou dans l'état. Avant OpenTofu, une
+  connexion SSH par le même script contrôle l'hôte et dit pourquoi elle
+  échoue (`hostkey`, `auth`, `unreachable`) : le provider, lui, ne dit que
+  « procedure interrupted ».
+- **Pourquoi pas `qemu+ssh://...?keyfile=&knownhosts=`** : son client SSH
+  (écrit en Go) choisit un type de clé d'hôte sans regarder ceux épinglés et
+  refusait un hôte dont l'empreinte épinglée était ed25519 (« knownhosts: key
+  mismatch », vu sur node2). Et dans les deux transports, `no_verify` coupe
+  la vérification dès qu'il apparaît, quelle que soit sa valeur
+  (`no_verify=0` compris) : l'URI n'en porte jamais.
+- **Droits**, alignés sur le module KVM : un opérateur planifie et applique
+  une déclaration de VMs et de volumes ; appliquer un plan relu qui détruit
+  ou remplace quelque chose, appliquer une déclaration qui porte un réseau,
+  et détruire une déclaration demandent un administrateur. Une déclaration
+  KVM ne s'applique que depuis un plan relu. Le code Terraform libre n'est
+  pas proposé sur un hôte KVM (son espace porte la clé de l'hôte pendant une
+  exécution). Le cloud-init d'une déclaration est caché aux lecteurs (les
+  déclarations Harvester aussi), et son onglet Code demande un opérateur.
+- **Images de base** : une image de base doit être une image du catalogue de
+  l'hôte, du pool du nouveau disque, au format déclaré, et qu'aucun domaine
+  n'utilise comme disque. La console lit le catalogue sur l'hôte avant
+  chaque plan et chaque apply ; un chemin libre (un périphérique bloc, le
+  disque d'une autre VM) est refusé.
+- **Ce que demande l'hôte** : son URI libvirt est `qemu:///system` ou
+  `qemu:///session` (un hôte déclaré avec une autre URI est refusé), et il a
+  `virt-ssh-helper` (client libvirt) ou `nc`.
+- **Ressources** :
+  - **Machine virtuelle (KVM)** : nom, processeurs, modèle de processeur
+    (`host-model` par défaut, `host-passthrough`), mémoire, démarrage,
+    démarrage avec l'hôte ; disque dans un pool, tiré d'une image de base du
+    catalogue de l'hôte (copie sur écriture) ou vierge ; un réseau libvirt ou
+    un pont de l'hôte ; premier démarrage par cloud-init (configuration, ou
+    une simple clé SSH). Chaque domaine reçoit ACPI et APIC : sans eux, sur
+    q35, le disque restait introuvable au démarrage et la carte réseau sans
+    porteuse (vu sur node2).
+  - **Volume (KVM)** : dans un pool, qcow2 ou raw, vierge ou sur une image.
+  - **Réseau (KVM)** : isolé, NAT ou routé, avec l'adresse de l'hôte, son
+    préfixe et une plage DHCP.
+- **Modèle « RKE2 sur des VMs libvirt »** : N serveurs (1, 3, 5 ou 7) et M
+  agents (0 à 20) tirés d'une image cloud du catalogue de l'hôte.
+  Paramètres : préfixe des noms des nœuds, canal ou version exacte de RKE2,
+  processeurs, modèle de processeur, mémoire, disque, pool, image de base,
+  réseau libvirt, première adresse fixe, préfixe, passerelle, DNS,
+  utilisateur et clé publique SSH. Chaque nœud reçoit une adresse MAC fixe
+  et son adresse fixe par cloud-init (réseau reconnu par sa MAC) ;
+  cloud-init installe RKE2 (`INSTALL_RKE2_METHOD=tar`) et démarre
+  `rke2-server` ou `rke2-agent` ; les autres nœuds rejoignent le premier
+  serveur. Le jeton RKE2 est tiré par la console à la première exécution,
+  gardé dans l'espace de la déclaration (`.secrets/`, 0600, espace en 0700),
+  passé à OpenTofu par une variable d'environnement d'une variable sensible,
+  et jamais montré (code, plan, historique, réponses). Le fichier d'état
+  (0600) et le disque cloud-init sur l'hôte le portent, comme ils portent la
+  configuration des nœuds. Sorties : l'adresse de chaque nœud et la commande
+  qui lit le kubeconfig du premier serveur, sous « Sorties du dernier
+  apply » (une sortie sensible n'est jamais gardée).
+- **Airgap** : le modèle installe RKE2 depuis `get.rke2.io` ; les VMs ont
+  donc besoin d'Internet (un réseau NAT de l'hôte suffit). Une installation
+  airgap (archive RKE2 donnée comme volume) n'est **pas couverte** en 2.3.0.
+- **Essai réel (node2, 02/11/2026)** : une déclaration avec une VM (cirros
+  sur `kvmtest-net`), un volume et un réseau isolé : plan 12 s et apply 15 s
+  (tous deux lisent d'abord le catalogue d'images de l'hôte), contrôlé par
+  `virsh` (domaine démarré avec ACPI/APIC, disque sur son image de base,
+  disque cloud-init, bail DHCP), destruction 9 s, rien ne reste. Le modèle
+  avec 1 serveur et 1 agent depuis l'image cloud openSUSE Tumbleweed (somme
+  publiée vérifiée) : plan 12 s, apply 15 s, SSH sur le serveur en moins
+  d'une minute après l'apply, les deux nœuds `Ready` 153 s et 167 s après
+  l'apply sur deux passages (RKE2 v1.36.5+rke2r1, lus avec le kubeconfig par
+  un tunnel SSH), destruction 12 s. Une copie de la déclaration de l'hôte
+  avec une mauvaise empreinte épinglée a été refusée avant OpenTofu
+  (`hostkey: Host key verification failed.`), une image de base `/dev/sda`
+  refusée avant OpenTofu, rien créé. Non vérifié en réel : VMs sur un pont,
+  réseaux NAT ou routés créés par une déclaration, plusieurs serveurs.
 
 ## 11. Reprise après sinistre : réplication asynchrone des VMs (CLI + API de la console)
 

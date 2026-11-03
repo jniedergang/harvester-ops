@@ -127,7 +127,7 @@ BUILDERS = ("esc", "icon", "hostSel", "Icons.svg", "tip", "badge", "dim", "row",
             "VMForm.shellHtml", "VMForm.appliedBadge", "VMForm.changesHtml", "VMForm.restartBanner",
             "VMForm.reviewHtml", "TFForm.render", "CloudInitForm.renderWizard",
             "KVMForm.menuGroupHtml", "errHtml", "okHtml", "listHtml", "progressHtml", "sendFieldsHtml",
-            "poolRow", "volRow", "imageRow", "netRow", "hostName")
+            "poolRow", "volRow", "imageRow", "netRow", "hostName", "vmMenuHtml")
 HTML_VARS = {
     "vm-form.js": {"a[0]", "actions", "buttonHtml", "head", "html"},
     "cloudinit-form.js": set(),
@@ -136,7 +136,7 @@ HTML_VARS = {
                     "tip", "whyHtml"},
     "kvm.js": {"acts", "bad", "body", "byState", "cls", "data", "declare", "filters", "flags", "g", "head",
                "head(h.name)", "inner", "labels", "links", "op", "open", "partly", "remove", "sha", "state",
-               "test", "value"},
+               "test", "value", "o.extraHtml || ''"},
 }
 _LIT = re.compile(r"""^('([^'\\]|\\.)*'|"([^"\\]|\\.)*"|\d+(\.\d+)?)$""")
 
@@ -500,7 +500,9 @@ def test_vm_list_serves_the_edit_operations_table():
     }
     assert wapp.KVM_VM_EDIT_OPERATIONS["hot"]["states"][:3] == list(ke.LIVE_STATES)
     src = (ROOT / "web" / "app.py").read_text()
-    assert '"edit_operations": KVM_VM_EDIT_OPERATIONS})' in src
+    # 2.2.2 : une seule source pour /api/kvm/vms et /api/vms-all
+    assert '"edit_operations": KVM_VM_EDIT_OPERATIONS}' in src
+    assert "jsonify(dict(_kvm_vm_tables(), vms=vms" in src
 
 
 def test_harvester_tabs_carry_a_tooltip_in_the_shared_shell_and_the_edit_window():

@@ -22,14 +22,13 @@ from nav import address, goto  # noqa: E402
 def _open_install_tab(page, base_url):
     page.context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_tf_subtab','install');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     # 2.0.0 : Automatisation par son adresse, puis l'entrée Terraform du menu
     goto(page, base_url, address("automation", sub="capi"))
     page.click('#host-nav [data-hnav-root="automation"][data-hnav-tab="terraform"]', timeout=5000)
-    page.wait_for_selector('#tf-status-body .sub-tab[data-tf-tab="install"]',
-                           timeout=10000)
-    page.click('#tf-status-body .sub-tab[data-tf-tab="install"]')
+    # 2.2.0 : l'onglet Installation est dans la bande de l'en-tête
+    page.click('#tab-automation .sub-tab[data-tf-tab="installation"]', timeout=10000)
+    page.wait_for_selector('#tf-status-body [data-tf-pane="installation"]:not([hidden])', timeout=10000)
     page.wait_for_timeout(300)
 
 

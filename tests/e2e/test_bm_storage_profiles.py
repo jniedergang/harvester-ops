@@ -5,6 +5,8 @@ import sys
 from playwright.sync_api import expect
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'web'))
 import baremetal_onboarding as profiles
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from nav import bm_discover  # noqa: E402
 
 
 def test_storage_profiles_preview_launch_disable_and_vm_uplinks(context, flask_server):
@@ -34,7 +36,7 @@ def test_storage_profiles_preview_launch_disable_and_vm_uplinks(context, flask_s
     page.wait_for_function('window.BMC && window.FloatingPanels && window.i18n')
     page.click('#host-nav [data-hnav-root="automation"][data-hnav-tab="pxe"]')   # 2.0.0 : entrée du menu des hôtes
     page.mouse.move(1300, 450)
-    form = page.locator('#bmc-discover-form');form.locator('[name="hosts"]').fill(host);form.locator('[name="password"]').fill('fixture-bmc-password');form.locator('button[type="submit"]').click()
+    bm_discover(page, host, 'fixture-bmc-password')
     page.locator('.bmc-install').click();win = page.locator('#bm-install-form')
     # création de cluster : la section est masquée, comme le réseau VM
     expect(win.locator('#bm-onboarding')).to_be_hidden()

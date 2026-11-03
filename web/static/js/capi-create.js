@@ -564,8 +564,8 @@ const CapiCreate = (() => {
         <button type="button" class="btn btn-secondary btn-sm tip" data-x="open-list" data-tip="${esc(tr('capi.new.t.openList'))}">${Icons.svg('capi')} <span>${esc(tr('capi.new.openList'))}</span></button>
       </div>`;
     box.querySelector('[data-x="open-list"]').addEventListener('click', () => {
-      document.querySelector('#tab-automation .sub-tab[data-capi-tab="k8s"]')?.click();
-      if (window.CAPI && CAPI.refreshK8s) CAPI.refreshK8s();
+      // 2.2.0 : l'onglet Clusters a son adresse ; y aller relit la liste
+      if (window.Router) Router.go('#automation/capi/clusters');
     });
   }
 
@@ -580,7 +580,7 @@ const CapiCreate = (() => {
       <div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(tr('capi.new.stackMissing', { missing: (stack.missing || []).join(', ') }))}
         <button type="button" class="btn btn-secondary btn-sm tip" data-x="go-install" data-tip="${esc(tr('capi.new.t.goInstall'))}">${esc(tr('capi.new.goInstall'))}</button></div></div>`;
     box.querySelector('[data-x="go-install"]').addEventListener('click', () => {
-      document.querySelector('#tab-automation .sub-tab[data-capi-tab="install"]')?.click();
+      if (window.Router) Router.go('#automation/capi/installation');
     });
   }
 

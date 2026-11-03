@@ -14,12 +14,30 @@ example do not install CSI charts or configure array credentials.
 
 ---
 
+## The screen: four tabs (2.1.0)
+
+Automation > Bare-metal opens on **Machines**; the other tabs sit next to it,
+each with its own address:
+
+| Tab | Address | What it holds |
+|---|---|---|
+| **Machines** (default) | `#automation/pxe/machines` (also `#automation/pxe`) | The machines of the last discovery, one row each: hardware, power state, disks, network cards, and the gestures **Install** (or **Join** *cluster* during a join), power on, graceful shutdown, force off, restart. **Discover...** opens the discovery window; **Re-read** reads the same BMCs again. The join banner and the "no ISO" banner sit on top. |
+| **Profiles** | `#automation/pxe/profiles` | Multi-node install profiles and the batch launch. |
+| **Images** | `#automation/pxe/images` | The ISO store. |
+| **History** | `#automation/pxe/history` | The bare-metal actions of Activity, running and past, each with a link to its log. |
+
+**Refresh** in the card header reads the open tab again. Nothing is lost
+when you change tab, reload the page or come back later: the console
+remembers the last discovery (see below).
+
+---
+
 ## What has to be true before you start
 
 | Requirement | Why | How to check |
 |---|---|---|
 | The BMC speaks Redfish | Everything is driven through it | Discovery lists the node |
-| The BMC exposes a **CD virtual media** device | The ISO is mounted over the network | The node card offers **Install Harvester**; otherwise it shows *no virtual media* |
+| The BMC exposes a **CD virtual media** device | The ISO is mounted over the network | The machine row offers **Install Harvester**; otherwise it shows *no virtual media* |
 | The BMC can boot from `Cd` | The machine must come up on that ISO once | Same badge as above |
 | The console host is reachable **from the BMC** | The BMC downloads the ISO from it | `curl` the console host from another machine on the BMC network |
 
@@ -27,7 +45,7 @@ On HPE iLO 4/5, virtual media is an **iLO Advanced** feature. Without
 that licence the BMC exposes no CD device and the console will say so
 rather than fail thirty seconds into an installation.
 
-The node card also reports the number of disks the firmware can boot
+The machine row also reports the number of disks the firmware can boot
 from. If it reports none, the machine has no usable install target and
 there is nothing to install onto.
 
@@ -49,7 +67,7 @@ console (your server)                          target machine
 
 ### 1. Get an ISO into the store
 
-**Installation images** downloads an ISO **server-side, as a stream**.
+The **Images** tab downloads an ISO **server-side, as a stream**.
 The file never passes through your browser: a Harvester ISO is around
 7.6 GB, and an upload of that size through a browser would be spooled in
 memory on the way in.
@@ -91,13 +109,40 @@ toolkit is 135 MB, the ISO alone is fifty times that.
 
 ### 2. Discover the BMC
 
-Enter one or more BMC addresses, a username and a password. The
-credentials are **never stored on the server**: they stay in the page for
-the length of your session, and every subsequent action re-sends them.
+In **Machines**, **Discover...** opens a window: enter one or more BMC
+addresses, a username and a password. The credentials are **never stored
+on the server**: they stay in the page for the length of your session, and
+every subsequent action re-sends them. A BMC address is a host name or an
+IP address, with an optional port; anything else (a path, a scheme, a
+user name) is refused before any read.
 
-Each reachable BMC comes back as a card: model, serial, BIOS, memory,
-NICs with their MAC addresses, current power state, and whether the
-machine can be installed.
+Each reachable BMC comes back as a row: model, serial, BIOS, CPU and
+memory, disks, NICs with their MAC addresses and link state, current power
+state, and whether the machine can be installed. An unreachable BMC keeps
+its row, with the reason.
+
+**The console remembers the last discovery** (2.1.0): the addresses, the
+date and what each BMC answered, so the list is still there after a reload
+or the next day. The line above the list gives its date; **Re-read** reads
+the same BMCs again with the credentials of the page, and opens the window
+to ask for them when the page was reloaded. The power state shown is the
+one read at that date (its tooltip says so).
+
+- Stored in `<state>/baremetal-last-discovery.json` (mode 0600, replaced
+  atomically, relative to the state directory, so it moves with it). Only
+  the known fields of a machine are kept; a credential never is.
+- It is a **read cache**, like the folders cache: written during the
+  Redfish read itself, with no tracked action, because nothing changes on
+  a machine or a cluster. A new discovery replaces it.
+- Reading it needs the **admin** role (`GET /api/bmc/last-discovery`): it
+  names the BMCs of the fleet and their serial numbers.
+
+Before you act, the tab checks the store: a banner says **No ISO in the
+store** when it is empty, and, during a join, **No ISO of version X in
+the store** when no ISO has the cluster's version (read from the cluster,
+`setting/server-version`, and matched against each ISO's
+`harvester-release.yaml`, or its name). **Open Images** leads to the
+store.
 
 > **Careful with a powered-off machine.** A BMC does not re-read hardware
 > while the server is off: it replays the inventory of the **last POST**.
@@ -172,6 +217,35 @@ sent to the installer.
 
 The token and the password never appear in a response, in an action
 label, or in a log line.
+
+**A machine that already carries a system (2.2.0).** Before the Install
+button, the window says whether a system seems present on the machine,
+from what the BMC already publishes (read only, nothing is changed):
+
+- a UEFI boot entry that starts a loader `\EFI\...` from a disk partition
+  (USB keys, CDs and network entries are left out), named with the loader
+  and the disk, for example `Boot entry "elemental-shim" starts
+  \EFI\elemental\shim.efi from a disk partition (HD.Emb.1.3)`;
+- the same entry at the head of the boot order ("boots first from");
+- a logical drive (RAID volume) on a controller.
+
+On an iLO 4 these come from `Systems/1/BIOS/Boot/` (the iLO 4 publishes no
+disk nor volume), as of the machine's last boot; on an iDRAC 9 or an iLO 5,
+from `Systems/<id>/BootOptions` and `Boot.BootOrder`. When a system seems
+present, the evidence is listed and installing requires typing the machine
+name exactly: its serial number, or the BMC address when the serial is
+unknown; Install stays off until it matches. **No sign** is said only when
+the boot entries could be read and none points to a system (a system
+started in legacy BIOS mode would not show); when the BMC tells nothing,
+the window says **Unknown**, never empty. The console checks again at
+install time, on its own Redfish read, and refuses with `409` and
+`fields: ["system_confirm"]` when a system seems present and the typed
+name (`system_confirm`) does not match. `POST /api/bmc/system-check`
+(`{host, user, password}`, administrator) returns `state` (`present`,
+`absent`, `unknown`), `evidence` and `confirm_name`. A boot entry can
+outlive a wiped disk: the check then asks for the name once more, which is
+the safe side. Batches of a profile go through the same check, machine by
+machine (2.2.1, below).
 
 ### 4. Watch it install
 
@@ -299,6 +373,8 @@ Linux names.
 
 ### Many identical nodes: install profiles and batches (1.80.0)
 
+Profiles live in the **Profiles** tab (2.1.0).
+
 A **profile** is a named install configuration: the fields of the install
 window, written in YAML, plus the advanced YAML, where any value may hold a
 variable `{{name}}`. Built-in variables: `{{hostname}}`, `{{ip}}`
@@ -359,11 +435,30 @@ most 512 characters, without control characters.
   each machine is its own `baremetal-install:<hostname>` action in the
   dock. Cancelling the batch cancels the install in progress and skips
   the rows not started.
+- **Machines that already carry a system (2.2.1).** The batch window
+  runs the check of the install window (above) on every machine of the
+  table: **Check the machines** reads each BMC, read only, and shows one
+  banner per machine, `Row <n> · <BMC>`, with **present** and its evidence,
+  **No sign**, or **Unknown** said plainly. For every machine where a
+  system seems present, type its name (serial number, or BMC address when
+  the serial is unknown) exactly; a wrong name is said. **Start the batch**
+  reads the machines first when the table changed since the last check,
+  and does not start while a name is missing or wrong. The console then
+  reads every BMC again itself, after the row checks and before anything
+  is powered on, and refuses the whole batch with `409`,
+  `fields: ["system_confirm"]`, `refused` (BMC hosts) and `machines` (each
+  machine with its row, state, evidence, name to type and `confirmed`)
+  when a machine where a system seems present lacks its name; nothing
+  starts, and the window shows what the console read. "Unknown" is not a
+  refusal, as for one machine. The typed names go in
+  `rows[].system_confirm` and never reach the install options.
 - API: `GET|POST /api/baremetal/profiles`, `GET|PUT|DELETE
   /api/baremetal/profiles/<name>`, `POST .../from-config`,
   `POST .../<name>/csv`, `POST .../<name>/render`, `POST .../<name>/batch`
   (`cluster_name`, `vip`, `iso`, `rows`, `token`, `password`,
-  `bmc_password`, `import_id`, `concurrency`). Reads are open to every
+  `bmc_password`, `import_id`, `concurrency`; `rows[].system_confirm`,
+  2.2.1), `POST .../<name>/system-check` (same body, read only: returns
+  `machines`, 2.2.1). Reads are open to every
   role, writes need **admin**.
 - Command line, same code (the batch runs inside the command), secrets
   never on argv:
@@ -380,7 +475,10 @@ most 512 characters, without control characters.
   (common) and `bmc_passwords` (per BMC host). The CSV must not hold
   passwords. `--state-dir` points to the console state directory,
   `--port` sets the artifact server port when a console already listens
-  on 8091.
+  on 8091. When a system seems present on a machine, the command prints
+  each machine with its state and evidence, starts nothing and exits 2;
+  `--confirm-system <BMC host>=<name>` (once per machine, the name as
+  printed) confirms it (2.2.1).
 - Verified by automated tests (substitution, store, ordering, refusals,
   secrets) and on the window with mocked routes. **Run for real (1.83.2)**
   on two machines behind two Redfish BMCs (the bmcfg bench): row 1 created
@@ -388,6 +486,22 @@ most 512 characters, without control characters.
   itself with both nodes. That run found three defects, fixed in 1.83.2:
   `skipchecks: true` did not reach the installer, a failed row did not say
   why, and the joined node was missing from the declaration.
+  **Checked for real (2.2.1), read only**: a batch window with node3
+  (iLO 4, `172.16.1.33`) and node4 (iLO 4, `172.16.1.34`) showed both as
+  present, node3 with `sles-secureboot` (`\EFI\sles\shim.efi` on
+  `HD.Emb.5.2`) and the name `USE6236S00`, node4 with `elemental-shim` and
+  `sles-secureboot` and the name `USE6236RY3`; a wrong name was said and the
+  batch did not start. The batch was never submitted.
+
+### History of the bare-metal actions (2.1.0)
+
+The **History** tab lists the bare-metal actions of Activity: installs and
+joins (`baremetal-install`), batches (`baremetal-batch`), discovery boots
+(`baremetal-discover`) and power gestures (`bmc-power`), the running ones
+first. It uses the action filter of Activity, server side, so older actions
+are found too. Each row links to the action in Activity
+(`#activity/action/<id>`), where its log opens. While an action runs, the
+tab reads it again every five seconds.
 
 ### Redfish: what 1.78.0 changed
 
@@ -526,7 +640,7 @@ preflight already warn when the discovery inventory shows a management NIC
 under 10 Gbit/s. If the machine is acceptable for you, add
 `harvester.install.skipchecks=true` to the extra kernel arguments.
 
-**"no virtual media" on the node card.** The BMC exposes no CD device or
+**"no virtual media" on the machine row.** The BMC exposes no CD device or
 cannot boot from it. On iLO, check for the Advanced licence. There is no
 workaround from the console: without virtual media the machine has to be
 installed another way.

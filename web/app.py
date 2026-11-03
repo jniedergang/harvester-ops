@@ -91,6 +91,7 @@ import rancher_servers as _srv
 import rancher_admin as _radm
 import tf_store as _tfs
 import tf_state as _tfst
+import tf_kvm as _tfk
 import baremetal_onboarding as _bmo
 import baremetal_onboarding_runtime as _bmor
 from flask import (
@@ -181,6 +182,7 @@ def _load_shared_module(name):
 
 _ufg = _load_shared_module("url_fetch_guard")
 import bm_discover as _bmd  # noqa: E402
+import bm_presence as _bmpres  # noqa: E402
 import baremetal_disks as _bmdisks  # noqa: E402
 import cluster_decl as _cd  # noqa: E402
 HTPASSWD_PATH = Path(os.environ.get("HARVESTER_OPS_HTPASSWD", "/etc/harvester-ops/htpasswd"))
@@ -1205,7 +1207,10 @@ ADMIN_ONLY_READ_PREFIXES = ("/api/harvester-users", "/api/users",
                             # un kubeconfig délivré porte un jeton
                             "/api/hv-support/",
                             # v1.71.0 : le journal du contrôleur d'import cite URL et serveurs des sources
-                            "/api/vmimport-log/")
+                            "/api/vmimport-log/",
+                            # 2.1.0 : la dernière découverte nomme les BMC du parc (adresses,
+                            # numéros de série) ; seul un administrateur s'en sert
+                            "/api/bmc/last-discovery")
 
 
 # Lectures qui donnent plus qu'une vue : le kubeconfig d'un cluster créé
@@ -1225,6 +1230,9 @@ def required_role_for(path, method):
         return _replication_required_role(path, method)
     if method in ("GET", "HEAD", "OPTIONS"):
         if path.startswith("/api/capi/") and path.endswith(OPERATOR_READ_SUFFIXES):
+            return "operator"
+        # 2.3.0 : le code d'une déclaration porte le cloud-init de ses VMs
+        if path.startswith("/api/tf-declarations/") and path.endswith("/code"):
             return "operator"
         # prochaine version KVM : le cloud-init d'une VM KVM peut porter des
         # mots de passe, lu par un opérateur seulement (comme côté Harvester)
@@ -3716,6 +3724,41 @@ def _bmc_storage(host, user, pwd, system_path=None):
     return out
 
 
+def _bm_system_presence(host, user, pwd, system_path=None):
+    """2.2.0 : une machine porte-t-elle déjà un système ? Lecture seule de
+    ce que le BMC publie (entrées UEFI, ordre de démarrage, volumes) ;
+    l'analyse est dans bin/lib/bm_presence.py. Rend {state, evidence,
+    confirm_name, source} ; « unknown » quand rien n'est lisible."""
+    sp = (system_path or _redfish_system_path(host, user, pwd) or "").rstrip("/")
+    if not sp:
+        return {"state": _bmpres.UNKNOWN, "evidence": [], "confirm_name": _bmpres.confirm_name(None, host),
+                "source": None}
+    s = _redfish_get(host, sp + "/", user, pwd, timeout=8) or {}
+    entries, order, source = None, [], None
+    # Redfish standard (iDRAC 9, iLO 5) ; l'iLO 4 répond 404
+    coll = _redfish_get(host, sp + "/BootOptions", user, pwd, timeout=8)
+    if isinstance(coll, dict) and isinstance(coll.get("Members"), list):
+        docs = [d for d in (_redfish_get(host, m.get("@odata.id") or "", user, pwd, timeout=6)
+                            for m in coll["Members"][:64] if isinstance(m, dict)) if d]
+        entries, order = _bmpres.entries_from_standard(docs, (s.get("Boot") or {}).get("BootOrder"))
+        source = "redfish"
+    if entries is None:
+        entries, order = _bmpres.entries_from_hpe(_redfish_get(host, sp + "/BIOS/Boot/", user, pwd, timeout=8))
+        source = "hpe-oem" if entries is not None else None
+    try:
+        st = _bmc_storage(host, user, pwd, sp)
+        # un disque présenté tel quel par un HBA (RawDevice) n'est pas un volume créé
+        volumes = [{"name": v.get("name") or v.get("id") or "",
+                    "controller": c.get("name") or c.get("model") or c.get("id") or ""}
+                   for c in st.get("controllers") or [] for v in c.get("volumes") or []
+                   if v.get("volume_type") != "RawDevice"]
+    except Exception:                      # jamais de détail qui porterait un secret
+        volumes = None
+    out = _bmpres.evaluate(entries, order, volumes)
+    out.update(confirm_name=_bmpres.confirm_name(s.get("SerialNumber"), host), source=source)
+    return out
+
+
 def _bmc_discover_one(host, user, pwd):
     """Walk Redfish to produce a node profile (system info + NICs)."""
     root = _redfish_get(host, "/redfish/v1/", user, pwd, timeout=6)
@@ -3779,22 +3822,115 @@ def _bmc_discover_one(host, user, pwd):
     }
 
 
+# 2.1.0 : la dernière découverte des BMC, gardée par la console (onglet
+# Machines de Bare-metal, avec sa date et « Relire »).
+#
+# Choix de conception : un CACHE DE LECTURE, comme le cache des dossiers
+# (décision 4 de la 2.0.0), et non une action suivie passée par un outil de
+# bin/. La découverte est une lecture Redfish : rien ne change sur une
+# machine ni sur un cluster ; la console garde une copie de ce qu'elle a lu,
+# écrite pendant la lecture même. Aucun identifiant n'y entre : le nom et le
+# mot de passe du BMC restent dans la page (bmc.js), comme avant. Seuls les
+# champs connus d'une machine sont gardés (liste blanche ci-dessous).
+# Fichier relatif au répertoire d'état (règle de la 1.78.0), 0600,
+# remplacement atomique : la console se déplace avec son état.
+BM_LAST_DISCOVERY = "baremetal-last-discovery.json"
+BMC_HOST_RE = re.compile(r"[A-Za-z0-9.:\[\]-]{1,253}")
+BMC_DISCOVER_MAX = 64
+_BM_NODE_KEYS = ("ok", "host", "error", "system_path", "manager_path", "virtualmedia_path",
+                 "virtualmedia_inserted", "boot_targets", "boot_override", "uefi_targets",
+                 "post_state", "manufacturer", "model", "serial", "asset", "bios_version",
+                 "power_state", "cpu_count", "memory_gib", "indicator_led", "uuid")
+_BM_NIC_KEYS = ("name", "mac", "status", "speed_mbps")
+
+
+def _bm_scalar(v):
+    """Valeur gardée telle quelle si elle est simple ; texte borné sinon."""
+    if v is None or isinstance(v, (bool, int, float)):
+        return v
+    return str(v)[:512]
+
+
+def _bm_discovery_record(hosts, nodes, at):
+    """Ce que la console garde d'une découverte : adresses, date, champs
+    connus de chaque machine (jamais un identifiant)."""
+    out = []
+    for n in nodes[:BMC_DISCOVER_MAX]:
+        if not isinstance(n, dict):
+            continue
+        rec = {}
+        for k in _BM_NODE_KEYS:
+            if k not in n:
+                continue
+            v = n[k]
+            rec[k] = [_bm_scalar(x) for x in v[:64]] if isinstance(v, list) else _bm_scalar(v)
+        rec["nics"] = [{k: _bm_scalar(x.get(k)) for k in _BM_NIC_KEYS}
+                       for x in (n.get("nics") or [])[:32] if isinstance(x, dict)]
+        out.append(rec)
+    return {"at": at, "hosts": list(hosts)[:BMC_DISCOVER_MAX], "nodes": out}
+
+
+def _bm_last_discovery_path():
+    return _state_dir() / BM_LAST_DISCOVERY
+
+
+def _bm_last_discovery_save(doc):
+    path = _bm_last_discovery_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(doc, f)
+    os.replace(tmp, path)
+
+
+def _bm_last_discovery_load():
+    """Dernière découverte gardée, ou None (absente ou illisible)."""
+    try:
+        doc = json.loads(_bm_last_discovery_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("nodes"), list):
+        return None
+    return _bm_discovery_record(doc.get("hosts") or [], doc["nodes"], doc.get("at"))
+
+
 @app.route("/api/bmc/discover", methods=["POST"])
 @requires_auth
 def api_bmc_discover():
     """Discover one or many BMCs via Redfish.
     Body: { hosts: ["192.0.2.10", ...], user, password }
-    Returns the list of node profiles."""
+    Returns the list of node profiles. 2.1.0 : the result is remembered by
+    the console (read cache, no credentials), see BM_LAST_DISCOVERY."""
     data = request.get_json(force=True, silent=True) or {}
     hosts = data.get("hosts") or []
     user  = data.get("user", "")
     pwd   = data.get("password", "")
     if not hosts or not isinstance(hosts, list):
         return jsonify({"error": "hosts (list of IPs) required"}), 400
+    # une adresse de BMC, rien d'autre : elle finit dans une URL https://<hôte>/
+    if not all(isinstance(h, str) and BMC_HOST_RE.fullmatch(h) for h in hosts):
+        return jsonify({"error": "invalid BMC address", "fields": ["hosts"]}), 400
+    hosts = list(dict.fromkeys(hosts))[:BMC_DISCOVER_MAX]
     results = []
-    for h in hosts[:64]:
+    for h in hosts:
         results.append(_bmc_discover_one(h, user, pwd))
-    return jsonify({"nodes": results, "count": len(results)})
+    at = time.time()
+    remembered = True
+    try:
+        _bm_last_discovery_save(_bm_discovery_record(hosts, results, at))
+    except OSError as e:
+        remembered = False
+        log.warning("bare-metal: last discovery not remembered: %s", type(e).__name__)
+    return jsonify({"nodes": results, "count": len(results), "at": at, "remembered": remembered})
+
+
+@app.route("/api/bmc/last-discovery", methods=["GET"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_bmc_last_discovery():
+    """2.1.0 : la dernière découverte gardée par la console, ou null."""
+    return jsonify({"discovery": _bm_last_discovery_load()})
 
 
 @app.route("/api/bmc/storage", methods=["POST"])
@@ -3812,6 +3948,23 @@ def api_bmc_storage():
         out = _bmc_storage(host, str(data.get("user") or ""), str(data.get("password") or ""))
     except Exception as e:                      # jamais de détail qui porterait un secret
         return jsonify({"error": f"storage inventory failed: {type(e).__name__}"}), 502
+    return jsonify(dict(out, host=host))
+
+
+@app.route("/api/bmc/system-check", methods=["POST"])
+@requires_auth
+@_rate_limit("12/minute")
+def api_bmc_system_check():
+    """2.2.0 : un système semble-t-il déjà présent sur la machine ? Corps :
+    {host, user, password}, comme /api/bmc/storage ; lecture seule."""
+    data = request.get_json(force=True, silent=True) or {}
+    host = data.get("host")
+    if not isinstance(host, str) or not BMC_HOST_RE.fullmatch(host):
+        return jsonify({"error": "invalid host", "fields": ["host"]}), 400
+    try:
+        out = _bm_system_presence(host, str(data.get("user") or ""), str(data.get("password") or ""))
+    except Exception as e:                      # jamais de détail qui porterait un secret
+        return jsonify({"error": f"system check failed: {type(e).__name__}"}), 502
     return jsonify(dict(out, host=host))
 
 
@@ -4174,7 +4327,40 @@ def api_cluster_join_url(cluster):
     if not any(c.get("name") == cluster for c in load_config_ro().get("clusters", [])):
         return jsonify({"error": "unknown cluster"}), 404
     url, reason = _cluster_join_url(cluster)
-    return jsonify({"cluster": cluster, "join_url": url, "reason": reason})
+    # 2.1.0 : un nœud rejoint avec la version du cluster ; l'onglet Machines
+    # dit avant d'agir quand le magasin n'a pas d'ISO de cette version
+    version = _cluster_harvester_version(cluster) if reason != "unreachable" else ""
+    return jsonify({"cluster": cluster, "join_url": url, "reason": reason,
+                    "harvester_version": version or None,
+                    "isos_of_version": _bm_isos_of_version(version) if version else []})
+
+
+_ISO_NAME_VERSION_RE = re.compile(r"v?(\d+\.\d+\.\d+(?:-rc\d+)?)")
+
+
+def _cluster_harvester_version(cluster):
+    """Version de Harvester du cluster (setting server-version), ou ""."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc or _cluster_reachable(kc) is False:
+        return ""
+    return _harvester_server_version(kc)
+
+
+def _bm_isos_of_version(version):
+    """ISO du magasin de cette version de Harvester : celle que porte
+    l'ISO (harvester-release.yaml), sinon celle de son nom."""
+    want = str(version or "").strip().lstrip("v")
+    if not want:
+        return []
+    out = []
+    for p in sorted(_iso_dir().glob("*.iso")):
+        v = (_iso_release_info(p) or {}).get("harvester") or ""
+        if not v:
+            m = _ISO_NAME_VERSION_RE.search(p.name)
+            v = m.group(1) if m else ""
+        if str(v).strip().lstrip("v") == want:
+            out.append(p.name)
+    return out
 
 
 @app.route("/api/status/<cluster>")
@@ -7428,6 +7614,9 @@ def api_baremetal_install():
     if mode not in ("create", "join"):
         return jsonify({"error": "invalid mode", "fields": ["mode"]}), 400
     data["mode"] = mode
+    # 2.2.0 : nom tapé pour une machine qui porte déjà un système ; hors des
+    # données de l'installation (contrôlé par _bm_presence_refusal)
+    typed = data.pop("system_confirm", None)
     # v1.77.0 : jeton et mot de passe vides repris d'un fichier importé
     err = _bm_apply_import(data)
     if err:
@@ -7435,12 +7624,30 @@ def api_baremetal_install():
     data, err = _bm_prepare_install(data)
     if err:
         return err
+    # 2.2.0 : une machine qui semble porter un système ne s'installe que si
+    # son nom (série, sinon adresse du BMC) a été tapé ; contrôlé ici, sur
+    # une lecture du BMC faite par la console, jamais sur ce que dit la page.
+    refused = _bm_presence_refusal(data, typed)
+    if refused:
+        return refused
     # Le label de l'action ne porte ni token ni mot de passe.
     action_id, busy = _bm_track(f"baremetal-install:{data['hostname']}",
                                 data["bmc_host"], _baremetal_install_runner, data)
     if busy:
         return busy
     return jsonify({"action_id": action_id, "hostname": data["hostname"]}), 202
+
+
+def _bm_presence_refusal(data, typed):
+    """Refus (réponse 409) quand un système semble présent et que le nom
+    tapé (`typed`, champ `system_confirm`) n'est pas celui de la machine ;
+    None sinon.
+    « Inconnu » n'est pas un refus : le BMC ne permet pas de le dire."""
+    chk = _bm_system_presence(data["bmc_host"], data.get("bmc_user") or "", data.get("bmc_password") or "")
+    if _bmpres.confirmed(chk, typed):
+        return None
+    return jsonify({"error": "a system seems present on this machine: type its name to install",
+                    "fields": ["system_confirm"], "system": chk}), 409
 
 
 def _bm_prepare_install(data, defer_join=False):
@@ -7784,6 +7991,51 @@ def _bm_batch_input(data):
     return batch, secrets_
 
 
+def _bm_batch_confirms(data):
+    """2.2.1 : noms tapés pour les machines d'une série qui portent déjà un
+    système, {bmc_host: nom}, lus dans `rows[].system_confirm` ; hors des
+    données de l'installation."""
+    out = {}
+    for r in data.get("rows") or []:
+        if isinstance(r, dict) and r.get("system_confirm") is not None:
+            out[str(r.get("bmc_host") or "").strip()] = str(r.get("system_confirm"))
+    return out
+
+
+def _bm_batch_presence(targets):
+    """2.2.1 : la lecture de la fenêtre d'installation (_bm_system_presence),
+    faite pour chaque machine d'une série, en parallèle. `targets` :
+    [(ligne, hôte, utilisateur, mot de passe)] ; rend, dans l'ordre des
+    lignes, [{row, bmc_host, state, evidence, confirm_name, source}]."""
+    def one(t):
+        row, host, user, pwd = t
+        try:
+            chk = _bm_system_presence(host, user, pwd)
+        except Exception:                      # jamais de détail qui porterait un secret
+            chk = {"state": _bmpres.UNKNOWN, "evidence": [], "confirm_name": _bmpres.confirm_name(None, host),
+                   "source": None}
+        return dict(chk, row=row, bmc_host=host)
+    if not targets:
+        return []
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(8, len(targets))) as pool:
+        return list(pool.map(one, targets))
+
+
+def _bm_batch_presence_refusal(plan, confirms):
+    """2.2.1 : (machines lues, hôtes refusés) pour une série prête à partir.
+    Refusée dès qu'une machine semble porter un système sans son nom tapé ;
+    « inconnu » n'est pas un refus, comme pour une machine seule."""
+    machines = _bm_batch_presence([(i + 1, o["bmc_host"], o.get("bmc_user") or "", o.get("bmc_password") or "")
+                                   for i, o in enumerate(plan)])
+    refused = []
+    for m in machines:
+        m["confirmed"] = _bmpres.confirmed(m, confirms.get(m["bmc_host"]))
+        if not m["confirmed"]:
+            refused.append(m["bmc_host"])
+    return machines, refused
+
+
 def _bm_batch_plan(prof, batch, secrets_):
     """Options d'installation complètes et contrôlées de chaque ligne
     (jonctions contrôlées sans leur cluster, qui n'existe pas encore), ou
@@ -7927,20 +8179,35 @@ def _baremetal_batch_steps(run, plan, concurrency):
     run.close()
 
 
-def _bm_batch_start(prof, batch, secrets_, concurrency=_bmp.DEFAULT_CONCURRENCY):
+def _bm_batch_start(prof, batch, secrets_, concurrency=_bmp.DEFAULT_CONCURRENCY, confirms=None):
     """Contrôle toute la série puis lance son action parente : (action_id,
-    None) ou (None, refus [(où, raison)])."""
+    None, None), (None, refus [(où, raison)], None), ou, 2.2.1, (None, None,
+    machines) quand une machine semble porter un système sans son nom tapé
+    dans `confirms` ({bmc_host: nom})."""
     plan, errors = _bm_batch_plan(prof, batch, secrets_)
     if errors:
-        return None, errors
+        return None, errors, None
     for o in plan:
         busy = _bm_busy(o["bmc_host"])
         if busy:
-            return None, [(o["bmc_host"], f"{busy.action} is already driving this BMC")]
+            return None, [(o["bmc_host"], f"{busy.action} is already driving this BMC")], None
+    # 2.2.1 : chaque machine est relue par la console, jamais sur ce que dit la page
+    machines, refused = _bm_batch_presence_refusal(plan, confirms or {})
+    if refused:
+        plan.clear()                            # secrets : rien ne part
+        return None, None, machines
     concurrency = max(1, min(4, int(concurrency or _bmp.DEFAULT_CONCURRENCY)))
     action_id = track_action(f"baremetal-batch:{batch['cluster_name']}", "(local)",
                              _baremetal_batch_runner, plan, concurrency)
-    return action_id, None
+    return action_id, None, None
+
+
+def _bm_presence_batch_json(machines):
+    """Refus 409 d'une série : la liste des machines lues, chacune avec son
+    état, ses signes, le nom à taper et `confirmed`."""
+    refused = [m["bmc_host"] for m in machines if not m.get("confirmed")]
+    return jsonify({"error": "a system seems present on some machines: type each name to start the batch",
+                    "fields": ["system_confirm"], "refused": refused, "machines": machines}), 409
 
 
 @app.route("/api/baremetal/profiles/<name>/render", methods=["POST"])
@@ -7976,6 +8243,29 @@ def api_bm_profile_render(name):
     return jsonify({"rows": out, "ok": all("yaml" in r for r in out)})
 
 
+@app.route("/api/baremetal/profiles/<name>/system-check", methods=["POST"])
+@requires_auth
+@_rate_limit("12/minute")
+def api_bm_profile_system_check(name):
+    """2.2.1 : un système semble-t-il déjà présent sur les machines d'une
+    série ? Même corps que /batch (lignes, mot de passe du BMC commun ou par
+    ligne) ; lecture seule, chaque BMC lu comme par la fenêtre
+    d'installation."""
+    prof = _bmp.load_profile(_bm_profiles_state(), name)
+    if prof is None:
+        return jsonify({"error": "no such profile"}), 404
+    batch, secrets_ = _bm_batch_input(request.get_json(force=True, silent=True) or {})
+    rows = batch["rows"]
+    bad = [f"row {i + 1} bmc_host" for i, r in enumerate(rows)
+           if not isinstance(r, dict) or not BMC_HOST_RE.fullmatch(r.get("bmc_host") or "")]
+    if not rows or len(rows) > _bmp.MAX_ROWS or bad:
+        return jsonify({"error": "invalid rows", "fields": bad or ["rows"]}), 400
+    machines = _bm_batch_presence([(i + 1, r["bmc_host"], r.get("bmc_user") or "",
+                                    r.get("bmc_password") or secrets_.get("bmc_password") or "")
+                                   for i, r in enumerate(rows)])
+    return jsonify({"machines": machines})
+
+
 @app.route("/api/baremetal/profiles/<name>/batch", methods=["POST"])
 @requires_auth
 @_rate_limit("6/minute")
@@ -7994,9 +8284,12 @@ def api_bm_profile_batch(name):
         concurrency = int(data.get("concurrency") or _bmp.DEFAULT_CONCURRENCY)
     except (TypeError, ValueError):
         return _bm_errors_json([("concurrency", "not a number")], "invalid batch")
-    action_id, errors = _bm_batch_start(prof, batch, secrets_, concurrency)
+    action_id, errors, machines = _bm_batch_start(prof, batch, secrets_, concurrency,
+                                                  confirms=_bm_batch_confirms(data))
     if errors:
         return _bm_errors_json(errors, "invalid batch")
+    if machines:
+        return _bm_presence_batch_json(machines)
     return jsonify({"action_id": action_id, "cluster": batch["cluster_name"],
                     "nodes": len(batch["rows"])}), 202
 
@@ -9686,8 +9979,11 @@ def api_vms_all():
             c = cache.get(r.get("key"))
             r["folder"], r["folder_source"] = (c["folder_path"], c["source"]) if c else (None, None)
     rows.sort(key=lambda r: (r["name"] or "", r["kind"], r["source"] or "", r["namespace"] or ""))
-    return jsonify({"sources": sources, "vms": rows, "clusters": clusters, "folder_warnings": warnings,
-                    "hidden_count": hidden})
+    out = {"sources": sources, "vms": rows, "clusters": clusters, "folder_warnings": warnings,
+           "hidden_count": hidden}
+    if "kvm" in kinds:
+        out["kvm_tables"] = _kvm_vm_tables()       # même menu que la page de l'hôte (2.2.2)
+    return jsonify(out)
 
 
 # -----------------------------------------------------------------------------
@@ -11815,10 +12111,16 @@ def api_kvm_vms():
     except OSError as e:
         log.warning("KVM: restart markers not read: %s", e)
     vms.sort(key=lambda v: (v["name"], v["host"]))
-    return jsonify({"vms": vms, "hosts": hosts, "warnings": warnings, "role": current_role(),
-                    "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()},
-                    "operations": KVM_VM_OPERATIONS,
-                    "edit_operations": KVM_VM_EDIT_OPERATIONS})
+    return jsonify(dict(_kvm_vm_tables(), vms=vms, hosts=hosts, warnings=warnings, role=current_role()))
+
+
+def _kvm_vm_tables():
+    """Tables du menu d'une VM KVM (refus des gestes par état, droits et
+    états des opérations, de la modification) : servies par /api/kvm/vms et
+    par /api/vms-all, qui rendent le même menu (2.2.2)."""
+    return {"gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()} if _kvm_cli else {},
+            "operations": KVM_VM_OPERATIONS,
+            "edit_operations": KVM_VM_EDIT_OPERATIONS}
 
 
 @app.route("/api/kvm/vms/<host>/<domain>")
@@ -26341,6 +26643,173 @@ def _tf_provider_binary():
     return None
 
 
+# 2.3.0 : le provider dmacvicar/libvirt (Apache-2.0), pour les déclarations
+# qui visent un hôte KVM. Embarqué dans le livrable par package.sh, vérifié
+# par la somme publiée ET la signature GPG de la release (clé épinglée dans
+# config/terraform-provider-keys/), posé par install.sh dans l'état du
+# service. Une seule source, réglable par HARVESTER_OPS_TF_LIBVIRT_PROVIDER.
+TF_LIBVIRT_DIR = Path(os.environ.get(
+    "HARVESTER_OPS_TF_LIBVIRT_PROVIDER",
+    str(Path.home() / ".local/share/harvester-ops/terraform-provider-libvirt"),
+))
+TF_LIBVIRT_NAME = "terraform-provider-libvirt"
+
+
+def _tf_libvirt_meta():
+    try:
+        return json.loads((TF_LIBVIRT_DIR / "provider.json").read_text())
+    except Exception:
+        return {}
+
+
+def _tf_libvirt_binary():
+    p = TF_LIBVIRT_DIR / "bin" / TF_LIBVIRT_NAME
+    try:
+        return p if p.is_file() and os.access(p, os.X_OK) else None
+    except OSError:
+        return None
+
+
+def _tf_libvirt_version():
+    """Version du provider libvirt posé (fiche provider.json) ; vide sans
+    fiche lisible : sans version, il ne peut pas entrer dans le miroir."""
+    v = str(_tf_libvirt_meta().get("version") or "").lstrip("v")
+    return v if re.match(r"^\d+\.\d+\.\d+$", v) else ""
+
+
+# Un miroir sous les DEUX noms de registre : OpenTofu résout `harvester/harvester`
+# ou `dmacvicar/libvirt` en registry.opentofu.org, Terraform en
+# registry.terraform.io. Avec le seul second, OpenTofu (l'image de la console)
+# téléchargeait le provider sur Internet au lieu de prendre le miroir (vu en
+# réel le 02/11/2026 avec le réseau coupé : seul le double miroir passe).
+_TF_MIRROR_HOSTS = ("registry.terraform.io", "registry.opentofu.org")
+
+
+def _tf_mirror_provider(ws_dir, namespace, ptype, version, bin_src):
+    """Pose `bin_src` dans le miroir local de l'espace, sous les deux noms
+    de registre. Recopie quand la taille diffère (même version reconstruite)."""
+    import shutil as _shutil
+    for host in _TF_MIRROR_HOSTS:
+        plug = ws_dir / "plugins" / host / namespace / ptype / version / f"linux_{_tf_host_arch()}"
+        plug.mkdir(parents=True, exist_ok=True)
+        dest = plug / f"terraform-provider-{ptype}_v{version}"
+        try:
+            stale = not dest.exists() or dest.stat().st_size != bin_src.stat().st_size
+        except OSError:
+            stale = True
+        if stale:
+            try:
+                _shutil.copy2(bin_src, dest)
+                dest.chmod(0o755)
+            except Exception as e:
+                log_tf.warning("copy provider failed: %s", e)
+
+
+def _tf_write_rc(ws_dir):
+    """`terraformrc` de l'espace : chaque provider du miroir local vient du
+    miroir et JAMAIS d'Internet (inclus dans le miroir, exclu du direct). Réécrit
+    quand le miroir change ; None sans miroir."""
+    plug_root = (ws_dir / "plugins").resolve()
+    if not plug_root.is_dir():
+        return None
+    addrs = sorted(f"{h.name}/{n.name}/{t.name}"
+                   for h in plug_root.iterdir() if h.is_dir()
+                   for n in h.iterdir() if n.is_dir()
+                   for t in n.iterdir() if t.is_dir())
+    if not addrs:
+        return None
+    inc = ", ".join(json.dumps(a) for a in addrs)
+    content = ("provider_installation {\n"
+               "  filesystem_mirror {\n"
+               f"    path    = {json.dumps(str(plug_root))}\n"
+               f"    include = [{inc}]\n"
+               "  }\n"
+               "  direct {\n"
+               f"    exclude = [{inc}]\n"
+               "  }\n"
+               "}\n")
+    rc = ws_dir / "terraformrc"
+    try:
+        if not rc.exists() or rc.read_text() != content:
+            rc.write_text(content)
+    except OSError as e:
+        log_tf.warning("terraformrc: %s", e)
+    return rc
+
+
+# 2.3.0 : un état Terraform/OpenTofu porte des secrets (identifiants des
+# providers, jetons générés, cloud-init : le jeton RKE2 du modèle KVM). Les
+# espaces de travail sont en 0700 et leurs fichiers en 0600, à la création
+# (tofu lancé sous umask 077, fichiers de la console resserrés) ET pour les
+# espaces d'avant, réparés une fois au démarrage (journalisé). Vu dans l'état
+# de développement : terraform.tfstate et ses copies en 0644, lisibles de tous.
+TF_DIR_MODE, TF_FILE_MODE_MASK = 0o700, 0o600   # fichier : 0600 (0700 s'il est exécutable)
+
+
+def _tf_secure_dir(d):
+    """Répertoire en 0700 ; rend 1 s'il a fallu le resserrer."""
+    try:
+        mode = _stat.S_IMODE(d.stat().st_mode)
+        if mode != TF_DIR_MODE:
+            os.chmod(d, TF_DIR_MODE)
+            return 1
+    except OSError:
+        pass
+    return 0
+
+
+def _tf_secure_files(ws):
+    """Fichiers réguliers d'un espace (état, copies, plan, kubeconfig, code,
+    fiches, sorties) sans droit pour le groupe ni les autres ; ne suit aucun
+    lien. Rend le nombre de fichiers resserrés."""
+    n = 0
+    try:
+        entries = list(os.scandir(ws))
+    except OSError:
+        return 0
+    for e in entries:
+        try:
+            if not e.is_file(follow_symlinks=False):
+                continue
+            mode = _stat.S_IMODE(e.stat(follow_symlinks=False).st_mode)
+            if mode & 0o077:
+                # les droits du propriétaire restent (le script kvm_ssh garde son x)
+                os.chmod(e.path, (mode & 0o700) or TF_FILE_MODE_MASK)
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
+def _tf_secure_ws(ws):
+    return _tf_secure_dir(ws) + _tf_secure_files(ws)
+
+
+def _tf_secure_all(root=None):
+    """Réparation de tous les espaces existants (racine, clusters, `decls`,
+    déclarations, `.kvm`) : (répertoires, fichiers) resserrés."""
+    root = Path(root or TF_WORKSPACES)
+    dirs = files = 0
+    if not root.is_dir():
+        return 0, 0
+    dirs += _tf_secure_dir(root)
+    stack = [root]
+    while stack:
+        cur = stack.pop()
+        files += _tf_secure_files(cur)
+        try:
+            subs = [Path(e.path) for e in os.scandir(cur) if e.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue
+        for sub in subs:
+            if sub.name in (".terraform", "plugins", ".tmp"):
+                dirs += _tf_secure_dir(sub)      # contenu reconstruit par tofu (greffons exécutables)
+                continue
+            dirs += _tf_secure_dir(sub)
+            stack.append(sub)
+    return dirs, files
+
+
 def _tf_workspace_dir(cluster):
     """Per-cluster workspace dir — keeps state files isolated.
 
@@ -26350,6 +26819,8 @@ def _tf_workspace_dir(cluster):
     safe = re.sub(r"[^a-z0-9-]+", "-", cluster.lower()) or "default"
     p = TF_WORKSPACES / safe
     p.mkdir(parents=True, exist_ok=True)
+    _tf_secure_dir(TF_WORKSPACES)
+    _tf_secure_dir(p)
     return p
 
 
@@ -26362,14 +26833,213 @@ TF_DECLS = _tfs.DeclStore(TF_DB)
 TF_STATE_LOCK = threading.Lock()
 
 
-def _tf_decl_workspace_dir(cluster, decl_id, create=True):
-    """L'espace de travail d'une déclaration : `<cluster>/decls/<id>/`."""
+def _tf_decl_workspace_dir(cluster, decl_id, create=True, target_kind="harvester"):
+    """L'espace de travail d'une déclaration : `<cluster>/decls/<id>/`.
+    2.3.0 : celui d'une déclaration KVM est `.kvm/<hôte>/decls/<id>/`, en
+    0700 (il garde le jeton RKE2 et, le temps d'une exécution, la clé de
+    l'hôte). Le point en tête : aucun nom de cluster nettoyé ne donne `.kvm`."""
     if not _tfs.ID_RE.match(str(decl_id or "")):
         raise ValueError("invalid declaration id")
+    if target_kind == "kvm":
+        if not isinstance(cluster, str) or not _kd.NAME_RE.match(cluster):
+            raise ValueError("invalid host name")
+        p = TF_WORKSPACES / ".kvm" / cluster / "decls" / decl_id
+        if create:
+            p.mkdir(parents=True, exist_ok=True)
+            for d in (TF_WORKSPACES, TF_WORKSPACES / ".kvm", p.parent.parent, p.parent, p):
+                _tf_secure_dir(d)
+        return p
     p = _tf_workspace_dir(cluster) / "decls" / decl_id
     if create:
         p.mkdir(parents=True, exist_ok=True)
+        _tf_secure_dir(p.parent)
+        _tf_secure_dir(p)
     return p
+
+
+def _tf_decl_ws(decl, create=True):
+    """L'espace d'une déclaration lue dans le magasin, quelle que soit sa cible."""
+    return _tf_decl_workspace_dir(decl["cluster"], decl["id"], create=create,
+                                  target_kind=decl.get("target_kind") or "harvester")
+
+
+# ---------------------------------------------------------------------------
+# 2.3.0 : cible KVM d'une déclaration (hôte déclaré dans la console)
+# ---------------------------------------------------------------------------
+TF_KVM_RUNNING = set()          # déclarations KVM en cours d'exécution
+TF_KVM_RUNNING_LOCK = threading.Lock()
+
+
+def _tf_kvm_host(host):
+    """(déclaration de l'hôte, None) ou (None, (message, statut)). Ni chemin
+    ni secret dans le message."""
+    if not isinstance(host, str) or not _kd.NAME_RE.match(host):
+        return None, ("invalid host name", 400)
+    try:
+        decl = _kd.load(_state_dir(), host)
+    except FileNotFoundError:
+        return None, (f"host {host} is not declared", 404)
+    except _kd.DeclError:
+        return None, (f"host {host}: invalid declaration", 500)
+    try:
+        _tfk.connection_uri_expr(decl)
+    except _tfk.SpecError as e:
+        return None, (str(e), 400)
+    return decl, None
+
+
+def _tf_private_write(path, data):
+    """Écrit `data` en 0600, sans suivre un lien posé à sa place."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
+def _tf_kvm_stage(ws, host_decl):
+    """Clé de l'hôte et empreinte épinglée, copiées en 0600 dans l'espace le
+    temps d'une exécution, et le script ssh strict qui les utilise (le
+    provider le lance par l'URI ; ni clé ni chemin dans argv de tofu)."""
+    state = _state_dir()
+    for rel, name in ((host_decl["ssh_key"], _tfk.KEY_FILE),
+                      (host_decl["known_hosts"], _tfk.KNOWN_FILE)):
+        _tf_private_write(ws / name, _kd.resolve(state, rel).read_bytes())
+    # le script ssh strict que le provider lance (qemu+sshcmd, command=)
+    _tf_private_write(ws / _tfk.WRAPPER_FILE, _tfk.ssh_wrapper(ws).encode())
+    os.chmod(ws / _tfk.WRAPPER_FILE, 0o700)
+
+
+def _tf_kvm_unstage(ws):
+    for name in (_tfk.KEY_FILE, _tfk.KNOWN_FILE, _tfk.WRAPPER_FILE):
+        try:
+            (ws / name).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            log_tf.warning("KVM declaration: could not remove %s: %s", name, e)
+
+
+def _tf_kvm_scrub(text, ws):
+    """Le texte de tofu sans le chemin de l'espace (en clair ou encodé pour
+    l'URL, comme dans l'URI du provider) : jamais de chemin dans une réponse."""
+    if not text:
+        return text
+    from urllib.parse import quote
+    for form in (str(ws), quote(str(ws), safe=""), quote(str(ws), safe="/")):
+        text = text.replace(form, "<workspace>")
+    return text
+
+
+def _tf_kvm_preflight(ws, host_decl, env):
+    """Une connexion SSH par le MÊME script strict que le provider, avant
+    tofu : le provider ne rend qu'un « procedure interrupted » quand ssh
+    refuse l'empreinte, ce contrôle dit pourquoi (hostkey, auth,
+    unreachable...). Rend None, ou le message (sans chemin)."""
+    addr, port = str(host_decl["address"]), int(host_decl.get("port") or 22)
+    run_env = {k: v for k, v in os.environ.items() if k != "SSH_AUTH_SOCK"}
+    run_env.update(env or {})
+    try:
+        r = subprocess.run([str(ws / _tfk.WRAPPER_FILE), "-p", str(port), "--",
+                            f"{host_decl['user']}@{addr}", "true"],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           timeout=30, env=run_env)
+    except subprocess.TimeoutExpired:
+        return f"host {host_decl['name']}: timeout: no SSH answer within 30 s"
+    except OSError as e:
+        return f"host {host_decl['name']}: failed: cannot run ssh ({e.strerror})"
+    if r.returncode == 0:
+        return None
+    err = _kh.make_error(host_decl["name"], r.stderr, r.returncode, paths=(str(ws),),
+                         ssh_level=r.returncode == 255)
+    return _tf_kvm_scrub(str(err), ws)
+
+
+def _tf_kvm_check_bases(host_decl, rendered):
+    """Chaque image de base doit être une image du catalogue de l'hôte (comme
+    pour la création de VM de la console), du MÊME pool que le disque qui s'y
+    appuie, au format déclaré, et qu'aucun domaine n'utilise comme disque :
+    jamais un chemin libre (/dev/sda, le disque d'une autre VM). Lu sur
+    l'hôte à chaque plan ou apply. Rend None, ou la raison."""
+    wanted = [b for b in (_tfk.base_images(r[1], r[2]) for r in rendered) if b]
+    if not wanted:
+        return None
+    try:
+        vh = _kh.VirshHost(host_decl, _state_dir(), timeout=KVM_READ_TIMEOUT)
+        cat = _ks.list_images(vh, vh.decl, {}, fresh=True)
+    except (_ko.OpError, _kh.KvmError) as e:
+        return f"host {host_decl['name']}: the image catalogue cannot be read ({getattr(e, 'kind', 'failed')})"
+    by_path = {i.get("path"): i for i in cat.get("images") or [] if i.get("path")}
+    for path, pool, fmt in wanted:
+        img = by_path.get(path)
+        if not img or img.get("iso"):
+            return f"base image {path}: not an image of the catalogue of host {host_decl['name']}"
+        if img.get("pool") != pool:
+            return (f"base image {img['pool']}/{img['volume']}: it must be in the pool of the new "
+                    f"disk ({pool})")
+        if img.get("used_by"):
+            return f"base image {img['pool']}/{img['volume']}: used as a disk by {', '.join(img['used_by'])}"
+        if img.get("format") and img["format"] != fmt:
+            return f"base image {img['pool']}/{img['volume']}: its format is {img['format']}, not {fmt}"
+    return None
+
+
+def _tf_kvm_sweep():
+    """Au démarrage : retire la clé, l'empreinte et le script ssh qu'une
+    exécution interrompue par l'arrêt de la console aurait laissés."""
+    root = TF_WORKSPACES / ".kvm"
+    if not root.is_dir():
+        return 0
+    n = 0
+    for ws in root.glob("*/decls/*"):
+        for name in (_tfk.KEY_FILE, _tfk.KNOWN_FILE, _tfk.WRAPPER_FILE):
+            try:
+                (ws / name).unlink()
+                n += 1
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log_tf.warning("KVM declaration sweep: %s", e)
+    return n
+
+
+try:
+    _swept = _tf_kvm_sweep()
+    if _swept:
+        log_tf.warning("KVM declarations: %d staged SSH file(s) left by an interrupted run removed", _swept)
+    _fixed = _tf_secure_all()
+    if any(_fixed):
+        log_tf.warning("Terraform workspaces: permissions tightened on %d director(y/ies) (0700) and "
+                       "%d file(s) (0600): states can hold secrets", *_fixed)
+except Exception as _e:          # noqa: BLE001 : le démarrage passe
+    log_tf.warning("Terraform workspace repair failed: %s", _e)
+
+
+def _tf_kvm_secret(ws, var):
+    """Le jeton d'une variable sensible, tiré une fois et gardé dans
+    `<espace>/.secrets/<variable>` (0600) ; jamais rendu par l'API."""
+    d = ws / _tfk.SECRETS_DIR
+    d.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(d, 0o700)
+    f = d / var
+    if not f.is_file():
+        _tf_private_write(f, _secrets.token_hex(32).encode())
+    return f.read_text().strip()
+
+
+def _tf_kvm_env(ws, rendered):
+    """Variables d'environnement d'une exécution KVM : TMPDIR privé (le
+    provider y écrit les ISO cloud-init, en 0644, jeton compris) et le jeton
+    de chaque modèle RKE2 en TF_VAR_<variable>."""
+    tmp = ws / ".tmp"
+    tmp.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(tmp, 0o700)
+    env = {"TMPDIR": str(tmp)}
+    for var in _tfk.token_vars(rendered):
+        env[f"TF_VAR_{var}"] = _tf_kvm_secret(ws, var)
+    return env
 
 
 def _tf_decl_workspaces(cluster):
@@ -26398,25 +27068,21 @@ def _tf_plugin_cache_init(ws_dir):
         return None
     raw = _tf_provider_version().lstrip("v") or "0.0.0"
     version = re.sub(r"-(rc|snap|alpha|beta|dev)[\w\.-]*$", "", raw)
-    plug = (ws_dir / "plugins" / "registry.terraform.io" / "harvester"
-            / "harvester" / version / f"linux_{_tf_host_arch()}")
-    plug.mkdir(parents=True, exist_ok=True)
-    dest = plug / f"terraform-provider-harvester_v{version}"
     # Recopier aussi quand la taille diffère : réinstaller la MÊME version
     # avec un autre binaire (un correctif reconstruit sur place) laissait
-    # sinon l'ancien greffon dans le miroir, indéfiniment.
-    try:
-        stale = (not dest.exists()
-                 or dest.stat().st_size != bin_src.stat().st_size)
-    except OSError:
-        stale = True
-    if stale:
-        try:
-            import shutil as _shutil
-            _shutil.copy2(bin_src, dest)
-            dest.chmod(0o755)
-        except Exception as e:
-            log_tf.warning("copy provider failed: %s", e)
+    # sinon l'ancien greffon dans le miroir, indéfiniment. 2.3.0 : sous les
+    # deux noms de registre (voir _TF_MIRROR_HOSTS).
+    _tf_mirror_provider(ws_dir, "harvester", "harvester", version, bin_src)
+    return version
+
+
+def _tf_plugin_cache_init_libvirt(ws_dir):
+    """Miroir du provider libvirt d'un espace KVM ; sa version, ou None
+    quand le provider n'est pas posé."""
+    bin_src, version = _tf_libvirt_binary(), _tf_libvirt_version()
+    if not bin_src or not version:
+        return None
+    _tf_mirror_provider(ws_dir, "dmacvicar", "libvirt", version, bin_src)
     return version
 
 
@@ -26701,6 +27367,14 @@ def api_terraform_info():
         "provider_installed_at": meta.get("installed_at", 0),
         "provider_can_install": _tf_provider_installer() is not None,
         "provider_arch": _tf_host_arch(),
+        # 2.3.0 : le provider libvirt des déclarations KVM (embarqué, vérifié
+        # par sa somme publiée et la signature GPG de la release)
+        "libvirt_provider_version": _tf_libvirt_version(),
+        "libvirt_provider_binary": str(_tf_libvirt_binary() or ""),
+        "libvirt_provider_sha256": _tf_libvirt_meta().get("sha256", ""),
+        "libvirt_provider_signer": _tf_libvirt_meta().get("signer_fingerprint", ""),
+        "libvirt_provider_source": _tf_libvirt_meta().get("source", ""),
+        "libvirt_provider_dir": str(TF_LIBVIRT_DIR),
         "terraform_bin": TF_BIN,
         "terraform_flavor": TF_FLAVOR,
         "terraform_available": Path(TF_BIN).exists(),
@@ -26857,28 +27531,19 @@ def _terraform_cli_version():
     return "?"
 
 
-def _tf_run_cmd(ws_dir, kc_path, args, timeout=300):
+def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=()):
     """Invoke terraform with the right env vars (HARVESTER_KUBECONFIG) and
     return (rc, stdout, stderr).
 
-    Generates a per-workspace `terraformrc` that pins the harvester provider
-    to our local mirror so a user's ~/.terraformrc dev_overrides can't
-    interfere (was breaking init with constraints-mismatch errors)."""
-    version = _tf_provider_version().lstrip("v") or "0.0.0"
-    plug_root = (ws_dir / "plugins").resolve()
-    rc_file = ws_dir / "terraformrc"
-    if not rc_file.exists() and plug_root.exists():
-        rc_file.write_text(
-            'provider_installation {\n'
-            '  filesystem_mirror {\n'
-            f'    path    = "{plug_root}"\n'
-            '    include = ["registry.terraform.io/harvester/harvester"]\n'
-            '  }\n'
-            '  direct {\n'
-            '    exclude = ["registry.terraform.io/harvester/harvester"]\n'
-            '  }\n'
-            '}\n'
-        )
+    Generates a per-workspace `terraformrc` that pins the providers of the
+    local mirror (harvester, and libvirt for a KVM declaration, 2.3.0) so a
+    user's ~/.terraformrc dev_overrides can't interfere (was breaking init
+    with constraints-mismatch errors) and nothing is fetched from the
+    Internet. `extra_env` : variables ajoutées (jeton RKE2 en TF_VAR_, jamais
+    dans argv) ; `drop_env` : variables retirées (SSH_AUTH_SOCK : seule la
+    clé de l'hôte doit servir)."""
+    _tf_secure_ws(ws_dir)
+    rc_file = _tf_write_rc(ws_dir) or (ws_dir / "terraformrc")
     env = {
         **os.environ,
         "HARVESTER_KUBECONFIG": kc_path,
@@ -26887,12 +27552,34 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300):
         "TF_CLI_CONFIG_FILE": str(rc_file) if rc_file.exists() else os.environ.get("TF_CLI_CONFIG_FILE", ""),
         "NO_COLOR": "1",
     }
+    for k in drop_env:
+        env.pop(k, None)
+    env.update(extra_env or {})
     try:
+        # umask 077 : état, copies et plans que crée tofu naissent en 0600
         r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env,
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout, umask=0o077)
+        # 2.3.0 : un espace dont le verrou a été écrit d'après un provider
+        # téléchargé sur Internet (OpenTofu, avant le double miroir) refuse le
+        # miroir local au prochain `init` (sommes différentes, vu en réel). Le
+        # miroir de la console est la seule source du provider : le verrou
+        # périmé part, une seule nouvelle tentative.
+        if (args and args[0] == "init" and r.returncode != 0
+                and _TF_STALE_LOCK in " ".join((r.stderr or "").split())
+                and (ws_dir / ".terraform.lock.hcl").exists()):
+            (ws_dir / ".terraform.lock.hcl").unlink()
+            log_tf.warning("terraform lock file of %s did not match the local mirror: recreated",
+                           ws_dir.name)
+            r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env,
+                               capture_output=True, text=True, timeout=timeout, umask=0o077)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
+    finally:
+        _tf_secure_ws(ws_dir)
+
+
+_TF_STALE_LOCK = "doesn't match any of the checksums previously recorded in the dependency lock file"
 
 
 @app.route("/api/terraform/<cluster>/state")
@@ -27025,11 +27712,42 @@ def _tf_decl_id_ok(decl_id):
     return bool(_tfs.ID_RE.match(str(decl_id or "")))
 
 
+# Le cloud-init d'une ressource peut porter des mots de passe : lu par un
+# opérateur seulement, comme côté Harvester et KVM (/cloudinit). Un lecteur
+# voit la déclaration sans ces champs ; le code produit demande l'opérateur.
+_TF_HIDDEN_FOR_VIEWERS = ("user_data", "network_data")
+
+
+def _tf_decl_for_role(view):
+    if view is None or ROLE_RANK.get(current_role(), 0) >= ROLE_RANK["operator"]:
+        return view
+    out = dict(view)
+    res = []
+    for r in view.get("resources") or []:
+        spec = dict(r.get("spec") or {})
+        for key in _TF_HIDDEN_FOR_VIEWERS:
+            if spec.get(key):
+                spec[key] = "(hidden)"
+        for blk in ("cloudinit",):
+            if isinstance(spec.get(blk), list):
+                spec[blk] = [{k: ("(hidden)" if k in _TF_HIDDEN_FOR_VIEWERS and v else v)
+                              for k, v in (b or {}).items()} for b in spec[blk]]
+        res.append(dict(r, spec=spec))
+    out["resources"] = res
+    return out
+
+
 @app.route("/api/tf-declarations")
 @requires_auth
 def api_tf_declarations():
+    """Les déclarations ; `?cluster=` celles d'un cluster Harvester (comme
+    avant la 2.3.0), `?family=harvester|kvm` celles d'une famille de cibles,
+    `?family=kvm&cluster=<hôte>` celles d'un hôte KVM."""
     cluster = request.args.get("cluster") or None
-    return jsonify({"declarations": [_tf_decl_view(d) for d in TF_DECLS.list(cluster)]})
+    family = request.args.get("family") or None
+    if family and family not in _tfs.TARGET_KINDS:
+        return jsonify({"error": "family must be harvester or kvm"}), 400
+    return jsonify({"declarations": [_tf_decl_for_role(_tf_decl_view(d)) for d in TF_DECLS.list(cluster, family)]})
 
 
 @app.route("/api/tf-declarations", methods=["POST"])
@@ -27040,12 +27758,21 @@ def api_tf_declaration_create():
     reprise des déclarations d'avant la v1.54 (localStorage) garde le leur."""
     data = request.get_json(force=True, silent=True) or {}
     cluster = str(data.get("cluster") or "")
-    if not _kubectl_for_cluster(cluster):
+    # 2.3.0 : la cible est un cluster Harvester (défaut) ou un hôte KVM déclaré
+    target_kind = str(data.get("target_kind") or "harvester")
+    if target_kind not in _tfs.TARGET_KINDS:
+        return jsonify({"error": "target_kind must be harvester or kvm", "code": "invalid-target"}), 400
+    if target_kind == "kvm":
+        _host, err = _tf_kvm_host(cluster)
+        if err:
+            return jsonify({"error": err[0]}), err[1]
+    elif not _kubectl_for_cluster(cluster):
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
     decl_id = str(data.get("id") or uuid.uuid4().hex[:12])
     try:
         d = TF_DECLS.create(decl_id, cluster, data.get("name"), data.get("description") or "",
-                            data.get("resources") or [], user=current_user() or "")
+                            data.get("resources") or [], user=current_user() or "",
+                            target_kind=target_kind)
     except _tfs.StoreError as e:
         return _tf_store_error(e)
     return jsonify(_tf_decl_view(d)), 201
@@ -27057,7 +27784,7 @@ def api_tf_declaration_get(decl_id):
     d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
     if d is None:
         return jsonify({"error": "declaration not found"}), 404
-    return jsonify(_tf_decl_view(d))
+    return jsonify(_tf_decl_for_role(_tf_decl_view(d)))
 
 
 @app.route("/api/tf-declarations/<decl_id>", methods=["PUT"])
@@ -27086,8 +27813,13 @@ def api_tf_declaration_code(decl_id):
     d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
     if d is None:
         return jsonify({"error": "declaration not found"}), 404
-    rendered, errors = _tf_render_resources(d["resources"])
-    files = [{"name": "_providers.tf", "content": _TF_HEADER}]
+    kind = d.get("target_kind") or "harvester"
+    rendered, errors = _tf_render_resources(d["resources"], kind)
+    head = _TF_HEADER
+    if kind == "kvm":
+        host, err = _tf_kvm_host(d["cluster"])
+        head = _tfk.header(host) if host else f"# {err[0]}\n"
+    files = [{"name": "_providers.tf", "content": head}]
     for safe, kind, spec, hcl, addr, i in rendered:
         body = hcl[len(_TF_HEADER):] if hcl.startswith(_TF_HEADER) else hcl
         files.append({"name": f"{safe}.tf", "content": body, "address": addr,
@@ -27145,7 +27877,11 @@ def api_tf_declaration_delete(decl_id):
     d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
     if d is None:
         return jsonify({"error": "declaration not found"}), 404
-    ws = _tf_decl_workspace_dir(d["cluster"], decl_id, create=False)
+    with TF_KVM_RUNNING_LOCK:
+        if decl_id in TF_KVM_RUNNING:
+            return jsonify({"error": "this declaration is running", "code": "running",
+                            "hint": "wait for the current plan, apply or destroy to end"}), 409
+    ws = _tf_decl_ws(d, create=False)
     deployed = _tfst.addresses(ws) if ws.exists() else []
     if deployed:
         return jsonify({"error": "declaration still has deployed resources",
@@ -27240,7 +27976,7 @@ def _tf_raw_name(hcl):
     return m.group(1) if m else ""
 
 
-def _tf_render_resources(resources):
+def _tf_render_resources(resources, target_kind="harvester"):
     """(rendu, erreurs) : rendu = [(nom_sûr, kind, spec, hcl, adresse, rang)].
 
     Le nom sûr nomme les fichiers `<nom>.tf` / `<nom>.json` et, pour les
@@ -27249,23 +27985,59 @@ def _tf_render_resources(resources):
     nom de son bloc `resource` (elle s'appelait d'après les 24 premiers
     caractères de son code, `resource_harvester_ssh_`, audit D6)."""
     rendered, errors, seen = [], [], set()
+    target_kind = target_kind or "harvester"
+    taken = {}                       # adresse -> rang, pour les ressources KVM
     for i, res in enumerate(resources or []):
         kind = (res or {}).get("kind") or ""
         spec = (res or {}).get("spec") or {}
-        hcl = _render_tf_for_kind(kind, spec)
-        if not hcl:
+        # 2.3.0 : chaque famille de ressources va à sa cible ; le code libre
+        # va dans les deux
+        if kind not in _tfs.KINDS_OF.get(target_kind, ()):
+            errors.append({"index": i, "kind": kind, "name": spec.get("name"),
+                           "error": f"a {kind} resource does not go to a {target_kind} target"})
+            continue
+        kvm_kind = kind in _tfs.KVM_KINDS
+        hcl = "" if kvm_kind else _render_tf_for_kind(kind, spec)
+        if not kvm_kind and not hcl:
             errors.append({"index": i, "kind": kind, "name": spec.get("name"),
                            "error": "missing required fields"})
             continue
-        base = spec.get("name") or (_tf_raw_name(spec.get("tf")) if kind == "raw" else "") or f"res_{i}"
+        base = str(spec.get("name") or "") or (_tf_raw_name(spec.get("tf")) if kind == "raw" else "") or f"res_{i}"
         safe = re.sub(r"[^a-z0-9_]+", "_", base.lower()) or f"res_{i}"
+        if kvm_kind:
+            # un nom de ressource Terraform commence par une lettre
+            safe = safe.strip("_") or f"res_{i}"
+            if not safe[0].isalpha():
+                safe = f"r_{safe}"
         n, j = safe, 1
         while n in seen:
             j += 1
             n = f"{safe}_{j}"
         seen.add(n)
+        if kvm_kind:
+            try:
+                hcl = _tfk.render(kind, spec, n, seed=str((res or {}).get("id") or n))
+            except _tfk.SpecError as e:
+                errors.append({"index": i, "kind": kind, "name": spec.get("name"), "error": str(e)})
+                continue
+            clash = [a for a in _tfk.addresses(kind, n, spec) if a in taken]
+            if clash:
+                errors.append({"index": i, "kind": kind, "name": spec.get("name"),
+                               "error": f"{clash[0]} is already produced by resource #{taken[clash[0]] + 1}"})
+                continue
+            taken.update({a: i for a in _tfk.addresses(kind, n, spec)})
+            rendered.append((n, kind, spec, hcl, _tfk.addresses(kind, n, spec)[0], i))
+            continue
         rendered.append((n, kind, spec, hcl, _tf_address_for_resource(kind, n, hcl=hcl), i))
     return rendered, errors
+
+
+def _tf_all_addresses(kind, safe, spec, primary):
+    """Toutes les adresses d'une ressource de déclaration, la principale en
+    tête (une VM KVM produit aussi son disque et son disque cloud-init)."""
+    if kind in _tfs.KVM_KINDS:
+        return _tfk.addresses(kind, safe, spec)
+    return [primary] if primary else []
 
 
 def _safe_name_for_spec(spec, fallback="res"):
@@ -27402,7 +28174,7 @@ def _tf_apply_declaration_runner(run, cluster, kc, rendered, dry_run,
 
 
 # Fichiers d'un espace de déclaration qui ne décrivent pas une ressource.
-_TF_KEEP = {"_providers.tf", "kubeconfig", "terraformrc", "tfplan", "tfplan.meta"}
+_TF_KEEP = {"_providers.tf", "kubeconfig", "terraformrc", "tfplan", "tfplan.meta", ".outputs.json"}
 
 
 def _tf_decl_hash(rendered):
@@ -27415,7 +28187,7 @@ def _tf_decl_hash(rendered):
 def _tf_decl_resource_addresses(decl):
     """{id de ressource: adresse Terraform} d'une déclaration."""
     resources = decl.get("resources") or []
-    rendered, _ = _tf_render_resources(resources)
+    rendered, _ = _tf_render_resources(resources, decl.get("target_kind") or "harvester")
     return {resources[r[5]]["id"]: r[4] for r in rendered if r[4]}
 
 
@@ -27425,19 +28197,32 @@ def _tf_decl_view(decl):
     if decl is None:
         return None
     d = dict(decl)
-    addr = _tf_decl_resource_addresses(decl)
-    d["resources"] = [dict(r, address=addr.get(r["id"])) for r in decl.get("resources") or []]
-    rendered, errors = _tf_render_resources(decl.get("resources") or [])
+    d["target_kind"] = decl.get("target_kind") or "harvester"
+    rendered, errors = _tf_render_resources(decl.get("resources") or [], d["target_kind"])
+    res = decl.get("resources") or []
+    addr = {res[r[5]]["id"]: r[4] for r in rendered if r[4]}
+    # 2.3.0 : une ressource KVM produit plusieurs objets Terraform (VM, disque,
+    # disque cloud-init) ; la page les compte comme les siens
+    every = {res[r[5]]["id"]: _tf_all_addresses(r[1], r[0], r[2], r[4]) for r in rendered}
+    d["resources"] = [dict(r, address=addr.get(r["id"]), addresses=every.get(r["id"], []))
+                      for r in res]
     # v1.55.0 : l'empreinte du contenu, pour que la page sache si le
     # dernier plan vaut encore pour ce qui est écrit.
     d["content_hash"] = _tf_decl_hash(rendered) if not errors else None
     d["incomplete"] = [e["index"] for e in errors]
     ws = None
     try:
-        ws = _tf_decl_workspace_dir(decl["cluster"], decl["id"], create=False)
+        ws = _tf_decl_ws(decl, create=False)
     except ValueError:
         pass
     d["deployed"] = _tfst.addresses(ws) if ws and ws.exists() else []
+    # sorties non sensibles du dernier apply (adresses des nœuds RKE2...)
+    d["outputs"] = None
+    if ws and (ws / ".outputs.json").exists():
+        try:
+            d["outputs"] = json.loads((ws / ".outputs.json").read_text())
+        except (OSError, ValueError):
+            d["outputs"] = None
     meta = {}
     if ws and (ws / "tfplan.meta").exists():
         try:
@@ -27448,16 +28233,21 @@ def _tf_decl_view(decl):
     return d
 
 
-def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None):
+def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harvester"):
     """Lance plan, apply ou destroy d'une déclaration gardée par la console,
-    en action suivie. `mode` : plan | apply | destroy | destroy-plan."""
+    en action suivie. `mode` : plan | apply | destroy | destroy-plan.
+    2.3.0 : `target_kind` kvm pour un hôte KVM (`cluster` = l'hôte, pas de
+    kubeconfig) ; une seule exécution à la fois par déclaration KVM."""
     decl = TF_DECLS.get(decl_id)
     if decl is None:
         return jsonify({"error": "declaration not found", "id": decl_id}), 404
+    if (decl.get("target_kind") or "harvester") != target_kind:
+        return jsonify({"error": f"declaration targets a {decl.get('target_kind')} "
+                                 f"host, not a {target_kind} one"}), 400
     if decl["cluster"] != cluster:
         return jsonify({"error": "declaration belongs to another cluster",
                         "cluster": decl["cluster"]}), 400
-    rendered, errors = _tf_render_resources(decl["resources"])
+    rendered, errors = _tf_render_resources(decl["resources"], target_kind)
     if errors:
         return jsonify({"error": "one or more resources are incomplete", "errors": errors,
                         "supported": ["vm", "image", "ssh_key", "raw"]}), 400
@@ -27472,6 +28262,15 @@ def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None):
                         "hint": "the declaration changed since this plan; plan again"}), 409
     label = {"plan": "tf-plan-decl", "apply": "tf-apply-decl",
              "destroy": "tf-destroy-decl", "destroy-plan": "tf-destroy-decl"}[mode]
+    if target_kind == "kvm":
+        if not _tf_libvirt_binary() or not _tf_libvirt_version():
+            return jsonify({"error": "the libvirt Terraform provider is not installed",
+                            "hint": "it ships with the harvester-ops package; see the Installation tab"}), 503
+        with TF_KVM_RUNNING_LOCK:
+            if decl["id"] in TF_KVM_RUNNING:
+                return jsonify({"error": "this declaration is already running",
+                                "hint": "wait for the current plan, apply or destroy to end"}), 409
+            TF_KVM_RUNNING.add(decl["id"])
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, f"{label}:{decl['name']}:{len(rendered)}", cluster, [],
                     dry_run=mode in ("plan", "destroy-plan"))
@@ -27488,6 +28287,38 @@ def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None):
 
 
 def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_saved_plan, user):
+    """Exécute la déclaration ; pour une cible KVM, retire la clé et
+    l'empreinte copiées dans l'espace QUOI QU'IL ARRIVE, et libère la
+    déclaration."""
+    kvm = (decl.get("target_kind") or "harvester") == "kvm"
+    try:
+        return _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash,
+                                    use_saved_plan, user)
+    except Exception as e:                 # noqa: BLE001 : l'action ne reste pas « en cours »
+        log_tf.exception("declaration %s", decl.get("id"))
+        if run.status not in ("done", "error"):
+            msg = str(e)
+            if kvm:
+                try:
+                    msg = _tf_kvm_scrub(msg, _tf_decl_ws(decl, create=False))
+                except ValueError:
+                    msg = type(e).__name__
+                msg = _tf_kvm_scrub(msg, TF_WORKSPACES)
+            _close_err(run, "internal", msg[:300])
+    finally:
+        if kvm:
+            try:
+                ws = _tf_decl_ws(decl, create=False)
+                _tf_kvm_unstage(ws)
+                for f in ws.glob("terraform.tfstate*"):
+                    os.chmod(f, 0o600)       # l'état garde le cloud-init, jeton compris
+            except (OSError, ValueError) as e:
+                log_tf.warning("KVM declaration cleanup: %s", e)
+            with TF_KVM_RUNNING_LOCK:
+                TF_KVM_RUNNING.discard(decl["id"])
+
+
+def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, use_saved_plan, user):
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
 
@@ -27505,19 +28336,56 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
 
     destroying = mode in ("destroy", "destroy-plan")
     name = decl["name"]
+    kvm = (decl.get("target_kind") or "harvester") == "kvm"
     step("preflight", "running", f"declaration '{name}' ({len(rendered)} resources)")
-    ws = _tf_decl_workspace_dir(cluster, decl["id"])
-    shared = _tf_workspace_dir(cluster)
-    try:
-        _stage_kubeconfig(kc, ws)
-    except Exception as e:
-        return _close_err(run, "preflight", f"kubeconfig copy failed: {e}")
-    (ws / "_providers.tf").write_text(_TF_HEADER)
+    ws = _tf_decl_ws(decl)
+    env, drop = {}, ()
+    if kvm:
+        # 2.3.0 : hôte KVM. Clé et empreinte épinglée recopiées en 0600 le
+        # temps de l'exécution (retirées par _tf_decl_runner), jamais dans argv.
+        host_decl, herr = _tf_kvm_host(cluster)
+        if herr:
+            return _close_err(run, "preflight", herr[0])
+        try:
+            header = _tfk.header(host_decl)
+            _tf_kvm_stage(ws, host_decl)
+        except _tfk.SpecError as e:
+            return _close_err(run, "preflight", str(e))
+        except (OSError, _kd.DeclError):
+            return _close_err(run, "preflight", f"host {cluster}: its SSH key or pinned host key "
+                                                "cannot be read in the console state")
+        (ws / "_providers.tf").write_text(header)
+        env, drop = _tf_kvm_env(ws, rendered), ("SSH_AUTH_SOCK",)
+        kcp = ""
+        why = _tf_kvm_preflight(ws, host_decl, env)
+        if why:
+            return _close_err(run, "preflight", why)
+        if not destroying:
+            why = _tf_kvm_check_bases(host_decl, rendered)
+            if why:
+                return _close_err(run, "preflight", why)
+    else:
+        try:
+            _stage_kubeconfig(kc, ws)
+        except Exception as e:
+            return _close_err(run, "preflight", f"kubeconfig copy failed: {e}")
+        (ws / "_providers.tf").write_text(_TF_HEADER)
+        kcp = str((ws / "kubeconfig").resolve())
 
-    # Reprise : ce qui a été appliqué avant la v1.54 vit dans l'état partagé.
+    def tf(args, timeout):
+        if not kvm:
+            return _tf_run_cmd(ws, kcp, args, timeout=timeout)
+        rc, out, err = _tf_run_cmd(ws, kcp, args, timeout=timeout, extra_env=env, drop_env=drop)
+        if args and args[0] == "show":           # JSON lu par la console, jamais renvoyé tel quel
+            return rc, out, _tf_kvm_scrub(err, ws)
+        return rc, _tf_kvm_scrub(out, ws), _tf_kvm_scrub(err, ws)
+
+    # Reprise : ce qui a été appliqué avant la v1.54 vit dans l'état partagé
+    # (Harvester seulement : une cible KVM n'a jamais eu d'état partagé).
+    shared = None if kvm else _tf_workspace_dir(cluster)
     wanted = {r[4] for r in rendered}
-    lock_file = shared / ".terraform.tfstate.lock.info"
-    if wanted - set(_tfst.addresses(ws)) and not lock_file.exists():
+    lock_file = shared / ".terraform.tfstate.lock.info" if shared else None
+    if shared and wanted - set(_tfst.addresses(ws)) and not lock_file.exists():
         with TF_STATE_LOCK:
             moved = _tfst.move(shared, ws, wanted)
         for a in moved:
@@ -27541,13 +28409,16 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
             _write_resource_with_sidecar(ws, safe, hcl, kind, spec, name)
         except OSError as e:
             return _close_err(run, "preflight", f"writing {safe}.tf failed: {e}")
-    _tf_plugin_cache_init(ws)
+    if kvm:
+        if not _tf_plugin_cache_init_libvirt(ws):
+            return _close_err(run, "preflight", "the libvirt Terraform provider is not installed")
+    else:
+        _tf_plugin_cache_init(ws)
     step("preflight", "done", f"workspace of declaration {decl['id']}")
-    kcp = str((ws / "kubeconfig").resolve())
 
     if not (ws / ".terraform").exists():
         step("init", "running", "init")
-        rc, out, err = _tf_run_cmd(ws, kcp, ["init", "-input=false"], timeout=120)
+        rc, out, err = tf(["init", "-input=false"], 120)
         if rc != 0:
             return _close_err(run, "init", err.strip()[:400] or out.strip()[:400])
         step("init", "done", "providers ready")
@@ -27556,7 +28427,7 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
         args = (["plan", "-destroy", "-input=false", "-no-color"] if mode == "destroy-plan"
                 else ["destroy", "-input=false", "-no-color", "-auto-approve"])
         step("destroy", "running", args[0])
-        rc, out, err = _tf_run_cmd(ws, kcp, args, timeout=900)
+        rc, out, err = tf(args, 900)
         for line in (out or "").splitlines()[-60:]:
             if line.strip():
                 log(line)
@@ -27567,7 +28438,7 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
         if mode == "destroy":
             for f in list(ws.glob("*.tf")) + list(ws.glob("*.json")) + [ws / "tfplan", ws / "tfplan.meta"]:
                 if f.name != "_providers.tf":
-                    f.unlink(missing_ok=True)
+                    f.unlink(missing_ok=True)       # .outputs.json compris
             TF_DECLS.mark_applied(decl["id"], "destroyed", user)
         step("destroy", "done", f"declaration '{name}' destroyed" if mode == "destroy" else "destroy plan ready")
         return done({"deployed": _tfst.addresses(ws)})
@@ -27575,19 +28446,21 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
     summary = None
     if not (use_saved_plan and (ws / "tfplan").exists()):
         step("plan", "running", "plan")
-        rc, out, err = _tf_run_cmd(ws, kcp, ["plan", "-input=false", "-no-color", "-out=tfplan"],
-                                   timeout=300)
+        rc, out, err = tf(["plan", "-input=false", "-no-color", "-out=tfplan"], 300)
         if rc != 0:
             (ws / "tfplan.meta").unlink(missing_ok=True)
             return _close_err(run, "plan", err.strip()[:400] or out.strip()[:400])
         for line in (out or "").splitlines()[-40:]:
             if line.strip():
                 log(line)
-        rc2, js, _ = _tf_run_cmd(ws, kcp, ["show", "-json", "tfplan"], timeout=120)
+        rc2, js, _ = tf(["show", "-json", "tfplan"], 120)
         try:
             summary = _tfst.plan_summary(json.loads(js)) if rc2 == 0 else None
         except ValueError:
             summary = None
+        if kvm and summary:
+            # les chemins de l'espace (ISO cloud-init sous .tmp) ne sortent pas
+            summary = json.loads(_tf_kvm_scrub(json.dumps(summary), ws))
         meta = {"hash": content_hash, "revision": decl["revision"],
                 "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "by": user,
                 "summary": summary}
@@ -27608,8 +28481,7 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
         return done({"plan": summary, "plan_hash": content_hash})
 
     step("apply", "running", f"apply ({len(rendered)} resources)")
-    rc, out, err = _tf_run_cmd(ws, kcp, ["apply", "-input=false", "-no-color", "-auto-approve", "tfplan"],
-                               timeout=900)
+    rc, out, err = tf(["apply", "-input=false", "-no-color", "-auto-approve", "tfplan"], 1800 if kvm else 900)
     for line in (out or "").splitlines()[-60:]:
         if line.strip():
             log(line)
@@ -27619,8 +28491,32 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
         TF_DECLS.mark_applied(decl["id"], "error", user)
         return _close_err(run, "apply", err.strip()[:400] or out.strip()[:400])
     TF_DECLS.mark_applied(decl["id"], "done", user)
+    if kvm:
+        _tf_save_outputs(ws, tf, _tfk.output_names(rendered))
     step("apply", "done", f"declaration '{name}' applied ({len(rendered)} resources)")
     return done({"plan": summary, "deployed": _tfst.addresses(ws)})
+
+
+def _tf_save_outputs(ws, tf, wanted=None):
+    """Garde les sorties NON sensibles du dernier apply (`.outputs.json`,
+    0600) : adresses des nœuds, commande du kubeconfig. Seulement celles de
+    `wanted` (les sorties connues des modèles) ; une sortie sensible n'est
+    jamais écrite."""
+    rc, js, _ = tf(["output", "-json"], 60)
+    out = {}
+    if rc == 0:
+        try:
+            for k, v in (json.loads(js or "{}") or {}).items():
+                if wanted is not None and k not in wanted:
+                    continue
+                if isinstance(v, dict) and not v.get("sensitive"):
+                    out[k] = v.get("value")
+        except ValueError:
+            out = {}
+    try:
+        _tf_private_write(ws / ".outputs.json", json.dumps(out, indent=2).encode())
+    except OSError as e:
+        log_tf.warning("outputs: %s", e)
 
 
 _TF_HEADER = """terraform {
@@ -28072,6 +28968,71 @@ def api_terraform_destroy_declaration(cluster):
         daemon=True,
     ).start()
     return jsonify({"action_id": run_id}), 201
+
+
+# 2.3.0 : déclarations qui visent un hôte KVM. Seulement par identifiant
+# (gardées par la console) ; mêmes rôles que pour un cluster (opérateur).
+def _tf_kvm_needed_role(decl, mode):
+    """Rôle qu'il faut pour exécuter une déclaration KVM, aligné sur le
+    module KVM : un réseau sert à toutes les VMs de l'hôte, supprimer une VM
+    ou un volume est réservé (admin). Donc admin pour une déclaration qui
+    porte un réseau, pour toute destruction, et pour un apply dont le plan
+    relu détruit ou remplace ; opérateur pour le reste (un plan ne touche à
+    rien)."""
+    if mode in ("plan", "destroy-plan"):
+        return "operator"
+    if mode == "destroy":
+        return "admin"
+    if any(r.get("kind") == "kvm_network" for r in decl.get("resources") or []):
+        return "admin"
+    try:
+        meta = json.loads((_tf_decl_ws(decl, create=False) / "tfplan.meta").read_text())
+        counts = (meta.get("summary") or {}).get("counts") or {}
+    except (OSError, ValueError):
+        counts = {}
+    return "admin" if counts.get("delete") or counts.get("replace") else "operator"
+
+
+def _tf_kvm_route_start(host, mode_dry, mode_real):
+    data = request.get_json(force=True, silent=True) or {}
+    decl_id = str((data.get("declaration") or {}).get("id") or "")
+    if not _tf_decl_id_ok(decl_id):
+        return jsonify({"error": "a KVM declaration is run by its id",
+                        "hint": "body: {declaration: {id}, dry_run}"}), 400
+    _host, err = _tf_kvm_host(host)
+    if err:
+        return jsonify({"error": err[0]}), err[1]
+    dry_run = bool(data.get("dry_run", False))
+    mode = mode_dry if dry_run else mode_real
+    decl = TF_DECLS.get(decl_id)
+    if decl is not None and (decl.get("target_kind") or "harvester") == "kvm" and decl["cluster"] == host:
+        if mode == "apply" and not data.get("plan_hash"):
+            return jsonify({"error": "a KVM declaration applies a reviewed plan",
+                            "hint": "plan first, then apply with its plan_hash"}), 400
+        needed, have = _tf_kvm_needed_role(decl, mode), current_role()
+        if ROLE_RANK.get(have, 0) < ROLE_RANK[needed]:
+            return jsonify({"error": "forbidden", "role": have, "required": needed,
+                            "hint": f"this action needs the '{needed}' role; "
+                                    f"'{current_user() or 'you'}' has '{have}'"}), 403
+    return _tf_decl_start(host, None, decl_id, mode_dry if dry_run else mode_real,
+                          plan_hash=data.get("plan_hash") if not dry_run else None,
+                          target_kind="kvm")
+
+
+@app.route("/api/terraform/kvm/<host>/apply_declaration", methods=["POST"])
+@_rate_limit("20/minute")
+@requires_auth
+def api_terraform_kvm_apply_declaration(host):
+    """Plan (`dry_run`) ou apply d'une déclaration KVM, comme pour un cluster."""
+    return _tf_kvm_route_start(host, "plan", "apply")
+
+
+@app.route("/api/terraform/kvm/<host>/destroy_declaration", methods=["POST"])
+@_rate_limit("20/minute")
+@requires_auth
+def api_terraform_kvm_destroy_declaration(host):
+    """Destruction (ou son plan, `dry_run`) d'une déclaration KVM."""
+    return _tf_kvm_route_start(host, "destroy-plan", "destroy")
 
 
 def _tf_destroy_declaration_runner(run, cluster, kc, planned, dry_run,

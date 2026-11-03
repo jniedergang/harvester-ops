@@ -425,7 +425,7 @@ def test_routes_are_authenticated_and_rate_limited():
     from limits import parse_many
     src = (WEB / "app.py").read_text()
     heads = src.split('@app.route("/api/baremetal/profiles')[1:]
-    assert len(heads) == 9
+    assert len(heads) == 10                   # 2.2.1 : + system-check
     for head in heads:
         head = head.split("\ndef ", 1)[0]
         assert "@requires_auth" in head
@@ -533,7 +533,7 @@ def test_cli_apply_runs_the_console_batch(tmp_path, monkeypatch, capsys):
     state, nodes, sec = _cli_env(tmp_path)
     seen = {}
 
-    def fake_start(prof, batch, secrets_, concurrency):
+    def fake_start(prof, batch, secrets_, concurrency, confirms=None):
         seen.update(prof=prof["name"], rows=batch["rows"], secrets=secrets_, conc=concurrency)
         run = wapp.ActionRun("cli1", "baremetal-batch:rack-a", "(local)", [])
         run.emit({"type": "step", "step_id": "node-1", "status": "done", "message": "node1"})
@@ -541,7 +541,7 @@ def test_cli_apply_runs_the_console_batch(tmp_path, monkeypatch, capsys):
         run.result = {"nodes": [{"row": 1, "status": "done"}]}
         with wapp.ACTIONS_LOCK:
             wapp.ACTIONS["cli1"] = run
-        return "cli1", None
+        return "cli1", None, None
     monkeypatch.setattr(wapp, "_bm_batch_start", fake_start)
     monkeypatch.setitem(sys.modules, "app", wapp)
     code = _cli().main(["profile", "--state-dir", str(state), "apply", "rack-a", "--nodes", str(nodes),
@@ -594,13 +594,13 @@ def test_cli_apply_neither_watches_nor_writes_to_tmp(tmp_path, monkeypatch, caps
             os.environ.pop(k, None)
         seen = {}
 
-        def fake_start(prof, batch, secrets_, concurrency):
+        def fake_start(prof, batch, secrets_, concurrency, confirms=None):
             seen.update({k: os.environ.get(k) for k in ("HARVESTER_OPS_WATCH", "HARVESTER_OPS_ACTIONS_DB")})
             run = wapp.ActionRun("cli2", "baremetal-batch:rack-a", "(local)", [])
             run.status, run.result = "done", {"nodes": []}
             with wapp.ACTIONS_LOCK:
                 wapp.ACTIONS["cli2"] = run
-            return "cli2", None
+            return "cli2", None, None
         monkeypatch.setattr(wapp, "_bm_batch_start", fake_start)
         monkeypatch.setitem(sys.modules, "app", wapp)
         _cli().main(["profile", "--state-dir", str(state), "apply", "rack-a", "--nodes", str(nodes),

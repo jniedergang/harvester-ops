@@ -39,7 +39,8 @@ def veil_in(page, body_selector):
 
 
 @pytest.mark.parametrize("subtab,body,slow_url", [
-    ("capi", "#capi-status-body", "**/api/capi/**/diag"),
+    # 2.2.0 : Cluster API s'ouvre sur Clusters, qui lit aussi le diagnostic
+    ("capi", "#capi-k8s-body", "**/api/capi/**/diag"),
     ("terraform", "#tf-status-body", "**/api/terraform/info"),
 ])
 def test_a_slow_tab_shows_the_blurred_veil(context, flask_server, subtab,

@@ -1,11 +1,16 @@
 /**
  * harvester-ops : l'onglet Terraform.
  *
- * Trois sous-onglets : Déclarations (la vue TFDeclView, v1.55.0 : liste,
- * déclaration choisie, plan lisible avant d'appliquer), Ressources du
- * cluster (tout ce que Terraform gère ici, déclaration par déclaration) et
- * Installation (CLI, provider, paquet airgap). Les déclarations sont gardées
- * par la console et ont chacune leur état Terraform (v1.54.0).
+ * 2.2.0 : quatre onglets dans l'en-tête d'Automatisation
+ * (#automation/terraform/<onglet>) : Déclarations (défaut ; la vue
+ * TFDeclView, v1.55.0 : liste, déclaration choisie, plan lisible avant
+ * d'appliquer), Ressources (tout ce que Terraform gère sur le cluster de
+ * gestion, déclaration par déclaration), Historique (les plans, applications
+ * et destructions de l'Activité) et Installation (OpenTofu, provider
+ * embarqué, paquet airgap). Les déclarations sont gardées par la console et
+ * ont chacune leur état Terraform (v1.54.0). 2.3.0 : une déclaration vise
+ * un cluster Harvester ou un hôte KVM (provider libvirt, listé dans
+ * Installation).
  */
 const TF = (() => {
   // Cluster de gestion (navigation 2.0) : plus de lecture du sélecteur
@@ -42,6 +47,7 @@ const TF = (() => {
   async function refresh() {
     const out = $('#tf-status-body');
     if (!out) return;
+    paintTabs();
     const cluster = mgmtCluster();
     // Même voile flouté que les autres chargements. Posé sur la CARTE : le
     // corps est réécrit par le rendu et emporterait le voile avec lui.
@@ -76,26 +82,86 @@ const TF = (() => {
 
     out.innerHTML = renderShell(info, state, cluster);
     if (window.TFDeclView) TFDeclView.mount($('#tf-decls-view'), cluster);
-    activateSubtab(getSavedSubtab());
+    paintTabs();
+    if (tab === 'history') tfHistory.render();
   }
 
-  const SUBTAB_KEY = 'harvester_ops_tf_subtab';
-  function getSavedSubtab() {
-    try { return localStorage.getItem(SUBTAB_KEY) || 'decls'; }
-    catch { return 'decls'; }
+  // -------------------------------------------------------------------------
+  // 2.2.0 : onglets (#automation/terraform/<onglet>), dans l'ordre
+  // Déclarations (défaut), Ressources, Historique, Installation
+  // -------------------------------------------------------------------------
+  const TABS = ['declarations', 'resources', 'history', 'installation'];
+  const OLD_TABS = { decls: 'declarations', live: 'resources', install: 'installation' };
+  let tab = 'declarations';
+
+  function paintTabs() {
+    const strip = $('#tab-automation .tf-tabs');
+    if (strip) strip.setAttribute('aria-label', i18n.t('tf.tabs'));
+    $$('#tab-automation .sub-tab[data-tf-tab]').forEach((b) => {
+      const on = b.dataset.tfTab === tab;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    $$('#tf-status-body [data-tf-pane]').forEach((p) => { p.hidden = p.dataset.tfPane !== tab; });
   }
-  function setSavedSubtab(name) {
-    try { localStorage.setItem(SUBTAB_KEY, name); } catch {}
+
+  /** Onglet demandé (adresse, clic) ; `render: false` = seulement retenu,
+   *  le rendu viendra de refresh() (routeur). */
+  function setTab(name, opts) {
+    const o = opts || {};
+    const n = OLD_TABS[name] || name;
+    tab = TABS.includes(n) ? n : 'declarations';
+    if (o.render === false) return;
+    if (tab !== 'history') tfHistory.stop();
+    if (!$('#tf-status-body [data-tf-pane]')) refresh();
+    else { paintTabs(); if (tab === 'history') tfHistory.render(); }
+    if (o.sync && window.Router) Router.syncFromScreen();
   }
-  function activateSubtab(name) {
-    if (!['live', 'decls', 'install'].includes(name)) name = 'decls';
-    document.querySelectorAll('#tf-status-body .sub-tab[data-tf-tab]')
-      .forEach(btn => btn.classList.toggle('active',
-                                            btn.dataset.tfTab === name));
-    document.querySelectorAll('#tf-status-body .tf-subtab-content[data-tf-tab]')
-      .forEach(pane => pane.classList.toggle('active',
-                                                pane.dataset.tfTab === name));
-    setSavedSubtab(name);
+
+  // Historique : l'Activité filtrée sur les plans, applications et
+  // destructions (tf-plan*, tf-apply*, tf-destroy*) ; le provider et le
+  // paquet (Installation) n'y entrent pas.
+  const historyShown = () => tab === 'history'
+    && !!document.querySelector('#tab-automation.active > .sub-tab-content[data-subtab="terraform"].active');
+
+  // Libellé d'une action (verbe de l'Activité) ; table littérale, visible des
+  // tests de traduction
+  function kindLabel(a) {
+    const verb = String(a.action || '').split(':', 1)[0];
+    switch (verb) {
+      case 'tf-plan-decl': return i18n.t('tf.hist.kind.plan');
+      case 'tf-apply-decl': return i18n.t('tf.hist.kind.apply');
+      case 'tf-destroy-decl': return a.dry_run ? i18n.t('tf.hist.kind.destroyPlan') : i18n.t('tf.hist.kind.destroy');
+      case 'tf-apply': return i18n.t('tf.hist.kind.applyResource');
+      case 'tf-destroy': return i18n.t('tf.hist.kind.destroyAll');
+      case 'tf-destroy-resource': return i18n.t('tf.hist.kind.destroyResource');
+      default: return verb;
+    }
+  }
+
+  const tfHistory = AutoHistory.create({
+    box: () => $('#tf-history'), queries: ['tf-plan', 'tf-apply', 'tf-destroy'], cls: 'tf', shown: historyShown,
+    cluster: true, label: kindLabel, hint: () => i18n.t('tf.hist.hint'), empty: () => i18n.t('tf.hist.empty'),
+  });
+
+  /** Vérifier avant d'agir : les déclarations visent Harvester (provider
+   *  harvester/harvester, _TF_HEADER côté serveur) et passent par OpenTofu ;
+   *  l'absence de l'un ou de l'autre est dite sur Déclarations. */
+  function missingBanner(info, cluster) {
+    const msgs = [];
+    if (!info.provider_binary) msgs.push(i18n.t('tf.banner.provider', { cluster: cluster || '-' }));
+    // 2.3.0 : sans le provider libvirt, les déclarations qui visent un hôte KVM ne s'exécutent pas
+    if (!info.libvirt_provider_binary && window.TFDecl && TFDecl.list(null, 'kvm').length) {
+      msgs.push(i18n.t('tf.banner.libvirt'));
+    }
+    if (!info.terraform_available) {
+      msgs.push(i18n.t('tf.banner.cli', { cli: info.terraform_flavor === 'opentofu' ? 'OpenTofu' : 'Terraform' }));
+    }
+    if (!msgs.length) return '';
+    return `<div class="ct-banner auto-banner-warn tf-provider-missing" role="status">${Icons.svg('warn', { size: 14 })}
+        <span>${esc(msgs.join(' '))}</span>
+        <a href="#automation/terraform/installation" class="btn btn-sm btn-secondary tip" data-tf-goto="installation"
+           data-tip="${esc(i18n.t('tf.banner.openTip'))}">${esc(i18n.t('tf.banner.open'))}</a></div>`;
   }
 
   function renderShell(info, state, cluster) {
@@ -140,22 +206,12 @@ const TF = (() => {
             </tr>`;
         }).join('');
     return `
-      ${summary}
-
-      <nav class="sub-tabs sub-tabs-2nd" role="tablist" aria-label="Terraform">
-        <button type="button" class="sub-tab tip" data-tf-tab="decls" role="tab"
-                data-tip="${esc(i18n.t('tf.ui.t.decls'))}">${Icons.svg('bundle')} ${esc(i18n.t('tf.ui.decls'))}</button>
-        <button type="button" class="sub-tab tip" data-tf-tab="live" role="tab"
-                data-tip="${esc(i18n.t('tf.ui.t.live'))}">${Icons.svg('network')} ${esc(i18n.t('tf.ui.live'))}</button>
-        <button type="button" class="sub-tab tip" data-tf-tab="install" role="tab"
-                data-tip="${esc(i18n.t('tf.ui.t.install'))}">${Icons.svg('settings')} ${esc(i18n.t('tf.ui.install'))}</button>
-      </nav>
-
-      <section class="tf-subtab-content" data-tf-tab="decls" role="tabpanel">
+      <div class="tf-pane" data-tf-pane="declarations" role="tabpanel">
+        ${missingBanner(info, cluster)}
         <div id="tf-decls-view" class="tfd-host"></div>
-      </section>
+      </div>
 
-      <section class="tf-subtab-content" data-tf-tab="live" role="tabpanel">
+      <div class="tf-pane" data-tf-pane="resources" role="tabpanel" hidden>
         <h4 style="margin-top:8px;">${esc(i18n.t('tf.ui.liveTitle', { cluster: cluster || '-' }))}</h4>
         <p class="form-hint">${esc(i18n.t('tf.ui.liveHint'))}</p>
         <table class="data-table">
@@ -173,9 +229,12 @@ const TF = (() => {
             ${Icons.svg('destroy')} ${esc(i18n.t('tf.ui.destroyAll'))}
           </button>
         </div>
-      </section>
+      </div>
 
-      <section class="tf-subtab-content" data-tf-tab="install" role="tabpanel">
+      <div class="tf-pane" data-tf-pane="history" role="tabpanel" hidden><div id="tf-history"></div></div>
+
+      <div class="tf-pane" data-tf-pane="installation" role="tabpanel" hidden>
+        ${summary}
         <h4 style="margin-top:8px;">${esc(i18n.t('tf.ui.installTitle'))}</h4>
         <table class="data-table" style="margin-bottom:14px;">
           <tbody>
@@ -199,6 +258,16 @@ const TF = (() => {
                        <ul class="form-hint">${(info.provider_searched || [])
                          .map(x => `<li><code>${esc(x)}</code></li>`).join('')}</ul>
                      </details>`}</td></tr>
+            <tr><td>${esc(i18n.t('tf.ui.libvirtProvider'))}</td>
+                <td>${info.libvirt_provider_binary
+                  ? `<code>${esc(info.libvirt_provider_binary)}</code>
+                     <span class="badge">${esc(i18n.t('tf.prov.origin.bundled'))}</span>
+                     <span class="form-hint">v${esc(info.libvirt_provider_version || '?')}${info.libvirt_provider_signer
+                       ? `, ${esc(i18n.t('tf.ui.libvirtVerified', { fpr: String(info.libvirt_provider_signer).slice(-16) }))}` : ''}</span>
+                     <p class="form-hint">${esc(i18n.t('tf.ui.libvirtHint'))}</p>`
+                  : `<span class="badge bad">${esc(i18n.t('tf.ui.missing'))}</span>
+                     <p class="form-hint">${esc(i18n.t('tf.ui.libvirtHint'))}</p>
+                     <p class="form-hint"><code>${esc(info.libvirt_provider_dir || '')}</code></p>`}</td></tr>
             <tr><td>${esc(i18n.t('tf.ui.workspaces'))}</td>
                 <td><code>${esc(info.workspaces_dir)}</code></td></tr>
             <tr><td>${esc(i18n.t('tf.ui.examples'))}</td>
@@ -213,7 +282,7 @@ const TF = (() => {
                 data-tip="${esc(i18n.t('tf.tip.bundleBuild'))}">
           ${Icons.svg('build')} ${esc(i18n.t('tf.ui.bundleBuild'))}
         </button>
-      </section>`;
+      </div>`;
   }
 
   // -------------------------------------------------------------------------
@@ -667,7 +736,7 @@ const TF = (() => {
         : window.TFDecl.addResourceWithSpec(target.id, kind, spec);
       await window.TFDecl.flush(target.id);
       say(`<span style="color:var(--accent)">${Icons.svg('edit')} ${esc(i18n.t('tf.ui.adopted', { address, name: target.name }))}</span>`);
-      activateSubtab('decls');
+      setTab('declarations', { sync: true });
       if (window.TFDeclView) TFDeclView.select(target.id, res && res.id);
     } catch (e) {
       say(`<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`);
@@ -716,11 +785,14 @@ const TF = (() => {
       const dr = e.target.closest('.tf-destroy-resource');
       if (dr) destroySingleResource(dr.dataset.address, dr.dataset.decl);
       const od = e.target.closest('.tf-open-decl');
-      if (od && window.TFDeclView) { activateSubtab('decls'); TFDeclView.select(od.dataset.decl); }
+      if (od && window.TFDeclView) { setTab('declarations', { sync: true }); TFDeclView.select(od.dataset.decl); }
       const ed = e.target.closest('.tf-edit-resource');
       if (ed) importResourceForEdit(ed.dataset.safe, ed.dataset.address);
-      const tab = e.target.closest('#tf-status-body .sub-tab[data-tf-tab]');
-      if (tab) { activateSubtab(tab.dataset.tfTab); return; }
+      // 2.2.0 : onglets de la bande de l'en-tête, liens vers un onglet
+      const b = e.target.closest('#tab-automation .sub-tab[data-tf-tab]');
+      if (b) { e.preventDefault(); setTab(b.dataset.tfTab, { sync: true }); return; }
+      const g = e.target.closest('[data-tf-goto]');
+      if (g) { e.preventDefault(); setTab(g.dataset.tfGoto, { sync: true }); return; }
     });
     // 2.0.0 : l'onglet Terraform est rafraîchi par le routeur
     // (CAPI.selectAutomationSubtab), plus par un clic de l'ancien menu
@@ -730,7 +802,7 @@ const TF = (() => {
     });
   }
 
-  return { init, refresh, confirmDestructive, followRun };
+  return { init, refresh, confirmDestructive, followRun, setTab, tab: () => tab };
 })();
 
 document.addEventListener('DOMContentLoaded', TF.init);

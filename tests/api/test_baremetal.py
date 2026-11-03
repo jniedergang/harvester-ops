@@ -664,8 +664,9 @@ def test_bmc_tab_rerender_targets_the_nav_link_only():
     assert '.sub-tab[data-subtab="pxe"]' not in BMC_JS
     capi = (ROOT / "web" / "static" / "js" / "capi.js").read_text()
     assert "else if (name === 'pxe' && window.BMC) window.BMC.render();" in capi
-    # et un re-render non forcé préserve ce qui est déjà affiché
-    assert "if (!force && out.querySelector('#bmc-discover-form'))" in BMC_JS
+    # et un re-render ne reconstruit le squelette des onglets que s'il manque
+    # (2.1.0 : la découverte est en plus gardée par la console)
+    assert "if (!out.querySelector('.bm-pane')) skeleton(out);" in BMC_JS
 
 
 def test_management_interface_is_designated_by_mac():

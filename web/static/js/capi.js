@@ -218,7 +218,7 @@ const CAPI = (() => {
         <div class="loading-placeholder">${esc(tr('capi.v.bundles.loading'))}</div>
       </div>`;
 
-    // Managed CAPI clusters table moved to its own sub-tab (🖥 Clusters K8S).
+    // Managed CAPI clusters table: its own tab (Clusters, 2.2.0).
     // The Installation tab is just: stack components + bundles management.
     out.innerHTML = `
       ${summary}
@@ -689,34 +689,131 @@ const CAPI = (() => {
     if (cur) pick.value = cur;
   }
 
-  function selectAutomationSubtab(name) {
-    // 2.0.0 : l'entrée du menu (#automation/<x>) est peinte par HostNav.
-    // Show only that content panel
+  /** Montre le panneau d'un sous-onglet d'Automatisation et sa bande
+   *  d'onglets (data-only-for), sans rien relire. */
+  function paintAutomationSubtab(name) {
     $$('#tab-automation > .sub-tab-content').forEach(x =>
       x.classList.toggle('active', x.dataset.subtab === name));
-    // 3. The inline 📦/🛠 strip is only meaningful for capi
-    const inline = document.querySelector('#tab-automation .sub-tabs-inline');
-    if (inline) inline.classList.toggle('hidden', name !== 'capi');
+    // Chaque bande d'onglets appartient à un sous-onglet (data-only-for) :
+    // Cluster API, Terraform (2.2.0) et Bare-metal (2.1.0)
+    $$('#tab-automation .sub-tabs-inline[data-only-for]').forEach(x =>
+      x.classList.toggle('hidden', x.dataset.onlyFor !== name));
+  }
+
+  function selectAutomationSubtab(name) {
+    // 2.0.0 : l'entrée du menu (#automation/<x>) est peinte par HostNav.
+    paintAutomationSubtab(name);
     try { localStorage.setItem('harvester_ops_automation_subtab', name); } catch {}
     paintMgmt(name);
     // Navigation 2.0 : l'adresse porte le sous-onglet (#automation/<x>)
     if (window.Router) Router.syncFromScreen();
-    if (name === 'capi') refresh();
+    if (name === 'capi') { paintTabs(); renderTab(); }
     else if (name === 'terraform' && window.TF) window.TF.refresh();
     else if (name === 'pxe' && window.BMC) window.BMC.render();
   }
 
-  function selectCapiTab(name) {
-    // v1.53.0 : plus de sous-onglet « Création de clusters », la création
-    // s'ouvre en fenêtre depuis Clusters K8S (un choix mémorisé y mène).
-    if (name === 'clusters') name = 'k8s';
-    $$('#tab-automation .sub-tabs-inline .sub-tab').forEach(x =>
-      x.classList.toggle('active', x.dataset.capiTab === name));
+  // -------------------------------------------------------------------------
+  // 2.2.0 : onglets de Cluster API (#automation/capi/<onglet>), dans l'ordre
+  // Clusters (défaut), Services, Historique, Installation
+  // -------------------------------------------------------------------------
+  const TABS = ['clusters', 'services', 'history', 'installation'];
+  // Anciens noms internes (onglets d'avant la 2.2.0, et « Création de
+  // clusters » de la v1.53.0, devenue une fenêtre de Clusters)
+  const OLD_TABS = { k8s: 'clusters', install: 'installation' };
+  let tab = 'clusters';
+
+  function paintTabs() {
+    const strip = $('#tab-automation .capi-tabs');
+    if (strip) strip.setAttribute('aria-label', tr('capi.tabs'));
+    $$('#tab-automation .sub-tab[data-capi-tab]').forEach((b) => {
+      const on = b.dataset.capiTab === tab;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
     $$('[data-subtab="capi"] .capi-tab-content').forEach(x =>
-      x.classList.toggle('active', x.dataset.capiTab === name));
-    try { localStorage.setItem('harvester_ops_capi_subtab', name); } catch {}
-    if (name === 'k8s') refreshK8sClustersPanel();
-    else if (name === 'services' && window.CapiServices) CapiServices.start();
+      x.classList.toggle('active', x.dataset.capiTab === tab));
+  }
+
+  /** Onglet demandé (adresse, clic) ; `render: false` = seulement retenu,
+   *  le rendu viendra du routeur (reactivate). */
+  function setTab(name, opts) {
+    const o = opts || {};
+    const n = OLD_TABS[name] || name;
+    tab = TABS.includes(n) ? n : 'clusters';
+    if (o.render === false) return;
+    paintTabs();
+    renderTab();
+    if (o.sync && window.Router) Router.syncFromScreen();
+  }
+
+  function renderTab() {
+    if (tab !== 'history') capiHistory.stop();
+    if (tab === 'clusters') { refreshK8sClustersPanel(); paintStackBanner(); }
+    else if (tab === 'services') { if (window.CapiServices) CapiServices.start(); }
+    else if (tab === 'history') capiHistory.render();
+    else refresh();
+  }
+
+  // Historique : l'Activité filtrée sur les actions Cluster API (capi-*)
+  const historyShown = () => tab === 'history'
+    && !!document.querySelector('#tab-automation.active > .sub-tab-content[data-subtab="capi"].active');
+
+  // Libellé d'une action (verbe de l'Activité) ; table littérale, visible des
+  // tests de traduction
+  function kindLabel(action) {
+    const verb = String(action || '').split(':', 1)[0];
+    switch (verb) {
+      case 'capi-install': return tr('capi.hist.kind.install');
+      case 'capi-uninstall': return tr('capi.hist.kind.uninstall');
+      case 'capi-cleanup-legacy': return tr('capi.hist.kind.cleanup');
+      case 'capi-bundle-build': return tr('capi.hist.kind.bundle');
+      case 'capi-cluster-create': return tr('capi.hist.kind.create');
+      case 'capi-cluster-scale': return tr('capi.hist.kind.scale');
+      case 'capi-cluster-delete': return tr('capi.hist.kind.delete');
+      case 'capi-service-deploy': return tr('capi.hist.kind.deploy');
+      case 'capi-service-remove': return tr('capi.hist.kind.remove');
+      default: return verb;
+    }
+  }
+
+  const capiHistory = AutoHistory.create({
+    box: () => $('#capi-history-body'), queries: ['capi-'], cls: 'capi', shown: historyShown, cluster: true,
+    label: (a) => kindLabel(a.action), hint: () => tr('capi.hist.hint'), empty: () => tr('capi.hist.empty'),
+  });
+
+  // Vérifier avant d'agir : la pile Cluster API du cluster de gestion. Rien
+  // n'est affirmé quand la lecture échoue ou que le cluster ne répond pas.
+  let bannerRev = 0;
+  async function paintStackBanner() {
+    const box = $('#capi-stack-banner');
+    if (!box) return;
+    const cluster = mgmtCluster();
+    const mine = ++bannerRev;
+    if (!cluster) { box.innerHTML = ''; return; }
+    // une lecture plus récente, ou un autre cluster de gestion : on s'arrête
+    // là (jamais de seconde lecture sur l'ancien cluster)
+    const stale = () => mine !== bannerRev || tab !== 'clusters' || mgmtCluster() !== cluster;
+    let missing = null;
+    try {
+      const st = await fetch(`/api/capi/${enc(cluster)}/stack`).then(r => (r.ok ? r.json() : null));
+      if (stale()) return;
+      if (st && st.turtles && st.core) {
+        missing = st.ready ? [] : (st.missing || []);
+      } else {
+        // Harvester sans Turtles : l'ancienne installation (diagnostic)
+        const d = await fetch(`/api/capi/${enc(cluster)}/diag`).then(r => (r.ok ? r.json() : null));
+        const comps = (d && !d.unreachable && d.components) || [];
+        if (comps.length) missing = comps.filter(c => !c.installed).map(c => c.label);
+        else if (st && !st.turtles) missing = st.missing || [];
+      }
+    } catch (e) { missing = null; }
+    if (stale()) return;
+    box.innerHTML = missing && missing.length
+      ? `<div class="ct-banner auto-banner-warn capi-stack-missing" role="status">${Icons.svg('warn', { size: 14 })}
+           <span>${esc(tr('capi.banner.missing', { cluster, missing: missing.join(', ') }))}</span>
+           <a href="#automation/capi/installation" class="btn btn-sm btn-secondary tip" data-capi-goto="installation"
+              data-tip="${esc(tr('capi.banner.openTip'))}">${esc(tr('capi.banner.open'))}</a></div>`
+      : '';
   }
 
   function initSubtabs() {
@@ -725,32 +822,20 @@ const CAPI = (() => {
     $('#mgmt-cluster-pick')?.addEventListener('change', (e) => {
       if (window.App && App.setManagementCluster) App.setManagementCluster(e.target.value);
     });
-    // Sidebar children click → ensure parent is expanded + activate sub-tab.
-    // The main-tab routing (to #tab-automation) is handled by app.js.
     document.addEventListener('click', (e) => {
-      // Inline Cluster API sub-tabs
-      const inlineBtn = e.target.closest('#tab-automation .sub-tabs-inline .sub-tab');
-      if (inlineBtn) { e.preventDefault(); selectCapiTab(inlineBtn.dataset.capiTab); }
+      // Onglets de Cluster API (bande de l'en-tête) et liens vers un onglet
+      const b = e.target.closest('#tab-automation .sub-tab[data-capi-tab]');
+      if (b) { e.preventDefault(); setTab(b.dataset.capiTab, { sync: true }); return; }
+      const g = e.target.closest('[data-capi-goto]');
+      if (g) { e.preventDefault(); setTab(g.dataset.capiGoto, { sync: true }); return; }
+      if (e.target.closest('#btn-capi-history-refresh')) capiHistory.render();
     });
-
-    // Restore last selection
-    try {
-      const saved = localStorage.getItem('harvester_ops_automation_subtab');
-      if (saved && ['capi', 'terraform', 'pxe'].includes(saved)) {
-        selectAutomationSubtab(saved);
-      } else {
-        selectAutomationSubtab('capi');
-      }
-      const savedCapi = localStorage.getItem('harvester_ops_capi_subtab');
-      if (savedCapi && ['install', 'clusters', 'k8s', 'services'].includes(savedCapi)) {
-        selectCapiTab(savedCapi);
-      }
-    } catch {
-      selectAutomationSubtab('capi');
-    }
-
-    // 2.0.0 : une entrée Automatisation du menu passe par le routeur, qui
-    // appelle reactivate (sous-onglet retenu, sur le cluster de gestion)
+    // Le sous-onglet retenu est seulement peint : l'écran est rendu par le
+    // routeur (reactivate), jamais au chargement d'un autre écran.
+    let saved = null;
+    try { saved = localStorage.getItem('harvester_ops_automation_subtab'); } catch {}
+    paintAutomationSubtab(['capi', 'terraform', 'pxe'].includes(saved) ? saved : 'capi');
+    paintTabs();
   }
 
   // ---------------------------------------------------------------------
@@ -910,20 +995,15 @@ const CAPI = (() => {
   async function reactivate() {
     let sub = 'capi';
     try { sub = localStorage.getItem('harvester_ops_automation_subtab') || 'capi'; } catch {}
+    // 2.2.0 : l'onglet de Cluster API vient de l'adresse (setTab), plus
+    // d'un choix mémorisé
     selectAutomationSubtab(sub);
-    if (sub === 'capi') {
-      let capiTab = null;
-      try { capiTab = localStorage.getItem('harvester_ops_capi_subtab'); } catch {}
-      // selectAutomationSubtab a déjà rendu le diagnostic ; les vues
-      // « Création » et « Clusters K8S » ont leur propre chargement.
-      if (capiTab && capiTab !== 'diag') selectCapiTab(capiTab);
-    }
   }
 
   // Wire sub-tabs at DOMContentLoaded
   document.addEventListener('DOMContentLoaded', initSubtabs);
 
-  return { init, refresh, reactivate, selectCapiTab, refreshK8s: refreshK8sClustersPanel, openCreate };
+  return { init, refresh, reactivate, setTab, tab: () => tab, refreshK8s: refreshK8sClustersPanel, openCreate };
 })();
 
 document.addEventListener('DOMContentLoaded', CAPI.init);

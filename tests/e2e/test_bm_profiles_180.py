@@ -68,6 +68,10 @@ def open_tab(context, flask_server):
             return fulfill(route, {"ok": False, "rows": [
                 {"row": 1, "hostname": "node1", "mode": "create", "yaml": "token: •••\nos:\n  hostname: node1\n"},
                 {"row": 2, "errors": [["row 2 {{storage_ip}}", "missing variable"]]}]})
+        if url.endswith("/system-check"):          # 2.2.1 : aucune machine ne porte de système
+            return fulfill(route, {"machines": [
+                {"row": i + 1, "bmc_host": r["bmc_host"], "state": "absent", "evidence": [],
+                 "confirm_name": r["bmc_host"], "source": "hpe-oem"} for i, r in enumerate(body["rows"])]})
         if url.endswith("/batch"):
             return fulfill(route, {"action_id": "batch0000180", "cluster": "rack-a", "nodes": 2}, 202)
         return fulfill(route, {"error": "unexpected"}, 500)
@@ -80,6 +84,7 @@ def open_tab(context, flask_server):
     page.wait_for_function("window.BMC && window.BMProfiles && window.FloatingPanels && window.i18n")
     page.click('#host-nav [data-hnav-root="automation"][data-hnav-tab="pxe"]')   # 2.0.0 : entrée du menu des hôtes
     page.mouse.move(1100, 450)
+    page.locator('#tab-automation [data-bm-tab="profiles"]').click()             # 2.1.0 : onglet Profils
     expect(page.locator('#bmp-table tr[data-profile="rack-a"]')).to_be_visible()
     return page, calls
 

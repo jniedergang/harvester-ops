@@ -128,7 +128,9 @@ const TFForm = (() => {
         const multi = arg.multiple ? ' multiple size="4"' : '';
         control =
           `<div class="tf-ref-wrap">
-             <select id="${id}" name="${name}" data-ref-endpoint="${esc(arg.ref_endpoint)}"
+             <select id="${id}" name="${name}" ${arg.ref_url
+                       ? `data-ref-url="${esc(arg.ref_url)}" data-ref-list="${esc(arg.ref_list_key || '')}"`
+                       : `data-ref-endpoint="${esc(arg.ref_endpoint)}"`}
                      data-ref-value="${esc(arg.ref_value_field || 'name')}"
                      data-ref-label="${esc(arg.ref_label_field || arg.ref_value_field || 'name')}"
                      data-ref-namespaced="${arg.ref_namespaced ? '1' : '0'}"
@@ -439,20 +441,28 @@ const TFForm = (() => {
     //    Runs LAST so kubectl latency never blocks the user from
     //    interacting with the form's structural controls (+Add/−Remove
     //    etc.).
-    const refSelects = $$(rootEl, 'select[data-ref-endpoint]');
+    //    2.3.0 : `data-ref-url` porte {target} (l'hôte KVM de la
+    //    déclaration) et `data-ref-list` la liste à lire dans la réponse.
+    const refSelects = $$(rootEl, 'select[data-ref-endpoint], select[data-ref-url]');
     const byEndpoint = new Map();
     refSelects.forEach(sel => {
-      const ep = sel.dataset.refEndpoint;
+      const ep = sel.dataset.refUrl
+        ? `${sel.dataset.refUrl.replace('{target}', encodeURIComponent(currentCluster))}#${sel.dataset.refList || ''}`
+        : `${sel.dataset.refEndpoint}/${encodeURIComponent(currentCluster)}`;
       if (!byEndpoint.has(ep)) byEndpoint.set(ep, []);
       byEndpoint.get(ep).push(sel);
     });
-    await Promise.all([...byEndpoint.entries()].map(async ([ep, selects]) => {
+    await Promise.all([...byEndpoint.entries()].map(async ([key, selects]) => {
+      const [url, listKey] = key.split('#');
       let items = [];
       try {
-        const r = await fetch(`${ep}/${encodeURIComponent(currentCluster)}`);
-        if (r.ok) items = await r.json();
+        const r = await fetch(url);
+        if (r.ok) {
+          const body = await r.json();
+          items = Array.isArray(body) ? body : ((listKey && Array.isArray(body[listKey])) ? body[listKey] : []);
+        }
       } catch (e) {
-        console.warn(`tf-form: ${ep} fetch failed`, e);
+        console.warn(`tf-form: ${url} fetch failed`, e);
       }
       selects.forEach(sel => populateRef(sel, items));
     }));

@@ -352,9 +352,12 @@ full redraw of the 300 rows (new sort): 0.22 s with 2,000 VMs and 0.23 to
 0.29 s with 10,000 (2.0.2: 0.5 to 0.57 s and 0.9 s, the cost being the six
 icon buttons of each row; 1.x: 3.6 s for every refresh and every key at
 2,000). A render without change takes about 0.05 s. The row menu follows
-the family: the Harvester VM menu, or for a KVM VM the console, snapshots,
-clone, delete, **Move to folder** and **Open on its host** (start and stop
-are on the host page). Start, stop, restart, force stop and migrate of a
+the family: the Harvester VM menu, or for a KVM VM the menu of its host
+page (since 2.2.2): start, shut down, reboot, suspend, resume, force off,
+console, snapshots, clone, delete and **Edit**, greyed with the same reasons
+(role, state, transient VM), then **Move to folder** and **Open on its
+host**. A gesture reports in the view, and force off asks for confirmation
+there. Start, stop, restart, force stop and migrate of a
 selection apply to its Harvester VMs.
 
 On the left, a panel with two modes, like vCenter. **Folders**: All VMs,
@@ -2230,6 +2233,20 @@ their header which cluster they work from (**Management cluster**): the last
 Harvester host visited, unless you pick another one in the menu next to it.
 That choice is kept per browser and does not change the host you have open.
 
+**Four tabs (2.2.0).** In the header, in this order: **Clusters** (default:
+the clusters created by Cluster API, with **Create a cluster**, details,
+kubeconfig, scale and delete), **Services** (Helm charts through CAAPH),
+**History** (the Cluster API actions of Activity: clusters created, scaled or
+deleted, services deployed or removed, stack installed or removed, bundles
+built; running and past, each with a link to its log, read again every five
+seconds while one runs and only while the tab is shown) and **Installation**
+(the stack, its providers and the bundles; it was the first tab before
+2.2.0). Addresses `#automation/capi/<tab>`; `#automation/capi` opens
+Clusters. **Check before acting:** when the Cluster API stack is not
+installed on the management cluster, Clusters says so, with what is
+missing and a link to Installation (nothing is said when the cluster cannot
+be read).
+
 ### Installing the stack (1.48.0)
 
 - **Harvester v1.9 and later** embed Rancher Turtles, which already runs the
@@ -2254,7 +2271,7 @@ That choice is kept per browser and does not change the host you have open.
 
 ### Creating a cluster (1.48.0, window with menus in 1.53.0)
 
-The **Create a cluster** button of the K8S Clusters tab opens a window that
+The **Create a cluster** button of the Clusters tab opens a window that
 can be minimised to the window bar, to check a setting elsewhere, and
 reopened as it was. It is organised in menus, like the creation of a VM,
 and filled from the cluster itself:
@@ -2359,6 +2376,35 @@ API, through the Cluster API add-on provider for Helm (CAAPH v0.6.4):
 
 Drive the Terraform provider for Harvester from saved declarations.
 
+- **Four tabs (2.2.0)** in the header, in this order: **Declarations**
+  (default), **Resources** (was "Cluster resources"), **History** (the
+  Terraform plans, applies and destroys of Activity, on every management
+  cluster, each with a link to its log; read again every five seconds while
+  one runs and only while the tab is shown) and **Installation** (OpenTofu,
+  the embedded Harvester provider and its updates, the airgap bundle; the
+  "ready" line moved here). Addresses `#automation/terraform/<tab>`;
+  `#automation/terraform` opens Declarations. **Check before acting:** when
+  the Harvester provider that declarations need, or the OpenTofu (or
+  Terraform) command, is missing, Declarations says so with a link to
+  Installation.
+- **Targets: a Harvester cluster or a KVM host (2.3.0)**. One list of
+  declarations for every target: each declaration chooses, at creation, a
+  Harvester cluster (provider `harvester/harvester`) or a KVM host declared
+  in the console (provider `dmacvicar/libvirt`, embedded). A family filter
+  (all targets, Harvester clusters, KVM hosts) sits above the list; each
+  card and the declaration header name the target. A KVM declaration offers
+  libvirt resources (VM, volume, network) and the template "RKE2 on libvirt
+  VMs", described in section 10; free code stays on Harvester targets. Plan, read, apply, destroy and history work
+  the same way.
+- **Private workspaces (2.3.0)**: a state can hold secrets, so every
+  workspace directory is 0700 and its files (states, backups, plans, code)
+  0600, whatever the umask; workspaces made before are repaired once when the
+  console starts (logged).
+- **Offline providers (2.3.0)**: every provider of a workspace comes from a
+  local mirror laid out under both registry names (`registry.opentofu.org`
+  and `registry.terraform.io`), included in the mirror and excluded from
+  direct downloads. Before, OpenTofu resolved `harvester/harvester` to
+  `registry.opentofu.org` and fetched it from the Internet.
 - **Declarations**: named groups of resources (VMs, VM images, SSH keys,
   Terraform code written by hand) applied together, each with its own
   Terraform state (1.54.0). They are kept by the console (shared between
@@ -2386,14 +2432,14 @@ Drive the Terraform provider for Harvester from saved declarations.
   changed since, the console refuses and asks for a new plan. The last
   plan stays available from the "Apply" button.
 - A resource removed from a declaration is destroyed by its next apply
-  (the plan says so); a resource destroyed on its own from the cluster
-  resources tab leaves its declaration. Destroying a declaration asks for
+  (the plan says so); a resource destroyed on its own from the Resources
+  tab leaves its declaration. Destroying a declaration asks for
   its name to be typed; a declaration with deployed resources cannot be
   deleted. Two operators editing the same declaration do not overwrite
   each other: the later one is told and sees the current version.
 - A destroyed VM takes its disks with it unless "delete with the VM" is
   unchecked on the disk (1.52.1).
-- **Cluster resources**: everything Terraform manages on the cluster,
+- **Resources**: everything Terraform manages on the cluster,
   declaration by declaration; a resource of the shared workspace (applied
   before 1.54) can be adopted into a declaration, which takes it over at
   its next plan without recreating it.
@@ -2402,7 +2448,7 @@ Drive the Terraform provider for Harvester from saved declarations.
   version (the official release is downloaded and checked against the
   published `SHA256SUMS`), a URL to an internal mirror, or upload the
   archive from a machine that has no outbound network at all. The
-  Install sub-tab names the active binary, its version and where it came
+  Installation tab names the active binary, its version and where it came
   from, and one click reverts to the provider shipped in the package.
   Every workspace is re-initialised on its next apply; Terraform state is
   never touched. The same install runs from the CLI:
@@ -2412,6 +2458,26 @@ Drive the Terraform provider for Harvester from saved declarations.
 
 Turn a blank server into a running Harvester node without touching it.
 Full walkthrough in **[bare-metal.md](bare-metal.md)**.
+
+- **Four tabs (2.1.0)**: **Machines** (default: the machines of the last
+  discovery with their gestures, the discovery in its own window, the join
+  banner and a "no ISO of version X" check before acting), **Profiles**,
+  **Images** (the ISO store) and **History** (the bare-metal actions of
+  Activity, with their logs). Addresses `#automation/pxe/<tab>`;
+  `#automation/pxe` opens Machines. The console remembers the last
+  discovery (read cache in the state directory, never the credentials):
+  the list survives a reload, with its date and a **Re-read** button.
+
+- **A machine that already carries a system is guarded (2.2.0)**: the
+  install window lists what the BMC shows (UEFI boot entries of a loader
+  on a disk partition, the head of the boot order, logical drives) and,
+  when a system seems present, installing requires typing the machine name
+  (serial number, or BMC address); the console checks again on its own
+  Redfish read and refuses otherwise. "Unknown" is said plainly when the
+  BMC tells nothing. **Profile batches too (2.2.1)**: the batch window
+  checks every machine and needs the name of each one where a system seems
+  present; the console reads every BMC again and refuses the whole batch
+  (`409`, machine list) otherwise. Details in [bare-metal.md](bare-metal.md).
 
 - **BMC / Redfish discovery** — point at one or many BMC endpoints and
   read back node profiles: model, serial, BIOS, memory, NICs with their
@@ -3451,6 +3517,99 @@ answer, log or action record. Not verified: macvtap cards, NFS pools,
 SCSI disks, a vCPU decrease, a guest without a balloon driver.
 
 ---
+
+### Terraform declarations on a KVM host (2.3.0)
+
+A Terraform declaration can target a KVM host instead of a Harvester cluster
+(Automation, Terraform, Declarations, "New declaration", target family KVM).
+Decisions of the product owner: one list of declarations with a family
+filter, no duplicated menus (107); no Cluster API on KVM, a Terraform
+template "RKE2 on libvirt VMs" instead (108).
+
+- **Provider**: `dmacvicar/libvirt` 0.9.9 (Apache-2.0), embedded in the
+  package and checked at build time (GPG signature of the release
+  `SHA256SUMS` by the pinned key, then checksum). It runs from a local
+  mirror: nothing is downloaded at run time, airgap included.
+- **Connection**: `qemu+sshcmd://<user>@<address>/system?command=<workspace>/kvm_ssh`.
+  For each run the console copies the host SSH key and its pinned host key
+  into the declaration workspace (0600) and writes `kvm_ssh`, a script that
+  starts OpenSSH with strict options first: `-F /dev/null`,
+  `StrictHostKeyChecking=yes`, the pinned host key only
+  (`UserKnownHostsFile`, `GlobalKnownHostsFile=/dev/null`), the host key
+  only (`IdentitiesOnly`, no agent), `BatchMode`, no multiplexing nor
+  forwarding. OpenSSH keeps the first value of each option, so nothing the
+  provider adds can loosen them. The three files are removed after the run,
+  failed or not; no key and no path appears in argv, in the code, in an
+  answer or in the state. Before OpenTofu runs, one SSH connection through
+  the same script checks the host and tells why it fails (`hostkey`,
+  `auth`, `unreachable`): the provider itself only says "procedure
+  interrupted".
+- **Why not `qemu+ssh://...?keyfile=&knownhosts=`**: its SSH client (written
+  in Go) picks a host key type without looking at the pinned ones and refused
+  a host whose pinned key was ed25519 ("knownhosts: key mismatch", seen on
+  node2). And in both transports `no_verify` turns verification off as soon
+  as it appears, whatever its value (`no_verify=0` included): the URI never
+  carries it.
+- **Rights**, aligned on the KVM module: an operator plans and applies a
+  declaration of VMs and volumes; applying a reviewed plan that destroys or
+  replaces something, applying a declaration that holds a network, and
+  destroying a declaration need an administrator. A KVM declaration is
+  applied only from a reviewed plan. Free Terraform code is not offered on a
+  KVM host (its workspace holds the host key during a run). The cloud-init of
+  a declaration is hidden from viewers (Harvester declarations too), and its
+  Code tab needs an operator.
+- **Base images**: a base image must be an image of the host catalogue, in
+  the pool of the new disk, of the declared format, and not used as a disk by
+  a domain. The console reads the catalogue on the host before every plan
+  and apply; a free path (a block device, the disk of another VM) is
+  refused.
+- **Host requirements**: the host libvirt URI is `qemu:///system` or
+  `qemu:///session` (a host declared with another URI is refused), and the
+  host has `virt-ssh-helper` (libvirt client) or `nc`.
+- **Resources**:
+  - **Virtual machine (KVM)**: name, processors, CPU model (`host-model`
+    by default, `host-passthrough`), memory, start, start with the host;
+    disk in a pool, made from a base image of the host catalogue (copy on
+    write) or blank; a libvirt network or a bridge of the host; first boot
+    by cloud-init (configuration, or just an SSH key). Every domain gets
+    ACPI and APIC: without them, on q35, the disk was not found at boot and
+    the network card had no carrier (seen on node2).
+  - **Volume (KVM)**: in a pool, qcow2 or raw, blank or on a base image.
+  - **Network (KVM)**: isolated, NAT or routed, with the host address, its
+    prefix and a DHCP range.
+- **Template "RKE2 on libvirt VMs"**: N servers (1, 3, 5 or 7) and M agents
+  (0 to 20) from a cloud image of the host catalogue. Parameters: prefix of
+  the node names, RKE2 channel or exact version, processors, CPU model,
+  memory, disk, pool, base image, libvirt network, first static address,
+  prefix, gateway, DNS, SSH user and public key. Each node gets a fixed MAC
+  address and its static address by cloud-init (network matched by MAC);
+  cloud-init installs RKE2 (`INSTALL_RKE2_METHOD=tar`) and starts
+  `rke2-server` or `rke2-agent`; the other nodes join the first server.
+  The RKE2 token is drawn by the console at the first run, kept in the
+  declaration workspace (`.secrets/`, 0600, workspace 0700), passed to
+  OpenTofu by an environment variable of a sensitive variable, and never
+  shown (code, plan, history and answers). The state file (0600) and the
+  cloud-init disk on the host do hold it, as they hold the node
+  configuration. Outputs: the address of each node and the command that
+  reads the kubeconfig of the first server, shown under "Outputs of the
+  last apply" (sensitive outputs are never kept).
+- **Airgap**: the template installs RKE2 from `get.rke2.io`, so the VMs need
+  Internet access (a NAT network of the host is enough). An airgap install
+  (RKE2 tarball given as a volume) is **not covered** in 2.3.0.
+- **Real check (node2, 02/11/2026)**: a declaration with a VM (cirros on
+  `kvmtest-net`), a volume and an isolated network: plan 12 s and apply
+  15 s (both read the image catalogue on the host first), checked with
+  `virsh` (domain running with ACPI/APIC, disk on its base image, seed disk,
+  DHCP lease), destroy 9 s, nothing left. The template with 1 server and
+  1 agent from the openSUSE Tumbleweed cloud image (published checksum
+  checked): plan 12 s, apply 15 s, SSH on the server under a minute after
+  apply, both nodes `Ready` 153 s and 167 s after apply over two runs (RKE2
+  v1.36.5+rke2r1, read with the kubeconfig through an SSH tunnel), destroy
+  12 s. A copied host declaration with a wrong pinned key was refused before
+  OpenTofu (`hostkey: Host key verification failed.`), a base image
+  `/dev/sda` was refused before OpenTofu, nothing created. Not checked for
+  real: bridged VMs, NAT or routed networks created by a declaration,
+  several servers.
 
 ## 11. Disaster recovery: asynchronous VM replication (CLI + console API)
 

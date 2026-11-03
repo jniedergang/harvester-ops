@@ -2393,14 +2393,6 @@ a.bundle-inspect:hover { text-decoration: underline; }
   background: var(--bg); color: var(--text); font-size: 12px;
 }
 
-/* v1.5.4 — Terraform tab split into sub-tabs (live / decls / install).
-   We reuse `.sub-tabs-2nd` + `.sub-tab` for the strip itself, and add
-   a parallel show/hide rule for the panes (the existing
-   `.sub-tab-content` class is owned by the Automation > CAPI strip
-   and we don't want a collision). */
-.tf-subtab-content { display: none; }
-.tf-subtab-content.active { display: block; }
-
 /* v1.5.5 — Declaration overlay panel (TFDeclPanel)
    2-column inside FloatingPanel: vertical resource list on the left,
    section-button strip + form on the right. */
@@ -2574,9 +2566,6 @@ a.bundle-inspect:hover { text-decoration: underline; }
 .tf-log-line.ok   { color: var(--accent); }
 .tf-log-line.dim  { color: var(--text-dim); }
 .tf-log-line.info { color: var(--info); }
-
-.sub-tabs-2nd { margin-top: -8px; margin-bottom: 12px; }
-.sub-tabs-2nd .sub-tab { font-size: 12px; }
 
 /* Inline title + tab row for the Automation section.
    3-column grid: title on the left, tabs centered horizontally
@@ -4617,6 +4606,16 @@ body.login-page {
 .tfd-card-top strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tfd-card-desc, .tfd-card-meta, .tfd-foot, .tfd-meta, .tfd-hint { font-size: 11.5px; color: var(--text-dim); }
 .tfd-foot { margin-top: auto; }
+/* 2.3.0 : cible d'une déclaration (cluster Harvester ou hôte KVM) et filtre de famille */
+.tfd-list-head { flex-wrap: wrap; }
+.tfd-family { flex: 1 1 100%; order: 3; }
+.tfd-card-target { font-size: 11.5px; color: var(--text-dim); display: flex; align-items: center; gap: 6px; }
+.tfd-card-target::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: var(--accent); flex: none; }
+.tfd-card-target.tfd-fam-kvm::before { background: var(--info); }
+.tfd-target-badge.tfd-fam-kvm { border-color: var(--info); }
+.tfd-outputs { margin: 10px 0; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+.tfd-outputs summary { cursor: pointer; font-weight: 600; }
+.tfd-outputs pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
 .tfd-empty { color: var(--text-dim); font-size: 13px; }
 .tfd-main { display: flex; flex-direction: column; min-width: 0; }
 .tfd-placeholder { margin: auto; text-align: center; color: var(--text-dim); display: flex; flex-direction: column;
@@ -5750,6 +5749,37 @@ a.sub-tab { text-decoration: none; display: inline-flex; align-items: center; ga
 .hp-conn-tests { margin-top: 12px; }
 .bm-join-target { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .bm-join-target .btn { margin-left: auto; }
+/* 2.1.0 : Bare-metal en onglets (Machines, Profils, Images, Historique) */
+#bmc-body > .bm-pane { padding: 12px 16px; }
+#bmc-body > #bm-join-slot:not(:empty) { padding: 12px 16px 0; }
+#bmc-body > #bm-join-slot .bm-join-target { margin-bottom: 0; }
+.bm-join-target.ct-banner { align-items: center; color: var(--text); }
+/* Bandeau « vérifier avant d'agir » d'un écran d'Automatisation (2.1.0
+   Bare-metal, 2.2.0 Terraform et Cluster API) */
+.bm-banner-warn, .auto-banner-warn { align-items: center; border-left-color: var(--warn); color: var(--text); }
+.bm-banner-warn svg, .auto-banner-warn svg { color: var(--warn); margin-top: 0; }
+.bm-banner-warn .btn, .auto-banner-warn .btn { margin-left: auto; }
+.bm-machines-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 10px; }
+.bm-machines-bar .bm-last-at { margin-left: 4px; }
+.bm-machines .bm-nic-line { white-space: nowrap; font-size: 12px; line-height: 1.5; }
+.bm-machines .bm-nic-line .form-hint { margin-left: 4px; }
+.bm-machines .bm-num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.bm-machine-actions { white-space: nowrap; }
+.bm-machine-actions .bm-power-group { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
+.bm-machine-down td { color: var(--text-dim); }
+.bm-machines-empty { padding: 24px 12px; }
+/* Historique d'un écran d'Automatisation (auto-history.js : Bare-metal,
+   Terraform, Cluster API) */
+.auto-history-empty { padding: 24px 12px; }
+.auto-history-title { margin: 14px 0 6px; font-size: 14px; font-weight: 600; }
+.auto-history .auto-num { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.auto-history-log { display: inline-flex; align-items: center; gap: 4px; }
+/* 2.2.0 : onglets de Terraform (Déclarations reste bord à bord, comme
+   avant) et Historique de Cluster API */
+#tf-status-body > .tf-pane:not([data-tf-pane="declarations"]), #capi-history-body { padding: 12px 16px; }
+#tf-status-body .tf-provider-missing { margin: 12px 16px; }
+.bm-discover-window { max-width: 640px; }
+.bm-discover-window .modal-body { padding: 14px 18px; }
 .hp-tabs .sub-tab { white-space: nowrap; }
 .hp-conn .card-body { padding: 12px 16px; }
 
@@ -5919,3 +5949,19 @@ html[data-mode="dark"] .tbl-scroll { --tbl-shade: rgba(0, 0, 0, 0.42); }
 .avm-table td code, #ns-vms-table td code { font-size: 12px; }
 .avm-table .vmf-family { padding: 1px 5px; font-size: 10px; }
 .tbl-scroll .ct-table .ct-images code { max-width: 200px; font-size: 12px; }
+/* 2.2.0 : système déjà présent sur une machine (fenêtre d'installation) */
+.bm-system { grid-column: 1 / -1; margin: 10px 0 4px; }
+.bm-system .ct-banner { align-items: flex-start; color: var(--text); }
+.bm-system .ct-banner > div, .bm-system .ct-banner > span { flex: 1; }
+.bm-system .ct-banner .btn { margin-left: auto; flex: none; }
+.bm-system-evidence { margin: 6px 0 8px 18px; padding: 0; }
+.bm-system-evidence li { margin: 2px 0; }
+.capi-form label.bm-system-confirm { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: flex-start;
+  gap: 8px; font-size: 12px; color: var(--text); }
+.bm-system-name { font-weight: 600; }
+.bm-system-confirm input { width: 240px; }
+.bm-system-refused { margin: 4px 0; color: var(--danger); }
+.bm-system-mismatch { display: block; margin-top: 4px; color: var(--danger); }
+/* 2.2.1 : système déjà présent, une bannière par machine (fenêtre de série) */
+.bmp-system .ct-banner { margin: 0 0 6px; }
+.bmp-sys-machine { margin-right: 4px; }

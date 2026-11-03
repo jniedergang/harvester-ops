@@ -1,10 +1,14 @@
 /**
  * harvester-ops — onglet Bare-metal (BMC / Redfish + installation Harvester).
  *
- * Trois blocs :
- *   1. le magasin d'ISO (téléchargement côté serveur, en flux) ;
- *   2. la découverte Redfish des BMC ;
- *   3. l'installation zéro-touch d'une machine découverte, via média virtuel.
+ * 2.1.0 : quatre onglets (#automation/pxe/<onglet>) :
+ *   1. Machines : les machines de la dernière découverte (gardée par la
+ *      console, sans identifiant), leurs gestes (installer, joindre,
+ *      alimentation), la découverte en fenêtre et « Relire » ;
+ *   2. Profils : profils multi-nœuds et séries (bm-profiles.js) ;
+ *   3. Images : le magasin d'ISO (téléchargement côté serveur, en flux) ;
+ *   4. Historique : les actions bare-metal de l'Activité, avec leur journal.
+ * L'installation zéro-touch d'une machine passe par sa fenêtre (openInstall).
  *
  * Les identifiants BMC ne sont jamais persistés côté serveur. Ils sont
  * gardés en mémoire du module le temps de la session d'écran : avant, les
@@ -22,8 +26,28 @@ const BMC = (() => {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+  // 2.2.0 : un signe de système déjà présent (code de bin/lib/bm_presence.py)
+  // en phrase ; partagé avec la fenêtre de série (bm-profiles.js, 2.2.1)
+  const evidenceText = (ev) => (ev.code === 'boots-from-disk' ? tr('bmc.sys.ev.bootsFromDisk', { name: ev.name })
+    : ev.code === 'boot-entry' ? tr('bmc.sys.ev.bootEntry', { name: ev.name, loader: ev.loader, disk: ev.disk })
+      : ev.code === 'volume' ? tr('bmc.sys.ev.volume', { name: ev.name, controller: ev.controller }) : ev.code);
+
   let creds = { user: '', password: '' };   // mémoire volatile, jamais envoyée ailleurs
   let lastNodes = [];
+  let lastHosts = [];                       // adresses de la découverte affichée
+  let lastAt = null;                        // sa date (secondes), null sans découverte
+  let machinesLoaded = false;               // dernière découverte relue auprès de la console
+  let discovering = false;
+  const TABS = ['machines', 'profiles', 'images', 'history'];
+  let tab = 'machines';
+  // Actions de l'historique : installations et jonctions, séries, démarrages
+  // de découverte (baremetal-*), gestes d'alimentation (bmc-power:*). Filtre
+  // `action` de l'Activité (sous-chaîne, côté serveur).
+  const HISTORY_KINDS = ['baremetal-', 'bmc-power'];
+  const fmtDate = (at) => {
+    const t = Number(at);
+    return t ? new Date(t * 1000).toLocaleString() : '';
+  };
 
   // -------------------------------------------------------------------------
   // Magasin d'ISO
@@ -56,7 +80,7 @@ const BMC = (() => {
             <fieldset>
               <legend>${esc(tr('bmc.iso.fetch'))}</legend>
               <label style="grid-column:1/-1;">${esc(tr('bmc.iso.url'))}
-                <input name="url" type="url" required
+                <input name="url" type="url" required class="tip" data-tip="${esc(tr('bmc.iso.fetchTip'))}"
                        placeholder="https://releases.rancher.com/harvester/v1.8.2/harvester-v1.8.2-amd64.iso"></label>
             </fieldset>
             <div class="apply-bar">
@@ -74,50 +98,223 @@ const BMC = (() => {
   }
 
   // -------------------------------------------------------------------------
-  // Découverte
+  // Onglets
   // -------------------------------------------------------------------------
-  // `force` reconstruit tout ; sinon on garde ce qui est déjà à l'écran et on
-  // se contente de rafraîchir le magasin d'ISO. Une découverte prend une
-  // minute : la perdre parce qu'on revient sur l'onglet serait pénible.
+  function skeleton(out) {
+    out.innerHTML = `
+      <div id="bm-join-slot"></div>
+      <div class="bm-pane" data-bm-pane="machines" role="tabpanel">
+        <div id="bm-iso-missing"></div>
+        <div class="bm-machines-bar">
+          <button type="button" class="btn btn-sm btn-primary btn-ico tip" data-bm="discover-open"
+                  data-tip="${esc(tr('bmm.discoverTip'))}">${Icons.svg('search')} ${esc(tr('bmm.discover'))}</button>
+          <button type="button" class="btn btn-sm btn-secondary btn-ico tip" data-bm="reread" hidden
+                  data-tip="${esc(tr('bmm.rereadTip'))}">${Icons.svg('refresh')} ${esc(tr('bmm.reread'))}</button>
+          <span class="form-hint bm-last-at" id="bm-last-at" role="status"></span>
+        </div>
+        <div id="bmc-discover-result"></div>
+      </div>
+      <div class="bm-pane" data-bm-pane="profiles" role="tabpanel" hidden><div id="bm-profiles"></div></div>
+      <div class="bm-pane" data-bm-pane="images" role="tabpanel" hidden><div id="bmc-iso-store"></div></div>
+      <div class="bm-pane" data-bm-pane="history" role="tabpanel" hidden><div id="bm-history"></div></div>`;
+  }
+
+  function paintTabs() {
+    const strip = $('#tab-automation .bm-tabs');
+    if (strip) strip.setAttribute('aria-label', tr('bmt.tabs'));
+    document.querySelectorAll('#tab-automation [data-bm-tab]').forEach((b) => {
+      const on = b.dataset.bmTab === tab;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('#bmc-body [data-bm-pane]').forEach((p) => {
+      p.hidden = p.dataset.bmPane !== tab;
+    });
+  }
+
+  /** Onglet demandé (adresse, clic) ; `render: false` = seulement retenu,
+   *  le rendu viendra de render() (routeur). */
+  function setTab(name, opts) {
+    const o = opts || {};
+    tab = TABS.includes(name) ? name : 'machines';
+    if (o.render === false) return;
+    paintTabs();
+    renderTab(false);
+    if (o.sync && window.Router) Router.syncFromScreen();
+  }
+
+  function renderTab(force) {
+    if (tab !== 'history') bmHistory.stop();
+    if (tab === 'machines') {
+      if (force || !machinesLoaded) loadLast(); else paintMachines();
+      paintIsoMissing();
+    } else if (tab === 'profiles') {
+      // v1.80.0 : profils d'installation multi-nœuds (bm-profiles.js)
+      if (window.BMProfiles) BMProfiles.render();
+    } else if (tab === 'images') {
+      renderIsoStore();
+    } else {
+      bmHistory.render();
+    }
+  }
+
+  // `force` (bouton Rafraîchir) relit l'onglet ouvert auprès de la console ;
+  // la découverte n'est plus perdue : la console la garde.
   function render(force) {
     const out = $('#bmc-body');
     if (!out) return;
-    if (!force && out.querySelector('#bmc-discover-form')) {
-      renderIsoStore();
-      if (window.BMProfiles) BMProfiles.render();
-      paintJoin();
-      return;
+    if (!out.querySelector('.bm-pane')) skeleton(out);
+    paintTabs();
+    paintJoin();
+    renderTab(!!force);
+  }
+
+  // -------------------------------------------------------------------------
+  // Machines : dernière découverte, gardée par la console
+  // -------------------------------------------------------------------------
+  async function loadLast() {
+    let d = null;
+    try {
+      const r = await fetch('/api/bmc/last-discovery');
+      if (r.ok) d = (await r.json()).discovery || null;
+    } catch (e) { d = null; }
+    machinesLoaded = true;
+    // une découverte faite dans cette page pendant la lecture reste la plus récente
+    if (d && Number(d.at || 0) >= Number(lastAt || 0)) {
+      lastNodes = d.nodes || [];
+      lastHosts = d.hosts || [];
+      lastAt = d.at || null;
     }
-    out.innerHTML = `
-      <div id="bmc-iso-store"></div>
-      <div class="card" style="margin-top:12px;">
-        <div class="card-header"><h2>${Icons.svg('search', { size: 18 })} ${esc(tr('bmc.discovery'))}</h2></div>
-        <div class="card-body">
-          <form id="bmc-discover-form" class="capi-form">
+    paintMachines();
+  }
+
+  function paintMachines() {
+    const at = $('#bm-last-at');
+    if (at) {
+      at.textContent = lastAt
+        ? tr('bmm.lastAt', { at: fmtDate(lastAt), count: lastHosts.length })
+        : tr('bmm.never');
+    }
+    const reread = $('#bmc-body [data-bm="reread"]');
+    if (reread) reread.hidden = !lastHosts.length;
+    const out = $('#bmc-discover-result');
+    if (!out || discovering) return;
+    out.innerHTML = lastNodes.length
+      ? renderResults(lastNodes)
+      : `<div class="empty-state bm-machines-empty">${esc(tr('bmm.empty'))}</div>`;
+  }
+
+  // Version d'un nom d'ISO (harvester-v1.9.0-amd64.iso -> 1.9.0)
+  const nameVersion = (name) => {
+    const m = /v?(\d+\.\d+\.\d+(?:-rc\d+)?)/.exec(String(name || ''));
+    return m ? m[1] : '';
+  };
+
+  /** Vérifier avant d'agir : pas d'ISO dans le magasin, ou aucun de la
+   *  version du cluster à joindre. */
+  async function paintIsoMissing() {
+    const box = $('#bm-iso-missing');
+    if (!box) return;
+    let isos = null;
+    try {
+      const r = await fetch('/api/isos');
+      if (r.ok) isos = (await r.json()).isos || [];
+    } catch (e) { isos = null; }
+    if (isos === null) { box.innerHTML = ''; return; }
+    let msg = '';
+    if (joinTarget && joinTarget.version) {
+      const want = String(joinTarget.version).replace(/^v/, '');
+      const ok = isos.some(i => (joinTarget.isos || []).includes(i.name) || nameVersion(i.name) === want);
+      if (!ok) msg = tr('bmm.noIsoVersion', { version: joinTarget.version, cluster: joinTarget.cluster });
+    }
+    if (!msg && !isos.length) msg = tr('bmm.noIso');
+    box.innerHTML = msg
+      ? `<div class="ct-banner bm-banner-warn bm-iso-missing" role="status">${Icons.svg('warn', { size: 14 })}
+           <span>${esc(msg)}</span>
+           <a href="#automation/pxe/images" class="btn btn-sm btn-secondary tip" data-bm-goto="images"
+              data-tip="${esc(tr('bmm.openImagesTip'))}">${esc(tr('bmm.openImages'))}</a></div>`
+      : '';
+  }
+
+  // -------------------------------------------------------------------------
+  // Découverte : une fenêtre, le formulaire d'avant
+  // -------------------------------------------------------------------------
+  function openDiscover(opts) {
+    const o = opts || {};
+    const id = 'bm-discover-modal';
+    document.getElementById(id)?.remove();
+    const m = document.createElement('div');
+    m.className = 'modal-overlay active bm-discover-modal';
+    m.id = id;
+    m.setAttribute('role', 'dialog');
+    m.setAttribute('aria-modal', 'true');
+    m.setAttribute('aria-labelledby', 'bm-discover-title');
+    const hosts = (o.hosts || lastHosts || []).join(', ');
+    m.innerHTML = `
+      <div class="modal bm-discover-window">
+        <div class="modal-header"><h3 id="bm-discover-title">${Icons.svg('search', { size: 18 })} ${esc(tr('bmc.discovery'))}</h3>
+          <button type="button" class="btn-close tip" data-x="close" data-tip="${esc(tr('common.close'))}"
+                  aria-label="${esc(tr('common.close'))}">×</button></div>
+        <div class="modal-body">
+          ${o.reason ? `<p class="form-hint vm-edit-unverified bm-discover-reason">${esc(o.reason)}</p>` : ''}
+          <form id="bmc-discover-form" class="capi-form" autocomplete="off">
             <fieldset>
               <legend>${esc(tr('bmc.targets'))}</legend>
               <label style="grid-column:1/-1;">${esc(tr('bmc.hosts'))} *
-                <textarea name="hosts" rows="2" required
-                          placeholder="192.0.2.10, 192.0.2.11"></textarea></label>
+                <textarea name="hosts" rows="2" required class="tip" data-tip="${esc(tr('bmm.hostsTip'))}"
+                          placeholder="192.0.2.10, 192.0.2.11">${esc(hosts)}</textarea></label>
               <label>${esc(tr('bmc.user'))} *
-                <input name="user" required value="${esc(creds.user || 'admin')}"></label>
+                <input name="user" required class="tip" data-tip="${esc(tr('bmm.userTip'))}" value="${esc(creds.user || 'admin')}"></label>
               <label>${esc(tr('bmc.password'))} *
-                <input name="password" type="password" required></label>
+                <input name="password" type="password" required autocomplete="new-password" class="tip"
+                       data-tip="${esc(tr('bmc.credsHint'))}"></label>
             </fieldset>
             <div class="apply-bar">
               <button type="submit" class="btn btn-primary btn-sm btn-ico tip"
                       data-tip="${esc(tr('bmc.discoverTip'))}">${Icons.svg('search')} ${esc(tr('bmc.discover'))}</button>
+              <button type="button" class="btn btn-secondary btn-sm tip" data-x="close"
+                      data-tip="${esc(tr('bmm.cancelTip'))}">${esc(tr('common.cancel'))}</button>
             </div>
           </form>
           <p class="form-hint">${esc(tr('bmc.credsHint'))}</p>
         </div>
-      </div>
-      <div id="bmc-discover-result" style="margin-top:12px;"></div>
-      <div id="bm-profiles" style="margin-top:12px;"></div>`;
-    renderIsoStore();
-    // v1.80.0 : profils d'installation multi-nœuds (bm-profiles.js)
-    if (window.BMProfiles) BMProfiles.render();
-    paintJoin();
+      </div>`;
+    document.body.appendChild(m);
+    const close = () => m.remove();
+    m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-x="close"]')) close(); });
+    m.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+    const focus = m.querySelector(hosts ? '[name="password"]' : '[name="hosts"]');
+    if (focus) focus.focus();
+    return m;
+  }
+
+  /** Identifiants absents (page rechargée) : la fenêtre de découverte les
+   *  demande, adresses déjà remplies. */
+  function askCreds() {
+    openDiscover({ reason: tr('bmc.needCreds') });
+  }
+
+  async function runDiscovery(hosts) {
+    const out = $('#bmc-discover-result');
+    discovering = true;
+    if (out) out.innerHTML = `<div class="summary-bar">${esc(tr('bmc.discovering'))}</div>`;
+    try {
+      const r = await fetch('/api/bmc/discover', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hosts, ...creds }),
+      });
+      const d = await r.json().catch(() => ({}));
+      discovering = false;
+      if (!r.ok) { if (out) out.innerHTML = `<div class="summary-bar bad">${esc(d.error || r.status)}</div>`; return; }
+      lastNodes = d.nodes || [];
+      lastHosts = hosts;
+      lastAt = d.at || Date.now() / 1000;
+      machinesLoaded = true;
+      paintMachines();
+    } catch (e) {
+      discovering = false;
+      if (out) out.innerHTML = `<div class="summary-bar bad">${esc(e.message)}</div>`;
+    }
   }
 
   async function discover(ev) {
@@ -126,75 +323,98 @@ const BMC = (() => {
     const hosts = String(fd.get('hosts') || '')
       .split(/[\s,;]+/).map(h => h.trim()).filter(Boolean);
     creds = { user: fd.get('user') || '', password: fd.get('password') || '' };
-    const out = $('#bmc-discover-result');
-    if (out) out.innerHTML = `<div class="summary-bar">${esc(tr('bmc.discovering'))}</div>`;
-    try {
-      const r = await fetch('/api/bmc/discover', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hosts, ...creds }),
-      });
-      const d = await r.json();
-      if (!r.ok) { if (out) out.innerHTML = `<div class="summary-bar bad">${esc(d.error)}</div>`; return; }
-      lastNodes = d.nodes || [];
-      if (out) out.innerHTML = renderResults(lastNodes);
-    } catch (e) {
-      if (out) out.innerHTML = `<div class="summary-bar bad">${esc(e.message)}</div>`;
-    }
+    document.getElementById('bm-discover-modal')?.remove();
+    // la découverte se voit dans Machines
+    if (tab !== 'machines') setTab('machines', { sync: true });
+    await runDiscovery(hosts);
+  }
+
+  /** Relire : mêmes adresses, identifiants de la page ; sans eux, la fenêtre. */
+  function reread() {
+    if (!lastHosts.length) { openDiscover(); return; }
+    if (!creds.password) { askCreds(); return; }
+    runDiscovery(lastHosts.slice());
   }
 
   function renderResults(nodes) {
     const okCount = nodes.filter(n => n.ok).length;
     const errCount = nodes.length - okCount;
-    let html = `<div class="summary-bar ${errCount ? 'warn' : 'ok'}">
+    const summary = `<div class="summary-bar ${errCount ? 'warn' : 'ok'}">
         ${okCount} / ${nodes.length} BMC ${esc(tr('bmc.reachable'))}${errCount ? ` · ${errCount} ${esc(tr('bmc.unreachable'))}` : ''}
       </div>`;
-    nodes.forEach(n => {
+    const powerBtn = (host, action, cls, icon, label, tip) => `<button type="button"
+        class="btn btn-sm ${cls} bmc-power tip" data-host="${esc(host)}" data-action="${action}"
+        data-tip="${esc(tip)}" aria-label="${esc(label)}">${icon}</button>`;
+    const rows = nodes.map(n => {
       if (!n.ok) {
-        html += `<div class="card" style="margin-top:10px;"><div class="card-header">
-          <h2><code>${esc(n.host)}</code> — <span class="err">${esc(n.error || '')}</span></h2>
-        </div></div>`;
-        return;
+        return `<tr class="bm-machine bm-machine-down" data-host="${esc(n.host)}">
+          <td><code>${esc(n.host)}</code></td>
+          <td colspan="6"><span class="err">${esc(n.error || '')}</span></td></tr>`;
       }
-      const nics = (n.nics || []).map(x => `
-        <tr><td>${esc(x.name)}</td><td><code>${esc(x.mac || '—')}</code></td>
-            <td>${esc(x.status || '—')}</td>
-            <td>${x.speed_mbps ? x.speed_mbps + ' Mbps' : '—'}</td></tr>`).join('');
-      const disks = (n.uefi_targets || []).filter(x => x.startsWith('HD.')).length;
+      const nics = (n.nics || []).map(x => `<div class="bm-nic-line"><code>${esc(x.mac || '—')}</code>
+          <span class="form-hint">${esc(x.status || '—')}${x.speed_mbps ? ' · ' + esc(x.speed_mbps) + ' Mbps' : ''}</span></div>`).join('')
+        || '<span class="form-hint">—</span>';
+      const disks = (n.uefi_targets || []).filter(x => String(x).startsWith('HD.')).length;
       // L'installation n'est proposée que si la machine sait vraiment le
       // faire : lecteur virtuel CD et amorce CD pilotables.
       const installable = !!n.virtualmedia_path
         && (n.boot_targets || []).includes('Cd');
-      html += `<div class="card" style="margin-top:10px;">
-        <div class="card-header">
-          <h2><code>${esc(n.host)}</code> — ${esc(n.model || '')}
-            <span class="badge ${n.power_state === 'On' ? 'ok' : 'warn'}">${esc(n.power_state || '?')}</span></h2>
-          <span class="form-hint">SN <code>${esc(n.serial || '—')}</code> · BIOS <code>${esc(n.bios_version || '—')}</code>
-            · ${esc(n.memory_gib || '?')} GiB · ${disks} ${esc(tr('bmc.disks'))}</span>
-        </div>
-        <div class="card-body">
-          <div class="apply-bar" style="margin-bottom:8px;">
-            <button class="btn btn-sm btn-secondary btn-ico bmc-power tip" data-host="${esc(n.host)}" data-action="On"
-                    data-tip="${esc(tr('bmc.tip.on'))}"><span class="icon-green">${Icons.svg('power')}</span> ${esc(tr('bmc.pw.on'))}</button>
-            <button class="btn btn-sm btn-secondary btn-ico bmc-power tip" data-host="${esc(n.host)}" data-action="GracefulShutdown"
-                    data-tip="${esc(tr('bmc.tip.gracefulOff'))}">${Icons.svg('stop')} ${esc(tr('bmc.pw.gracefulOff'))}</button>
-            <button class="btn btn-sm btn-danger btn-ico bmc-power tip" data-host="${esc(n.host)}" data-action="ForceOff"
-                    data-tip="${esc(tr('bmc.tip.forceOff'))}">${Icons.svg('power')} ${esc(tr('bmc.pw.forceOff'))}</button>
-            <button class="btn btn-sm btn-secondary btn-ico bmc-power tip" data-host="${esc(n.host)}" data-action="GracefulRestart"
-                    data-tip="${esc(tr('bmc.tip.restart'))}">${Icons.svg('restart')} ${esc(tr('bmc.pw.restart'))}</button>
-            ${installable
-              ? `<button class="btn btn-sm btn-primary btn-ico bmc-install tip" data-host="${esc(n.host)}"
-                         data-tip="${esc(tr('bmc.installTip'))}">${Icons.svg('install')} ${esc(tr('bmc.install'))}</button>`
-              : `<span class="badge warn tip" data-tip="${esc(tr('bmc.noMediaTip'))}">${esc(tr('bmc.noMedia'))}</span>`}
-          </div>
-          <table class="data-table">
-            <thead><tr><th>NIC</th><th>MAC</th><th>${esc(tr('bmc.state'))}</th><th>${esc(tr('bmc.speed'))}</th></tr></thead>
-            <tbody>${nics}</tbody>
-          </table>
-        </div>
-      </div>`;
-    });
-    return html;
+      const go = installable
+        ? `<button type="button" class="btn btn-sm btn-primary btn-ico bmc-install tip" data-host="${esc(n.host)}"
+                   data-tip="${esc(joinTarget ? tr('bmm.joinTip', { cluster: joinTarget.cluster }) : tr('bmc.installTip'))}">${Icons.svg('install')}
+             ${esc(joinTarget ? tr('bmm.join', { cluster: joinTarget.cluster }) : tr('bmc.install'))}</button>`
+        : `<span class="badge warn tip" data-tip="${esc(tr('bmc.noMediaTip'))}">${esc(tr('bmc.noMedia'))}</span>`;
+      return `<tr class="bm-machine" data-host="${esc(n.host)}">
+          <td><code>${esc(n.host)}</code></td>
+          <td><div>${esc(n.manufacturer ? n.manufacturer + ' ' : '')}${esc(n.model || '')}</div>
+            <div class="form-hint">SN <code>${esc(n.serial || '—')}</code> · BIOS <code>${esc(n.bios_version || '—')}</code></div></td>
+          <td class="bm-num">${n.cpu_count ? esc(n.cpu_count) + ' CPU · ' : ''}${esc(n.memory_gib || '?')} GiB</td>
+          <td class="bm-num tip" data-tip="${esc(tr('bmm.disksTip'))}">${disks} ${esc(tr('bmc.disks'))}</td>
+          <td class="bm-nics-cell">${nics}</td>
+          <td><span class="badge ${n.power_state === 'On' ? 'ok' : 'warn'} tip" data-tip="${esc(tr('bmm.powerTip', { at: fmtDate(lastAt) }))}">${esc(n.power_state || '?')}</span></td>
+          <td class="bm-machine-actions">
+            ${go}
+            <span class="bm-power-group" role="group" aria-label="${esc(tr('bmm.power'))}">
+              ${powerBtn(n.host, 'On', 'btn-secondary', `<span class="icon-green">${Icons.svg('power')}</span>`, tr('bmc.pw.on'), tr('bmc.tip.on'))}
+              ${powerBtn(n.host, 'GracefulShutdown', 'btn-secondary', Icons.svg('stop'), tr('bmc.pw.gracefulOff'), tr('bmc.tip.gracefulOff'))}
+              ${powerBtn(n.host, 'ForceOff', 'btn-danger', Icons.svg('power'), tr('bmc.pw.forceOff'), tr('bmc.tip.forceOff'))}
+              ${powerBtn(n.host, 'GracefulRestart', 'btn-secondary', Icons.svg('restart'), tr('bmc.pw.restart'), tr('bmc.tip.restart'))}
+            </span>
+          </td>
+        </tr>`;
+    }).join('');
+    return `${summary}
+      <div class="tbl-scroll"><table class="data-table bm-machines">
+        <thead><tr><th>BMC</th><th>${esc(tr('bmm.col.machine'))}</th><th>${esc(tr('bmm.col.compute'))}</th>
+          <th>${esc(tr('bmm.col.disks'))}</th><th>${esc(tr('bmm.col.nics'))}</th><th>${esc(tr('bmc.state'))}</th>
+          <th>${esc(tr('col.actions') || 'Actions')}</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
   }
+
+  // -------------------------------------------------------------------------
+  // Historique : l'Activité filtrée sur les actions bare-metal
+  // -------------------------------------------------------------------------
+  const historyShown = () => tab === 'history'
+    && !!document.querySelector('#tab-automation.active > .sub-tab-content[data-subtab="pxe"].active');
+
+  // Libellé d'une action (verbe de l'Activité) ; table littérale, visible des
+  // tests de traduction
+  function kindLabel(action) {
+    const verb = String(action || '').split(':', 1)[0];
+    switch (verb) {
+      case 'baremetal-install': return tr('bmh.kind.install');
+      case 'baremetal-batch': return tr('bmh.kind.batch');
+      case 'baremetal-discover': return tr('bmh.kind.discover');
+      case 'bmc-power': return tr('bmh.kind.power');
+      default: return verb;
+    }
+  }
+
+  // 2.2.0 : l'historique est partagé avec Terraform et Cluster API (auto-history.js)
+  const bmHistory = AutoHistory.create({
+    box: () => $('#bm-history'), queries: HISTORY_KINDS, cls: 'bm', shown: historyShown,
+    label: (a) => kindLabel(a.action), hint: () => tr('bmh.hint'), empty: () => tr('bmh.empty'),
+  });
 
   // -------------------------------------------------------------------------
   // Installation
@@ -337,7 +557,8 @@ const BMC = (() => {
     const node = lastNodes.find(n => n.host === host) || {};
     let isos = [];
     try { isos = (await fetch('/api/isos').then(r => r.json())).isos || []; } catch (e) { /* vide */ }
-    if (!isos.length) { alert(tr('bmc.needIso')); return; }
+    // vérifier avant d'agir : sans ISO, l'onglet Images
+    if (!isos.length) { alert(tr('bmc.needIso')); setTab('images', { sync: true }); return; }
     // La valeur est la MAC, pas le nom Redfish : sur ces machines les deux
     // cartes s'appellent « System Ethernet Interface », et de toute façon
     // Redfish ignore le nom que Linux donnera à l'interface. Plusieurs cartes
@@ -498,8 +719,10 @@ const BMC = (() => {
                         autocapitalize="off" placeholder="os:&#10;  write_files:&#10;  - path: /etc/example.conf&#10;    content: |&#10;      key=value"></textarea>
               <span class="form-hint">${esc(tr('bmc.f.advYamlHint'))}</span></label>
           </fieldset>
+          <!-- 2.2.0 : un système semble-t-il déjà présent ? (vérifier avant d'agir) -->
+          <div class="bm-system" data-bm="system" role="status"></div>
           <div class="apply-bar">
-            <button type="submit" class="btn btn-primary btn-sm btn-ico tip"
+            <button type="submit" class="btn btn-primary btn-sm btn-ico tip" data-bm="install-go"
                     data-tip="${esc(tr('bmc.installTip'))}">${Icons.svg('install')} ${esc(tr('bmc.installGo'))}</button>
             <span class="apply-result" id="bm-install-result"></span>
           </div>
@@ -572,6 +795,68 @@ const BMC = (() => {
     }
     onboardEnabled.addEventListener('change', syncOnboarding);
     field('onboard_profile').addEventListener('change', renderStoragePorts);
+
+    // --- Système déjà présent (2.2.0) ----------------------------------------
+    // Ce que le BMC publie (entrées UEFI, ordre de démarrage, volumes) dit
+    // si la machine porte déjà un système. Présent : le nom de la machine
+    // (série, sinon adresse du BMC) doit être tapé, et la console le revérifie
+    // à l'installation. Inconnu : dit tel quel, jamais « vide ».
+    const sysBox = form.querySelector('[data-bm="system"]');
+    const goBtn = form.querySelector('[data-bm="install-go"]');
+    let sysCheck = null;
+    function syncSystemGate() {
+      const typed = field('system_confirm');
+      const need = sysCheck && sysCheck.state === 'present';
+      const ok = !need || (typed && typed.value.trim() === sysCheck.confirm_name);
+      goBtn.disabled = !ok;
+      const hint = sysBox.querySelector('.bm-system-mismatch');
+      if (hint) hint.hidden = ok || !typed || !typed.value.trim();
+    }
+    function paintSystem(d, refusedNow) {
+      sysCheck = d;
+      const recheck = `<button type="button" class="btn btn-sm btn-secondary btn-ico tip" data-bm="system-recheck"
+          data-tip="${esc(tr('bmc.sys.recheckTip'))}">${Icons.svg('refresh')} ${esc(tr('bmc.sys.recheck'))}</button>`;
+      if (!d) {
+        sysBox.innerHTML = `<p class="form-hint">${esc(tr('bmc.sys.checking'))}</p>`;
+      } else if (d.state === 'present') {
+        const keep = field('system_confirm') ? field('system_confirm').value : '';
+        sysBox.innerHTML = `<div class="ct-banner auto-banner-warn bm-system-present">${Icons.svg('warn', { size: 14 })}
+            <div><strong>${esc(tr('bmc.sys.present'))}</strong>
+              ${refusedNow ? `<p class="bm-system-refused">${esc(tr('bmc.sys.refused'))}</p>` : ''}
+              <ul class="bm-system-evidence">${(d.evidence || []).map(ev => `<li>${esc(evidenceText(ev))}</li>`).join('')}</ul>
+              <label class="bm-system-confirm tip" data-tip="${esc(tr('bmc.sys.typeTip'))}">${esc(tr('bmc.sys.typeName'))}
+                <code class="bm-system-name">${esc(d.confirm_name)}</code>
+                <input name="system_confirm" autocomplete="off" spellcheck="false" value="${esc(keep)}"
+                       title="${esc(tr('bmc.sys.typeTip'))}" aria-label="${esc(tr('bmc.sys.typeTip'))}"></label>
+              <span class="form-hint bm-system-mismatch" hidden>${esc(tr('bmc.sys.mismatch'))}</span>
+            </div>${recheck}</div>`;
+      } else if (d.state === 'absent') {
+        sysBox.innerHTML = `<div class="ct-banner bm-system-absent">${Icons.svg('info', { size: 14 })}
+            <span>${esc(tr('bmc.sys.absent'))}</span>${recheck}</div>`;
+      } else {
+        sysBox.innerHTML = `<div class="ct-banner bm-system-unknown">${Icons.svg('info', { size: 14 })}
+            <span>${esc(d.noCreds ? tr('bmc.sys.noCreds') : tr('bmc.sys.unknown'))}</span>${recheck}</div>`;
+      }
+      field('system_confirm')?.addEventListener('input', syncSystemGate);
+      syncSystemGate();
+    }
+    async function checkSystem() {
+      paintSystem(null);
+      if (!creds.password) { paintSystem({ state: 'unknown', evidence: [], noCreds: true }); return; }
+      let d = null;
+      try {
+        const r = await fetch('/api/bmc/system-check', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host, user: creds.user, password: creds.password }),
+        });
+        if (r.ok) d = await r.json();
+      } catch (e) { d = null; }
+      paintSystem(d && d.state ? d : { state: 'unknown', evidence: [] });
+    }
+    sysBox.addEventListener('click', (e) => {
+      if (e.target.closest('[data-bm="system-recheck"]')) checkSystem();
+    });
+    checkSystem();
 
     // Secrets d'un fichier importé : gardés par le serveur, désignés par cet
     // identifiant ; le navigateur ne les voit jamais.
@@ -1337,6 +1622,10 @@ const BMC = (() => {
         res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.join.needConfirm'))}</span>`;
         return;
       }
+      if (sysCheck && sysCheck.state === 'present' && String(body.system_confirm || '').trim() !== sysCheck.confirm_name) {
+        res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.sys.mismatch'))}</span>`;
+        return;
+      }
       body.bmc_host = host;
       body.bmc_user = creds.user;
       body.bmc_password = creds.password;
@@ -1351,6 +1640,11 @@ const BMC = (() => {
         const d = await r.json().catch(() => ({}));
         if (r.ok) {
           res.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${esc(d.action_id)}</span>`;
+        } else if ((d.fields || []).includes('system_confirm') && d.system) {
+          // 2.2.0 : la console a relu le BMC et refuse ; la fenêtre le montre
+          paintSystem(d.system, true);
+          res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.sys.refused'))}</span>`;
+          sysBox.scrollIntoView({ block: 'nearest' });
         } else {
           msg.innerHTML = refusalFor(d, r.status);
           res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(d.error || r.status)}</span>`;
@@ -1383,7 +1677,7 @@ const BMC = (() => {
   }
 
   async function power(host, action) {
-    if (!creds.password) { alert(tr('bmc.needCreds')); return; }
+    if (!creds.password) { askCreds(); return; }
     if (!confirm(tr('bmc.confirmPower', { action, host }))) return;
     try {
       const r = await fetch(`/api/bmc/${encodeURIComponent(host)}/power`, {
@@ -1402,48 +1696,53 @@ const BMC = (() => {
   // cluster à l'ouverture (/api/clusters/<c>/join-url, ConfigMap de VIP de
   // Harvester) ; null si elle ne se lit pas : la personne la saisit.
   // -------------------------------------------------------------------------
-  let joinTarget = null;        // { cluster, server_url }
+  let joinTarget = null;        // { cluster, server_url, version, isos }
 
+  // 2.1.0 : le bandeau de jonction reste au-dessus de Machines
   function paintJoin() {
-    const out = $('#bmc-body');
-    if (!out) return;
-    let el = out.querySelector('#bm-join-target');
-    if (!joinTarget) { if (el) el.remove(); return; }
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'bm-join-target';
-      el.className = 'summary-bar info bm-join-target';
-      el.setAttribute('role', 'status');
-      out.prepend(el);
-    }
-    el.innerHTML = joinTarget.server_url
-      ? `${Icons.svg('info', { size: 14 })} <span>${esc(tr('bmc.join.banner', { cluster: joinTarget.cluster, url: joinTarget.server_url }))}</span>
-         <button type="button" class="btn btn-sm btn-secondary tip" data-bm="join-cancel" title="${esc(tr('bmc.join.cancelTip'))}"
-                 data-tip="${esc(tr('bmc.join.cancelTip'))}">${esc(tr('bmc.join.cancel'))}</button>`
-      : `${Icons.svg('warn', { size: 14 })} <span>${esc(tr('bmc.join.noUrl', { cluster: joinTarget.cluster }))}</span>
-         <button type="button" class="btn btn-sm btn-secondary tip" data-bm="join-cancel" title="${esc(tr('bmc.join.cancelTip'))}"
+    const slot = $('#bm-join-slot');
+    if (!slot) return;
+    if (!joinTarget) { slot.innerHTML = ''; return; }
+    const cancel = `<button type="button" class="btn btn-sm btn-secondary tip" data-bm="join-cancel" title="${esc(tr('bmc.join.cancelTip'))}"
                  data-tip="${esc(tr('bmc.join.cancelTip'))}">${esc(tr('bmc.join.cancel'))}</button>`;
+    slot.innerHTML = `<div id="bm-join-target" class="ct-banner summary-bar info bm-join-target" role="status">${joinTarget.server_url
+      ? `${Icons.svg('info', { size: 14 })} <span>${esc(tr('bmc.join.banner', { cluster: joinTarget.cluster, url: joinTarget.server_url }))}</span>`
+      : `${Icons.svg('warn', { size: 14 })} <span>${esc(tr('bmc.join.noUrl', { cluster: joinTarget.cluster }))}</span>`}
+      ${cancel}</div>`;
   }
 
-  /** Ouvre Automatisation > Bare-metal pour joindre une machine à `cluster`. */
+  /** Ouvre Automatisation > Bare-metal > Machines pour joindre une machine à `cluster`. */
   async function openJoin(cluster) {
     if (!cluster) return;
-    let url = null;
+    let d = {};
     try {
       const r = await fetch('/api/clusters/' + encodeURIComponent(cluster) + '/join-url');
-      if (r.ok) url = (await r.json()).join_url || null;
+      if (r.ok) d = await r.json();
     } catch (e) { /* dit dans le bandeau */ }
-    joinTarget = { cluster, server_url: url };
+    joinTarget = { cluster, server_url: d.join_url || null, version: d.harvester_version || null,
+                   isos: Array.isArray(d.isos_of_version) ? d.isos_of_version : [] };
+    tab = 'machines';
     try { localStorage.setItem('harvester_ops_automation_subtab', 'pxe'); } catch (e) { /* sans stockage */ }
-    if (window.Router) await Router.go('#automation/pxe');
+    if (window.Router) await Router.go('#automation/pxe/machines');
     render();
+  }
+
+  function cancelJoin() {
+    joinTarget = null;
     paintJoin();
+    if (tab === 'machines') { paintMachines(); paintIsoMissing(); }
   }
 
   function init() {
     document.addEventListener('click', (e) => {
-      if (e.target.closest('[data-bm="join-cancel"]')) { joinTarget = null; paintJoin(); return; }
+      if (e.target.closest('[data-bm="join-cancel"]')) { cancelJoin(); return; }
       if (e.target.closest('#btn-bmc-refresh')) render(true);
+      const t = e.target.closest('#tab-automation [data-bm-tab]');
+      if (t) { e.preventDefault(); setTab(t.dataset.bmTab, { sync: true }); return; }
+      const g = e.target.closest('[data-bm-goto]');
+      if (g) { e.preventDefault(); setTab(g.dataset.bmGoto, { sync: true }); return; }
+      if (e.target.closest('#bmc-body [data-bm="discover-open"]')) { openDiscover(); return; }
+      if (e.target.closest('#bmc-body [data-bm="reread"]')) { reread(); return; }
       const p = e.target.closest('.bmc-power');
       if (p) { e.preventDefault(); power(p.dataset.host, p.dataset.action); }
       const i = e.target.closest('.bmc-install');
@@ -1460,7 +1759,7 @@ const BMC = (() => {
     });
   }
 
-  return { init, render, openJoin };
+  return { init, render, openJoin, setTab, tab: () => tab, evidenceText };
 })();
 
 document.addEventListener('DOMContentLoaded', BMC.init);
