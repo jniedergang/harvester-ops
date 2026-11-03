@@ -521,3 +521,19 @@ Chaque lot est utile seul. 2.9.0 suffit à un client qui a déjà OpenBao.
 - External Secrets Operator, OpenBao : https://external-secrets.io/latest/provider/openbao/
 - OpenTofu, chiffrement de l'état et du plan : https://opentofu.org/docs/language/state/encryption/
 - Image officielle : https://hub.docker.com/r/openbao/openbao
+
+## Décisions du propriétaire du produit (03/11/2026)
+
+- 133 : les deux modes livrés ensemble (serveur du client et OpenBao déployé par la console).
+- 134 : OpenBao déployé en conteneur à côté de la console ; Helm sur un Harvester seulement sur demande.
+- 135 : AppRole, secret emballé, gardé dans `/etc`, rotation par l'agent de l'hôte.
+- 136 : toutes les classes de secrets migrées dans la même version ; les comptes et les clés publiques restent locaux.
+- 137 : cache en mémoire seulement, 15 minutes réglables.
+- 138 : hybride. Identité de service pour les tâches de fond et les comptes locaux ; jeton personnel pour qui se connecte par Rancher ou OIDC, politiques OpenBao par groupe. Identité de service d'abord, jeton personnel dans la version suivante.
+- 139 : Secrets Kubernetes écrits par la console, External Secrets Operator proposé en option.
+- 140 : états chiffrés par OpenTofu avec une clé gérée par OpenBao.
+- 141 : secrets d'un plan gardés dans OpenBao pendant le déroulé, effacés à la fin.
+- 142 : clé de descellement statique lisible par root, copie hors ligne exigée.
+- 143 : image OpenBao de la SUSE Application Collection, dans un paquet séparé facultatif. Elle demande les identifiants Application Collection du client, ou un registre miroir.
+- 144 : instantanés raft planifiés, visibles dans Protection, restauration testée dans l'exercice de reprise.
+- 145 : interface interne dans 2.4.0, puis une version 2.9.0 complète (deux modes, toutes les classes, états chiffrés), jeton personnel en 2.10.0.
