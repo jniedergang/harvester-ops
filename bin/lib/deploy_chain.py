@@ -63,8 +63,8 @@ from dataclasses import dataclass, field
 import secret_store
 
 ORDER = ("install", "readiness", "terraform", "capi", "clusters", "registry", "artefacts")
-COMING = ("capi", "clusters", "registry", "artefacts")
-COMING_MESSAGE = "coming in 2.5+"
+COMING = ("registry", "artefacts")
+COMING_MESSAGE = "coming in 2.6+"
 CHECKED_MESSAGE = "already done (checked)"
 POLL_SECONDS = 15
 SECRET_CLASS = "plan-run"

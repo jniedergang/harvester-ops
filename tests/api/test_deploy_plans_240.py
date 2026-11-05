@@ -78,8 +78,9 @@ def test_plan_normalized():
     assert p["phases"]["readiness"] == {"enabled": True, "timeout_minutes": 20}
     assert p["phases"]["terraform"]["templates"] == [
         {"template": "reseaux-site"}, {"template": "images-base", "depends_on": ["reseaux-site"]}]
-    # format de 2.5+ gardé tel quel, désactivé
-    assert p["phases"]["capi"] == {"enabled": False, "providers": {"caaph": True}}
+    # 2.5.0 : clé libre d'une phase désactivée écrite en 2.4.0, retirée
+    assert p["phases"]["capi"] == {"enabled": False, "timeout_minutes": 10}
+    assert p["phases"]["registry"] == {"enabled": False}
     assert dp.enabled_phases(p) == ["readiness", "terraform"]
 
 
@@ -97,10 +98,11 @@ def test_plan_defaults_and_shorthands():
     (plan_doc(description="x" * 501), "description", "invalid"),
     (plan_doc(phases=[]), "phases", "not a mapping"),
     (with_phase("gitops", {"enabled": False}), "phases.gitops", "unknown phase"),
-    (with_phase("capi", {"enabled": True}), "phases.capi", "coming in 2.5+: set enabled: false"),
-    (with_phase("capi", {"providers": {}}), "phases.capi",
-     "coming in 2.5+: set enabled: false"),                                     # enabled par défaut
-    (with_phase("artefacts", {"enabled": True}), "phases.artefacts", "coming in 2.5+: set enabled: false"),
+    (with_phase("registry", {"enabled": True}), "phases.registry", "coming in 2.6+: set enabled: false"),
+    (with_phase("registry", {"mirrors": {}}), "phases.registry",
+     "coming in 2.6+: set enabled: false"),                                     # enabled par défaut
+    (with_phase("artefacts", {"enabled": True}), "phases.artefacts", "coming in 2.6+: set enabled: false"),
+    (with_phase("capi", {"providers": {}}), "phases.capi.providers", "unknown key"),   # 2.5.0 : activée, stricte
     (with_phase("clusters", [{"template": "x"}]), "phases.clusters", "not a mapping"),
     (with_phase("readiness", {"enabled": "yes"}), "phases.readiness.enabled", "not a boolean"),
     (with_phase("readiness", {"timeout_minutes": 0}), "phases.readiness.timeout_minutes", "an integer from 1 to 180"),
@@ -248,7 +250,7 @@ def test_unreadable_plan_never_overwritten_silently(tmp_path):
 def test_unreadable_plan_listed_invalid(tmp_path):
     d = tmp_path / "plans.d"
     d.mkdir()
-    (d / "broken.yaml").write_text("phases: {capi: {enabled: true}}\n")
+    (d / "broken.yaml").write_text("phases: {registry: {enabled: true}}\n")
     (d / "garbage.yaml").write_text(": : :\n")
     assert dp.list_plans(tmp_path) == [{"name": "broken", "invalid": True},
                                        {"name": "garbage", "invalid": True}]

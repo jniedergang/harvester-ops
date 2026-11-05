@@ -154,7 +154,8 @@ def test_rules_are_those_of_hv_upgrade(monkeypatch):
     assert ["nodes"] in seen and ["charts"] in seen
 
 
-def test_capi_checks_not_evaluated_in_240():
-    """rke2-traefik et Turtles : phase Cluster API, à partir de 2.5.0."""
-    out = dr.evaluate(reads(), phases=("readiness", "terraform", "capi"))
+def test_capi_checks_not_evaluated_without_capi_phases():
+    """rke2-traefik et Turtles : seulement si capi ou clusters est activée
+    (2.5.0, test_deploy_plans_250.py)."""
+    out = dr.evaluate(reads(), phases=("readiness", "terraform"))
     assert out == {"ready": True, "unmet": []}

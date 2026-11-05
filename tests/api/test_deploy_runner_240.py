@@ -137,7 +137,7 @@ def test_chain_readiness_then_terraform(world):
     assert res["resumes"] is None and res["dry_run"] is False and res["status"] == "done"
     assert res["variables"] == {"equipe": "ops"}
     assert [p["id"] for p in res["phases"]] == ["readiness", "terraform", "capi"]
-    assert res["phases"][2] == {"id": "capi", "status": "disabled", "message": "coming in 2.5+"}
+    assert res["phases"][2] == {"id": "capi", "status": "disabled", "message": "disabled in the plan"}
     [item] = res["phases"][1]["items"]
     d = world["store"].find_by_name("harvlab", "site-cles")
     assert item["template"] == "cles" and item["status"] == "done" and item["declaration_id"] == d["id"]

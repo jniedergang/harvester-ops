@@ -112,9 +112,10 @@ def test_full_chain():
     (["terraform", "readiness"], [("readiness", "done"), ("terraform", "done")]),
     # phase désactivée : sautée, la suivante tourne
     ([("readiness", False), "terraform"], [("readiness", "disabled"), ("terraform", "done")]),
-    # phases 2.5+ : sautées « coming in 2.5+ », même activées par erreur
+    # phases 2.6+ : sautées « coming in 2.6+ », même activées par erreur ;
+    # capi tourne depuis la 2.5.0
     (["readiness", "capi", "artefacts", ("registry", False)],
-     [("readiness", "done"), ("capi", "disabled"), ("registry", "disabled"), ("artefacts", "disabled")]),
+     [("readiness", "done"), ("capi", "done"), ("registry", "disabled"), ("artefacts", "disabled")]),
 ])
 def test_order_disabled_and_coming(phases_ids, expected):
     ctx = Ctx()
@@ -124,9 +125,9 @@ def test_order_disabled_and_coming(phases_ids, expected):
         phases.append(simple(ctx, pid, enabled=en))
     out = run(ctx, phases)
     assert statuses(out) == expected and out["status"] == "done"
-    for pid in ("capi", "registry", "artefacts"):
+    for pid in ("registry", "artefacts"):
         if any(p.id == pid for p in phases):
-            assert ctx.final(f"phase-{pid}") == ("skipped", "coming in 2.5+")
+            assert ctx.final(f"phase-{pid}") == ("skipped", "coming in 2.6+")
             assert pid not in ctx.calls
     if ("readiness", False) in phases_ids:
         assert ctx.final("phase-readiness") == ("skipped", "disabled in the plan")
@@ -168,8 +169,7 @@ def test_terraform_partial_independent_continues_dependent_skipped():
 
 
 def test_partial_does_not_continue_to_later_phase(monkeypatch):
-    """Une phase suivante (simulée en 2.5+ activable) n'est pas lancée."""
-    monkeypatch.setattr(dc, "COMING", ())
+    """Une phase suivante (capi, activable depuis la 2.5.0) n'est pas lancée."""
     ctx = Ctx()
     out = run(ctx, [tf_phase(ctx, {"a": "error", "b": "done"}), simple(ctx, "capi")])
     assert "capi" not in ctx.calls and dict(statuses(out))["capi"] == "skipped"

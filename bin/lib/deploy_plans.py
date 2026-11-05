@@ -3,9 +3,9 @@
 Un plan de déploiement est nommé et réutilisable. Il s'applique à un
 cluster Harvester déclaré, ou s'enchaîne après une installation bare-metal
 (un profil le désigne par son champ `plan`). Il active des phases :
-disponibilité et contenu Terraform en 2.4.0 ; gestion Cluster API,
-clusters enfants, registre et artefacts existent déjà dans le format, mais
-seulement désactivés (« coming in 2.5+ »), pour que le format ne change pas.
+disponibilité et contenu Terraform en 2.4.0 ; pile Cluster API et clusters
+enfants en 2.5.0 ; registre et artefacts existent déjà dans le format, mais
+seulement désactivés (« coming in 2.6+ »), pour que le format ne change pas.
 
 Un modèle de déclaration porte les ressources d'une déclaration Terraform
 (format de web/tf_store.py), chaînes à variables `{{nom}}`. La phase
@@ -62,13 +62,19 @@ TEMPLATE_DIR = "tf-templates.d"
 CAPI_TEMPLATE_DIR = "capi-templates.d"
 CAPI_TEMPLATE_FORBIDDEN = ("name", "namespace", "target_namespace")
 PHASES = ("readiness", "terraform", "capi", "clusters", "registry", "artefacts")
-AVAILABLE = ("readiness", "terraform")
+AVAILABLE = ("readiness", "terraform", "capi", "clusters")
 BUILTIN_VARS = ("cluster", "vip")
 MAX_TEMPLATES = 32
 TIMEOUT_MIN, TIMEOUT_MAX, TIMEOUT_DEFAULT = 1, 180, 20
+# 2.5.0 : délais des phases Cluster API (minutes) : (min, max, défaut)
+CAPI_TIMEOUT = (1, 60, 10)
+CLUSTERS_TIMEOUT = (5, 180, 30)
+MAX_CLUSTERS = 16
+# `n` : variable intégrée du seul raccourci `name_pattern` (1 à `count`)
+PATTERN_VAR = "n"
 MAX_DESCRIPTION = 500
 MAX_DECL_NAME = 63
-COMING = "coming in 2.5+"
+COMING = "coming in 2.6+"
 
 # Noms de clés qui désignent un objet public ou le NOM d'un Secret, pas un
 # secret : la clé publique d'une ressource ssh_key, les clés d'une VM
@@ -322,13 +328,126 @@ def _check_terraform(ph, errors, plan_name, known_templates):
     return out
 
 
-def check_plan(doc, known_templates=None):
-    """Plan normalisé {description, variables, phases}, ou ProfileError
-    [(où, raison)]. `known_templates` (noms) : refuse un modèle absent ;
-    sans lui, l'existence des modèles est contrôlée au lancement."""
+def _check_timeout(ph, where, bounds, errors):
+    lo, hi, default = bounds
+    t = ph.get("timeout_minutes", default)
+    if isinstance(t, bool) or not isinstance(t, int) or not lo <= t <= hi:
+        errors.append((f"{where}.timeout_minutes", f"an integer from {lo} to {hi}"))
+        return default
+    return t
+
+
+def _check_capi_phase(ph, errors):
+    """Phase capi : {enabled, timeout_minutes} (pile Cluster API du paquet
+    actif ; CAAPH toujours déclaré avec elle, décision 172)."""
+    unknown = sorted(set(ph) - {"enabled", "timeout_minutes"})
+    errors.extend((f"phases.capi.{k}", "unknown key") for k in unknown)
+    return {"enabled": ph.get("enabled", True) is not False,
+            "timeout_minutes": _check_timeout(ph, "phases.capi", CAPI_TIMEOUT, errors)}
+
+
+def cluster_name_shape_ok(name):
+    """Forme d'un nom de cluster enfant AVANT rendu : chaque variable
+    remplacée par une lettre, le résultat suit capi_cluster.NAME_RE. Le nom
+    rendu est contrôlé de nouveau au lancement (longueur réelle)."""
+    return isinstance(name, str) and bool(_cc.NAME_RE.match(_bmp.VAR_RE.sub("a", name)))
+
+
+def _expand_shortcut(ph, where, errors):
+    """Raccourci `{template, count, name_pattern}` développé en entrées
+    (`n` de 1 à `count`), ou []."""
+    if not any(k in ph for k in ("count", "name_pattern", "template")):
+        return []
+    count, pattern, tname = ph.get("count"), ph.get("name_pattern"), ph.get("template")
+    bad = False
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_CLUSTERS:
+        errors.append((f"{where}.count", f"an integer from 1 to {MAX_CLUSTERS}"))
+        bad = True
+    if not isinstance(pattern, str) or PATTERN_VAR not in _bmp.VAR_RE.findall(pattern):
+        errors.append((f"{where}.name_pattern", "a name holding {{n}}"))
+        bad = True
+    if not isinstance(tname, str) or not NAME_RE.match(tname):
+        errors.append((f"{where}.template", "missing or invalid template name"))
+        bad = True
+    if bad:
+        return []
+    return [{"template": tname, "name": _bmp.VAR_RE.sub(
+        lambda m: str(i) if m.group(1) == PATTERN_VAR else m.group(0), pattern)}
+        for i in range(1, count + 1)]
+
+
+def _check_clusters_phase(ph, errors, variables):
+    """Phase clusters : {enabled, timeout_minutes, items: [{template, name,
+    depends_on}]} ; le raccourci est développé à la suite des entrées.
+    Noms à variables (plan et intégrées), uniques, 16 entrées au plus ;
+    `depends_on` désigne une entrée placée avant (règle de la phase
+    Terraform)."""
+    where = "phases.clusters"
+    unknown = sorted(set(ph) - {"enabled", "timeout_minutes", "items", "template", "count", "name_pattern"})
+    errors.extend((f"{where}.{k}", "unknown key") for k in unknown)
+    timeout = _check_timeout(ph, where, CLUSTERS_TIMEOUT, errors)
+    raw = ph.get("items")
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        errors.append((f"{where}.items", "not a list"))
+        raw = []
+    raw = list(raw) + _expand_shortcut(ph, where, errors)
+    if len(raw) > MAX_CLUSTERS:
+        errors.append((f"{where}.items", f"more than {MAX_CLUSTERS} clusters"))
+        raw = []
+    known = set(BUILTIN_VARS) | set(variables or [])
+    out, seen = [], []
+    for i, entry in enumerate(raw):
+        w = f"{where}.items[{i}]"
+        if not isinstance(entry, dict):
+            errors.append((w, "not a mapping"))
+            continue
+        unknown = sorted(set(entry) - {"template", "name", "depends_on"})
+        errors.extend((f"{w}.{k}", "unknown key") for k in unknown)
+        tname, name = entry.get("template"), entry.get("name")
+        if not isinstance(tname, str) or not NAME_RE.match(tname):
+            errors.append((f"{w}.template", "missing or invalid template name"))
+            continue
+        if not cluster_name_shape_ok(name):
+            errors.append((f"{w}.name", "lowercase letters, digits and '-', starting with a letter, "
+                                        "variables allowed"))
+            continue
+        undeclared = [v for v in _bmp.VAR_RE.findall(name) if v not in known]
+        if undeclared:
+            errors.append((f"{w}.name", f"undeclared variable {undeclared[0]}"))
+            continue
+        if name in seen:
+            errors.append((f"{w}.name", f"{name} listed twice"))
+            continue
+        deps = entry.get("depends_on") or []
+        if isinstance(deps, str):
+            deps = [deps]
+        if not isinstance(deps, list):
+            errors.append((f"{w}.depends_on", "not a list"))
+            deps = []
+        clean = []
+        for d in deps:
+            if d == name:
+                errors.append((f"{w}.depends_on", "a cluster does not depend on itself"))
+            elif d not in seen:
+                errors.append((f"{w}.depends_on", f"{d} is not listed before this cluster"))
+            elif d not in clean:
+                clean.append(d)
+        seen.append(name)
+        item = {"template": tname, "name": name}
+        if clean:
+            item["depends_on"] = clean
+        out.append(item)
+    return {"enabled": ph.get("enabled", True) is not False, "timeout_minutes": timeout, "items": out}
+
+
+def check_plan_warnings(doc, known_templates=None):
+    """(plan normalisé, avertissements) ; voir check_plan. Avertissements :
+    clés d'une phase Cluster API désactivée d'un plan de 2.4.0, retirées."""
     if not isinstance(doc, dict):
         raise ProfileError([("plan", "not a mapping")], "invalid plan")
-    errors = []
+    errors, warnings = [], []
     name = doc.get("name")
     if name is not None and (not isinstance(name, str) or not NAME_RE.match(name)):
         errors.append(("name", "invalid name (RFC 1123)"))
@@ -363,8 +482,26 @@ def check_plan(doc, known_templates=None):
             if enabled:
                 errors.append((f"phases.{pid}", f"{COMING}: set enabled: false"))
                 continue
-            # format de 2.5+ non figé : gardé tel quel, jamais lu en 2.4.0
+            # format de 2.6+ non figé : gardé tel quel, jamais lu
             phases[pid] = dict(ph, enabled=False)
+            continue
+        if pid in ("capi", "clusters") and not enabled:
+            # Plan écrit en 2.4.0 : la phase désactivée y gardait des clés
+            # libres (format non figé alors). Acceptée, clés inconnues
+            # ignorées et retirées au prochain enregistrement, avec un
+            # avertissement ; activée, la règle stricte s'applique.
+            sub = []
+            phases[pid] = (_check_capi_phase(ph, sub) if pid == "capi"
+                           else _check_clusters_phase(ph, sub, variables))
+            phases[pid]["enabled"] = False
+            for where, why in sub:
+                warnings.append(f"{where}: {why}, ignored (phase disabled)")
+            continue
+        if pid == "capi":
+            phases[pid] = _check_capi_phase(ph, errors)
+            continue
+        if pid == "clusters":
+            phases[pid] = _check_clusters_phase(ph, errors, variables)
             continue
         if pid == "readiness":
             unknown = sorted(set(ph) - {"enabled", "timeout_minutes"})
@@ -382,7 +519,14 @@ def check_plan(doc, known_templates=None):
                            "templates": _check_terraform(ph, errors, name, known_templates)}
     if errors:
         raise ProfileError(errors, "invalid plan")
-    return {"description": desc, "variables": variables, "phases": phases}
+    return {"description": desc, "variables": variables, "phases": phases}, warnings
+
+
+def check_plan(doc, known_templates=None):
+    """Plan normalisé {description, variables, phases}, ou ProfileError
+    [(où, raison)]. `known_templates` (noms) : refuse un modèle absent ;
+    sans lui, l'existence des modèles est contrôlée au lancement."""
+    return check_plan_warnings(doc, known_templates)[0]
 
 
 def enabled_phases(plan):
@@ -394,6 +538,25 @@ def plan_templates(plan):
     return list(((plan.get("phases") or {}).get("terraform") or {}).get("templates") or [])
 
 
+def plan_clusters(plan):
+    """Entrées de la phase clusters d'un plan, dans l'ordre ([] si absente)."""
+    return list(((plan.get("phases") or {}).get("clusters") or {}).get("items") or [])
+
+
+def render_cluster_name(name, values):
+    """Nom d'une entrée de la phase clusters rendu avec les valeurs du
+    lancement ; ProfileError (variable absente, nom rendu invalide)."""
+    missing = [v for v in _bmp.VAR_RE.findall(name) if v not in (values or {})]
+    if missing:
+        raise ProfileError([(f"clusters[{name}].name", f"missing variable {missing[0]}")], "missing variable")
+    out = _bmp.VAR_RE.sub(lambda m: str(values[m.group(1)]), name)
+    if not _cc.NAME_RE.match(out):
+        raise ProfileError([(f"clusters[{name}].name", f"rendered name {out[:45]} is not valid: lowercase "
+                                                       "letters, digits and '-', starting with a letter, "
+                                                       "1 to 40 characters")], "invalid name")
+    return out
+
+
 def _named(doc, name):
     return dict(doc, name=name) if isinstance(doc, dict) else doc
 
@@ -402,7 +565,10 @@ def save_plan(state, name, doc, revision=None):
     """Écrit le plan (0600, remplacement atomique) à la révision lue ;
     PlanConflict si elle est périmée, ProfileError s'il est invalide. Le nom
     d'enregistrement fait foi pour le contrôle des noms de déclaration."""
-    return _save(state, PLAN_DIR, name, doc, revision, lambda d: check_plan(_named(d, name)))
+    out = _save(state, PLAN_DIR, name, doc, revision, lambda d: check_plan_warnings(_named(d, name)))
+    out, warnings = out
+    # avertissements rendus, jamais écrits (clés d'une phase désactivée retirées)
+    return dict(out, warnings=warnings) if warnings else out
 
 
 def load_plan(state, name):

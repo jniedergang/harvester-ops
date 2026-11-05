@@ -32588,6 +32588,30 @@ def _deploy_read_cluster(kc, cluster):
         return {k: f.result() for k, f in futs.items()}
 
 
+def _deploy_read_capi(kc, cluster):
+    """Lectures Cluster API de la disponibilité (2.5.0, décision 155) :
+    version de Harvester, service rke2-traefik, CAPIProvider ; None pour une
+    lecture en échec."""
+    def setting():
+        d = _kubectl_json(kc, "get", "settings.harvesterhci.io", "server-version", timeout=20, cluster=cluster)
+        return (d or {}).get("value") or None
+
+    def traefik():
+        return _kubectl_json(kc, "get", "services", "-n", "kube-system", "rke2-traefik", timeout=20,
+                             cluster=cluster)
+
+    def providers():
+        d = _kubectl_json(kc, "get", "capiproviders.turtles-capi.cattle.io", "-A", timeout=30, cluster=cluster)
+        return None if d is None else (d.get("items") or [])
+    jobs = {"server_version": setting, "traefik": traefik, "capi_providers": providers}
+    if not kc:
+        return {k: None for k in jobs}
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futs = {k: pool.submit(f) for k, f in jobs.items()}
+        return {k: f.result() for k, f in futs.items()}
+
+
 def _deploy_install_verify(cluster, expected):
     """Installation revérifiée : cluster déclaré, joignable, nœuds attendus
     présents. (vrai, nœuds lus)."""
@@ -32668,10 +32692,14 @@ def _deploy_install_phase(run, spec, store):
 
 def _deploy_readiness_phase(cluster, kc_ref, plan, expected=None):
     seen = {}
+    capi_on = [p for p in _drd.CAPI_PHASES if (plan["phases"].get(p) or {}).get("enabled")]
 
     def evaluate():
         kc = kc_ref()
-        return _drd.evaluate(_deploy_read_cluster(kc, cluster), expected_nodes=expected)
+        reads = _deploy_read_cluster(kc, cluster)
+        if capi_on:
+            reads.update(_deploy_read_capi(kc, cluster))
+        return _drd.evaluate(reads, expected_nodes=expected, phases=capi_on)
 
     def execute(ctx, state):
         ev = evaluate()
