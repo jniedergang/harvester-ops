@@ -2638,9 +2638,57 @@ sauvegardées.
   une fois au démarrage de la console (journalisé).
 - **Providers hors ligne (2.3.0)** : chaque provider d'un espace vient d'un
   miroir local posé sous les deux noms de registre (`registry.opentofu.org`
-  et `registry.terraform.io`), inclus au miroir et exclu des téléchargements
-  directs. Avant, OpenTofu résolvait `harvester/harvester` en
+  et `registry.terraform.io`) ; depuis la 2.3.1 le miroir est la seule
+  source (aucun téléchargement direct). Avant, OpenTofu résolvait `harvester/harvester` en
   `registry.opentofu.org` et le téléchargeait sur Internet.
+- **Ce qu'une déclaration peut contenir (2.3.1)** : OpenTofu exécute du
+  code sur la machine qui le lance ; la console lit donc chaque déclaration
+  avant chaque plan, application ou destruction, et refuse, en nommant la
+  construction et sa ligne :
+  - les blocs `provisioner` de tout type (`local-exec`, `remote-exec`,
+    `file`) et `connection`, à toute profondeur, `dynamic "provisioner"`
+    compris ;
+  - tout type de ressource ou de source de données hors des providers
+    embarqués : `null_resource`, `terraform_data`, `data "external"`,
+    `terraform_remote_state`, `local_file`... et `harvester_bootstrap` (il
+    écrit un kubeconfig sur la machine de la console) ;
+  - l'attribut `file_path` de `harvester_image` (il téléverse un fichier de
+    la machine de la console) ;
+  - les blocs `module`, `terraform` (backend, cloud, providers requis) et
+    `provider` : la console écrit elle-même les providers, depuis le seul
+    miroir embarqué ;
+  - les fonctions qui lisent des fichiers ou évaluent un gabarit (`file`,
+    `fileexists`, `fileset`, `filebase64`, `filemd5`..., `templatefile`,
+    `templatestring`, `pathexpand`), quel que soit le chemin, forme `core::`
+    comprise, et les fonctions de provider (`provider::...`) ;
+  - le code que la console ne sait pas lire sûrement (un corps JSON, une
+    chaîne ou un heredoc non terminé).
+  Permis : les blocs `resource`, `data`, `locals`, `variable` et `output`
+  avec les types de ressource et de source de données des providers
+  embarqués. Le contrôle voit à travers les commentaires, les séquences
+  d'échappement (`"null\u005fresource"`), les gabarits (`${...}`,
+  `%{...}`, imbriqués), les heredocs et les étiquettes sans guillemets.
+  L'espace lui-même est relu juste avant chaque commande OpenTofu, quel que
+  soit ce qui a écrit ses fichiers ; un fichier `.tf.json`, `.tofu` ou
+  `.tfvars` y refuse l'exécution.
+- **Le code libre est réservé aux admins (2.3.1)** : une déclaration qui
+  contient du code Terraform écrit à la main ne peut être créée, modifiée,
+  planifiée, appliquée ou détruite que par un admin (403 pour un
+  opérateur ; les boutons le disent). Les déclarations faites avec les
+  formulaires restent au rôle opérateur. Une valeur de formulaire ne peut
+  plus devenir du code : les séquences de gabarit sont neutralisées et le
+  marqueur d'un heredoc est choisi absent de la valeur.
+- **Déclarations bloquées (2.3.1)** : une déclaration enregistrée qui
+  enfreint ces règles n'est pas supprimée. La console la signale au
+  démarrage (journal), sa carte affiche **Bloquée** et la déclaration liste
+  chaque construction refusée ; plan, application et destruction sont
+  refusés jusqu'à ce qu'un admin corrige ou retire le code.
+- **Environnement minimal (2.3.1)** : OpenTofu n'hérite plus de
+  l'environnement de la console. Il ne reçoit que les variables de langue,
+  de chemin, de proxy et d'autorités de certification, avec `HOME` et
+  `TMPDIR` dans l'espace (0700) et la configuration de l'espace : les
+  providers viennent du miroir de l'espace et de nulle part ailleurs (aucun
+  téléchargement direct, aucun cache de greffons).
 - **Déclarations** : des groupes nommés de ressources (VMs, images de VM,
   clés SSH, code Terraform écrit à la main) appliquées ensemble, chacune
   avec son propre état Terraform (1.54.0). Elles sont gardées par la
@@ -2835,7 +2883,8 @@ un workspace Terraform.
   lit, `operator` fait le travail mutatif courant (VMs, snapshots, applies
   Terraform), `admin` y ajoute ce qui coupe un service ou change la
   configuration de l'outil : séquençage électrique, maintenance des nœuds,
-  déclarations de cluster, bare-metal, magasin d'ISO et provider Terraform.
+  déclarations de cluster, bare-metal, magasin d'ISO, provider Terraform et
+  déclarations Terraform qui contiennent du code libre (2.3.1).
 - **Appliqué au centre, en refus par défaut.** Toute requête qui modifie
   quelque chose exige au moins `operator`, et une liste explicite de chemins
   exige `admin`. Un point d'entrée ajouté demain est protégé sans que

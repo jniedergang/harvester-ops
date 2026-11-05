@@ -44,6 +44,15 @@ const TFDeclView = (() => {
   // un hôte KVM (l'espace porte la clé de l'hôte le temps d'une exécution)
   const ADD_KINDS = { harvester: ['vm', 'image', 'ssh_key', 'raw'],
                       kvm: ['kvm_vm', 'kvm_volume', 'kvm_network', 'kvm_rke2'] };
+  // 2.3.1 : le code libre se lance sur la machine de la console, il est
+  // réservé à l'admin (le serveur le refuse aux autres ; l'écran le dit).
+  // Rôle encore inconnu (whoami pas lu) : rien n'est bridé à l'écran.
+  const rawLocked = () => {
+    const r = window.App && App.role ? App.role() : null;
+    return r != null && r !== 'admin';
+  };
+  const declLocked = (d) => !!(d && d.raw) && rawLocked();
+  const blockedOf = (d) => (d && d.blocked) || [];
 
   // Un appel littéral par texte : le contrôle de parité des traductions ne
   // voit que ces formes (une clé construite par concaténation lui échappe).
@@ -214,6 +223,8 @@ const TFDeclView = (() => {
 
   function getTab() { try { return localStorage.getItem(TAB_KEY) || 'resources'; } catch { return 'resources'; } }
   function setTab(t) { try { localStorage.setItem(TAB_KEY, t); } catch {} }
+  // le rôle arrive après le premier rendu (whoami) : les verrous du code libre suivent
+  document.addEventListener('hops:role', () => { if (host && host.isConnected) render(); });
 
   // -------------------------------------------------------------------------
   // Rendu
@@ -257,9 +268,12 @@ const TFDeclView = (() => {
       bits.push(d.last_applied_by ? tr('tfd.appliedOn', { when: when(d.last_applied_at), by: d.last_applied_by })
                                   : tr('tfd.appliedOnAt', { when: when(d.last_applied_at) }));
     }
+    const blocked = blockedOf(d);
+    const blockBadge = blocked.length
+      ? `<span class="badge fail tip tfd-blocked-badge" data-tip="${esc(blocked[0].error)}">${esc(tr('tfd.ds.blocked'))}</span>` : '';
     return `
       <button type="button" class="tfd-card ${isActive ? 'is-active' : ''}" data-decl="${esc(d.id)}">
-        <span class="tfd-card-top"><strong>${esc(d.name)}</strong><span class="badge ${esc(s.cls)}">${esc(s.text)}</span></span>
+        <span class="tfd-card-top"><strong>${esc(d.name)}</strong><span class="badge ${esc(s.cls)}">${esc(s.text)}</span>${blockBadge}</span>
         <span class="tfd-card-target tfd-fam-${esc(familyOf(d))}">${esc(targetText(d))}</span>
         ${d.description ? `<span class="tfd-card-desc">${esc(d.description)}</span>` : ''}
         <span class="tfd-card-meta">${esc(bits.join(' · '))}</span>
@@ -271,16 +285,19 @@ const TFDeclView = (() => {
     const deployed = (d.deployed || []).length;
     const plan = currentPlan(d);
     const planChanges = plan ? ((plan.summary || {}).changes || []).length : 0;
-    const canApply = !!plan && planChanges > 0 && !(d.incomplete || []).length;
-    const applyTip = !plan ? tr('tfd.t.applyNeedsPlan') : planChanges ? tr('tfd.t.apply') : tr('tfd.t.applyNothing');
+    const locked = declLocked(d);
+    const blocked = blockedOf(d);
+    const stop = locked ? tr('tfd.t.rawAdmin') : blocked.length ? tr('tfd.t.blocked') : '';
+    const canApply = !stop && !!plan && planChanges > 0 && !(d.incomplete || []).length;
+    const applyTip = stop || (!plan ? tr('tfd.t.applyNeedsPlan') : planChanges ? tr('tfd.t.apply') : tr('tfd.t.applyNothing'));
     return `
       <header class="tfd-head">
         <div class="tfd-title">
           <h3 class="tfd-name">${esc(d.name)}</h3>
-          <button type="button" class="btn-icon-sm tfd-rename tip" aria-label="${esc(tr('tf.tip.renameDecl'))}"
-                  data-tip="${esc(tr('tf.tip.renameDecl'))}">${Icons.svg('edit', { size: 14 })}</button>
+          <button type="button" class="btn-icon-sm tfd-rename tip" aria-label="${esc(tr('tf.tip.renameDecl'))}" ${locked ? 'disabled' : ''}
+                  data-tip="${esc(locked ? tr('tfd.t.rawAdmin') : tr('tf.tip.renameDecl'))}">${Icons.svg('edit', { size: 14 })}</button>
         </div>
-        <input type="text" class="tfd-desc tip" value="${esc(d.description || '')}" maxlength="500"
+        <input type="text" class="tfd-desc tip" value="${esc(d.description || '')}" maxlength="500" ${locked ? 'disabled' : ''}
                placeholder="${esc(tr('tfd.descPh'))}" aria-label="${esc(tr('tfd.descPh'))}"
                data-tip="${esc(tr('tfd.t.desc'))}">
         <div class="tfd-badges">
@@ -292,6 +309,11 @@ const TFDeclView = (() => {
             : tr('tfd.lastApplyAt', { status: text(STATUS, d.last_applied_status || 'done'), when: when(d.last_applied_at) }))}</span>` : ''}
         </div>
         ${changedSinceApply(d) && !plan ? `<p class="tfd-notice">${esc(tr('tfd.changedNotice'))}</p>` : ''}
+        ${locked ? `<p class="tfd-notice tfd-raw-locked">${esc(tr('tfd.rawAdminNotice'))}</p>` : ''}
+        ${blocked.length ? `<div class="sto-finding sev-critical tfd-blocked" role="alert">
+          <div class="sto-finding-title">${esc(tr('tfd.blockedTitle'))}</div>
+          <ul>${blocked.slice(0, 10).map(v => `<li><code>${esc(v.error)}</code></li>`).join('')}</ul>
+          <p class="hint">${esc(tr('tfd.blockedHint'))}</p></div>` : ''}
       </header>
       ${tab === 'edit' ? '<div class="tfd-body" data-x="edit"></div>' : `
       <nav class="sub-tabs sub-tabs-inline tfd-tabs" role="tablist">
@@ -300,14 +322,14 @@ const TFDeclView = (() => {
       </nav>
       <div class="tfd-body" data-x="${esc(tab)}">${tab === 'resources' ? resourcesHtml(d) : `<p class="hint">${esc(tr('common.loading'))}</p>`}</div>`}
       <footer class="apply-bar tfd-actions">
-        <button type="button" class="btn btn-primary btn-sm tfd-plan tip" ${(d.resources || []).length || deployed ? '' : 'disabled'}
-                data-tip="${esc(tr('tfd.t.plan'))}">${Icons.svg('preview', { size: 14 })} ${esc(tr('tfd.plan'))}</button>
+        <button type="button" class="btn btn-primary btn-sm tfd-plan tip" ${!stop && ((d.resources || []).length || deployed) ? '' : 'disabled'}
+                data-tip="${esc(stop || tr('tfd.t.plan'))}">${Icons.svg('preview', { size: 14 })} ${esc(tr('tfd.plan'))}</button>
         <button type="button" class="btn btn-sm tfd-apply tip" ${canApply ? '' : 'disabled'}
                 data-tip="${esc(applyTip)}">${Icons.svg('play', { size: 14 })} ${esc(tr('tfd.apply'))}</button>
         <span class="tfd-hint">${esc(plan ? tr('tfd.planReady', { when: when(plan.at), n: planChanges }) : tr('tfd.applyHint'))}</span>
         <button type="button" class="btn btn-sm tfd-export tip" data-tip="${esc(tr('tfd.t.export'))}">${Icons.svg('download', { size: 14 })} ${esc(tr('tfd.export'))}</button>
-        <button type="button" class="btn btn-sm btn-danger tfd-destroy tip" ${deployed ? '' : 'disabled'}
-                data-tip="${esc(tr('tfd.t.destroy'))}">${Icons.svg('destroy', { size: 14 })} ${esc(tr('tfd.destroy'))}</button>
+        <button type="button" class="btn btn-sm btn-danger tfd-destroy tip" ${deployed && !stop ? '' : 'disabled'}
+                data-tip="${esc(stop || tr('tfd.t.destroy'))}">${Icons.svg('destroy', { size: 14 })} ${esc(tr('tfd.destroy'))}</button>
         <button type="button" class="btn btn-sm tfd-delete tip" ${deployed ? 'disabled' : ''}
                 data-tip="${esc(deployed ? tr('tfd.t.deleteDeployed') : tr('tfd.t.delete'))}">${Icons.svg('delete', { size: 14 })} ${esc(tr('tfd.delete'))}</button>
       </footer>`;
@@ -316,14 +338,16 @@ const TFDeclView = (() => {
   function resourcesHtml(d) {
     const cards = (d.resources || []).map(r => {
       const s = resState(d, r);
+      const lock = (r.kind === 'raw' && rawLocked()) || declLocked(d);
+      const lockAttr = lock ? `disabled data-tip="${esc(tr('tfd.t.rawAdmin'))}"` : '';
       return `
         <article class="tfd-res tfd-res--${esc(s.cls)}" data-res="${esc(r.id)}">
           <div class="tfd-res-top"><strong>${esc(kindLabel(r.kind))} ${esc(nameOf(r))}</strong><span class="badge ${esc(s.cls)}">${esc(s.text)}</span></div>
           <span class="tfd-res-sum">${esc(summaryOf(r))}</span>
           ${r.address ? `<code class="tfd-addr">${esc(r.address)}</code>` : ''}
           <div class="tfd-res-actions">
-            <button type="button" class="btn btn-sm tfd-edit-res tip" data-res="${esc(r.id)}" data-tip="${esc(tr('tfd.t.edit'))}">${Icons.svg('edit', { size: 13 })} ${esc(tr('tfd.edit'))}</button>
-            <button type="button" class="btn btn-sm btn-danger tfd-remove tip" data-res="${esc(r.id)}" data-tip="${esc(tr('tfd.t.remove'))}">${Icons.svg('delete', { size: 13 })} ${esc(tr('tfd.remove'))}</button>
+            <button type="button" class="btn btn-sm tfd-edit-res tip" data-res="${esc(r.id)}" ${lockAttr || `data-tip="${esc(tr('tfd.t.edit'))}"`}>${Icons.svg('edit', { size: 13 })} ${esc(tr('tfd.edit'))}</button>
+            <button type="button" class="btn btn-sm btn-danger tfd-remove tip" data-res="${esc(r.id)}" ${lockAttr || `data-tip="${esc(tr('tfd.t.remove'))}"`}>${Icons.svg('delete', { size: 13 })} ${esc(tr('tfd.remove'))}</button>
           </div>
         </article>`;
     });
@@ -339,7 +363,8 @@ const TFDeclView = (() => {
       <div class="tfd-add">
         <span>${esc(tr('tfd.add'))}</span>
         ${ADD_KINDS[familyOf(d)].map(k => `<button type="button" class="btn btn-sm tfd-add-kind tip" data-kind="${k}"
-            data-tip="${esc(tr('tfd.t.add', { kind: kindLabel(k) }))}">${Icons.svg('add', { size: 12 })} ${esc(kindLabel(k))}</button>`).join('')}
+            ${(k === 'raw' && rawLocked()) || declLocked(d) ? 'disabled' : ''}
+            data-tip="${esc((k === 'raw' && rawLocked()) || declLocked(d) ? tr('tfd.t.rawAdmin') : tr('tfd.t.add', { kind: kindLabel(k) }))}">${Icons.svg('add', { size: 12 })} ${esc(kindLabel(k))}</button>`).join('')}
       </div>`;
   }
 
