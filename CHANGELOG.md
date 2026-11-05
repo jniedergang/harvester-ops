@@ -4,6 +4,149 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.4.0] - 2026-11-05 - Deployment plans: Terraform content after installation
+
+### Added
+- **Deployment plans** (decisions 111 to 131, 146 to 161). A named,
+  reusable plan runs as one tracked action, `deploy:<cluster>`, applied to a
+  declared Harvester cluster or chained after a bare-metal install. Phases
+  in 2.4.0: install (from Bare-metal only), readiness (nodes, managed
+  charts, Longhorn, default storage class; 20 minutes by default, 1 to 180)
+  and Terraform (each declaration template becomes an ordinary declaration
+  `<plan>-<template>`, planned then applied). Cluster API, clusters,
+  registry and artefacts are in the model, greyed with "coming in 2.5+".
+  Plans and templates live in `<state>/plans.d` and
+  `<state>/tf-templates.d` (0600, atomic writes, revisions, 409 on a stale
+  revision).
+- **Plans tab** in Bare-metal (`#automation/pxe/plans`, between Profiles
+  and Images): plans with one card per phase, templates chosen from a list
+  with their order and an optional dependency, and the declaration
+  templates edited with the Terraform forms. **Save as template** in
+  Terraform > Declarations.
+- **Deploy window** (Parameters, Checks, Summary): findings grouped by
+  phase, Launch disabled with the reason while one blocks, dry run (plans
+  every template, then removes its trial declarations; nothing is written
+  to the cluster). **Apply a plan** on the Harvester host page; a **Plan**
+  field in the install and batch windows (pre-filled by the profile); a
+  **Resume** button in the Bare-metal History tab.
+- **Resume**: a new `deploy:` action reads the result of the run it
+  resumes, checks every finished phase again cheaply and starts from the
+  first one not done. A run interrupted by a console restart is marked
+  interrupted and can be resumed. A batch whose nodes all joined is not
+  reinstalled; otherwise only the rows that are not nodes are installed
+  again, with the BMC check and the secrets asked again.
+- **Stop**: an install in progress is stopped, a Terraform run goes to its
+  end, templates not started are skipped (`cancelled`, exit code 3).
+- **Never a destruction**: a template whose plan deletes or replaces a
+  resource is not applied (`plan-destroys`). A declaration made earlier by
+  the same plan and template whose content differs from the values is kept
+  and said so, unless the launch asks to update it.
+- **Variables** `{{name}}` in templates, `cluster` and `vip` built in; a
+  string that is only a variable takes the type of its form field.
+- **Internal secret store** (`bin/lib/secret_store.py`, memory backend):
+  the install secrets of a run (cluster token, OS password, BMC passwords)
+  are typed at launch, kept for the run only, cleared at the end whatever
+  the outcome, asked again on resume; never in the label, steps, result or
+  files.
+- **Terraform forms** for VM networks (`harvester_network`), storage
+  classes (`harvester_storageclass`) and IP pools (`harvester_ippool`),
+  with the fields of the embedded provider 1.9.0, checked on the server
+  (VLAN 0 to 4094, provider exclusions on routes, every address of a range
+  inside its subnet, start before end, gateway in the subnet, subnet
+  without host bits, Kubernetes label keys).
+- **Declaration origin**: a declaration made by a plan records the plan,
+  the template, their revisions and who wrote the template revision.
+- **Command line** `bin/harvester-plans.py`: `plan` and `template` (list,
+  show, save, delete), `check`, `apply` (`--dry-run`,
+  `--update-declarations`), `resume` (secrets from a 0600 file or stdin)
+  and `install` (a batch with a plan); `--json`; exit codes 0, 1, 3.
+
+### Changed
+- **One Terraform guard** for declarations and plans: the structure rules
+  of 2.3.1 (`web/tf_guard.py`) are checked inside the launch of a
+  declaration, so a plan chain goes through them, destroy included;
+  templates are refused at save time by the same rules (the 2.4.0 template
+  guard keeps only what is specific to templates: secret names and value
+  rendering).
+- **Admin-only kinds** (decision 160): a declaration that creates a VM
+  network, a storage class or an IP pool is created, edited, planned,
+  applied and destroyed by an admin (403 `admin-kind`), as these objects
+  are elsewhere in the console. In a plan, the same kinds, and the cluster
+  networks, VLAN configurations, load balancers, settings and devices that
+  free code would create, need an admin to launch (blocking finding
+  `admin-kind`); the Terraform screen greys these gestures with the reason.
+- **Free code in plans** (decision 161): an operator may launch a plan
+  whose templates hold free code written by an admin; the operator only
+  gives values, which are neutralised. Outside the chain the declaration
+  stays admin-only.
+- One run at a time per declaration, whatever the target, and one
+  deployment per cluster, shared by the console and the command line
+  (file locks); a running plan blocks a cluster shutdown.
+
+### Fixed
+- Review of the branch (blocks 1 to 3): runs survive a console restart and
+  stay exclusive across processes; a resumed install whose nodes are all
+  there is not reinstalled; the chain waits for a Terraform thread to
+  release its declaration (`declaration-busy` after 30 s instead of a later
+  "already running"); a launch no longer fails when another process only
+  probes the cluster lock; a declaration updated by the chain whose item
+  fails says it is not applied; plan findings come before any BMC read.
+
+### Security
+- **A variable value could change the structure of a free-code template**
+  (found by the internal review of the branch, never released): a newline
+  followed by the heredoc delimiter, or a value ending in `$` or `%`
+  followed by a value starting with `{`, turned text into code. Values with
+  a control character are refused, and the rendered template is read again
+  with the reader of `tf_guard`: every character, of the template and of
+  the values, must keep its kind (code, string, heredoc, comment), or the
+  value is refused with its name.
+- Templates were checked by a separate, shorter list of forbidden
+  constructs (no `templatestring`, `pathexpand` or provider functions, no
+  type allow-list): they now follow the 2.3.1 rules.
+
+### Verified for real
+- **Plan on an existing cluster** (harvlab, three nested nodes): templates for a VM network (VLAN 3999 on `mgmt`), a storage
+  class and an IP pool (range 172.16.2.200-205, reserved in NetBox), plus
+  free-code SSH keys. Operator: `admin-kind` blocking in check, start
+  refused, template write refused (403); admin dry run (67.8 s with a
+  first `init`, nothing written to the cluster, no declaration left); real
+  run `partial` in 13.8 s (pool and class applied, the network refused by
+  Harvester on a cluster network that is not ready); declaration fixed by
+  an admin (an operator got 403 `admin-kind`), resume `done` in 7.1 s with
+  the two finished templates checked and skipped; an operator ran the
+  free-code plan (decision 161, `template_by` recorded), stopped a
+  two-template run (`cancelled`, second template skipped) and resumed it;
+  injection values refused or kept as text through the real route.
+  Everything destroyed by the console afterwards: no `plan-test-*` object
+  left.
+- **Full chain with an install** on a Redfish bench of node2 (sushy-tools,
+  a blank KVM machine): one-node Harvester v1.9.0 installed by a plan, then
+  readiness, then one Terraform template (SSH key). Install phase 34.8 min
+  (ISO remaster, virtual media, installer, first boot), readiness 76 s
+  (managed charts), Terraform 4 s; 36.3 min in all.
+- **KVM declaration** under the 2.3.1 minimal environment on node2: plan
+  10.3 s, apply 13.9 s, destroy 10.5 s (the operator destroy refused, admin).
+- Provider schema read with OpenTofu 1.12.9 inside the console image, with
+  no network: same resources as the 2.4.0 plan's findings.
+- **Not verified for real**: a batch of several machines with a plan (node2
+  memory), the BMC guard of an install over an existing system within a
+  plan (the bench machine was blank), a resume of an install phase, a
+  Rancher SSO session over a long chain, a chain on a physical blade.
+
+### Tests
+- New: `test_secret_store_240.py`, `test_deploy_plans_240.py`,
+  `test_tf_decl_origin_240.py`, `test_deploy_ready_240.py`,
+  `test_deploy_chain_240.py`, `test_deploy_routes_240.py`,
+  `test_deploy_runner_240.py`, `test_harvester_plans_cli_240.py`,
+  `test_hcl_values_240.py`, `test_bm_plans_ui_240.py`,
+  `test_plans_guard_240.py` (injection probes of the review, admin-only
+  kinds on every route and in the chain, decision 161, mutations), e2e
+  `test_bm_plans_240.py` and `test_tf_forms_240.py`.
+- The `terraform validate` test of the new forms takes the provider binary
+  from `HOPS_TF_PROVIDER_BIN` when none is installed (run against the
+  embedded provider 1.9.0: valid).
+
 ## [2.3.1] - 2026-11-05 - Terraform declarations cannot run commands on the console host
 
 ### Security

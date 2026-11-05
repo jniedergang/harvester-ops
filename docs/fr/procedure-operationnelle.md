@@ -475,3 +475,44 @@ alors retiré.
 
 Un bouton que vous ne pouvez pas utiliser reste visible, grisé, avec le
 rôle qu'il faut dans son info-bulle ; le serveur applique la même règle.
+
+## 14. Appliquer un plan de déploiement (2.4.0)
+
+Un plan pose le même contenu Terraform (réseaux, classes de stockage, pools
+d'adresses, images, clés, VMs) sur un cluster, après une installation
+bare-metal ou sur un cluster déjà déclaré. Référence complète :
+[bare-metal.md](bare-metal.md), section « Plans de déploiement ».
+
+1. **Admin, une fois :** dans Automatisation > Bare-metal > Plans, écrire les
+   modèles de déclaration (formulaires Terraform, `{{variables}}` là où une
+   valeur change selon le site), puis le plan : délai de disponibilité,
+   modèles dans l'ordre, dépendance quand l'un a besoin d'un autre. Les
+   modèles ne portent aucun secret ; une VM qui en a besoin désigne par son
+   nom un Secret Kubernetes existant.
+2. **Vérifier avant d'agir :** ouvrir la page d'hôte du cluster, **Appliquer
+   un plan**, choisir le plan, remplir les variables, lire
+   **Vérifications**. Lancer reste grisé tant qu'un constat bloque (variable
+   absente, nom de déclaration pris par autre chose, cluster injoignable,
+   objet réservé à l'admin pour un opérateur, construction Terraform
+   refusée).
+3. **Essai à blanc** d'abord sur un cluster de production : il planifie
+   chaque modèle et retire ses déclarations d'essai ; rien n'est écrit sur
+   le cluster.
+4. **Lancer.** Suivre l'action `deploy:<cluster>` dans le dock ou l'onglet
+   Historique : une étape par phase et par modèle, chacune avec un lien vers
+   son plan et son apply Terraform.
+5. **Quand un modèle échoue**, les modèles indépendants continuent et le
+   déroulé finit `partial`. Corriger la cause (souvent la déclaration
+   elle-même, dans Terraform > Déclarations, ou le cluster), puis
+   **Reprendre** depuis l'onglet Historique : les modèles faits sont
+   revérifiés et sautés.
+6. **Arrêter** laisse finir un apply Terraform en cours et saute le reste ;
+   **Reprendre** repart de là.
+7. Un plan ne détruit jamais : un plan qui supprimerait ou remplacerait une
+   ressource s'arrête sur ce modèle (`plan-destroys`). Retirer des
+   ressources de la déclaration dans Terraform > Déclarations, sciemment.
+
+Avec une installation (admin) : renseigner le champ **Plan** de la fenêtre
+d'installation d'une machine ou de la fenêtre de série d'un profil.
+L'installation devient la première phase ; ses secrets sont demandés au
+lancement et à la reprise, jamais gardés.

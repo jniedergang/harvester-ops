@@ -1,7 +1,9 @@
 # OpenBao comme magasin de secrets facultatif (conception)
 
-État : conception, 02/11/2026. Rien n'est codé. Les décisions à prendre sont
-en fin de document, numérotées à partir de 133.
+État : conception, 02/11/2026, décisions 133 à 145 retenues. Réalisation :
+la 2.4.0 ne porte que l'interface interne du magasin de secrets
+(`bin/lib/secret_store.py`, support mémoire, plan
+`2026-11-03-plans-deploiement-240-plan.md`) ; OpenBao complet en 2.9.0.
 
 ## La demande
 

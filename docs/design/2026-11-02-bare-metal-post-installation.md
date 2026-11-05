@@ -1,7 +1,10 @@
 # Post-installation bare-metal : contenu, clusters Cluster API, artefacts (conception)
 
-État : conception, 02/11/2026. Rien n'est codé. Les décisions à prendre sont
-en fin de document, numérotées à partir de 111.
+État : conception, 02/11/2026, décisions 111 à 131 retenues. Réalisation :
+la 2.4.0 porte les plans de déploiement (installation, disponibilité,
+contenu Terraform), plan de réalisation `2026-11-03-plans-deploiement-240-plan.md`
+(décisions 146 à 161) ; Cluster API, clusters enfants, registre et artefacts
+suivent en 2.5.0 et après.
 
 ## La demande
 

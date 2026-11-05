@@ -452,3 +452,39 @@ still blocks, and the action says why. Nothing is purged then.
 
 A button you may not use stays visible, greyed, with the role it needs in
 its tooltip; the server applies the same rule.
+
+## 14. Applying a deployment plan (2.4.0)
+
+A plan puts the same Terraform content (networks, storage classes, IP pools,
+images, keys, VMs) on a cluster, after a bare-metal install or on a cluster
+already declared. Full reference: [bare-metal.md](bare-metal.md), section
+"Deployment plans".
+
+1. **Admin, once:** in Automation > Bare-metal > Plans, write the
+   declaration templates (Terraform forms, `{{variables}}` where a value
+   changes per site), then the plan: readiness timeout, templates in order,
+   "depends on" where one needs another. Templates hold no secret; a VM that
+   needs one points at an existing Kubernetes Secret by name.
+2. **Check before acting:** open the host page of the cluster, **Apply a
+   plan**, choose the plan, fill the variables, read **Checks**. Launch stays
+   disabled while a finding blocks (missing variable, declaration name taken
+   by something else, cluster unreachable, admin-only object for an
+   operator, refused Terraform construct).
+3. **Dry run** first on a production cluster: it plans every template and
+   removes its trial declarations; nothing is written to the cluster.
+4. **Launch.** Follow the `deploy:<cluster>` action in the dock or in the
+   History tab: one step per phase and per template, each with a link to
+   its Terraform plan and apply.
+5. **When a template fails**, the independent templates go on and the run
+   ends `partial`. Fix the cause (often the declaration itself, in
+   Terraform > Declarations, or the cluster), then **Resume** from the
+   History tab: finished templates are checked again and skipped.
+6. **Stop** lets a running Terraform apply finish and skips the rest;
+   **Resume** goes on from there.
+7. A plan never destroys: a plan that would delete or replace a resource
+   stops on that template (`plan-destroys`). Remove resources from the
+   declaration in Terraform > Declarations, on purpose.
+
+With an install (admin): set the **Plan** field in the install window of a
+machine or the batch window of a profile. The install becomes the first
+phase; its secrets are asked at launch and again on resume, never stored.

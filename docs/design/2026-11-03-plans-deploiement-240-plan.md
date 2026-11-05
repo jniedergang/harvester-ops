@@ -644,7 +644,7 @@ harvlab2 ; `harvlab.sh tidy` après chaque essai.
 
 Puis : suite API en parallèle (`python3 -m pytest tests/api/ -q -n 12`),
 suite e2e (`python3 -m pytest tests/e2e/ -q -n 8`), bilan de conformité
-règle par règle (CLAUDE.md du dépôt, règles TERRAHARV), relecture
+règle par règle (CONTRIBUTING.md et style des développeurs Harvester), relecture
 indépendante du diff, `git grep` des tirets cadratins, flèches Unicode et
 mentions d'outillage dans tout ce qui est publié.
 
@@ -722,3 +722,13 @@ mentions d'outillage dans tout ce qui est publié.
 ## Décisions (05/11/2026)
 
 Toutes les recommandations des points 1 à 14 sont retenues (décisions 146 à 159).
+
+Décisions ajoutées après la relecture du bloc 3 :
+
+- **160** : les déclarations de réseau, de classe de stockage et de pool
+  d'adresses sont réservées à l'admin, comme `_OBJ_ADMIN_KINDS` ailleurs
+  dans la console ; contrôle serveur par genre, chaîne d'un plan comprise
+  (et types créés par un code libre), l'écran grise avec la raison.
+- **161** : un opérateur peut lancer un plan dont les modèles en code libre
+  ont été écrits par un admin, valeurs neutralisées ; l'auteur du modèle est
+  consigné dans l'origine de la déclaration (`template_by`).

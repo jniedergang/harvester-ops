@@ -2689,6 +2689,33 @@ sauvegardées.
   `TMPDIR` dans l'espace (0700) et la configuration de l'espace : les
   providers viennent du miroir de l'espace et de nulle part ailleurs (aucun
   téléchargement direct, aucun cache de greffons).
+- **Réseaux, classes de stockage et pools d'adresses (2.4.0)** : trois
+  formulaires de plus, aux champs du provider embarqué 1.9.0. **Réseau de
+  VM** (`harvester_network`) : réseau de cluster, VLAN de 0 à 4094, mode de
+  route, CIDR, passerelle ou serveur DHCP (les exclusions du provider sont
+  contrôlées avant le plan), étiquettes aux clés Kubernetes. **Classe de
+  stockage** (`harvester_storageclass`) : paramètres en paires clé-valeur
+  (`migratable` proposé), politique de récupération, mode de liaison,
+  extension des volumes, classe par défaut (Harvester refuse la seconde, le
+  plan le montre), topologies permises. **Pool d'adresses**
+  (`harvester_ippool`) : une ou plusieurs plages, chaque adresse contrôlée,
+  début avant fin, début, fin et passerelle dans le sous-réseau, sous-réseau
+  écrit sans bits d'hôte, sélecteur facultatif (réseau, priorité, portée).
+  Réseaux de cluster et configurations VLAN restent en code libre : ils
+  touchent les cartes physiques.
+- **Genres réservés à l'admin (2.4.0)** : réseaux de VM, classes de
+  stockage et pools d'adresses changent le cluster pour tous ; une
+  déclaration qui en porte un se crée, se modifie, se planifie, s'applique
+  et se détruit par un admin, comme ailleurs dans la console (403
+  `admin-kind` pour un opérateur ; les boutons disent pourquoi). La même
+  règle couvre les plans de déploiement qui les créent.
+- **Déclarations faites par un plan (2.4.0)** : un plan de déploiement fait
+  de ses modèles des déclarations ordinaires nommées `<plan>-<modèle>`, avec
+  une origine (plan, modèle, leurs révisions et l'auteur du modèle). Elles
+  restent modifiables ici. Le contrôle de structure ci-dessus a lieu dans le
+  lancement lui-même : la chaîne d'un plan y passe aussi, destruction
+  comprise. Voir
+  [bare-metal.md](bare-metal.md#plans-de-déploiement--le-contenu-terraform-après-linstallation-240).
 - **Déclarations** : des groupes nommés de ressources (VMs, images de VM,
   clés SSH, code Terraform écrit à la main) appliquées ensemble, chacune
   avec son propre état Terraform (1.54.0). Elles sont gardées par la
@@ -2756,6 +2783,15 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   La console garde la dernière découverte (cache de lecture dans le
   répertoire d'état, jamais les identifiants) : la liste survit à un
   rechargement, avec sa date et un bouton **Relire**.
+
+- **Plans de déploiement (2.4.0)** : un cinquième onglet, **Plans**, porte
+  les plans nommés (disponibilité, puis modèles Terraform ; Cluster API,
+  clusters, registre et artefacts montrés « à venir (2.5+) ») et les modèles
+  de déclaration à `{{variables}}`. Un plan s'applique à un cluster existant
+  depuis la page de son hôte (opérateur), ou s'enchaîne après une
+  installation ou une série (admin), en une seule action suivie
+  `deploy:<cluster>`, avec arrêt, reprise, essai à blanc et sans
+  destruction. Ligne de commande : `bin/harvester-plans.py`.
 
 - **Une machine qui porte déjà un système est gardée (2.2.0)** : la
   fenêtre d'installation liste ce que montre le BMC (entrées de démarrage
@@ -2884,7 +2920,11 @@ un workspace Terraform.
   Terraform), `admin` y ajoute ce qui coupe un service ou change la
   configuration de l'outil : séquençage électrique, maintenance des nœuds,
   déclarations de cluster, bare-metal, magasin d'ISO, provider Terraform et
-  déclarations Terraform qui contiennent du code libre (2.3.1).
+  déclarations Terraform qui contiennent du code libre (2.3.1) et celles qui
+  créent des réseaux de VM, des classes de stockage ou des pools d'adresses
+  (2.4.0). Les plans de déploiement et leurs modèles s'écrivent par un
+  admin ; un opérateur applique un plan à un cluster existant, sauf s'il
+  crée ces objets réservés à l'admin.
 - **Appliqué au centre, en refus par défaut.** Toute requête qui modifie
   quelque chose exige au moins `operator`, et une liste explicite de chemins
   exige `admin`. Un point d'entrée ajouté demain est protégé sans que
