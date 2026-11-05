@@ -584,6 +584,14 @@ def test_viewers_do_not_read_cloud_init(monkeypatch):
     assert out["resources"][0]["spec"]["user_data"] == "(hidden)"
     assert out["resources"][1]["spec"]["cloudinit"][0]["user_data"] == "(hidden)"
     assert view["resources"][0]["spec"]["user_data"].startswith("#cloud")        # l'original n'est pas touché
+    # 2.4.0 : bloc cloud-init en objet seul, et code libre qui en écrit un
+    more = {"resources": [{"id": "2" * 12, "kind": "vm", "spec": {"cloudinit": {"network_data": "v: 2"}}},
+                          {"id": "3" * 12, "kind": "raw", "spec": {"tf": 'x = { user_data = "pw" }'}},
+                          {"id": "4" * 12, "kind": "raw", "spec": {"tf": 'resource "harvester_ssh_key" "k" {}'}}]}
+    out = wapp._tf_decl_for_role(more)
+    assert out["resources"][0]["spec"]["cloudinit"]["network_data"] == "(hidden)"
+    assert out["resources"][1]["spec"]["tf"] == "(hidden)"
+    assert out["resources"][2]["spec"]["tf"] == more["resources"][2]["spec"]["tf"]
     monkeypatch.setattr(wapp, "current_role", lambda: "operator")
     assert wapp._tf_decl_for_role(view) is view
     assert wapp.required_role_for("/api/tf-declarations/aaaaaaaaaaaa/code", "GET") == "operator"

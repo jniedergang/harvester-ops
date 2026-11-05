@@ -28073,19 +28073,29 @@ _TF_HIDDEN_FOR_VIEWERS = ("user_data", "network_data")
 
 
 def _tf_decl_for_role(view):
+    """Une déclaration, ou un modèle de plan (2.4.0 : mêmes ressources, même
+    cloud-init), telle qu'un lecteur peut la voir."""
     if view is None or ROLE_RANK.get(current_role(), 0) >= ROLE_RANK["operator"]:
         return view
     out = dict(view)
     res = []
+    def hide(block):
+        return {k: ("(hidden)" if k in _TF_HIDDEN_FOR_VIEWERS and v else v) for k, v in block.items()}
+
     for r in view.get("resources") or []:
-        spec = dict(r.get("spec") or {})
-        for key in _TF_HIDDEN_FOR_VIEWERS:
-            if spec.get(key):
-                spec[key] = "(hidden)"
-        for blk in ("cloudinit",):
-            if isinstance(spec.get(blk), list):
-                spec[blk] = [{k: ("(hidden)" if k in _TF_HIDDEN_FOR_VIEWERS and v else v)
-                              for k, v in (b or {}).items()} for b in spec[blk]]
+        if not isinstance(r, dict):
+            continue
+        spec = hide(dict(r.get("spec") or {}))
+        # le bloc cloud-init s'écrit en liste (formulaire) ou en objet seul
+        ci = spec.get("cloudinit")
+        if isinstance(ci, list):
+            spec["cloudinit"] = [hide(b) if isinstance(b, dict) else b for b in ci]
+        elif isinstance(ci, dict):
+            spec["cloudinit"] = hide(ci)
+        # code libre : s'il écrit un cloud-init, il se lit en opérateur, comme /code
+        if r.get("kind") == "raw" and isinstance(spec.get("tf"), str) and \
+                any(k in spec["tf"] for k in _TF_HIDDEN_FOR_VIEWERS):
+            spec["tf"] = "(hidden)"
         res.append(dict(r, spec=spec))
     out["resources"] = res
     return out
@@ -32905,7 +32915,9 @@ def api_deploy_template_get(name):
         if path is not None and path.is_file():
             return jsonify({"name": name, "invalid": True}), 200
         return jsonify({"error": "no such template"}), 404
-    return jsonify(t)
+    # le cloud-init d'un modèle se masque pour un lecteur comme celui d'une
+    # déclaration (2.3.0) : il peut porter des mots de passe
+    return jsonify(_tf_decl_for_role(t))
 
 
 def _deploy_template_save(name, doc, rev):

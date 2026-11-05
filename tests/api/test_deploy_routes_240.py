@@ -580,3 +580,39 @@ def test_orphan_rows_are_marked_interrupted(env, actions_db, other_process):
             assert d["ended_at"] >= t0
     assert store.get(trial["id"]) is None
     p.communicate("\n", timeout=5)
+
+
+# --- F-I1 : le cloud-init d'un modèle se lit en opérateur, comme celui d'une
+# déclaration (2.3.0) ------------------------------------------------------------
+
+UD = "#cloud-config\nruncmd:\n  - curl -H 'X-Key: k-123' https://example.invalid\n"
+ND = "version: 2\nethernets: {eth0: {dhcp4: true}}\n"
+CI_TEMPLATE = {"description": "vms", "variables": [], "resources": [
+    {"kind": "vm", "spec": {"name": "v1", "cloudinit": [{"user_data": UD, "network_data": ND}]}},
+    {"kind": "vm", "spec": {"name": "v2", "cloudinit": {"user_data": UD, "network_data": ND}}},
+    {"kind": "raw", "spec": {"tf": 'resource "harvester_cloudinit_secret" "c" {\n  name = "c"\n'
+                                   '  namespace = "default"\n  network_data = "version: 2"\n}\n'}},
+    {"kind": "ssh_key", "spec": {"name": "k", "namespace": "default", "public_key": KEY}},
+]}
+
+
+@pytest.mark.parametrize("role,hidden", [("viewer", True), ("operator", False), ("admin", False)])
+def test_template_cloudinit_hidden_for_viewers(env, monkeypatch, role, hidden):
+    c = env["client"]
+    r = c.put("/api/baremetal/tf-templates/ci", json=CI_TEMPLATE)
+    assert r.status_code == 201, r.get_json()
+    monkeypatch.setattr(wapp, "current_role", lambda: role)
+    r = c.get("/api/baremetal/tf-templates/ci")
+    assert r.status_code == 200
+    res = r.get_json()["resources"]
+    lst, obj, raw, key = (x["spec"] for x in res)
+    want_ud, want_nd = ("(hidden)", "(hidden)") if hidden else (UD, ND)
+    assert (lst["cloudinit"][0]["user_data"], lst["cloudinit"][0]["network_data"]) == (want_ud, want_nd)
+    assert (obj["cloudinit"]["user_data"], obj["cloudinit"]["network_data"]) == (want_ud, want_nd)
+    assert (raw["tf"] == "(hidden)") is hidden
+    assert key["public_key"] == KEY                      # le reste se lit toujours
+    if hidden:
+        assert "k-123" not in r.get_data(as_text=True)
+    # la liste des modèles ne porte aucune ressource
+    lst_body = c.get("/api/baremetal/tf-templates").get_data(as_text=True)
+    assert "k-123" not in lst_body and "version: 2" not in lst_body
