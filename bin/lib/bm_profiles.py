@@ -402,11 +402,13 @@ def check_batch(profile, batch):
     return errors
 
 
-def node_opts(profile, batch, index, field_type=None, dump=None):
+def node_opts(profile, batch, index, field_type=None, dump=None, join_all=False):
     """Options d'installation d'une ligne (corps de /api/baremetal/install,
     sans secrets) : champs du profil substitués, YAML avancé substitué,
     mode créer pour la première ligne, rejoindre ensuite. ProfileError
-    pour une variable absente, avec la ligne et le nom."""
+    pour une variable absente, avec la ligne et le nom. `join_all` (2.4.0,
+    reprise d'une série dont le cluster existe) : toutes les lignes
+    rejoignent."""
     row = batch["rows"][index]
     values = dict(row.get("values") or {}, vip=str(batch.get("vip") or ""))
     where = f"row {index + 1}"
@@ -423,7 +425,7 @@ def node_opts(profile, batch, index, field_type=None, dump=None):
         opts["iso"] = batch["iso"]
     opts["bmc_host"] = row.get("bmc_host")
     opts["bmc_user"] = row.get("bmc_user")
-    if index == 0:
+    if index == 0 and not join_all:
         opts["mode"] = "create"
         opts["vip"] = values["vip"]
         opts["cluster_name"] = batch["cluster_name"]
