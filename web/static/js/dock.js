@@ -329,6 +329,8 @@ const Dock = (() => {
               <span class="started" title="${tr('dock.startedTip', 'started')}">${startedHuman}</span>
               <span class="elapsed"></span>
             </div>
+            ${a.child_current
+              ? `<div class="dock-child" title="${tr('dock.childTip', 'Child action in progress, part of this action')}">${Icons.svg('chevronRight', { size: 11 })} ${escapeHtml(a.child_current.action)} <span class="dock-child-status">${escapeHtml(a.child_current.status || '')}</span>${a.children_count > 1 ? ` <span class="dock-child-count">${escapeHtml(tr('dock.childCount', '{n} child actions', { n: a.children_count }))}</span>` : ''}</div>` : ''}
             ${isRunning && liveProgress[a.id] && window.XferProgress
               ? `<div class="xfer-dock-line">${escapeHtml(XferProgress.text(liveProgress[a.id]))}</div>` : ''}
           </div>

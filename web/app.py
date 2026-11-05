@@ -1591,6 +1591,12 @@ class ActionRun:
         # 2.0.0 : geste réversible (dossiers) : {"path": route d'annulation} ;
         # None = pas de bouton « Annuler »
         self.undo = None
+        # 2.5.0 (décision 174) : action parente (identifiant) d'une action
+        # fille, posée AVANT que la fille soit visible (_register_action) ;
+        # `children` : identifiants des filles en mémoire, ordre de lancement
+        self.parent = None
+        self.children = []
+        self._persisted = False
         self.proc = None
         self._cond = threading.Condition()
         self._closed = False
@@ -1670,6 +1676,8 @@ class ActionRun:
             "progress_current": self.progress_last,
             "result": dict(self.result),
             "cancel_requested": self.cancel_requested,
+            "parent": self.parent,
+            "children": list(self.children),
             # 2.0.0 : seulement pour une action qui sait s'annuler (dossiers)
             **({"undo": dict(self.undo)} if self.undo else {}),
             **_folder_resume(self.action, self.status, self.id),
@@ -1678,6 +1686,35 @@ class ActionRun:
 
 ACTIONS = {}  # run_id -> ActionRun
 ACTIONS_LOCK = threading.Lock()
+
+ACTION_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def _register_action(run, parent=None):
+    """2.5.0 : rend `run` visible (ACTIONS) avec son parent DÉJÀ posé : une
+    lecture concurrente ne voit jamais une fille sans parent. Le parent est
+    écrit en base dès sa première fille (statut en cours, jamais purgé),
+    pour que la rétention ne garde jamais une fille sans son parent.
+    À appeler SOUS ACTIONS_LOCK ; rend le parent à écrire (ou None), à
+    passer à _persist_parent une fois le verrou rendu."""
+    run.parent = parent or None
+    ACTIONS[run.id] = run
+    if not run.parent:
+        return None
+    p = ACTIONS.get(run.parent)
+    if p is None:
+        return None
+    p.children.append(run.id)
+    return None if p._persisted else p
+
+
+def _persist_parent(p):
+    if p is None:
+        return
+    try:
+        _actions_persist(p)
+    except Exception:              # noqa: BLE001 : la base ne bloque jamais une action
+        pass
 
 # v1.5.7: ACTIONS used to grow without bound across the process lifetime.
 # Now finished runs are evicted by a background GC thread once they've
@@ -1757,6 +1794,13 @@ def _actions_init_db():
         conn.execute("ALTER TABLE actions ADD COLUMN undo TEXT")
     except sqlite3.OperationalError:
         pass
+    # 2.5.0 (décision 174) : action parente d'une action fille ; NULL = premier
+    # niveau (toutes les lignes d'avant). Même migration additive, à chaud.
+    try:
+        conn.execute("ALTER TABLE actions ADD COLUMN parent TEXT")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("CREATE INDEX IF NOT EXISTS actions_parent ON actions(parent)")
     conn.execute("CREATE INDEX IF NOT EXISTS actions_started ON actions(started_at DESC)")
     # v1.6.0: compound index for "recent actions per cluster" lookup
     # (the dock + activity tab queries by cluster + recency).
@@ -1780,12 +1824,13 @@ def _actions_persist(run):
         result_json = "{}"
     undo = getattr(run, "undo", None)
     undo_json = json.dumps(undo) if isinstance(undo, dict) and undo else None
+    run._persisted = True
     conn = sqlite3.connect(str(ACTIONS_DB))
     conn.execute("""
         INSERT INTO actions(id, action, cluster, status, exit_code,
                             started_at, ended_at, dry_run, cmd, events,
-                            error_summary, result, undo)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            error_summary, result, undo, parent)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
             exit_code=excluded.exit_code,
@@ -1796,18 +1841,36 @@ def _actions_persist(run):
             undo=excluded.undo
     """, (run.id, run.action, run.cluster, run.status, run.exit_code,
           run.started_at, run.ended_at, int(bool(run.dry_run)),
-          cmd_str, events_json, run.error_summary, result_json, undo_json))
+          cmd_str, events_json, run.error_summary, result_json, undo_json,
+          getattr(run, "parent", None)))
     conn.commit()
-    # Cap history at 500 rows (drop oldest done/error)
-    conn.execute("""
-        DELETE FROM actions WHERE id IN (
-            SELECT id FROM actions
-            WHERE status NOT IN ('starting','running')
-            ORDER BY started_at DESC LIMIT -1 OFFSET 500
-        )
-    """)
-    conn.commit()
+    _actions_purge(conn)
     conn.close()
+
+
+ACTIONS_KEEP = 500
+
+
+def _actions_purge(conn, keep=None):
+    """Garde les `keep` (500) dernières actions finies DE PREMIER NIVEAU ;
+    les filles partent avec leur parent (trois niveaux possibles), jamais
+    seules. Une fille dont le parent n'est pas en base compte comme une
+    action de premier niveau (base écrite avant la 2.5.0, parent perdu)."""
+    keep = ACTIONS_KEEP if keep is None else keep
+    conn.execute("""
+        WITH RECURSIVE doomed(id) AS (
+            SELECT id FROM (
+                SELECT id FROM actions a
+                WHERE status NOT IN ('starting','running')
+                  AND (parent IS NULL
+                       OR NOT EXISTS (SELECT 1 FROM actions p WHERE p.id = a.parent))
+                ORDER BY started_at DESC LIMIT -1 OFFSET ?)
+            UNION
+            SELECT c.id FROM actions c JOIN doomed d ON c.parent = d.id
+        )
+        DELETE FROM actions WHERE id IN (SELECT id FROM doomed)
+    """, (int(keep),))
+    conn.commit()
 
 
 def _row_result(raw):
@@ -1878,11 +1941,33 @@ def _actions_load_history():
                 run.result = _row_result(row["result"])
             if "undo" in row.keys():
                 run.undo = _row_undo(row["undo"])
+            if "parent" in row.keys():
+                run.parent = row["parent"]
+            run._persisted = True
             run._closed = True
             ACTIONS[row["id"]] = run
             restored += 1
         except Exception as e:
             log_actions.warning("failed to restore %s: %s", row["id"], e)
+    # 2.5.0 : filles relues rattachées à leur parent, ordre de lancement
+    for run in sorted(ACTIONS.values(), key=lambda r: r.started_at):
+        p = ACTIONS.get(run.parent) if run.parent else None
+        if p is not None and run.id not in p.children:
+            p.children.append(run.id)
+    # un parent écrit en cours (dès sa première fille) et tué par le
+    # redémarrage : la base le dit interrompu, comme la mémoire
+    interrupted = [r.id for r in ACTIONS.values() if r.status == "interrupted"]
+    if interrupted:
+        try:
+            conn = sqlite3.connect(str(ACTIONS_DB))
+            conn.executemany(
+                "UPDATE actions SET status='interrupted', exit_code=-1, ended_at=started_at"
+                " WHERE id=? AND status IN ('starting','running')",
+                [(i,) for i in interrupted])
+            conn.commit()
+            conn.close()
+        except sqlite3.Error:
+            pass
     if restored:
         log_actions.info("restored %d actions from %s", restored, ACTIONS_DB)
 
@@ -1896,7 +1981,7 @@ _actions_load_history()
 # /api/action/<id> and /api/stream/<id> for runs no longer in memory.
 _ACTIONS_LIST_COLUMNS = ("id", "action", "cluster", "status", "exit_code",
                          "started_at", "ended_at", "dry_run", "error_summary",
-                         "result", "undo")
+                         "result", "undo", "parent")
 
 
 _FOLDER_RESUMABLE = ("error", "interrupted")
@@ -1937,7 +2022,7 @@ def _row_finish(d):
 
 
 def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
-                       q=None):
+                       q=None, parent=None, top_level=False):
     """Most recent persisted runs, WITHOUT the events blob (list views).
 
     Les filtres s'appliquent EN SQL, pas après coup sur la page renvoyée :
@@ -1959,6 +2044,14 @@ def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
         where.append("(id LIKE ? OR action LIKE ? OR cluster LIKE ?"
                      " OR IFNULL(error_summary,'') LIKE ?)")
         params += [f"%{q}%"] * 4
+    # 2.5.0 : filles d'une action, ou premier niveau seulement (une fille dont
+    # le parent n'est pas en base compte comme une action de premier niveau)
+    if parent:
+        where.append("parent = ?")
+        params.append(parent)
+    elif top_level:
+        where.append("(parent IS NULL OR NOT EXISTS"
+                     " (SELECT 1 FROM actions p WHERE p.id = actions.parent))")
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     try:
         conn = sqlite3.connect(str(ACTIONS_DB))
@@ -1972,6 +2065,41 @@ def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
     except sqlite3.Error:
         return []
     return [_row_finish({k: r[k] for k in _ACTIONS_LIST_COLUMNS}) for r in rows]
+
+
+def _actions_db_children(ids):
+    """{parent: {identifiants des filles en base}} pour `ids`."""
+    ids = [i for i in ids if i]
+    out = {}
+    if not ids:
+        return out
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB))
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            for p, c in conn.execute(
+                    "SELECT parent, id FROM actions WHERE parent IN ({})"
+                    .format(",".join("?" * len(chunk))), chunk):
+                out.setdefault(p, set()).add(c)
+        conn.close()
+    except sqlite3.Error:
+        pass
+    return out
+
+
+def _actions_db_known(ids):
+    """Les identifiants de `ids` présents en base."""
+    ids = [i for i in ids if i]
+    if not ids:
+        return set()
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB))
+        found = {r[0] for r in conn.execute(
+            "SELECT id FROM actions WHERE id IN ({})".format(",".join("?" * len(ids))), ids)}
+        conn.close()
+        return found
+    except sqlite3.Error:
+        return set()
 
 
 def _actions_db_count():
@@ -8191,7 +8319,8 @@ def _baremetal_batch_steps(run, plan, concurrency):
             opts = data
         with app.app_context():
             action_id, busy = _bm_track(f"baremetal-install:{opts['hostname']}",
-                                        opts["bmc_host"], _baremetal_install_runner, opts)
+                                        opts["bmc_host"], _baremetal_install_runner, opts,
+                                        parent=run.id)
         if busy:
             raise RuntimeError(f"BMC {opts['bmc_host']} is busy")
         with lock:
@@ -8243,11 +8372,12 @@ def _bm_batch_prepare(prof, batch, secrets_, confirms=None, join_all=False):
     return plan, None, None
 
 
-def _bm_batch_launch(plan, cluster_name, concurrency=_bmp.DEFAULT_CONCURRENCY):
-    """Lance l'action parente d'une série préparée ; rend son identifiant."""
+def _bm_batch_launch(plan, cluster_name, concurrency=_bmp.DEFAULT_CONCURRENCY, parent=None):
+    """Lance l'action parente d'une série préparée ; rend son identifiant.
+    2.5.0 : `parent`, le déroulé de plan qui la lance."""
     concurrency = max(1, min(4, int(concurrency or _bmp.DEFAULT_CONCURRENCY)))
     return track_action(f"baremetal-batch:{cluster_name}", "(local)",
-                        _baremetal_batch_runner, plan, concurrency)
+                        _baremetal_batch_runner, plan, concurrency, parent=parent)
 
 
 def _bm_batch_start(prof, batch, secrets_, concurrency=_bmp.DEFAULT_CONCURRENCY, confirms=None):
@@ -8512,9 +8642,10 @@ def _bm_busy(host):
                      and r.status in ("starting", "running")), None)
 
 
-def _bm_track(label, host, worker, opts):
+def _bm_track(label, host, worker, opts, parent=None):
     """`track_action` refusé si le BMC est déjà piloté : (action_id, None)
-    ou (None, réponse 409). Contrôle et inscription sous un même verrou."""
+    ou (None, réponse 409). Contrôle et inscription sous un même verrou.
+    2.5.0 : `parent`, l'action parente (série, déroulé de plan)."""
     with _BM_LAUNCH_LOCK:
         busy = _bm_busy(host)
         if busy:
@@ -8522,7 +8653,7 @@ def _bm_track(label, host, worker, opts):
                 "error": f"{busy.action} is already driving the BMC {host} "
                          f"(action {busy.id}); wait for it to end or cancel it",
                 "running": busy.id, "running_action": busy.action}), 409)
-        action_id = track_action(label, "(local)", worker, opts)
+        action_id = track_action(label, "(local)", worker, opts, parent=parent)
         with ACTIONS_LOCK:
             run = ACTIONS.get(action_id)
             if run is not None:
@@ -13500,27 +13631,48 @@ def api_activity():
     """Return current and historical activity, optionally filtered.
 
     Query params: `cluster`, `status`, `action` (substring), `q` (free
-    text), `limit`.
+    text), `limit`. 2.5.0 (décision 174) : sans filtre, les actions de
+    premier niveau seulement, chacune avec `children_count` ; `?parent=<id>`
+    rend les filles d'une action (même forme, ordre de lancement) ; avec un
+    filtre, liste à plat où chaque fille porte son `parent`.
     """
     try:
         limit = max(1, min(int(request.args.get("limit", 50)), 500))
     except ValueError:
         limit = 50
+    f_parent = (request.args.get("parent") or "").strip()
+    if f_parent and not ACTION_ID_RE.match(f_parent):
+        return jsonify({"error": "parent must be an action identifier (12 hexadecimal characters)"}), 400
     f_cluster = (request.args.get("cluster") or "").strip()
     f_status = (request.args.get("status") or "").strip()
     f_action = (request.args.get("action") or "").strip()
     f_q = (request.args.get("q") or "").strip()
     filtering = any((f_cluster, f_status, f_action, f_q))
+    nested = not filtering
 
     def keep(e):
         return _activity_matches(e, f_cluster, f_status, f_action, f_q)
 
     with ACTIONS_LOCK:
-        in_progress = [a.to_dict() for a in ACTIONS.values()
-                       if a.status in ("starting", "running")]
-        done = [a.to_dict() for a in ACTIONS.values()
-                if a.status not in ("starting", "running")]
-        mem_ids = {a["id"] for a in in_progress} | {a["id"] for a in done}
+        runs = list(ACTIONS.values())
+        mem_ids = {a.id for a in runs}
+        if f_parent:
+            runs = [a for a in runs if a.parent == f_parent]
+        mem_children = {}
+        for a in ACTIONS.values():
+            if a.parent:
+                mem_children.setdefault(a.parent, set()).add(a.id)
+        in_progress = [a.to_dict() for a in runs if a.status in ("starting", "running")]
+        done = [a.to_dict() for a in runs if a.status not in ("starting", "running")]
+        # le dock montre la fille en cours d'une action parente
+        current = {}
+        for d in in_progress:
+            kids = [ACTIONS.get(c) for c in d.get("children") or []]
+            kids = [k for k in kids if k is not None]
+            if kids:
+                live = [k for k in kids if k.status in ("starting", "running")]
+                k = (live or kids)[-1]
+                current[d["id"]] = {"id": k.id, "action": k.action, "status": k.status}
     in_progress.sort(key=lambda a: a["started_at"], reverse=True)
     # v1.6.5: merge the SQLite history (last 500 runs) so completed actions
     # survive Flask restarts and the in-memory GC. In-memory entries win on
@@ -13529,13 +13681,28 @@ def api_activity():
     # dans la page déjà chargée.
     for row in _actions_db_recent(limit, cluster=f_cluster or None,
                                   status=f_status or None,
-                                  action=f_action or None, q=f_q or None):
+                                  action=f_action or None, q=f_q or None,
+                                  parent=f_parent or None,
+                                  top_level=nested and not f_parent):
         if row["id"] not in mem_ids:
             done.append(row)
+    if nested and not f_parent:
+        # premier niveau : une fille dont le parent n'existe plus nulle part
+        # (base d'avant la 2.5.0, parent perdu) y reste visible
+        orphans = {d["parent"] for d in in_progress + done if d.get("parent")} - mem_ids
+        known = mem_ids | _actions_db_known(sorted(orphans))
+        in_progress = [d for d in in_progress if not d.get("parent") or d["parent"] not in known]
+        done = [d for d in done if not d.get("parent") or d["parent"] not in known]
+    if nested:
+        db_children = _actions_db_children([d["id"] for d in in_progress + done])
+        for d in in_progress + done:
+            d["children_count"] = len(mem_children.get(d["id"], set()) | db_children.get(d["id"], set()))
+            if d["id"] in current:
+                d["child_current"] = current[d["id"]]
 
     # Filesystem log files (CLI runs + previous Flask sessions)
     all_logs = []
-    if LOG_DIR.exists():
+    if LOG_DIR.exists() and not f_parent:
         for p in sorted(LOG_DIR.glob("*.log"), reverse=True)[:200]:
             try:
                 all_logs.append(_log_file_entry(p, p.stat()))
@@ -13550,7 +13717,12 @@ def api_activity():
     in_progress = [a for a in in_progress if keep(a)]
     done = [a for a in done if keep(a)]
     fs_logs = [f for f in all_logs if keep(f)][:100]
-    done.sort(key=lambda a: a.get("ended_at") or a["started_at"], reverse=True)
+    if f_parent:
+        # filles : ordre de lancement
+        in_progress.sort(key=lambda a: a["started_at"])
+        done.sort(key=lambda a: a["started_at"])
+    else:
+        done.sort(key=lambda a: a.get("ended_at") or a["started_at"], reverse=True)
 
     # Valeurs proposables dans les menus de filtre : celles réellement
     # présentes, y compris pour un cluster retiré de la configuration dont
@@ -13561,7 +13733,8 @@ def api_activity():
         "actions_done": done[:limit],
         "log_files": fs_logs,
         "filters": {"cluster": f_cluster, "status": f_status,
-                    "action": f_action, "q": f_q, "active": filtering},
+                    "action": f_action, "q": f_q, "active": filtering,
+                    "parent": f_parent},
         "matched": len(in_progress) + len(done[:limit]) + len(fs_logs),
         "total": total,
         "facets": facets,
@@ -13682,15 +13855,17 @@ def api_doc_render(lang, filename):
 # -----------------------------------------------------------------------------
 # Per-VM runStrategy patch
 # -----------------------------------------------------------------------------
-def track_action(label, cluster, worker, *worker_args):
+def track_action(label, cluster, worker, *worker_args, parent=None):
     """Create an ActionRun and spawn the worker in a daemon thread.
     Returns the action_id (string) immediately. The worker must take
-    (run, *args) and eventually call run.close().
+    (run, *args) and eventually call run.close(). 2.5.0 : `parent`,
+    l'action parente, posée avant que l'action soit visible.
     """
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, label, cluster, [], dry_run=False)
     with ACTIONS_LOCK:
-        ACTIONS[run_id] = run
+        pending = _register_action(run, parent)
+    _persist_parent(pending)
     READ_SHARE.invalidate("_activity")
     threading.Thread(target=worker, args=(run, *worker_args), daemon=True).start()
     return run_id
@@ -17342,7 +17517,7 @@ def api_capi_cluster_preview(cluster):
 
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
                 capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
-                setup=None):
+                setup=None, parent=None):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
@@ -17357,7 +17532,8 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     `setup(run)` règle l'action (rôle, délai avant SIGKILL...) AVANT qu'elle
     soit visible et que son fil parte ; le contrôle d'occupation et l'ajout
     à ACTIONS se font sous le même verrou (deux gestes simultanés sur le
-    même plan : un seul passe)."""
+    même plan : un seul passe). 2.5.0 : `parent`, l'action parente (chaîne
+    d'un plan), posée avant que l'action soit visible."""
     wd = _capi_work_dir()
     spec_file = None
     if spec is not None:
@@ -17380,8 +17556,8 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     with ACTIONS_LOCK:
         busy = (_transfer_busy(tuple(busy_clusters or (cluster,)), label, prefix=busy_prefix)
                 if check_busy else None)
-        if not busy:
-            ACTIONS[run_id] = run
+        pending = None if busy else _register_action(run, parent)
+    _persist_parent(pending)
     if busy:
         run.status = "cancelled"               # jamais lancée : rien à persister
         run._closed = True
@@ -28643,7 +28819,7 @@ class TfLaunchError(Exception):
 
 
 def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster_user=None,
-                    target_kind="harvester", holder=None, role=None):
+                    target_kind="harvester", holder=None, role=None, parent=None):
     """Lance plan, apply ou destroy d'une déclaration gardée par la console,
     en action suivie ; rend (identifiant de l'action, empreinte du contenu).
     `mode` : plan | apply | destroy | destroy-plan. 2.3.0 : `target_kind`
@@ -28715,7 +28891,8 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
     # v1.55.0 : l'historique d'une déclaration retrouve ses actions par là.
     run.result = {"declaration_id": decl["id"], "by": user, "mode": mode}
     with ACTIONS_LOCK:
-        ACTIONS[run_id] = run
+        pending = _register_action(run, parent)
+    _persist_parent(pending)
     threading.Thread(target=_tf_decl_runner,
                      args=(run, cluster, kc, decl, rendered, mode, h, bool(plan_hash), user),
                      daemon=True).start()
@@ -32449,11 +32626,12 @@ def _deploy_install_phase(run, spec, store):
                                      data={"actions": [], "nodes": spec["hostnames"]})
         prepared = _deploy_install_secrets_get(store, ctx.run_id, rows)
         if spec["kind"] == "batch":
-            child = _bm_batch_launch(prepared, spec["cluster"], spec.get("concurrency"))
+            child = _bm_batch_launch(prepared, spec["cluster"], spec.get("concurrency"), parent=run.id)
         else:
             with app.app_context():
                 child, busy = _bm_track(f"baremetal-install:{prepared[0]['hostname']}",
-                                        prepared[0]["bmc_host"], _baremetal_install_runner, prepared[0])
+                                        prepared[0]["bmc_host"], _baremetal_install_runner, prepared[0],
+                                        parent=run.id)
             if busy:
                 return _dch.PhaseOutcome("error", message=f"BMC {prepared[0]['bmc_host']} is busy",
                                          data={"actions": [], "nodes": spec["hostnames"]})
@@ -32552,7 +32730,8 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
         try:
             kc = kc_ref()
             pid, h = _tf_decl_launch(cluster, kc, decl["id"], "plan", user=user,
-                                     cluster_user=cluster_user, holder=run.id, role=run.launch_role)
+                                     cluster_user=cluster_user, holder=run.id, role=run.launch_role,
+                                     parent=run.id)
             actions.append(pid)
             status, child = _deploy_wait_child(pid)
             if not _tf_decl_wait_idle(decl["id"]):
@@ -32580,7 +32759,8 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
                 return _dch.ItemOutcome("done", "kept: values differ from the declaration" if kept
                                         else "nothing to change", data=data)
             aid, _h = _tf_decl_launch(cluster, kc, decl["id"], "apply", plan_hash=h, user=user,
-                                      cluster_user=cluster_user, holder=run.id, role=run.launch_role)
+                                      cluster_user=cluster_user, holder=run.id, role=run.launch_role,
+                                      parent=run.id)
             actions.append(aid)
             status, _child = _deploy_wait_child(aid)
             if not _tf_decl_wait_idle(decl["id"]):

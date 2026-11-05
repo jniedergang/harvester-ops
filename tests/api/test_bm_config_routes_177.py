@@ -49,7 +49,7 @@ def client(monkeypatch):
 def runs(monkeypatch):
     seen = []
     monkeypatch.setattr(wapp, "track_action",
-                        lambda label, cluster, worker, *a: seen.append((label, a)) or "a1")
+                        lambda label, cluster, worker, *a, **_kw: seen.append((label, a)) or "a1")
     return seen
 
 

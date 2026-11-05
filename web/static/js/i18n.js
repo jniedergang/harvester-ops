@@ -17,6 +17,12 @@ const I18N_STORAGE_KEY = 'harvester_ops_language';
 
 const translations = {
   en: {
+    "activity.expandTip": "Show the {n} child actions launched by this action",
+    "activity.collapseTip": "Hide the {n} child actions",
+    "activity.partOf": "part of {id}",
+    "activity.partOfTip": "This action was launched by another one: open the parent action",
+    "dock.childTip": "Child action in progress, part of this action",
+    "dock.childCount": "{n} child actions",
     "bmc.onboard.title": "Optional storage onboarding",
     "bmc.onboard.enable": "Configure a storage profile and keep the joined host cordoned",
     "bmc.onboard.hint": "For a new host joining a declared cluster. Select a reviewed profile for your provider. Storage NICs are identified by MAC. Configure VM uplinks separately above.",
@@ -7551,6 +7557,12 @@ const translations = {
   },
 
   fr: {
+    "activity.expandTip": "Afficher les {n} actions filles lancées par cette action",
+    "activity.collapseTip": "Masquer les {n} actions filles",
+    "activity.partOf": "fait partie de {id}",
+    "activity.partOfTip": "Cette action a été lancée par une autre : ouvrir l'action parente",
+    "dock.childTip": "Action fille en cours, qui fait partie de cette action",
+    "dock.childCount": "{n} actions filles",
     "bmc.onboard.title": "Configuration de stockage facultative",
     "bmc.onboard.enable": "Configurer un profil de stockage et garder le nouvel hôte non planifiable",
     "bmc.onboard.hint": "Pour un nouvel hôte qui rejoint un cluster déclaré. Choisissez un profil validé pour votre fournisseur. Les cartes de stockage sont désignées par leur MAC. Configurez les interfaces VM séparément ci-dessus.",
@@ -15086,6 +15098,12 @@ const translations = {
   },
 
   it: {
+    "activity.expandTip": "Mostrare le {n} azioni figlie avviate da questa azione",
+    "activity.collapseTip": "Nascondere le {n} azioni figlie",
+    "activity.partOf": "parte di {id}",
+    "activity.partOfTip": "Questa azione è stata avviata da un'altra: aprire l'azione padre",
+    "dock.childTip": "Azione figlia in corso, parte di questa azione",
+    "dock.childCount": "{n} azioni figlie",
     "bmc.onboard.title": "Configurazione di archiviazione facoltativa",
     "bmc.onboard.enable": "Configurare un profilo di archiviazione e mantenere il nuovo host non pianificabile",
     "bmc.onboard.hint": "Per un nuovo host che si aggiunge a un cluster dichiarato. Scegliere un profilo verificato per il proprio fornitore. Le NIC di archiviazione sono identificate dal MAC. Configurare le NIC VM separatamente qui sopra.",
@@ -22619,6 +22637,12 @@ const translations = {
   },
 
   es: {
+    "activity.expandTip": "Mostrar las {n} acciones hijas lanzadas por esta acción",
+    "activity.collapseTip": "Ocultar las {n} acciones hijas",
+    "activity.partOf": "parte de {id}",
+    "activity.partOfTip": "Esta acción fue lanzada por otra: abrir la acción padre",
+    "dock.childTip": "Acción hija en curso, parte de esta acción",
+    "dock.childCount": "{n} acciones hijas",
     "bmc.onboard.title": "Configuración de almacenamiento opcional",
     "bmc.onboard.enable": "Configurar un perfil de almacenamiento y mantener el nuevo host no planificable",
     "bmc.onboard.hint": "Para un nuevo host que se une a un clúster declarado. Seleccione un perfil revisado para su proveedor. Las NIC de almacenamiento se identifican por su MAC. Configure las NIC de VM por separado arriba.",
@@ -30152,6 +30176,12 @@ const translations = {
   },
 
   de: {
+    "activity.expandTip": "Die {n} von dieser Aktion gestarteten Unteraktionen anzeigen",
+    "activity.collapseTip": "Die {n} Unteraktionen ausblenden",
+    "activity.partOf": "Teil von {id}",
+    "activity.partOfTip": "Diese Aktion wurde von einer anderen gestartet: übergeordnete Aktion öffnen",
+    "dock.childTip": "Laufende Unteraktion, Teil dieser Aktion",
+    "dock.childCount": "{n} Unteraktionen",
     "bmc.onboard.title": "Optionale Storage-Konfiguration",
     "bmc.onboard.enable": "Storage-Profil konfigurieren und den neuen Host gesperrt lassen",
     "bmc.onboard.hint": "Für einen neuen Host in einem registrierten Cluster. Ein geprüftes Profil für den Storage-Anbieter auswählen. Storage-NICs werden über ihre MAC bestimmt. VM-Uplinks separat oben konfigurieren.",

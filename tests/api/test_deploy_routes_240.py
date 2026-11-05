@@ -72,7 +72,7 @@ def env(tmp_path, monkeypatch):
     started = []
     monkeypatch.setattr(wapp, "_deploy_start", lambda *a, **kw: started.append((a, kw)) or "d1d1d1d1d1d1")
     monkeypatch.setattr(wapp, "track_action",
-                        lambda label, cluster, worker, *a: started.append((label, worker, a)) or "b1")
+                        lambda label, cluster, worker, *a, **_kw: started.append((label, worker, a)) or "b1")
     with wapp.ACTIONS_LOCK:
         before = dict(wapp.ACTIONS)
     yield {"state": state, "client": wapp.app.test_client(), "store": store, "started": started, "kc": str(kc)}

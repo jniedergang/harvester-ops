@@ -340,7 +340,7 @@ def test_a_join_needs_no_vip_but_a_known_cluster(client, monkeypatch, tmp_path):
     déclaré dans la console (reconnu par l'hôte de son serveur d'API)."""
     runs = []
     monkeypatch.setattr(wapp, "track_action",
-                        lambda label, cluster, worker, *args: runs.append(args) or "a1")
+                        lambda label, cluster, worker, *args, **_kw: runs.append(args) or "a1")
     monkeypatch.setattr(wapp, "load_config", lambda: {"clusters": []})
     r = client.post("/api/baremetal/install", json=JOIN)
     assert r.status_code == 400 and r.get_json()["fields"] == ["server_url"]
@@ -408,7 +408,7 @@ def test_a_join_carries_the_person_s_kubeconfig_to_the_worker(
     là où l'identité de la personne existe, et transmis au fil."""
     runs = []
     monkeypatch.setattr(wapp, "track_action",
-                        lambda label, cluster, worker, *args: runs.append(args) or "a1")
+                        lambda label, cluster, worker, *args, **_kw: runs.append(args) or "a1")
     _declared(monkeypatch, tmp_path)
     monkeypatch.setattr(wapp, "load_config_ro", wapp.load_config)
     monkeypatch.setattr(wapp, "current_cluster_identity", lambda: identity)
@@ -432,7 +432,7 @@ def test_the_runner_never_resolves_the_cluster_kubeconfig_itself():
 def test_install_action_label_carries_no_secret(client, monkeypatch):
     seen = {}
     monkeypatch.setattr(wapp, "track_action",
-                        lambda label, cluster, worker, *a: seen.setdefault("label", label) or "id1")
+                        lambda label, cluster, worker, *a, **_kw: seen.setdefault("label", label) or "id1")
     r = client.post("/api/baremetal/install", json={
         "bmc_host": "1.2.3.4", "bmc_user": "u", "bmc_password": "SECRET",
         "iso": "h.iso", "hostname": "harv3", "device": "/dev/sda",

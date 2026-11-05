@@ -305,7 +305,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(wapp, "load_config", lambda: {"clusters": []})
     started = []
     monkeypatch.setattr(wapp, "track_action",
-                        lambda label, cluster, worker, *a: started.append((label, worker, a)) or "b1")
+                        lambda label, cluster, worker, *a, **_kw: started.append((label, worker, a)) or "b1")
     return {"state": state, "started": started, "client": wapp.app.test_client()}
 
 
@@ -473,7 +473,7 @@ def test_batch_runner_waits_for_the_create_then_joins(monkeypatch):
         def __init__(self):
             self.status = "done"
 
-    def fake_track(label, host, worker, opts):
+    def fake_track(label, host, worker, opts, parent=None):
         assert worker is wapp._baremetal_install_runner
         launched.append((label, opts["mode"]))
         aid = f"c{len(launched)}"
@@ -515,7 +515,7 @@ def test_batch_joins_inherit_the_kubeconfig_frozen_on_the_request_side(monkeypat
     class Child:
         status = "done"
 
-    def fake_track(label, host, worker, opts):
+    def fake_track(label, host, worker, opts, parent=None):
         got.append(opts.get("_cluster_kc"))
         aid = f"k{len(got)}"
         with wapp.ACTIONS_LOCK:
@@ -669,7 +669,7 @@ def test_a_failed_row_carries_its_reason(monkeypatch):
         status = "error"
         error_summary = "the installer read its configuration but never asked for the image"
 
-    def fake_track(label, host, worker, opts):
+    def fake_track(label, host, worker, opts, parent=None):
         with wapp.ACTIONS_LOCK:
             wapp.ACTIONS["f1"] = Child()
         return "f1", None

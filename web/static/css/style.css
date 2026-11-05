@@ -5983,3 +5983,15 @@ html[data-mode="dark"] .tbl-scroll { --tbl-shade: rgba(0, 0, 0, 0.42); }
 .dpw-finding { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
 .dpw-follow { border-top: 1px solid var(--border); padding-top: 8px; }
 .dpw-step { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+
+/* 2.5.0 (décision 174) : actions filles imbriquées sous leur parent */
+.activity-child td.act-name,
+.auto-history-child td.auto-history-kind { padding-left: calc(var(--act-depth, 1) * 18px + 8px); }
+.activity-child,
+.auto-history-child { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.act-expand,
+.auto-history-expand { margin-left: 4px; display: inline-flex; align-items: center; gap: 2px; }
+.activity-part-of { margin-left: 6px; font-size: 0.85em; }
+.dock-child { font-size: 0.82em; opacity: 0.85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dock-child-status,
+.dock-child-count { opacity: 0.7; margin-left: 4px; }

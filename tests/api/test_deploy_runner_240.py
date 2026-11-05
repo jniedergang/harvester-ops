@@ -308,7 +308,7 @@ def test_secrets_never_in_steps_result_or_db(world):
 # --- installation enchaînée ---------------------------------------------------
 
 def _fake_child(status="done", gate=None, seen=None):
-    def launch(rows, cluster_name, concurrency=None):
+    def launch(rows, cluster_name, concurrency=None, parent=None):
         if seen is not None:
             seen.append([dict(r) for r in rows])
         run = wapp.ActionRun(wapp.uuid.uuid4().hex[:12], f"baremetal-batch:{cluster_name}", "(local)", [])

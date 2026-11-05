@@ -196,7 +196,7 @@ def install_env(monkeypatch, state, name="USE6236RY3"):
     monkeypatch.setattr(wapp, "_bm_system_presence", lambda host, user, pwd, system_path=None: {
         "state": state, "evidence": [{"code": "boots-from-disk", "name": "sles"}] if state == "present" else [],
         "confirm_name": name, "source": "hpe-oem"})
-    monkeypatch.setattr(wapp, "_bm_track", lambda label, host, runner, data: (started.append(data) or "a00000000220", None))
+    monkeypatch.setattr(wapp, "_bm_track", lambda label, host, runner, data, parent=None: (started.append(data) or "a00000000220", None))
     return started
 
 

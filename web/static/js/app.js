@@ -1416,18 +1416,7 @@ const App = (() => {
           active ? escapeHtml(i18n.t('activity.filter.noneRunningMatch'))
                  : escapeHtml(i18n.t('activity.noneRunning'))}</td></tr>`;
       } else {
-        running.forEach(a => {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td><code>${escapeHtml(a.id)}</code></td>
-            <td>${escapeHtml(a.cluster)}</td>
-            <td>${escapeHtml(a.action)}${a.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}</td>
-            <td><span class="phase Pending">${escapeHtml(a.status)}</span></td>
-            <td>${new Date(a.started_at * 1000).toLocaleString()}</td>
-            <td><button class="btn btn-sm btn-danger" data-cancel="${escapeHtml(a.id)}">Cancel</button></td>`;
-          tr.querySelector('[data-cancel]').addEventListener('click', () => cancelAction(a.id));
-          runBody.appendChild(tr);
-        });
+        running.forEach(a => runBody.appendChild(activityRunningRow(a, 0, active)));
       }
 
       // History — merge actions_done + log_files
@@ -1436,21 +1425,7 @@ const App = (() => {
 
       // Build unified list
       const items = [];
-      (data.actions_done || []).forEach(a => {
-        items.push({
-          kind: 'action',
-          id: a.id,
-          cluster: a.cluster,
-          action: a.action,
-          status: a.status,
-          ts: a.ended_at || a.started_at,
-          duration: (a.ended_at && a.started_at) ? (a.ended_at - a.started_at) : null,
-          dry_run: a.dry_run,
-          error_summary: a.error_summary || null,
-          undo: a.undo || null,
-          resume: a.resume || null,
-        });
-      });
+      (data.actions_done || []).forEach(a => items.push(activityItem(a)));
       (data.log_files || []).forEach(f => {
         // Cluster et action sont extraits du nom de fichier PAR LE SERVEUR :
         // c'est lui qui filtre dessus, les deux doivent lire le nom de la
@@ -1494,47 +1469,10 @@ const App = (() => {
         histBody.innerHTML = `<tr><td colspan="7" class="empty-state">${
           active ? escapeHtml(i18n.t('activity.filter.noMatch')) : '—'}</td></tr>`;
       } else {
-        visible.forEach(it => {
-          const tr = document.createElement('tr');
-          tr.classList.add('clickable');
-          const statusBadge = it.status === 'done' ? '<span class="phase Running">done</span>'
-                            : it.status === 'error' ? '<span class="phase Failed">error</span>'
-                            : `<span class="phase Stopped">${escapeHtml(it.status)}</span>`;
-          const typeBadge = `<span class="activity-type-badge ${it.kind === 'action' ? 'web' : 'file'}">${it.kind === 'action' ? 'web' : 'cli'}</span>`;
-          const dur = it.duration ? `${it.duration.toFixed(1)}s` : '—';
-          const tsStr = new Date(it.ts * 1000).toLocaleString();
-          tr.innerHTML = `
-            <td>${Icons.svg('activity', { cls: 'icon-dim' })}</td>
-            <td>${typeBadge}</td>
-            <td>${escapeHtml(it.cluster)}</td>
-            <td>${escapeHtml(it.action)}${it.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}${
-              it.kind === 'action' && typeof Dock !== 'undefined' && Dock.undoButton ? ' ' + Dock.undoButton(it, 'data-act-undo') + Dock.resumeButton(it, 'data-act-resume') : ''}</td>
-            <td>${statusBadge}</td>
-            <td>${tsStr}</td>
-            <td>${dur}</td>`;
-          if (it.error_summary) tr.title = it.error_summary;
-          // revue I-4 : Annuler un geste de dossiers fini, bien après le dock
-          const resumeBtn = tr.querySelector('[data-act-resume]');
-          if (resumeBtn) resumeBtn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            if (await Dock.resume(it, resumeBtn)) refreshActivity();
-          });
-          const undoBtn = tr.querySelector('[data-act-undo]');
-          if (undoBtn) undoBtn.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            if (await Dock.undo(it, undoBtn)) refreshActivity();
-          });
-          if (it.kind === 'log') {
-            tr.addEventListener('click', () => showLogFile(it.filename));
-          } else {
-            tr.addEventListener('click', () => {
-              const idx = activityActionList.findIndex(a => a.id === it.id);
-              if (idx >= 0) showActionDetails(idx);
-            });
-          }
-          histBody.appendChild(tr);
-        });
+        visible.forEach(it => histBody.appendChild(activityHistoryRow(it, 0, active)));
       }
+      // 2.5.0 : les actions dépliées le restent d'une relecture à l'autre
+      reopenActivityChildren();
       // #activity/action/<id> : le détail de l'action s'ouvre une fois
       if (pendingActionOpen) {
         const idx = activityActionList.findIndex(a => a.id === pendingActionOpen);
@@ -1542,6 +1480,191 @@ const App = (() => {
         if (idx >= 0) showActionDetails(idx);
       }
     } catch (e) { console.warn('activity refresh failed', e); }
+  }
+
+  // -------------------------------------------------------------------------
+  // 2.5.0 (décision 174) : actions filles. L'Activité montre le premier
+  // niveau ; une action à filles se déplie (filles lues à la demande par
+  // `?parent=`, même gabarit de ligne, en retrait, trois niveaux possibles).
+  // Une recherche filtrée liste à plat, chaque fille disant de quelle action
+  // elle fait partie.
+  // -------------------------------------------------------------------------
+  const activityExpanded = new Set();
+
+  function activityItem(a) {
+    return {
+      kind: 'action',
+      id: a.id,
+      cluster: a.cluster,
+      action: a.action,
+      status: a.status,
+      ts: a.ended_at || a.started_at,
+      started_at: a.started_at,
+      ended_at: a.ended_at,
+      duration: (a.ended_at && a.started_at) ? (a.ended_at - a.started_at) : null,
+      dry_run: a.dry_run,
+      error_summary: a.error_summary || null,
+      undo: a.undo || null,
+      resume: a.resume || null,
+      parent: a.parent || null,
+      children_count: a.children_count || 0,
+    };
+  }
+
+  /** Bouton de dépliage (filles) et lien « fait partie de » (recherche). */
+  function activityNestHtml(it, filtered) {
+    let out = '';
+    if (it.children_count > 0 && !filtered) {
+      const open = activityExpanded.has(it.id);
+      out += ` <button type="button" class="btn-mini act-expand" data-act-expand="${escapeHtml(it.id)}"
+                 aria-expanded="${open}" title="${escapeHtml(i18n.t(open ? 'activity.collapseTip' : 'activity.expandTip', { n: it.children_count }))}"
+                 >${Icons.svg(open ? 'chevronDown' : 'chevronRight', { size: 12 })} ${escapeHtml(String(it.children_count))}</button>`;
+    }
+    if (it.parent && filtered) {
+      out += ` <a class="activity-part-of form-hint" href="#activity/action/${encodeURIComponent(it.parent)}"
+                 title="${escapeHtml(i18n.t('activity.partOfTip'))}">${escapeHtml(i18n.t('activity.partOf', { id: it.parent }))}</a>`;
+    }
+    return out;
+  }
+
+  function activityIndent(tr, depth) {
+    if (!depth) return;
+    tr.classList.add('activity-child');
+    tr.dataset.depth = String(depth);
+    tr.style.setProperty('--act-depth', depth);
+  }
+
+  function activityRunningRow(a, depth, filtered) {
+    const it = activityItem(a);
+    const tr = document.createElement('tr');
+    tr.dataset.actId = it.id;
+    activityIndent(tr, depth);
+    const live = it.status === 'starting' || it.status === 'running';
+    tr.innerHTML = `
+      <td><code>${escapeHtml(it.id)}</code></td>
+      <td>${escapeHtml(it.cluster)}</td>
+      <td class="act-name">${escapeHtml(it.action)}${it.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}${activityNestHtml(it, filtered)}</td>
+      <td><span class="phase ${live ? 'Pending' : (it.status === 'done' ? 'Running' : 'Failed')}">${escapeHtml(it.status)}</span></td>
+      <td>${new Date(it.started_at * 1000).toLocaleString()}</td>
+      <td>${live ? `<button class="btn btn-sm btn-danger" data-cancel="${escapeHtml(it.id)}" title="${escapeHtml(i18n.t('dock.cancelTip'))}">Cancel</button>` : ''}</td>`;
+    tr.querySelector('[data-cancel]')?.addEventListener('click', () => cancelAction(it.id));
+    bindActivityExpand(tr, it, depth, activityRunningRow);
+    return tr;
+  }
+
+  function activityHistoryRow(it, depth, filtered) {
+    if (!it.kind) it = activityItem(it);
+    const tr = document.createElement('tr');
+    tr.classList.add('clickable');
+    tr.dataset.actId = it.id || '';
+    activityIndent(tr, depth);
+    const statusBadge = it.status === 'done' ? '<span class="phase Running">done</span>'
+                      : it.status === 'error' ? '<span class="phase Failed">error</span>'
+                      : `<span class="phase Stopped">${escapeHtml(it.status)}</span>`;
+    const typeBadge = `<span class="activity-type-badge ${it.kind === 'action' ? 'web' : 'file'}">${it.kind === 'action' ? 'web' : 'cli'}</span>`;
+    const dur = it.duration ? `${it.duration.toFixed(1)}s` : '—';
+    const tsStr = new Date(it.ts * 1000).toLocaleString();
+    tr.innerHTML = `
+      <td>${Icons.svg('activity', { cls: 'icon-dim' })}</td>
+      <td>${typeBadge}</td>
+      <td>${escapeHtml(it.cluster)}</td>
+      <td class="act-name">${escapeHtml(it.action)}${it.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}${
+        it.kind === 'action' ? activityNestHtml(it, filtered) : ''}${
+        it.kind === 'action' && typeof Dock !== 'undefined' && Dock.undoButton ? ' ' + Dock.undoButton(it, 'data-act-undo') + Dock.resumeButton(it, 'data-act-resume') : ''}</td>
+      <td>${statusBadge}</td>
+      <td>${tsStr}</td>
+      <td>${dur}</td>`;
+    if (it.error_summary) tr.title = it.error_summary;
+    // revue I-4 : Annuler un geste de dossiers fini, bien après le dock
+    const resumeBtn = tr.querySelector('[data-act-resume]');
+    if (resumeBtn) resumeBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (await Dock.resume(it, resumeBtn)) refreshActivity();
+    });
+    const undoBtn = tr.querySelector('[data-act-undo]');
+    if (undoBtn) undoBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (await Dock.undo(it, undoBtn)) refreshActivity();
+    });
+    tr.querySelector('.activity-part-of')?.addEventListener('click', (e) => e.stopPropagation());
+    if (it.kind === 'log') {
+      tr.addEventListener('click', () => showLogFile(it.filename));
+    } else {
+      tr.addEventListener('click', () => {
+        const idx = activityActionList.findIndex(a => a.id === it.id);
+        if (idx >= 0) showActionDetails(idx);
+      });
+    }
+    bindActivityExpand(tr, it, depth, activityHistoryRow);
+    return tr;
+  }
+
+  function bindActivityExpand(tr, it, depth, makeRow) {
+    const btn = tr.querySelector('[data-act-expand]');
+    if (!btn) return;
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (activityExpanded.has(it.id)) {
+        activityExpanded.delete(it.id);
+        collapseActivityRow(tr, depth);
+        btn.setAttribute('aria-expanded', 'false');
+        btn.title = i18n.t('activity.expandTip', { n: it.children_count });
+        btn.innerHTML = `${Icons.svg('chevronRight', { size: 12 })} ${escapeHtml(String(it.children_count))}`;
+        return;
+      }
+      activityExpanded.add(it.id);
+      await expandActivityRow(tr, it, depth, makeRow);
+    });
+  }
+
+  function collapseActivityRow(tr, depth) {
+    let next = tr.nextElementSibling;
+    while (next && Number(next.dataset.depth || 0) > depth) {
+      const gone = next;
+      next = next.nextElementSibling;
+      gone.remove();
+    }
+  }
+
+  async function expandActivityRow(tr, it, depth, makeRow) {
+    const btn = tr.querySelector('[data-act-expand]');
+    collapseActivityRow(tr, depth);
+    let data;
+    try {
+      data = await api(`/api/activity?parent=${encodeURIComponent(it.id)}&limit=500`);
+    } catch (e) { console.warn('activity children failed', e); return; }
+    if (!document.body.contains(tr)) return;
+    const kids = (data.in_progress || []).concat(data.actions_done || [])
+      .sort((a, b) => (a.started_at || 0) - (b.started_at || 0));
+    let after = tr;
+    kids.forEach(k => {
+      const item = activityItem(k);
+      if (makeRow === activityHistoryRow && !activityActionList.some(a => a.id === item.id)) {
+        activityActionList.push(item);
+      }
+      const row = makeRow(item, depth + 1, false);
+      after.after(row);
+      after = row;
+      if (activityExpanded.has(item.id)) expandActivityRow(row, item, depth + 1, makeRow);
+    });
+    if (btn) {
+      btn.setAttribute('aria-expanded', 'true');
+      btn.title = i18n.t('activity.collapseTip', { n: it.children_count });
+      btn.innerHTML = `${Icons.svg('chevronDown', { size: 12 })} ${escapeHtml(String(it.children_count))}`;
+    }
+  }
+
+  function reopenActivityChildren() {
+    ['#activity-running', '#activity-history'].forEach(sel => {
+      const makeRow = sel === '#activity-running' ? activityRunningRow : activityHistoryRow;
+      $$(`${sel} tbody tr[data-act-id]`).forEach(tr => {
+        if (Number(tr.dataset.depth || 0) !== 0 || !activityExpanded.has(tr.dataset.actId)) return;
+        const btn = tr.querySelector('[data-act-expand]');
+        if (!btn) return;
+        const n = Number(btn.textContent.trim()) || 0;
+        expandActivityRow(tr, { id: tr.dataset.actId, children_count: n }, 0, makeRow);
+      });
+    });
   }
 
   async function showLogFile(filename) {

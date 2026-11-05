@@ -676,7 +676,7 @@ BODY = {"bmc_host": "192.0.2.21", "bmc_user": "admin", "bmc_password": "S3CRET-P
 def test_discover_route_validates_then_tracks_an_action(client, monkeypatch):
     runs = []
     monkeypatch.setattr(wapp, "track_action",
-                        lambda label, cluster, worker, *a: runs.append((label, worker, a)) or "a1")
+                        lambda label, cluster, worker, *a, **_kw: runs.append((label, worker, a)) or "a1")
     r = client.post("/api/baremetal/discover", json={})
     assert r.status_code == 400 and set(r.get_json()["fields"]) == {
         "bmc_host", "bmc_user", "bmc_password", "iso"}
@@ -740,7 +740,7 @@ def test_a_bmc_driven_by_a_discovery_or_install_is_refused(client, monkeypatch):
     même lecteur virtuel : une seconde action sur ce BMC est refusée (409)."""
     runs = []
 
-    def fake_track(label, cluster, worker, *a):
+    def fake_track(label, cluster, worker, *a, **_kw):
         run = wapp.ActionRun(f"bm{len(runs):010d}", label, cluster, [])
         runs.append(run)
         with wapp.ACTIONS_LOCK:

@@ -316,7 +316,7 @@ def client(monkeypatch, tmp_path):
 @pytest.fixture()
 def runs(monkeypatch):
     seen = []
-    monkeypatch.setattr(wapp, "track_action", lambda label, cluster, worker, *a: seen.append(a) or "a1")
+    monkeypatch.setattr(wapp, "track_action", lambda label, cluster, worker, *a, **_kw: seen.append(a) or "a1")
     return seen
 
 
