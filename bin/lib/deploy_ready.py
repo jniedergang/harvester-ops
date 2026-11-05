@@ -35,8 +35,10 @@ def _name(o):
 
 
 def _precheck(rows, key):
-    """Ligne `key` de hv_upgrade.prechecks : la règle est la sienne, pas une copie."""
-    return next((r for r in rows if r.get("key") == key), {"ok": True, "text": ""})
+    """Ligne `key` de hv_upgrade.prechecks : la règle est la sienne, pas une
+    copie. Ligne absente (clé renommée là-bas) : jamais prise pour « prêt »."""
+    return next((r for r in rows if r.get("key") == key),
+                {"ok": False, "text": f"precheck {key} not found in hv_upgrade"})
 
 
 def _cond_true(obj, ctype):

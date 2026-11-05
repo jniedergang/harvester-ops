@@ -332,6 +332,17 @@ def test_crud(env):
     assert c.get("/api/baremetal/profiles/rack-a").status_code == 404
 
 
+def test_profile_plan_kept_through_the_routes_240(env):
+    """2.4.0 (revue) : la fenêtre du profil envoie `plan` ; la route le garde."""
+    c = env["client"]
+    assert create(c, plan="site-standard").status_code == 201
+    assert c.get("/api/baremetal/profiles/rack-a").get_json()["plan"] == "site-standard"
+    upd = dict(body_of(profile()), plan="")
+    assert c.put("/api/baremetal/profiles/rack-a", json=upd).get_json()["plan"] == ""
+    r = c.put("/api/baremetal/profiles/rack-a", json=dict(upd, plan="Bad"))
+    assert r.status_code == 400
+
+
 def test_save_refuses_what_the_installer_would_refuse(env):
     r = create(env["client"], advanced_yaml="install:\n  iso_url: http://x/{{hostname}}.iso\n")
     assert r.status_code == 400

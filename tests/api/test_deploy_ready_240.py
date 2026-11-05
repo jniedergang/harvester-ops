@@ -125,6 +125,19 @@ def test_empty_reads_never_ready():
     assert dr.evaluate(None)["ready"] is False
 
 
+@pytest.mark.parametrize("rows,unmet", [
+    ([], {"nodes-not-ready", "charts-not-ready"}),
+    ([{"ok": True, "key": "nodes-ready-v2", "text": ""}, {"ok": True, "key": "charts", "text": ""}],
+     {"nodes-not-ready"}),
+])
+def test_renamed_precheck_key_fails_closed(monkeypatch, rows, unmet):
+    """Revue M5 : une ligne de hv_upgrade.prechecks introuvable (clé
+    renommée) n'est jamais prise pour « prêt »."""
+    monkeypatch.setattr(hv_upgrade, "prechecks", lambda **kw: rows)
+    out = dr.evaluate(reads())
+    assert {u["code"] for u in out["unmet"]} == unmet and out["ready"] is False
+
+
 def test_rules_are_those_of_hv_upgrade(monkeypatch):
     """Identité de règle : nœuds et charts passent par hv_upgrade.prechecks."""
     seen = []

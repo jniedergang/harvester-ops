@@ -6,7 +6,10 @@
   (Terraform simulé), avec l'identité passée par l'appelant ;
 * chaque refus de `_tf_decl_start` rendu à l'identique (404, 400 cible,
   400 cluster, 400 incomplet, 409 plan périmé, 503 provider KVM) ;
-* `_tf_plan_meta` lit le dernier plan de l'espace.
+* le résumé du plan est lu dans le résultat de l'action fille
+  (`run.result["plan"]`), pas dans l'espace partagé (revue I4) ;
+* une seule exécution à la fois par déclaration, toute cible, et
+  réservation par un déroulé de plan (revue I4).
 
 Mutation jouée (rapport de la tâche 3) : `_tf_decl_launch` qui relit
 `current_user()` (le test sans contexte casse).
@@ -112,25 +115,60 @@ def test_launch_from_a_thread_without_request_context(world):
     assert run.result["by"] == "ops-240" and run.result["declaration_id"] == d["id"]
     assert run.cluster_user == "ops-240@harv1"
     assert run.action == "tf-plan-decl:site-standard-cles:1" and run.dry_run
-    meta = wapp._tf_plan_meta(store.get(d["id"]))
-    assert meta["hash"] == h and meta["revision"] == 1
-    assert meta["summary"]["counts"]["create"] == 1
+    assert run.result["plan_hash"] == h
+    assert run.result["plan"]["counts"]["create"] == 1
     # puis l'apply du plan revu, toujours hors requête
     run_id2, h2 = wapp._tf_decl_launch("harv1", kc, d["id"], "apply", plan_hash=h, user="ops-240")
     run2 = _wait(run_id2)
     assert run2.status == "done" and h2 == h
     assert fake.calls.count("plan") == 1 and "apply" in fake.calls
     assert store.get(d["id"])["last_applied_status"] == "done"
-    assert wapp._tf_plan_meta(store.get(d["id"])) is None          # retiré par l'apply
+    assert run2.result["plan"]["counts"]["create"] == 1
 
 
-def test_plan_meta_absent_or_unreadable(world):
-    store, _kc, _ = world
+def test_one_run_at_a_time_for_a_harvester_declaration(world, monkeypatch):
+    """Revue I4 : la règle d'une exécution à la fois vaut pour toute cible."""
+    store, kc, fake = world
     d = store.create("c" * 12, "harv1", "x", resources=[sshkey("3" * 12, "ops")])
-    assert wapp._tf_plan_meta(d) is None
-    ws = wapp._tf_decl_ws(d)
-    (ws / "tfplan.meta").write_text("{not json")
-    assert wapp._tf_plan_meta(d) is None
+    gate = threading.Event()
+
+    def slow(ws, kcp, args, timeout=180, **kw):
+        gate.wait(5)
+        return fake(ws, kcp, args, timeout, **kw)
+    monkeypatch.setattr(wapp, "_tf_run_cmd", slow)
+    run_id, _h = wapp._tf_decl_launch("harv1", kc, d["id"], "plan")
+    with pytest.raises(wapp.TfLaunchError) as e:
+        wapp._tf_decl_launch("harv1", kc, d["id"], "plan")
+    assert e.value.status == 409 and e.value.payload["code"] == "running"
+    wapp.app.config["TESTING"] = True
+    r = wapp.app.test_client().delete(f"/api/tf-declarations/{d['id']}")
+    assert r.status_code == 409 and r.get_json()["code"] == "running"
+    gate.set()
+    assert _wait(run_id).status == "done"
+    assert d["id"] not in wapp.TF_DECL_RUNNING
+    run_id, _h = wapp._tf_decl_launch("harv1", kc, d["id"], "plan")        # libérée
+    assert _wait(run_id).status == "done"
+
+
+def test_held_declaration_launches_only_for_its_holder(world):
+    """Revue I4 : réservée par un déroulé de plan entre son plan et son
+    apply, la déclaration ne se lance que pour lui ; libérée ensuite."""
+    store, kc, _ = world
+    d = store.create("8" * 12, "harv1", "x", resources=[sshkey("7" * 12, "ops")])
+    assert wapp._tf_decl_hold(d["id"], "aaaaaaaaaaaa")
+    assert not wapp._tf_decl_hold(d["id"], "bbbbbbbbbbbb")
+    with pytest.raises(wapp.TfLaunchError) as e:
+        wapp._tf_decl_launch("harv1", kc, d["id"], "plan")
+    assert e.value.status == 409
+    run_id, _h = wapp._tf_decl_launch("harv1", kc, d["id"], "plan", holder="aaaaaaaaaaaa")
+    assert _wait(run_id).status == "done"
+    assert d["id"] in wapp.TF_DECL_HELD                    # le déroulé la garde
+    wapp._tf_decl_release(d["id"], "bbbbbbbbbbbb")          # pas la sienne : sans effet
+    assert d["id"] in wapp.TF_DECL_HELD
+    wapp._tf_decl_release(d["id"], "aaaaaaaaaaaa")
+    assert d["id"] not in wapp.TF_DECL_HELD
+    run_id, _h = wapp._tf_decl_launch("harv1", kc, d["id"], "plan")
+    assert _wait(run_id).status == "done"
 
 
 def _cases(store, monkeypatch):

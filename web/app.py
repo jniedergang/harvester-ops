@@ -7845,7 +7845,7 @@ def _bm_profile_view(prof):
 
 
 def _bm_profile_payload(data, name):
-    doc = {k: data.get(k) for k in ("description", "variables", "fields", "advanced_yaml")}
+    doc = {k: data.get(k) for k in ("description", "variables", "fields", "advanced_yaml", "plan")}
     # la fenêtre envoie les champs en YAML (`fields_yaml`), la ligne de
     # commande et les tests en dictionnaire
     if isinstance(data.get("fields_yaml"), str):
@@ -26866,8 +26866,37 @@ def _tf_decl_ws(decl, create=True):
 # ---------------------------------------------------------------------------
 # 2.3.0 : cible KVM d'une déclaration (hôte déclaré dans la console)
 # ---------------------------------------------------------------------------
-TF_KVM_RUNNING = set()          # déclarations KVM en cours d'exécution
-TF_KVM_RUNNING_LOCK = threading.Lock()
+# 2.4.0 (revue I4) : une seule exécution à la fois par déclaration, QUELLE
+# QUE SOIT sa cible (2.3.0 ne le faisait que pour KVM). Deux terraform sur le
+# même espace se marchaient dessus, et une chaîne de plan pouvait appliquer
+# un `tfplan` écrit par un autre déroulé que celui qu'elle avait relu.
+TF_DECL_RUNNING = set()         # déclarations dont une exécution tourne
+# Réservation d'une déclaration par un déroulé de plan (identifiant de
+# l'action deploy:) entre son plan et son apply : seul ce déroulé lance.
+TF_DECL_HELD = {}
+TF_DECL_RUNNING_LOCK = threading.Lock()
+
+
+def _tf_decl_busy(decl_id, holder=None):
+    """Vrai si la déclaration tourne, ou si un autre déroulé la réserve.
+    À appeler sous TF_DECL_RUNNING_LOCK."""
+    held = TF_DECL_HELD.get(decl_id)
+    return decl_id in TF_DECL_RUNNING or (held is not None and held != holder)
+
+
+def _tf_decl_hold(decl_id, holder):
+    """Réserve la déclaration pour `holder` ; False si elle est occupée."""
+    with TF_DECL_RUNNING_LOCK:
+        if _tf_decl_busy(decl_id, holder):
+            return False
+        TF_DECL_HELD[decl_id] = holder
+        return True
+
+
+def _tf_decl_release(decl_id, holder):
+    with TF_DECL_RUNNING_LOCK:
+        if TF_DECL_HELD.get(decl_id) == holder:
+            del TF_DECL_HELD[decl_id]
 
 
 def _tf_kvm_host(host):
@@ -27877,8 +27906,8 @@ def api_tf_declaration_delete(decl_id):
     d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
     if d is None:
         return jsonify({"error": "declaration not found"}), 404
-    with TF_KVM_RUNNING_LOCK:
-        if decl_id in TF_KVM_RUNNING:
+    with TF_DECL_RUNNING_LOCK:
+        if _tf_decl_busy(decl_id):
             return jsonify({"error": "this declaration is running", "code": "running",
                             "hint": "wait for the current plan, apply or destroy to end"}), 409
     ws = _tf_decl_ws(d, create=False)
@@ -28244,12 +28273,13 @@ class TfLaunchError(Exception):
 
 
 def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster_user=None,
-                    target_kind="harvester"):
+                    target_kind="harvester", holder=None):
     """Lance plan, apply ou destroy d'une déclaration gardée par la console,
     en action suivie ; rend (identifiant de l'action, empreinte du contenu).
     `mode` : plan | apply | destroy | destroy-plan. 2.3.0 : `target_kind`
     kvm pour un hôte KVM (`cluster` = l'hôte, pas de kubeconfig) ; une seule
-    exécution à la fois par déclaration KVM.
+    exécution à la fois par déclaration (2.4.0 : toute cible) ; `holder` :
+    identifiant du déroulé de plan qui la réserve (_tf_decl_hold).
 
     2.4.0 : ne lit ni la requête ni la session (`user` et `cluster_user`
     sont passés par l'appelant, figés au déclenchement) : la chaîne d'un
@@ -28278,15 +28308,15 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
                                   "hint": "the declaration changed since this plan; plan again"})
     label = {"plan": "tf-plan-decl", "apply": "tf-apply-decl",
              "destroy": "tf-destroy-decl", "destroy-plan": "tf-destroy-decl"}[mode]
-    if target_kind == "kvm":
-        if not _tf_libvirt_binary() or not _tf_libvirt_version():
-            raise TfLaunchError(503, {"error": "the libvirt Terraform provider is not installed",
-                                      "hint": "it ships with the harvester-ops package; see the Installation tab"})
-        with TF_KVM_RUNNING_LOCK:
-            if decl["id"] in TF_KVM_RUNNING:
-                raise TfLaunchError(409, {"error": "this declaration is already running",
-                                          "hint": "wait for the current plan, apply or destroy to end"})
-            TF_KVM_RUNNING.add(decl["id"])
+    if target_kind == "kvm" and (not _tf_libvirt_binary() or not _tf_libvirt_version()):
+        raise TfLaunchError(503, {"error": "the libvirt Terraform provider is not installed",
+                                  "hint": "it ships with the harvester-ops package; see the Installation tab"})
+    with TF_DECL_RUNNING_LOCK:
+        if _tf_decl_busy(decl["id"], holder):
+            raise TfLaunchError(409, {"error": "this declaration is already running",
+                                      "code": "running",
+                                      "hint": "wait for the current plan, apply or destroy to end"})
+        TF_DECL_RUNNING.add(decl["id"])
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, f"{label}:{decl['name']}:{len(rendered)}", cluster, [],
                     dry_run=mode in ("plan", "destroy-plan"))
@@ -28315,21 +28345,10 @@ def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harv
     return jsonify({"action_id": run_id, "plan_hash": h}), 201
 
 
-def _tf_plan_meta(decl):
-    """Le dernier plan de l'espace d'une déclaration ({hash, revision, at,
-    by, summary}), ou None : la chaîne d'un plan y lit les destructions
-    (`summary.counts`) avant d'appliquer. Retiré par l'apply."""
-    try:
-        ws = _tf_decl_ws(decl, create=False)
-        return json.loads((ws / "tfplan.meta").read_text())
-    except (OSError, ValueError, TypeError, KeyError):
-        return None
-
-
 def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_saved_plan, user):
     """Exécute la déclaration ; pour une cible KVM, retire la clé et
-    l'empreinte copiées dans l'espace QUOI QU'IL ARRIVE, et libère la
-    déclaration."""
+    l'empreinte copiées dans l'espace QUOI QU'IL ARRIVE ; libère la
+    déclaration (toute cible)."""
     kvm = (decl.get("target_kind") or "harvester") == "kvm"
     try:
         return _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash,
@@ -28354,8 +28373,8 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
                     os.chmod(f, 0o600)       # l'état garde le cloud-init, jeton compris
             except (OSError, ValueError) as e:
                 log_tf.warning("KVM declaration cleanup: %s", e)
-            with TF_KVM_RUNNING_LOCK:
-                TF_KVM_RUNNING.discard(decl["id"])
+        with TF_DECL_RUNNING_LOCK:
+            TF_DECL_RUNNING.discard(decl["id"])
 
 
 def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, use_saved_plan, user):

@@ -238,7 +238,7 @@ def run_kvm(store, resources, mode, fake, monkeypatch, plan_hash=None):
     assert not errors, errors
     run = wapp.ActionRun("k" + mode, "x", "tfhost", [])
     h = wapp._tf_decl_hash(rendered)
-    wapp.TF_KVM_RUNNING.add(d["id"])
+    wapp.TF_DECL_RUNNING.add(d["id"])
     wapp._tf_decl_runner(run, "tfhost", None, d, rendered, mode, h, bool(plan_hash), "ju")
     return run, d, wapp._tf_decl_ws(d, create=False)
 
@@ -257,7 +257,7 @@ def test_a_plan_stages_the_host_key_only_for_the_run(kvm_world, monkeypatch):
     assert stat.S_IMODE(ws.stat().st_mode) == 0o700
     assert stat.S_IMODE((ws / ".secrets" / k.rke2_token_var("lab")).stat().st_mode) == 0o600
     assert token not in json.dumps(run.result) and token not in json.dumps(list(run.events))
-    assert d["id"] not in wapp.TF_KVM_RUNNING
+    assert d["id"] not in wapp.TF_DECL_RUNNING
     # le jeton est tiré une fois, puis relu
     fake2 = FakeTofu()
     run_kvm(kvm_world, None, "plan", fake2, monkeypatch)
@@ -270,7 +270,7 @@ def test_a_failed_run_still_removes_the_key_and_hides_paths(kvm_world, monkeypat
     assert run.status == "error"
     assert "<workspace>/kvm_ssh" in run.error_summary and str(ws) not in run.error_summary
     assert not (ws / "kvm_ssh_key").exists() and not (ws / "kvm_ssh").exists()
-    assert d["id"] not in wapp.TF_KVM_RUNNING
+    assert d["id"] not in wapp.TF_DECL_RUNNING
 
 
 def test_an_exception_does_not_leave_the_key_behind(kvm_world, monkeypatch):
@@ -587,16 +587,16 @@ def test_a_running_kvm_declaration_cannot_be_deleted(tmp_path, monkeypatch):
     monkeypatch.setattr(wapp, "TF_DECLS", store)
     monkeypatch.setattr(wapp, "TF_WORKSPACES", tmp_path / "ws")
     d = store.create("b" * 12, "tfhost", "busy", target_kind="kvm")
-    with wapp.TF_KVM_RUNNING_LOCK:
-        wapp.TF_KVM_RUNNING.add(d["id"])
+    with wapp.TF_DECL_RUNNING_LOCK:
+        wapp.TF_DECL_RUNNING.add(d["id"])
     try:
         with wapp.app.test_client() as c:
             r = c.delete(f"/api/tf-declarations/{d['id']}")
         assert r.status_code == 409 and r.get_json()["code"] == "running"
         assert store.get(d["id"]) is not None
     finally:
-        with wapp.TF_KVM_RUNNING_LOCK:
-            wapp.TF_KVM_RUNNING.discard(d["id"])
+        with wapp.TF_DECL_RUNNING_LOCK:
+            wapp.TF_DECL_RUNNING.discard(d["id"])
     with wapp.app.test_client() as c:
         assert c.delete(f"/api/tf-declarations/{d['id']}").status_code == 200
 

@@ -232,6 +232,17 @@ def test_a_provider_change_reinitialises_declaration_workspaces_too(tmp_path, mo
     assert not (d / ".terraform").exists()
 
 
+def _wait_action(api, action_id, timeout=60):
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        _st, a = api("GET", f"/api/action/{action_id}", expect_status=None)
+        if isinstance(a, dict) and a.get("status") in ("done", "error", "cancelled"):
+            return a
+        time.sleep(0.2)
+    raise AssertionError("action did not end")
+
+
 def test_the_routes_take_a_declaration_by_its_id_alone(api):
     """Vu à l'essai réel : la route refusait `{declaration: {id}}` (« resources
     must be a non-empty list ») avant même de regarder l'identifiant."""
@@ -241,6 +252,7 @@ def test_the_routes_take_a_declaration_by_its_id_alone(api):
         status, out = api("POST", f"/api/terraform/harv-fake/{path}", expect_status=None,
                           json_body={"declaration": {"id": d["id"]}, "dry_run": True})
         assert status == 201 and out["action_id"], (path, out)
+        _wait_action(api, out["action_id"])     # 2.4.0 : une exécution à la fois par déclaration
     status, out = api("POST", "/api/terraform/harv-fake/apply_declaration", expect_status=None,
                       json_body={"declaration": {"id": d["id"]}, "dry_run": False, "plan_hash": "0" * 16})
     assert status == 409 and "outdated" in out["error"]

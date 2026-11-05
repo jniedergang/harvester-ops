@@ -112,6 +112,9 @@ def test_update_without_any_field_keeps_the_revision(store):
     (dict(ORIGIN, plan=""), "origin plan is not a name"),
     (dict(ORIGIN, template=3), "origin template is not a name"),
     (dict(ORIGIN, plan="p" * 64), "origin plan is not a name"),
+    (dict(ORIGIN, plan="Site"), "origin plan is not a name"),         # revue M7 : RFC 1123
+    (dict(ORIGIN, template="../x"), "origin template is not a name"),
+    (dict(ORIGIN, template="-a"), "origin template is not a name"),
     (dict(ORIGIN, plan_revision="4"), "origin plan_revision is not a revision number"),
     (dict(ORIGIN, template_revision=True), "origin template_revision is not a revision number"),
     (dict(ORIGIN, template_revision=-1), "origin template_revision is not a revision number"),

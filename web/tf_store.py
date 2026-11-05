@@ -31,6 +31,8 @@ import threading
 import time
 
 ID_RE = re.compile(r"^[0-9a-f]{12}$")
+# nom de plan ou de modèle (RFC 1123, celui de bin/lib/bm_profiles.NAME_RE)
+NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 TARGET_KINDS = ("harvester", "kvm")
 HARVESTER_KINDS = ("vm", "image", "ssh_key")
 KVM_KINDS = ("kvm_vm", "kvm_volume", "kvm_network", "kvm_rke2")
@@ -123,7 +125,7 @@ def clean_origin(origin):
         if k.endswith("_revision"):
             if isinstance(v, bool) or not isinstance(v, int) or v < 0:
                 raise StoreError("invalid-origin", f"origin {k} is not a revision number")
-        elif not isinstance(v, str) or not v or len(v) > 63:
+        elif not isinstance(v, str) or not NAME_RE.match(v):
             raise StoreError("invalid-origin", f"origin {k} is not a name")
         out[k] = v
     return out
