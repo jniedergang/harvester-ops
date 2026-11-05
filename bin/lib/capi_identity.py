@@ -32,9 +32,15 @@ IDENTITY = "caphv-identity"
 TOKEN_SECRET = "caphv-identity-token"
 CLOUD_PROVIDER_ROLE = "harvesterhci.io:cloudprovider"   # util/cloud_provider.go:45 (v0.10.1)
 IDENTITIES = ("restricted", "console")
+# Namespaces des rôles annexes (image, clé, harvester-system, kube-system),
+# notés sur le compte de l'identité : la suppression retrouve chaque objet
+# par son nom, sans liste à l'échelle du cluster (droits de la personne).
+SIDE_NAMESPACES = "harvester-ops.io/caphv-side-namespaces"
+# Rôles annexes posés quel que soit la demande (règles à portée fixe)
+FIXED_SIDE_NAMESPACES = ("harvester-system", "kube-system")
 
-# Ce que la console crée ou lit pour l'identité : la suppression les cherche
-# par sélecteur, dans cet ordre (liaisons avant les rôles).
+# Genres des objets de l'identité (liaisons avant les rôles), pour le
+# sélecteur des diagnostics ; la suppression passe par `teardown` (noms).
 KINDS = (
     ("clusterrolebindings.rbac.authorization.k8s.io", False),
     ("clusterroles.rbac.authorization.k8s.io", False),
@@ -190,18 +196,25 @@ def pools_of(spec):
 
 
 def _resolve(rule, spec):
+    """Noms d'une règle, ou None (tous). Une liste vide ou un nom vide lève
+    ValueError : pour RBAC, `resourceNames: []` vaut TOUS les noms."""
     names = rule["names"]
     if names is None:
         return None
     if isinstance(names, list):
-        return list(names)
-    return {
-        "namespace": [spec["namespace"]],
-        "pools": pools_of(spec),
-        "generated-pool": [generated_pool(spec)],
-        "cloud-provider": [spec["name"]],
-        "keypair": [str(spec.get("ssh_keypair") or "").partition("/")[2]],
-    }[names]
+        out = list(names)
+    else:
+        out = {
+            "namespace": [spec["namespace"]],
+            "pools": pools_of(spec),
+            "generated-pool": [generated_pool(spec)],
+            "cloud-provider": [spec["name"]],
+            "keypair": [str(spec.get("ssh_keypair") or "").partition("/")[2]],
+        }[names]
+    if not out or not all(out):
+        raise ValueError(f"no name for the {rule['resource']} rule ({names}): "
+                         "an empty list would grant every name")
+    return out
 
 
 def _scope_ns(rule, spec):
@@ -256,12 +269,56 @@ def _meta(name, ns, spec):
     return m
 
 
+CLUSTER_ROLE_PREFIX = "harvester-ops-caphv-"
+
+
 def side_role_name(spec):
     return f"{IDENTITY}-{spec['namespace']}"
 
 
 def cluster_role_name(spec):
-    return f"harvester-ops-caphv-{spec['namespace']}"
+    return f"{CLUSTER_ROLE_PREFIX}{spec['namespace']}"
+
+
+def side_namespaces(spec, version):
+    """Namespaces des rôles annexes de cette demande (hors celui du
+    cluster), triés."""
+    return sorted({n for n, *_ in grants(spec, version) if n and n != spec["namespace"]})
+
+
+def teardown(namespace, name, side=None):
+    """Les objets de l'identité d'un cluster, par leur nom, dans l'ordre de
+    suppression : [(genre, namespace ou None, nom)]. Le compte de l'identité
+    vient en dernier : il porte la liste des namespaces annexes
+    (`SIDE_NAMESPACES`), une reprise la relit tant qu'il reste quelque chose.
+    `side` : ces namespaces (les namespaces fixes sont toujours compris)."""
+    spec = {"namespace": namespace, "name": name}
+    crole = cluster_role_name(spec)
+    out = [
+        ("clusterrolebindings.rbac.authorization.k8s.io", None, name),
+        ("clusterrolebindings.rbac.authorization.k8s.io", None, crole),
+        ("clusterroles.rbac.authorization.k8s.io", None, crole),
+    ]
+    for n in sorted((set(side or ()) | set(FIXED_SIDE_NAMESPACES)) - {namespace}):
+        out += [("rolebindings.rbac.authorization.k8s.io", n, side_role_name(spec)),
+                ("roles.rbac.authorization.k8s.io", n, side_role_name(spec))]
+    out += [
+        ("rolebindings.rbac.authorization.k8s.io", namespace, IDENTITY),
+        ("roles.rbac.authorization.k8s.io", namespace, IDENTITY),
+        ("secrets", namespace, TOKEN_SECRET),
+        ("serviceaccounts", namespace, name),
+        ("serviceaccounts", namespace, IDENTITY),
+    ]
+    return out
+
+
+def reserved_name(name):
+    """Un nom de cluster qui confondrait ses objets avec ceux de l'identité :
+    le compte du fournisseur de cloud `<nom>` deviendrait le compte de
+    l'identité, ou la liaison `<nom>` celle de son ClusterRole."""
+    name = str(name or "")
+    return (name in (IDENTITY, TOKEN_SECRET) or name.startswith(IDENTITY + "-")
+            or name.startswith(CLUSTER_ROLE_PREFIX))
 
 
 def docs(spec, version):
@@ -272,8 +329,10 @@ def docs(spec, version):
     by_ns = {}
     for scope_ns, group, resource, verbs, names, _src in grants(spec, version):
         by_ns.setdefault(scope_ns, []).append(_rbac_rule(group, resource, verbs, names))
+    identity_meta = dict(_meta(IDENTITY, ns, spec),
+                         annotations={SIDE_NAMESPACES: ",".join(side_namespaces(spec, version))})
     out = [
-        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": _meta(IDENTITY, ns, spec)},
+        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": identity_meta},
         {"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/service-account-token",
          "metadata": dict(_meta(TOKEN_SECRET, ns, spec),
                           annotations={"kubernetes.io/service-account.name": IDENTITY})},
@@ -333,20 +392,27 @@ def kubeconfig(server, ca_b64, token, name="caphv-identity"):
 
 
 def access_reviews(spec, version):
-    """Ce que la personne doit pouvoir faire pour poser l'identité :
-    [(namespace ou None, verbe, groupe, ressource, nom ou None)]. Créer un
-    rôle exige de détenir les droits qu'il accorde (contrôle d'escalade du
-    serveur), et lier le rôle du fournisseur de cloud exige `bind` sur lui."""
+    """Ce que la personne doit pouvoir faire pour poser l'identité, puis la
+    retirer avec le cluster : [(namespace ou None, verbe, groupe, ressource,
+    nom ou None)]. L'application côté serveur crée et modifie (create,
+    patch) ; la suppression relit chaque objet par son nom (get, étiquettes
+    du cluster vérifiées) puis le retire (delete). Créer un rôle exige de détenir
+    les droits qu'il accorde (contrôle d'escalade du serveur), un accès par
+    nom accordé ; lier le rôle du fournisseur de cloud exige `bind` sur lui."""
     out = []
     for d in docs(spec, version):
         group = d["apiVersion"].rpartition("/")[0]
         res = {"ServiceAccount": "serviceaccounts", "Secret": "secrets", "Role": "roles",
                "RoleBinding": "rolebindings", "ClusterRole": "clusterroles",
                "ClusterRoleBinding": "clusterrolebindings"}[d["kind"]]
-        out.append((d["metadata"].get("namespace"), "create", group, res, None))
+        ns = d["metadata"].get("namespace")
+        out.append((ns, "create", group, res, None))
+        for verb in ("patch", "get", "delete"):
+            out.append((ns, verb, group, res, d["metadata"]["name"]))
     for scope_ns, group, resource, verbs, names, _src in grants(spec, version):
         for v in verbs:
-            out.append((scope_ns, v, group, resource, (names or [None])[0]))
+            for n in (names or [None]):
+                out.append((scope_ns, v, group, resource, n))
     out.append((None, "bind", "rbac.authorization.k8s.io", "clusterroles", CLOUD_PROVIDER_ROLE))
     seen, uniq = set(), []
     for r in out:
@@ -380,6 +446,10 @@ def findings(spec, version, identity, bindings=None):
     if rules_for(version) is None:
         out.append({"code": "identity-rules-unknown", "level": "block",
                     "facts": {"version": version or "?", "known": ", ".join(sorted(RULES))}})
+    if reserved_name(spec.get("name")):
+        out.append({"code": "identity-name-reserved", "level": "block",
+                    "facts": {"name": spec.get("name"), "identity": IDENTITY,
+                              "prefix": CLUSTER_ROLE_PREFIX}})
     if spec.get("target_namespace") != spec.get("namespace"):
         out.append({"code": "target-namespace-forced", "level": "block",
                     "facts": {"target_namespace": spec.get("target_namespace"),

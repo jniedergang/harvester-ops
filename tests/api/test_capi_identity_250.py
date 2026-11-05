@@ -568,3 +568,243 @@ def test_details_tell_the_identity(monkeypatch, sa, expected):
     monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: "/kc")
     body = wapp.app.test_client().get("/api/capi/harv-fake/cluster/web/web/details").get_json()
     assert body["identity"] == expected
+
+
+# ---------------------------------------------------------------------------
+# Revue 2.5.0 (I1) : suppression de l'identité par les noms, sans liste à
+# l'échelle du cluster ; échec franc si un objet reste
+# ---------------------------------------------------------------------------
+
+def _keys(d):
+    return (Kube._kind(d), d["metadata"].get("namespace"), d["metadata"]["name"])
+
+
+@pytest.mark.parametrize("image,key", [
+    ("default/image-abc", "default/ju"),        # image et clé dans le même namespace
+    ("images/leap", "keys/ju"),                 # deux namespaces annexes de plus
+    ("web/leap", "web/ju"),                     # tout dans le namespace du cluster
+])
+def test_teardown_names_every_object_the_identity_creates(image, key):
+    spec = demand(image=image, ssh_keypair=key)
+    created = {_keys(d) for d in ci.docs(spec, V)}
+    side = ci.docs(spec, V)[0]["metadata"]["annotations"][ci.SIDE_NAMESPACES].split(",")
+    plan = ci.teardown("web", "web", side)
+    assert {(k, n, o) for k, n, o in plan} == created
+    assert plan[-1] == ("serviceaccounts", "web", ci.IDENTITY), "the account carrying the list goes last"
+    assert len(plan) == len(set(plan))
+
+
+def test_teardown_without_the_account_still_covers_the_fixed_namespaces():
+    plan = ci.teardown("web", "web", None)
+    assert ("roles.rbac.authorization.k8s.io", "kube-system", "caphv-identity-web") in plan
+    assert ("roles.rbac.authorization.k8s.io", "harvester-system", "caphv-identity-web") in plan
+
+
+class NoListKube(Kube):
+    """Identité d'une personne sans droit de liste à l'échelle du cluster :
+    toute lecture `-A` est refusée, comme sur un vrai serveur."""
+
+    def list(self, kind, ns=None, selector=None):
+        if ns is None and kind != "namespaces":
+            raise RuntimeError(f"forbidden: cannot list {kind} at the cluster scope")
+        return super().list(kind, ns, selector)
+
+
+def _world_on(cls, image="images/leap", key="keys/ju"):
+    k = cls()
+    k.objs = {
+        ("namespaces", None, "web"): {"metadata": {"name": "web", "labels": {"harvester-ops.io/managed": "true"}}},
+    }
+    for c in ("web", "api"):
+        for d in ci.docs(demand(name=c, image=image, ssh_keypair=key), V):
+            k.objs[_keys(d)] = json.loads(json.dumps(d))
+    return k
+
+
+def _identity_left(kube, name="web"):
+    return sorted(k for k, o in kube.objs.items()
+                  if ((o.get("metadata") or {}).get("labels") or {}).get(ci.L_CLUSTER) == name)
+
+
+def test_delete_without_cluster_wide_list_removes_the_whole_identity(cli, capsys):
+    kube = _world_on(NoListKube)
+    assert cli.remove_cluster(kube, "web", "web", 60, sleep=lambda s: None) == cli.EXIT_OK
+    assert _identity_left(kube) == []
+    assert len(_identity_left(kube, "api")) == len(ci.docs(demand(name="api", image="images/leap",
+                                                                 ssh_keypair="keys/ju"), V))
+    err = capsys.readouterr().err
+    assert "STEP_EVENT|delete|done|" in err
+
+
+@pytest.mark.parametrize("fail_on", [
+    ("delete", "clusterroles.rbac.authorization.k8s.io"),   # suppression refusée
+    ("delete", "secrets"),                                  # le jeton resterait vivant
+    ("get", "roles.rbac.authorization.k8s.io"),             # objet illisible
+])
+def test_an_object_kept_fails_loudly_and_a_new_delete_finishes(cli, capsys, monkeypatch, fail_on):
+    kube = _world_on(NoListKube)
+    verb, kind = fail_on
+    real = getattr(kube, verb)
+
+    def refuse(k, ns, name, *a, **kw):
+        if k == kind and ns != "default":
+            raise cli.KubeError(f"Error from server (Forbidden): {verb} {k} {name} is forbidden")
+        return real(k, ns, name, *a, **kw)
+    setattr(kube, verb, refuse)
+    assert cli.remove_cluster(kube, "web", "web", 60, sleep=lambda s: None) == cli.EXIT_FAIL
+    err = capsys.readouterr().err
+    assert "STEP_EVENT|delete|error|" in err and "STEP_EVENT|delete|done|" not in err
+    assert ("namespaces", None, "web") in kube.objs, "the namespace stays for a new delete"
+    assert ("serviceaccounts", "web", ci.IDENTITY) in kube.objs, "the account listing the side namespaces stays"
+    # droit rendu : `delete` reprend sur un Cluster déjà parti et finit
+    setattr(kube, verb, real)
+    monkeypatch.setattr(cli, "kube_from", lambda a: (kube, None, None))
+    assert cli.cmd_delete(argparse.Namespace(name="web/web", timeout=60, cluster=None, kubeconfig=None)) \
+        == cli.EXIT_OK
+    assert _identity_left(kube) == [] and ("namespaces", None, "web") not in kube.objs
+
+
+def test_delete_of_an_absent_cluster_without_identity_is_still_not_found(cli, monkeypatch, capsys):
+    kube = Kube()
+    monkeypatch.setattr(cli, "kube_from", lambda a: (kube, None, None))
+    assert cli.cmd_delete(argparse.Namespace(name="web/web", timeout=60, cluster=None, kubeconfig=None)) \
+        == cli.EXIT_FAIL
+    assert "not found" in capsys.readouterr().err
+
+
+def test_a_same_named_object_of_another_owner_is_left_alone(cli):
+    kube = _world_on(NoListKube)
+    # liaison `web` posée par CAPHV pour un cluster d'avant la 2.5.0 : sans
+    # les étiquettes de ce cluster, elle n'est pas à lui
+    kube.objs[("clusterrolebindings.rbac.authorization.k8s.io", None, "web")]["metadata"]["labels"] = {
+        ci.L_CLUSTER: "web", ci.L_NAMESPACE: "other"}
+    assert cli.remove_cluster(kube, "web", "web", 60, sleep=lambda s: None) == cli.EXIT_OK
+    assert ("clusterrolebindings.rbac.authorization.k8s.io", None, "web") in kube.objs
+
+
+def test_undo_before_the_manifests_fails_loudly_when_the_identity_stays(cli, capsys):
+    kube = _world_on(NoListKube)
+    real = kube.delete
+
+    def refuse(k, ns, name, *a, **kw):
+        if k == "clusterroles.rbac.authorization.k8s.io":
+            raise cli.KubeError("Error from server (Forbidden): nope")
+        return real(k, ns, name, *a, **kw)
+    kube.delete = refuse
+    cli._undo(kube, "web", "web", ns_existed=False, applied=False)
+    err = capsys.readouterr().err
+    assert "STEP_EVENT|cancel|error|" in err
+    assert ("namespaces", None, "web") in kube.objs
+
+
+# ---------------------------------------------------------------------------
+# Revue 2.5.0 (m2, m3, m4) : noms réservés, aucune liste de noms vide,
+# un accès par nom et la suppression contrôlée d'avance
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,reserved", [
+    ("caphv-identity", True),            # le compte du fournisseur de cloud deviendrait l'identité
+    ("caphv-identity-token", True),
+    ("caphv-identity-x", True),
+    ("harvester-ops-caphv-web", True),   # la liaison <nom> prendrait le nom de celle de l'identité
+    ("web", False),
+    ("caphv", False),
+    ("my-caphv-identity", False),
+])
+def test_reserved_cluster_names_are_refused(name, reserved):
+    codes = [f["code"] for f in ci.findings(demand(name=name), V, "restricted")]
+    assert ("identity-name-reserved" in codes) is reserved
+    if reserved:
+        f = next(f for f in ci.findings(demand(name=name), V, "restricted")
+                 if f["code"] == "identity-name-reserved")
+        assert f["level"] == "block"
+    assert "identity-name-reserved" not in [f["code"] for f in ci.findings(demand(name=name), V, "console")]
+
+
+@pytest.mark.parametrize("change", [
+    {"ssh_keypair": "default/"},          # clé sans nom
+    {"ip_pool": "", "ip_pool_refs": []},  # aucun pool
+])
+def test_an_empty_name_list_never_grants_every_name(change):
+    spec = dict(demand(), **change)
+    with pytest.raises(ValueError, match="every name"):
+        ci.docs(spec, V)
+    for doc in ci.docs(demand(), V):
+        for rule in doc.get("rules") or []:
+            assert rule.get("resourceNames", ["x"]), rule
+
+
+def test_access_reviews_check_each_pool_and_the_teardown():
+    spec = demand(ip_pool="p1", ip_pool_refs=["p2", "p3"])
+    rv = ci.access_reviews(spec, V)
+    for pool in ("p1", "p2", "p3"):
+        for verb in ("get", "update"):
+            assert (None, verb, "loadbalancer.harvesterhci.io", "ippools", pool) in rv
+    for d in ci.docs(spec, V):
+        group = d["apiVersion"].rpartition("/")[0]
+        for verb in ("patch", "get", "delete"):
+            assert any(r[0] == d["metadata"].get("namespace") and r[1] == verb and r[2] == group
+                       and r[4] == d["metadata"]["name"] for r in rv), (verb, d["kind"], d["metadata"]["name"])
+    rbac = {"serviceaccounts", "secrets", "roles", "rolebindings", "clusterroles", "clusterrolebindings"}
+    assert not [r for r in rv if r[1] == "list" and r[3] in rbac], "the teardown no longer lists"
+
+
+# ---------------------------------------------------------------------------
+# Revue 2.5.0 (m5, m6) : le contrôle du formulaire compte les droits,
+# l'aperçu impose le namespace des VMs comme la création
+# ---------------------------------------------------------------------------
+
+def test_single_check_with_restricted_identity_reviews_the_rights(cli, monkeypatch):
+    inv = json.loads((ROOT / "tests" / "fixtures" / "capi" / "harv1-inventory-2026-11-05.json").read_text())
+    monkeypatch.setattr(cli, "inventory", lambda kube, desc: json.loads(json.dumps(inv)))
+    asked = []
+
+    class K(Kube):
+        def create_many(self, objs):
+            asked.extend(objs)
+            return [{"status": {"allowed": o["spec"]["resourceAttributes"]["verb"] != "bind"}} for o in objs]
+    spec = demand(image="default/opensuse-leap-cloud", ssh_keypair="default/capi-ssh-key")
+    out = cli._check(K(), spec, None, "restricted")
+    codes = [f["code"] for f in out["findings"]]
+    assert "rights-missing" in codes and out["blocked"]
+    assert any(o["spec"]["resourceAttributes"].get("resource") == "clusters" for o in asked), "manifests too"
+    asked.clear()
+    out = cli._check(K(), dict(spec, target_namespace="default"), None, "console")
+    assert not asked and "rights-missing" not in [f["code"] for f in out["findings"]]
+
+
+def test_single_check_says_when_the_rights_could_not_be_read(cli, monkeypatch):
+    inv = json.loads((ROOT / "tests" / "fixtures" / "capi" / "harv1-inventory-2026-11-05.json").read_text())
+    monkeypatch.setattr(cli, "inventory", lambda kube, desc: json.loads(json.dumps(inv)))
+
+    class K(Kube):
+        def create_many(self, objs):
+            raise cli.KubeError("forbidden")
+    out = cli._check(K(), demand(image="default/opensuse-leap-cloud", ssh_keypair="default/capi-ssh-key"),
+                     None, "restricted")
+    assert "rights-unchecked" in [f["code"] for f in out["findings"]]
+
+
+@pytest.mark.parametrize("identity,forced,dry", [("restricted", "web", True), ("console", "default", False)])
+def test_preview_renders_like_create(cli, monkeypatch, capsys, tmp_path, identity, forced, dry):
+    monkeypatch.setenv("HARVESTER_OPS_WORK_DIR", str(tmp_path))
+    monkeypatch.setattr(cli, "kube_from", lambda a: (Kube(), "/console/kubeconfig", None))
+    monkeypatch.setattr(cli, "spec_from", lambda p: cc.normalize(
+        {"name": "web", "k8s_version": "v1.34.11", "image": "default/image-abc", "ssh_keypair": "default/ju",
+         "network": "default/production", "gateway": "172.16.0.1", "subnet_mask": "255.255.0.0",
+         "ip_pool": "capi-vm-pool", "dns": ["172.16.3.6"]}))
+    seen = {}
+
+    def render(spec, kc, origin=None):
+        seen["ns"] = spec["target_namespace"]
+        seen["kc"] = Path(kc).read_text() if kc != "/console/kubeconfig" else kc
+        seen["path"] = kc
+        return []
+    monkeypatch.setattr(cli, "render", render)
+    monkeypatch.setattr(cli, "as_yaml", lambda d: "yaml")
+    assert cli.cmd_render(argparse.Namespace(spec="-", show_secrets=False, identity=identity,
+                                             cluster=None, kubeconfig=None)) == cli.EXIT_OK
+    assert seen["ns"] == forced
+    assert ("dry-run-no-token" in seen["kc"]) is dry
+    if dry:
+        assert not Path(seen["path"]).exists()

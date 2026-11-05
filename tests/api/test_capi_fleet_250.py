@@ -247,7 +247,8 @@ def test_check_many_reads_once_and_checks_rights(cli, monkeypatch, tmp_path, cap
     spec.write_text(json.dumps([{"name": n, "k8s_version": "v1.34.11", "image": "default/opensuse-leap-cloud",
                                  "network": "default/production", "gateway": "172.16.0.1",
                                  "subnet_mask": "255.255.0.0", "ip_pool": "capi-vm-pool",
-                                 "dns": ["172.16.3.6"], "disk_size": "20Gi"} for n in ("k1", "k2")]))
+                                 "dns": ["172.16.3.6"], "disk_size": "20Gi",
+                                 "ssh_keypair": "default/capi-ssh-key"} for n in ("k1", "k2")]))
     rc = cli.cmd_check(argparse.Namespace(spec=str(spec), many=True, identity="restricted", json=True,
                                           components=None, cluster=None, kubeconfig=None))
     out = json.loads(capsys.readouterr().out)

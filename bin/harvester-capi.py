@@ -540,9 +540,26 @@ def _check(kube, spec, desc, identity="console"):
     version = ci.caphv_version(inv.get("stack"), desc)
     if identity == "restricted":
         findings += ci.findings(spec, version, identity, _cloud_provider_bindings(kube, spec["name"]))
+        if ci.rules_for(version) is not None:
+            # ce que la personne posera (namespace, identité, manifestes) et
+            # retirera avec le cluster : refusé ici plutôt qu'à mi-création
+            reviews = cc.manifest_reviews(spec) + _identity_reviews(spec, version)
+            findings += cc.rights_findings(
+                {"denied": rights_denied(kube, list(dict.fromkeys(reviews)))})
     return {"findings": findings, "blocked": bool(cc.blocking(findings)),
             "amount": amount(spec, inv["overcommit"]), "spec": spec,
             "identity": identity, "caphv_version": version}
+
+
+def _identity_reviews(spec, version):
+    """`ci.access_reviews`, vide si la version n'a pas de règles ou si la
+    demande est incomplète (les constats de `check` le disent déjà)."""
+    if ci.rules_for(version) is None:
+        return []
+    try:
+        return ci.access_reviews(spec, version)
+    except (ValueError, KeyError):
+        return []
 
 
 def rights_denied(kube, reviews):
@@ -585,8 +602,7 @@ def _check_many(kube, specs, desc, identity="restricted"):
         if identity == "restricted":
             extra += [dict(f, cluster=f"{s['namespace']}/{s['name']}")
                       for f in ci.findings(s, version, identity, _cloud_provider_bindings(kube, s["name"]))]
-            if ci.rules_for(version) is not None:
-                reviews += ci.access_reviews(s, version)
+            reviews += _identity_reviews(s, version)
     facts["denied"] = rights_denied(kube, list(dict.fromkeys(reviews)))
     findings = cc.check_many(specs, facts) + extra
     for s in specs:
@@ -638,14 +654,23 @@ def cmd_check(args):
 
 
 def cmd_render(args):
+    """Aperçu : ce que `create` appliquerait, namespace des VMs imposé comme
+    lui ; avec l'identité restreinte, rendu sur le kubeconfig d'essai (le
+    vrai jeton n'existe qu'à la création)."""
     _, kc, _ = kube_from(args)
-    spec = spec_from(args.spec)
+    spec = ci.force_target_namespace(spec_from(args.spec), args.identity)
     errs = cc.validate(spec)
     if errs:
         for k, m in errs:
             sys.stderr.write(f"{k}: {m}\n")
         return EXIT_BLOCKED
-    docs = render(spec, kc)
+    restricted = args.identity == "restricted"
+    rkc = _work_file(DRY_RUN_KUBECONFIG) if restricted else kc
+    try:
+        docs = render(spec, rkc)
+    finally:
+        if restricted:
+            Path(rkc).unlink(missing_ok=True)
     print(as_yaml(docs if args.show_secrets else cc.masked(docs)))
     return EXIT_OK
 
@@ -705,25 +730,52 @@ def identity_up(kube, spec, version, now=None, sleep=None):
     return path
 
 
+def _not_found(e):
+    return "NotFound" in str(e) or "not found" in str(e)
+
+
 def identity_down(kube, ns, name):
-    """Retire les objets de l'identité d'un cluster (sélecteur, portée
-    cluster comprise) ; rend le nombre d'objets retirés."""
-    gone = 0
-    sel = ci.selector(name, ns)
-    for kind, namespaced in ci.KINDS:
+    """Retire les objets de l'identité d'un cluster, chacun par son nom
+    (`ci.teardown`) : aucune liste à l'échelle du cluster, que l'identité
+    d'une personne n'a pas forcément. Un objet au même nom qui porte les
+    étiquettes d'un autre cluster n'est pas touché. Rend (retirés, gardés) ;
+    `gardés` liste ce qui n'a pas pu être lu ou supprimé : l'appelant
+    échoue alors (jamais « supprimé » avec un jeton encore vivant)."""
+    side = None
+    try:
+        sa = kube.get("serviceaccounts", ns, ci.IDENTITY)
+        if sa is not None:
+            raw = ((sa.get("metadata") or {}).get("annotations") or {}).get(ci.SIDE_NAMESPACES) or ""
+            side = [n for n in raw.split(",") if n]
+    except KubeError as e:
+        step("identity", "running", f"serviceaccounts {ci.IDENTITY} not read: {str(e)[:120]}")
+    gone, kept = 0, []
+    for kind, ons, oname in ci.teardown(ns, name, side):
+        if kept and (kind, ons, oname) == ("serviceaccounts", ns, ci.IDENTITY):
+            break   # gardé pour la reprise : il porte les namespaces annexes
+        where = f"{kind.partition('.')[0]} {ons + '/' if ons else ''}{oname}"
         try:
-            objs = kube.list(kind, None, selector=sel)
+            obj = kube.get(kind, ons, oname)
         except KubeError as e:
-            step("identity", "running", f"{kind} not listed: {str(e)[:120]}")
+            kept.append(where)
+            step("identity", "running", f"{where} not read: {str(e)[:120]}")
             continue
-        for o in objs:
-            md = o.get("metadata") or {}
-            try:
-                kube.delete(kind, md.get("namespace") if namespaced else None, md["name"])
-                gone += 1
-            except KubeError as e:
-                step("identity", "running", f"{kind} {md.get('name')} kept: {str(e)[:120]}")
-    return gone
+        if obj is None:
+            continue
+        lab = (obj.get("metadata") or {}).get("labels") or {}
+        if lab.get(ci.L_CLUSTER) != name or lab.get(ci.L_NAMESPACE) != ns:
+            # même nom, autre propriétaire (liaison créée par CAPHV pour un
+            # cluster de la 2.4, ou cluster voisin) : laissé en place
+            continue
+        try:
+            kube.delete(kind, ons, oname)
+            gone += 1
+        except KubeError as e:
+            if _not_found(e):
+                continue
+            kept.append(where)
+            step("identity", "running", f"{where} kept: {str(e)[:120]}")
+    return gone, kept
 
 
 def cmd_create(args):
@@ -815,7 +867,11 @@ def _undo(kube, ns, name, ns_existed, applied, timeout=2400):
         if applied:
             remove_cluster(kube, ns, name, timeout)
             return
-        identity_down(kube, ns, name)
+        _, kept = identity_down(kube, ns, name)
+        if kept:
+            step("cancel", "error", f"identity of {ns}/{name}: {len(kept)} object(s) kept "
+                                    f"({', '.join(kept[:6])}); run delete again")
+            return
         if not ns_existed:
             kube.delete("namespaces", None, ns)
     except KubeError as e:
@@ -828,8 +884,9 @@ def remove_cluster(kube, ns, name, timeout, sleep=None, now=None):
     l'identité, puis ce que la console a rendu et le namespace qu'elle a
     créé. Rend un code de sortie."""
     now, sleep = now or time.time, sleep or time.sleep
-    kube.delete(cs.K_CLUSTER, ns, name)
-    step("delete", "running", f"{ns}/{name}: machines and VMs being removed")
+    if kube.get(cs.K_CLUSTER, ns, name) is not None:
+        kube.delete(cs.K_CLUSTER, ns, name)
+        step("delete", "running", f"{ns}/{name}: machines and VMs being removed")
     deadline = now() + timeout
     while kube.get(cs.K_CLUSTER, ns, name) is not None:
         if now() > deadline:
@@ -841,7 +898,13 @@ def remove_cluster(kube, ns, name, timeout, sleep=None, now=None):
                     .get("cluster.x-k8s.io/cluster-name") == name])
         step("delete", "running", f"{ns}/{name}: {left} machine(s) left")
         sleep(10)
-    gone = identity_down(kube, ns, name)
+    gone, kept = identity_down(kube, ns, name)
+    if kept:
+        # le namespace reste : il porte le compte qui liste les namespaces
+        # annexes, une nouvelle suppression reprend là
+        step("delete", "error", f"identity of {ns}/{name}: {len(kept)} object(s) kept "
+                                f"({', '.join(kept[:6])}); fix the rights and run delete again")
+        return EXIT_FAIL
     if gone:
         step("delete", "running", f"identity of {ns}/{name} removed ({gone} object(s))")
     nsobj = kube.get("namespaces", None, ns) or {}
@@ -873,8 +936,13 @@ def cmd_delete(args):
         raise SystemExit("--name expects namespace/name")
     cl = kube.get(cs.K_CLUSTER, ns, name)
     if cl is None:
-        step("delete", "error", f"cluster {ns}/{name} not found")
-        return EXIT_FAIL
+        # Cluster déjà parti, identité restée (suppression précédente qui a
+        # échoué sur un droit) : la reprise finit le nettoyage
+        sa = kube.get("serviceaccounts", ns, ci.IDENTITY)
+        if sa is None or ((sa.get("metadata") or {}).get("labels") or {}).get(ci.L_CLUSTER) != name:
+            step("delete", "error", f"cluster {ns}/{name} not found")
+            return EXIT_FAIL
+        step("delete", "running", f"{ns}/{name} already gone, its identity is left: resuming")
     return remove_cluster(kube, ns, name, args.timeout)
 
 
@@ -1087,7 +1155,7 @@ def main(argv=None):
             ("cleanup-legacy", cmd_cleanup, ("dry",)),
             ("inventory", cmd_inventory, ("components", "json")),
             ("check", cmd_check, ("spec", "components", "json", "identity")),
-            ("render", cmd_render, ("spec", "secrets")),
+            ("render", cmd_render, ("spec", "secrets", "identity")),
             ("create", cmd_create, ("spec", "components", "json", "dry", "timeout", "identity")),
             ("delete", cmd_delete, ("name", "timeout")),
             ("state", cmd_state, ("name", "json")),

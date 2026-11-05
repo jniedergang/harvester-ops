@@ -683,12 +683,7 @@ def check_many(specs, facts, extra_addresses=None):
     for pool, (asked, avail) in sorted(_pool_demands(specs, facts.get("pools") or {},
                                                      extra_addresses).items()):
         out.append(finding("fleet-pool-short", "block", pool=pool, needed=asked, available=avail))
-    denied = facts.get("denied")
-    if denied:
-        out.append(finding("rights-missing", "block", count=len(denied),
-                           denied=", ".join(_access_text(d) for d in denied[:8])))
-    elif denied is None and "denied" in facts:
-        out.append(finding("rights-unchecked", "warn"))
+    out += rights_findings(facts)
     out.append(finding("fleet-dhcp-leases", "ok", leases=len(specs)))
     out.append(finding("fleet-sizes", "ok", clusters=len(specs),
                        vms=sum(s.get("cp_replicas", 0) + s.get("worker_replicas", 0) for s in specs),
@@ -700,6 +695,19 @@ def check_many(specs, facts, extra_addresses=None):
                        addresses=sum(addresses_needed(s) for s in specs)
                        + sum(int(n) for n in (extra_addresses or {}).values())))
     return out
+
+
+def rights_findings(facts):
+    """`rights-missing` (bloquant) ou `rights-unchecked` d'après
+    `facts["denied"]` : absent = pas contrôlé, rien ; None = lecture
+    impossible ; liste = accès refusés par le serveur."""
+    denied = facts.get("denied")
+    if denied:
+        return [finding("rights-missing", "block", count=len(denied),
+                        denied=", ".join(_access_text(d) for d in denied[:8]))]
+    if denied is None and "denied" in facts:
+        return [finding("rights-unchecked", "warn")]
+    return []
 
 
 def _access_text(a):
