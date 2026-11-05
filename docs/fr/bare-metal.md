@@ -647,6 +647,7 @@ demande aucun secret.
 | Écrire ou supprimer un plan ou un modèle | admin |
 | Appliquer un plan à un cluster existant, l'arrêter, le reprendre | opérateur |
 | Une chaîne avec installation, ou sa reprise | admin |
+| Un plan dont la phase capi doit installer la pile Cluster API (un opérateur peut le lancer quand la pile est déjà installée aux versions du paquet : la phase ne fait alors que la vérifier) | admin |
 | Un plan dont les modèles créent des réseaux de VM, des classes de stockage, des pools d'adresses (ou, en code libre, des réseaux de cluster, des configurations VLAN, des équilibreurs, des réglages, des périphériques PCI ou SR-IOV) | admin |
 
 Un opérateur peut lancer un plan dont les modèles portent du code libre : ce
@@ -656,6 +657,12 @@ du modèle (`origin.template_by`). Hors de la chaîne, cette déclaration reste
 du code libre et seul un admin la planifie, l'applique ou la détruit depuis
 Terraform > Déclarations. Le serveur décide ; la fenêtre montre le constat
 `admin-kind` et garde Lancer grisé.
+
+Installer la pile Cluster API est réservé aux administrateurs, dans un plan
+comme dans Cluster API > Installation. Quand la pile est à installer, un
+opérateur reçoit le constat `capi-install-admin` et Lancer reste grisé ; la
+phase capi revérifie le rôle à son début, si bien qu'une reprise ou une pile
+retirée entre-temps est refusée de la même façon.
 
 **Un cluster à la fois.** Une seule action `deploy:` par cluster (409
 `deploy-running`) ; un arrêt ou un démarrage du cluster la bloque, et un
@@ -759,6 +766,7 @@ pour chaque cluster.
   `capi-needs-harvester-1.9`, `capi-version-differs` (un plan ne met jamais
   une pile à niveau, même un plan qui n'a que la phase clusters : la mise à
   niveau se fait dans Cluster API > Installation), `capi-stack-missing`,
+  `capi-install-admin` (la pile est à installer et le rôle n'est pas admin),
   `capi-template-missing`, `cluster-var-missing`, `cluster-name-taken`,
   `identity-rules-unknown`, `identity-name-reserved`,
   `target-namespace-forced`, `vm-namespace-taken`, `cloud-provider-binding-taken`,

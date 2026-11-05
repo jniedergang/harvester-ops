@@ -613,6 +613,7 @@ secret.
 | Write or delete a plan or a template | admin |
 | Apply a plan to an existing cluster, stop, resume | operator |
 | A chain with an install, or its resume | admin |
+| A plan whose capi phase must install the Cluster API stack (an operator may run it when the stack is already installed at the bundle versions: the phase then only checks it) | admin |
 | A plan whose templates create VM networks, storage classes, IP pools (or, in free code, cluster networks, VLAN configurations, load balancers, settings, PCI or SR-IOV devices) | admin |
 
 An operator may launch a plan whose templates hold free code: an admin wrote
@@ -622,6 +623,12 @@ declaration produced records who wrote the template revision
 and only an admin plans, applies or destroys it from Terraform >
 Declarations. The server decides; the window shows the `admin-kind`
 finding and keeps Launch disabled.
+
+Installing the Cluster API stack is reserved to administrators, in a plan as
+in Cluster API > Installation. When the stack must be installed, an operator
+gets the `capi-install-admin` finding and Launch stays disabled; the capi
+phase checks the role again when it starts, so a resume or a stack removed in
+the meantime is refused the same way.
 
 **One cluster at a time.** One `deploy:` action runs per cluster (409
 `deploy-running`); a shutdown or startup of the cluster blocks it, and a
@@ -720,7 +727,8 @@ the stack version, and the per-cluster rules of the creation window.
   `capi-needs-harvester-1.9`, `capi-version-differs` (a plan never upgrades
   a stack, even for a plan with the clusters phase only: upgrade from
   Cluster API > Installation), `capi-stack-missing`,
-  `capi-template-missing`, `cluster-var-missing`, `cluster-name-taken`,
+  `capi-install-admin` (the stack must be installed and the role is not
+  admin), `capi-template-missing`, `cluster-var-missing`, `cluster-name-taken`,
   `identity-rules-unknown`, `identity-name-reserved`,
   `target-namespace-forced`, `vm-namespace-taken`, `cloud-provider-binding-taken`,
   `capi-check-failed`, `fleet-name-twice`, `fleet-cpu-short`,

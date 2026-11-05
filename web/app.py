@@ -32268,7 +32268,7 @@ DEPLOY_FINDING_LEVELS = {
     "decl-exists": "info", "readiness-later": "info",
     # 2.5.0 : phases capi et clusters
     "capi-bundle-missing": "blocking", "capi-bundle-no-turtles": "blocking",
-    "capi-needs-harvester-1.9": "blocking", "capi-version-differs": "blocking",
+    "capi-needs-harvester-1.9": "blocking", "capi-version-differs": "blocking", "capi-install-admin": "blocking",
     "capi-stack-missing": "blocking", "capi-template-missing": "blocking",
     "cluster-var-missing": "blocking", "cluster-name-taken": "blocking", "capi-check-failed": "blocking",
     "cluster-failed": "warning",
@@ -32569,7 +32569,7 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
     if (phases.get("readiness") or {}).get("enabled"):
         findings.append(_deploy_finding("readiness-later", "readiness",
                                         "readiness is checked again when the phase starts"))
-    capi = _deploy_capi_prepare(kc, plan, values, install, findings)
+    capi = _deploy_capi_prepare(kc, plan, values, install, findings, role=role)
     estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) \
         + (30 if install else 0) + capi["estimate"]
     summary = {"declarations": decls, "estimate_minutes": estimate, "capi": capi["capi"],
@@ -32633,7 +32633,17 @@ def _deploy_check_many(kc, specs):
     return (out, None) if err is None and isinstance(out, dict) else (None, err or "unreadable")
 
 
-def _deploy_capi_prepare(kc, plan, values, install, findings):
+def _deploy_capi_install_refused(role):
+    """Vrai si ce rôle ne peut pas installer la pile Cluster API : réservé à
+    l'admin, comme Cluster API > Installation (`/install`, décision D3 de la
+    revue 2.5.0). None : ligne de commande locale."""
+    return role is not None and ROLE_RANK.get(role, 0) < ROLE_RANK["admin"]
+
+
+CAPI_INSTALL_ADMIN = "capi-install-admin"
+
+
+def _deploy_capi_prepare(kc, plan, values, install, findings, role=None):
     """Constats et contexte des phases capi et clusters (2.5.0), lecture
     seule : paquet actif, version de Harvester et pile (décisions 117,
     171), modèles et rendu de chaque entrée, clusters déjà présents (repris
@@ -32676,6 +32686,13 @@ def _deploy_capi_prepare(kc, plan, values, install, findings):
                        "installed_version_differs": bool(stack and stack.get("differs"))}
         if not (stack and stack.get("ready")):
             out["estimate"] += 2
+        if _deploy_capi_install_refused(role) and (install or (stack and not stack.get("ready")
+                                                                and not stack.get("differs"))):
+            # la pile est à installer : geste d'admin ; déjà prête, la phase
+            # ne fait que la vérifier et reste permise à l'opérateur
+            findings.append(_deploy_finding(
+                CAPI_INSTALL_ADMIN, "capi", "the Cluster API stack must be installed: the 'admin' role is "
+                "needed, as for Cluster API > Installation"))
     if not cl_on:
         return out
     state = _deploy_state()
@@ -33115,6 +33132,9 @@ def _deploy_capi_phase(run, cluster, kc_ref, plan):
         provs = [m for m in missing if not m.startswith("compatibility/")]
         compat = [m for m in missing if m.startswith("compatibility/")]
         what = f"{len(provs)} provider(s)" + (f" and restore {', '.join(compat)}" if compat else "")
+        if _deploy_capi_install_refused(getattr(run, "launch_role", None)):
+            # rejoué ici : la pile a pu disparaître depuis le contrôle (reprise)
+            return _dch.PhaseOutcome("error", message=CAPI_INSTALL_ADMIN, data=data)
         if dry:
             return _dch.PhaseOutcome("done", message=f"would declare {what}", data=data)
         args = ["--cluster", cluster, "--components", str(_capi_bundle_active_path()),

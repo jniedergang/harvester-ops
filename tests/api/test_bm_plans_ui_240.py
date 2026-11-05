@@ -30,7 +30,7 @@ FINDING_CODES = ["plan-invalid", "phase-not-available", "template-missing", "var
                  "capi-bundle-missing", "capi-bundle-no-turtles", "capi-needs-harvester-1.9", "capi-later",
                  "capi-version-differs", "capi-stack-missing", "capi-template-missing", "cluster-var-missing",
                  "cluster-name-taken", "cluster-exists", "identity-rules-unknown", "refs-later",
-                 "cluster-failed", "capi-check-failed",
+                 "cluster-failed", "capi-check-failed", "capi-install-admin",
                  # identité restreinte, copiés de check --many (2.5.0, revue)
                  "identity-name-reserved", "target-namespace-forced", "cloud-provider-binding-taken",
                  "vm-namespace-taken",

@@ -77,6 +77,7 @@ const BMPlans = (() => {
     'capi-later': () => tr('dpw.f.capiLater'),
     'capi-version-differs': () => tr('dpw.f.capiVersionDiffers'),
     'capi-stack-missing': () => tr('dpw.f.capiStackMissing'),
+    'capi-install-admin': () => tr('dpw.f.capiInstallAdmin'),
     'capi-template-missing': () => tr('dpw.f.capiTemplateMissing'),
     'cluster-var-missing': () => tr('dpw.f.clusterVarMissing'),
     'cluster-name-taken': () => tr('dpw.f.clusterNameTaken'),

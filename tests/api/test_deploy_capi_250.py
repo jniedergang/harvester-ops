@@ -652,3 +652,54 @@ def test_a_cluster_of_another_origin_is_never_adopted(capi, monkeypatch):
     it = items(run)["harvlab-apps"]
     assert it["status"] == "error" and it["message"] == "cluster-name-taken" and it["created"] is False
     assert fake.subs("create") == [] and fake.subs("delete") == []
+
+
+# --- revue finale 2.5.0 (I3, D3) : installer la pile est un geste d'admin ------
+
+@pytest.mark.parametrize("role,ready,blocked", [
+    ("operator", False, True),     # la pile est à installer : réservé à l'admin
+    ("operator", True, False),     # déjà prête : la phase ne fait que la vérifier
+    ("admin", False, False),
+])
+def test_installing_the_stack_needs_the_admin_role(capi, monkeypatch, role, ready, blocked):
+    capi["capi"].stack.update(ready=ready, missing=[] if ready else ["infrastructure/harvester"])
+    seed(capi["client"])
+    monkeypatch.setattr(wapp, "current_role", lambda: role)
+    got = found(check(capi["client"]))
+    assert ("capi-install-admin" in got) is blocked
+    if blocked:
+        assert got["capi-install-admin"]["level"] == "blocking" and got["capi-install-admin"]["phase"] == "capi"
+
+
+def test_operator_launch_is_refused_when_the_stack_must_be_installed(capi, monkeypatch):
+    capi["capi"].stack.update(ready=False, missing=["infrastructure/harvester"])
+    seed(capi["client"])
+    monkeypatch.setattr(wapp, "current_role", lambda: "operator")
+    r = capi["client"].post("/api/deploy/harvlab", json={"plan": "site", "variables": {"equipe": "ops"}})
+    assert r.status_code == 400 and "capi-install-admin" in found(r.get_json())
+    assert capi["capi"].launches == []
+
+
+def test_an_install_chain_of_an_operator_is_told(capi):
+    seed(capi["client"])
+    with wapp.app.test_request_context():
+        findings, _s, _c = wapp._deploy_prepare("newone", "site", {"equipe": "ops"}, vip="172.16.2.70",
+                                                install=True, role="operator")
+    assert "capi-install-admin" in {f["code"] for f in findings}
+
+
+@pytest.mark.parametrize("role,installs", [("operator", False), ("admin", True), (None, True)])
+def test_the_capi_phase_refuses_the_install_itself(capi, role, installs):
+    """Rejoué dans la phase : la pile a pu disparaître depuis le contrôle
+    (reprise, chaîne)."""
+    fake = capi["capi"]
+    fake.stack.update(ready=False, missing=["infrastructure/harvester"])
+    seed(capi["client"])
+    run = wapp.ActionRun("t" * 12, "deploy:harvlab", "harvlab", [], dry_run=False)
+    run.launch_role = role
+    plan_doc = {"phases": {"capi": {"enabled": True, "timeout_minutes": 1}}}
+    out = wapp._deploy_capi_phase(run, "harvlab", lambda: capi["kc"], plan_doc).execute(None, None)
+    if installs:
+        assert out.status == "done" and fake.subs("install")
+    else:
+        assert out.status == "error" and out.message == "capi-install-admin" and fake.subs("install") == []
