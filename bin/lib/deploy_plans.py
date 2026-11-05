@@ -18,9 +18,13 @@ Rangement, comme les profils (bm_profiles) :
 
 Aucun secret n'y entre. Un modèle perd à l'enregistrement toute valeur d'une
 clé qui désigne un secret (règle de kvm_templates.scrub), sauf les clés
-publiques et les noms de Secrets ; un `user_data` (ou le code libre d'une
-ressource `raw`) qui parle de mot de passe est retiré entier. La liste de
-ce qui a été retiré est rendue.
+publiques et les noms de Secrets ; un `user_data` qui parle de mot de passe
+est retiré entier. La liste de ce qui a été retiré est rendue. Ce qui ne se
+retire pas sans changer le sens est refusé : le code libre d'une ressource
+`raw` qui parle de mot de passe ou affecte un attribut au nom de secret, une
+adresse qui porte des identifiants. Les mêmes règles sont rejouées sur les
+ressources rendues (refus `secret-looking value`) : une valeur de variable
+ne fait pas entrer un secret que le modèle relu n'avait pas.
 
 Variables : le moteur des profils (bm_profiles.render_advanced, jetons
 neutres, type tiré du schéma), plus les variables intégrées `cluster` et
@@ -63,10 +67,21 @@ COMING = "coming in 2.5+"
 # désignées par nom, le Secret qui porte le cloud-init (décision 150 : un
 # secret de VM passe par `user_data_secret_name` vers un Secret existant).
 _PUBLIC_KEYS = frozenset(("public_key", "ssh_keys"))
-_SECRET_NAME_RE = re.compile(r"_secret_name$")
-# Texte libre retiré entier s'il parle de mot de passe (cloud-init, HCL brut)
-_TEXT_FIELDS = frozenset(("user_data", "tf"))
+# nom (ou espace de noms) d'un Secret : `user_data_secret_name`, et les
+# paramètres d'une classe chiffrée `csi.storage.k8s.io/...-secret-name`
+_SECRET_NAME_RE = re.compile(r"secret[_-]name(space)?$", re.I)
+# cloud-init retiré entier s'il parle de mot de passe (décision 152)
+_TEXT_FIELDS = frozenset(("user_data",))
 _PASSWORD_TEXT_RE = re.compile(r"password|passwd|chpasswd", re.I)
+# HCL brut (`raw`, champ `tf`) : jamais retiré en silence, REFUSÉ s'il parle
+# de mot de passe ou affecte un attribut au nom de secret (`token = ...`,
+# `"api-secret" = ...`). `key` seul n'en est pas un en HCL (étiquettes,
+# `public_key`) : il reste à la règle des clés des autres genres.
+_HCL_SECRET_NAME_RE = re.compile(r"password|passwd|secret|token|credential|private", re.I)
+_HCL_ASSIGN_RE = re.compile(r'"([^"\n]{1,200})"\s*=(?![=>])|\b([A-Za-z_][\w-]*)\s*=(?![=>])')
+# identifiants dans une adresse (`https://user:pass@hôte/...`)
+_URL_USERINFO_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s@]+@")
+SECRET_REFUSED = "secret-looking value"
 
 _LOCK = threading.Lock()
 
@@ -150,8 +165,9 @@ def _save(state, sub, name, doc, revision, check):
     with _dir_lock(path.parent):
         current = _current_revision(path)
         wanted = revision if isinstance(revision, int) and not isinstance(revision, bool) else None
-        # absent : création (révision 0 ou rien) ; présent : la révision lue
-        if (current or 0) != (wanted or 0):
+        # absent : création (révision 0 ou rien) ; présent : la révision lue ;
+        # présent mais illisible : jamais écrasé en silence (le supprimer d'abord)
+        if current is None or current != (wanted or 0):
             raise PlanConflict(current)
         out = {"name": name, "revision": (current or 0) + 1, **clean}
         _write(path, out)
@@ -334,7 +350,7 @@ def check_plan(doc, known_templates=None):
             continue
         if pid not in AVAILABLE:
             if enabled:
-                errors.append((f"phases.{pid}", COMING))
+                errors.append((f"phases.{pid}", f"{COMING}: set enabled: false"))
                 continue
             # format de 2.5+ non figé : gardé tel quel, jamais lu en 2.4.0
             phases[pid] = dict(ph, enabled=False)
@@ -395,12 +411,50 @@ def delete_plan(state, name):
 
 # --- modèles de déclaration ---------------------------------------------------
 
+def _hcl_secret(text):
+    """Vrai si le HCL brut parle de mot de passe ou affecte un attribut au
+    nom de secret (noms de Secrets et clés publiques exemptés)."""
+    if _PASSWORD_TEXT_RE.search(text):
+        return True
+    for m in _HCL_ASSIGN_RE.finditer(text):
+        name = m.group(1) or m.group(2)
+        if (_HCL_SECRET_NAME_RE.search(name) and name not in _PUBLIC_KEYS
+                and not _SECRET_NAME_RE.search(name)):
+            return True
+    return False
+
+
+def secret_refusals(resources, base="resources"):
+    """[(chemin, raison)] de ce qui ne se retire pas sans changer le sens et
+    se refuse donc : HCL brut qui porte un secret, identifiants dans une
+    adresse. Rejoué sur les ressources RENDUES (une valeur de variable peut
+    apporter le secret que le modèle n'avait pas)."""
+    out = []
+
+    def walk(value, where):
+        if isinstance(value, dict):
+            for k, v in value.items():
+                here = f"{where}.{k}"
+                if k == "tf" and isinstance(v, str) and _hcl_secret(v):
+                    out.append((here, SECRET_REFUSED))
+                    continue
+                walk(v, here)
+        elif isinstance(value, list):
+            for i, v in enumerate(value):
+                walk(v, f"{where}[{i}]")
+        elif isinstance(value, str) and _URL_USERINFO_RE.search(value):
+            out.append((where, "credentials in a URL"))
+    for i, r in enumerate(resources):
+        walk(r, f"{base}[{i}]")
+    return out
+
+
 def scrub(resources):
     """(ressources sans secret, chemins retirés). Règle de clés de
     kvm_templates (SECRET_KEY_RE, à toute profondeur, valeur non vide),
-    clés publiques et noms de Secrets exemptés ; `user_data` et le code
-    libre `tf` d'une ressource `raw` gardés, sauf s'ils parlent de mot de
-    passe (alors retirés entiers)."""
+    clés publiques et noms de Secrets exemptés ; `user_data` gardé, sauf
+    s'il parle de mot de passe (alors retiré entier). Le HCL brut `tf`
+    n'est jamais retiré : `secret_refusals` le refuse."""
     removed = []
 
     def walk(value, where):
@@ -412,6 +466,9 @@ def scrub(resources):
                     if _PASSWORD_TEXT_RE.search(v):
                         removed.append(here)
                         continue
+                    out[k] = v
+                    continue
+                if k == "tf" and isinstance(v, str):
                     out[k] = v
                     continue
                 if (isinstance(k, str) and _kvt.SECRET_KEY_RE.search(k) and k not in _PUBLIC_KEYS
@@ -473,6 +530,7 @@ def check_template(doc, clean_resources=None):
     if not errors and not staged:
         errors.append(("resources", "no resource"))
     clean, removed = scrub(staged) if not errors else ([], [])
+    errors.extend(secret_refusals(clean))
     known = set(BUILTIN_VARS) | set(variables)
     for var in sorted(_bmp.variables_in(clean)):
         if var not in known:
@@ -585,7 +643,15 @@ def render_templates(plan, templates, values, field_type=None):
             except ProfileError as e:
                 errors.extend((f"{where} {w}", why) for w, why in e.errors)
                 continue
-            rendered.append(dict(r, spec=spec_out))
+            # décision 150 : la valeur d'une variable ne fait pas entrer un
+            # secret que le modèle relu n'avait pas. Refusé, jamais retiré : un
+            # retrait silencieux produirait une autre déclaration que la relue.
+            res = dict(r, spec=spec_out)
+            _clean, found = scrub([res])
+            found = [(p, SECRET_REFUSED) for p in found] + secret_refusals([res])
+            errors.extend((f"templates[{tname}].resources[{i}]{p[len('resources[0]'):]}", why)
+                          for p, why in found)
+            rendered.append(res)
         out.append((tname, rendered))
     if errors:
         raise ProfileError(errors, "cannot render the plan")

@@ -97,9 +97,10 @@ def test_plan_defaults_and_shorthands():
     (plan_doc(description="x" * 501), "description", "invalid"),
     (plan_doc(phases=[]), "phases", "not a mapping"),
     (with_phase("gitops", {"enabled": False}), "phases.gitops", "unknown phase"),
-    (with_phase("capi", {"enabled": True}), "phases.capi", "coming in 2.5+"),
-    (with_phase("capi", {"providers": {}}), "phases.capi", "coming in 2.5+"),   # enabled par défaut
-    (with_phase("artefacts", {"enabled": True}), "phases.artefacts", "coming in 2.5+"),
+    (with_phase("capi", {"enabled": True}), "phases.capi", "coming in 2.5+: set enabled: false"),
+    (with_phase("capi", {"providers": {}}), "phases.capi",
+     "coming in 2.5+: set enabled: false"),                                     # enabled par défaut
+    (with_phase("artefacts", {"enabled": True}), "phases.artefacts", "coming in 2.5+: set enabled: false"),
     (with_phase("clusters", [{"template": "x"}]), "phases.clusters", "not a mapping"),
     (with_phase("readiness", {"enabled": "yes"}), "phases.readiness.enabled", "not a boolean"),
     (with_phase("readiness", {"timeout_minutes": 0}), "phases.readiness.timeout_minutes", "an integer from 1 to 180"),
@@ -229,6 +230,21 @@ def test_save_plan_name_refusals(tmp_path, name, doc, where):
     assert not (tmp_path / "plans.d").exists() or not list((tmp_path / "plans.d").glob("*.yaml"))
 
 
+def test_unreadable_plan_never_overwritten_silently(tmp_path):
+    """Revue M6 : un fichier présent mais illisible n'est pas écrasé par une
+    création ; le supprimer d'abord."""
+    d = tmp_path / "plans.d"
+    d.mkdir()
+    (d / "p.yaml").write_text(": : :\n")
+    for rev in (None, 0, 1):
+        with pytest.raises(dp.PlanConflict) as e:
+            dp.save_plan(tmp_path, "p", plan_doc(), rev)
+        assert e.value.current_revision is None
+    assert (d / "p.yaml").read_text() == ": : :\n"
+    assert dp.delete_plan(tmp_path, "p")
+    assert dp.save_plan(tmp_path, "p", plan_doc())["revision"] == 1
+
+
 def test_unreadable_plan_listed_invalid(tmp_path):
     d = tmp_path / "plans.d"
     d.mkdir()
@@ -268,18 +284,57 @@ def test_template_scrub():
     t, removed = dp.check_template({"resources": [{"id": RID[0], "kind": "vm", "spec": VM},
                                                   {"id": RID[1], "kind": "ssh_key",
                                                    "spec": {"name": "k", "public_key": "ssh-rsa A"}},
-                                                  {"id": RID[2], "kind": "raw",
-                                                   "spec": {"tf": 'resource "x" "y" { password = "p" }'}}]})
+                                                  ]})
     assert removed == ["resources[0].spec.cloudinit[0].user_data", "resources[0].spec.admin_token",
-                       "resources[0].spec.nested.private_key", "resources[2].spec.tf"]
+                       "resources[0].spec.nested.private_key"]
     spec = t["resources"][0]["spec"]
     ci = spec["cloudinit"][0]
     assert "user_data" not in ci and ci["user_data_secret_name"] == "vm1-ci" and ci["network_data"]
     assert spec["ssh_keys"] == ["default/ops"] and spec["api_key"] == ""      # vide : rien à retirer
     assert t["resources"][1]["spec"]["public_key"] == "ssh-rsa A"
-    assert "tf" not in t["resources"][2]["spec"]
     text = yaml.safe_dump(t)
     assert "hunter2" not in text and "PEM" not in text and "abc" not in text
+
+
+def _raw(tf):
+    return {"resources": [{"id": RID[0], "kind": "raw", "spec": {"tf": tf}}]}
+
+
+# Revue I2 : le HCL brut n'est jamais retiré en silence ; il est REFUSÉ s'il
+# porte un secret. Mot de passe, attribut au nom de secret (nu ou entre
+# guillemets, dans une map), identifiants dans une adresse.
+@pytest.mark.parametrize("tf,refused", [
+    ('resource "x" "y" { password = "p" }', True),
+    ('resource "x" "y" {\n  user_data = <<EOF\nchpasswd: {expire: false}\nEOF\n}', True),
+    ('resource "x" "y" { data = { token = "abc123" } }', True),
+    ('resource "x" "y" { data = { "api-secret" = "abc" } }', True),
+    ('resource "x" "y" { client_credentials = "c" }', True),
+    ('resource "x" "y" { private_key_pem = "PEM" }', True),
+    ('resource "harvester_image" "i" { url = "https://u:pw@h/x.img" }', True),
+    # gardés : clé publique, noms de Secrets, `key` seul, comparaisons
+    ('resource "harvester_ssh_key" "k" { name = "k"\n public_key = "ssh-ed25519 A" }', False),
+    ('resource "x" "y" { user_data_secret_name = "vm1-ci" }', False),
+    ('resource "harvester_storageclass" "s" { parameters = {\n'
+     '  "csi.storage.k8s.io/provisioner-secret-name" = "enc"\n'
+     '  "csi.storage.k8s.io/provisioner-secret-namespace" = "default" } }', False),
+    ('resource "x" "y" { labels = { key = "v" } }', False),
+    ('locals { ok = var.token_count >= 1 }', False),
+])
+def test_raw_hcl_secret_refused(tf, refused):
+    if refused:
+        with pytest.raises(dp.ProfileError) as e:
+            dp.check_template(_raw(tf))
+        assert e.value.errors[0][0] == "resources[0].spec.tf" or e.value.errors[0][1] == "credentials in a URL"
+    else:
+        t, removed = dp.check_template(_raw(tf))
+        assert removed == [] and t["resources"][0]["spec"]["tf"] == tf
+
+
+def test_url_credentials_refused_in_template():
+    with pytest.raises(dp.ProfileError) as e:
+        dp.check_template({"resources": [{"id": RID[0], "kind": "image",
+                                          "spec": {"name": "i", "url": "https://u:pw@h/x.img"}}]})
+    assert ("resources[0].spec.url", "credentials in a URL") in e.value.errors
 
 
 def test_user_data_without_password_kept():
@@ -371,6 +426,32 @@ def test_render_refusals(values, templates, where, why):
     with pytest.raises(dp.ProfileError) as e:
         dp.render_templates(plan, templates or _templates(), values, _ft)
     assert (where, why) in e.value.errors
+
+
+# Revue I1 : le secret arrive par la valeur d'une variable, après le contrôle
+# du modèle ; le rendu le REFUSE (jamais un retrait silencieux).
+@pytest.mark.parametrize("kind,spec,value,where", [
+    ("vm", {"name": "v", "cloudinit": {"user_data": "#cloud-config\n{{extra}}\n"}}, "password: hunter2",
+     "templates[t].resources[0].spec.cloudinit.user_data"),
+    ("image", {"name": "i", "url": "https://{{extra}}/x.img"}, "u:hunter2@h",
+     "templates[t].resources[0].spec.url"),
+    ("raw", {"tf": 'resource "x" "y" { data = { {{extra}} } }'}, 'token = "hunter2"',
+     "templates[t].resources[0].spec.tf"),
+    ("raw", {"tf": 'resource "x" "y" { name = "{{extra}}" }'}, "passwd",
+     "templates[t].resources[0].spec.tf"),
+])
+def test_render_refuses_secret_brought_by_a_value(kind, spec, value, where):
+    t, removed = dp.check_template({"variables": ["extra"],
+                                    "resources": [{"id": RID[0], "kind": kind, "spec": spec}]})
+    assert removed == []
+    plan = dict(dp.check_plan(tf_templates(["t"])), name="p")
+    with pytest.raises(dp.ProfileError) as e:
+        dp.render_templates(plan, {"t": t}, {"extra": value})
+    assert [w for w, _ in e.value.errors] == [where]
+    assert "hunter2" not in str(e.value.errors)
+    # la même valeur sans secret passe
+    out = dp.render_templates(plan, {"t": t}, {"extra": "plain"})
+    assert out[0][0] == "t"
 
 
 def test_render_refuses_long_declaration_name():
