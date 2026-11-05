@@ -538,7 +538,13 @@ paths it removed), keeps public keys and the *names* of Kubernetes Secrets
 (`user_data_secret_name`), drops a cloud-init that talks about passwords,
 and refuses free code that assigns a secret, credentials in a URL, or a
 function that hides a value (`base64decode`, `sensitive`). The same check
-runs on the rendered template: a variable value cannot bring a secret in.
+runs on the rendered template, so a value that looks like a secret is
+refused too. The check is lexical (secret key names, password lines in
+`user_data`, credentials in a URL): a token given as the value of a neutral
+variable, such as `echo {{x}}` in `user_data`, is not detected. Plan values
+are not meant for secrets, as they are stored in the run result. Keep the
+secret in a Kubernetes Secret and reference it with the `*_secret_name`
+fields.
 
 **Deploy window.** **Apply a plan** on a Harvester host page, or **Deploy**
 in the Plans tab, opens a window with three tabs: **Parameters** (cluster,
@@ -578,7 +584,9 @@ and the run says so (`kept: values differ from the declaration`), unless
 
 **Stop and resume.** **Stop** (or the dock) stops the run: an install in
 progress is stopped, a Terraform run goes to its end, templates not started
-are skipped. **Resume** (History tab, on an error, partial, cancelled or
+are skipped (`cancelled`). A stop during the last template has nothing left
+to skip: the run ends `done`, with `cancel_requested` in its result.
+**Resume** (History tab, on an error, partial, cancelled or
 interrupted run) starts a new `deploy:` action that reads the result of the
 first one, checks each finished phase again cheaply (cluster declared and
 nodes present, readiness replayed, declaration present with the applied
@@ -600,7 +608,7 @@ secret.
 
 | Gesture | Role |
 |---|---|
-| Read plans and templates | viewer |
+| Read plans and templates (a viewer sees `(hidden)` in place of cloud-init) | viewer |
 | Write or delete a plan or a template | admin |
 | Apply a plan to an existing cluster, stop, resume | operator |
 | A chain with an install, or its resume | admin |
@@ -638,6 +646,15 @@ same chain: `plan list|show|save|delete`, `template list|show|save|delete`,
 plan. `--json` prints one document at every exit. Exit codes: 0 done, 1
 error or partial, 3 cancelled. The command line runs with the rights of the
 state directory (it does not check roles).
+
+**Rolling back to 2.3.x.** The upgrade to 2.4.0 is additive and leaves
+existing declarations as they are. A rollback to 2.3.x (Update tab) works
+without a crash, with three limits: 2.3.x lists the VM network, storage
+class and IP pool declarations but cannot plan, apply or destroy them
+(their objects stay on the cluster, unmanaged); a profile saved in 2.3.x
+loses its `plan` field; plans, templates and deployment runs are ignored
+until 2.4.0 is back. Before rolling back, destroy the declarations of these
+three kinds, or accept them as unmanaged.
 
 ### History of the bare-metal actions (2.1.0)
 

@@ -36,7 +36,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   reinstalled; otherwise only the rows that are not nodes are installed
   again, with the BMC check and the secrets asked again.
 - **Stop**: an install in progress is stopped, a Terraform run goes to its
-  end, templates not started are skipped (`cancelled`, exit code 3).
+  end, templates not started are skipped (`cancelled`, exit code 3). A
+  stop that lands during the last template has nothing left to skip: the
+  run ends `done`, with `cancel_requested` set in its result.
 - **Never a destruction**: a template whose plan deletes or replaces a
   resource is not applied (`plan-destroys`). A declaration made earlier by
   the same plan and template whose content differs from the values is kept
@@ -101,9 +103,34 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   with the reader of `tf_guard`: every character, of the template and of
   the values, must keep its kind (code, string, heredoc, comment), or the
   value is refused with its name.
+- **Viewers read the cloud-init of templates** (found by the final review,
+  never released): `GET /api/baremetal/tf-templates/<name>` returned
+  `user_data` and `network_data` as written, while 2.3.0 hides them from a
+  viewer in a declaration. A viewer now gets `(hidden)` there, in a list
+  or a single `cloudinit` block, and for free code that writes a
+  cloud-init; operators and admins read the value. The same masking now
+  also covers a declaration whose `cloudinit` is a single block.
+- **Secrets in plan values**: the secret check runs again on the rendered
+  template, so a value that looks like a secret (a secret key name, a
+  password line in `user_data`, credentials in a URL) is refused. The
+  check is lexical: a token given as the value of a neutral variable
+  (`echo {{x}}` in `user_data`) is not detected. Plan values are not meant
+  for secrets (they are stored in the run result): reference a Kubernetes
+  secret with the `*_secret_name` fields instead.
 - Templates were checked by a separate, shorter list of forbidden
   constructs (no `templatestring`, `pathexpand` or provider functions, no
   type allow-list): they now follow the 2.3.1 rules.
+
+### Upgrade and rollback
+- The upgrade is additive: the declaration store gains an `origin` column
+  and a unique name index, profiles without a `plan` read as empty, and
+  existing declarations are untouched (the startup audit still runs).
+- **Rolling back to 2.3.x** works without a crash, with three limits:
+  2.3.x lists the network, storage class and IP pool declarations but
+  cannot plan, apply or destroy them (their objects stay on the cluster,
+  unmanaged); a profile saved in 2.3.x loses its `plan` field; plans,
+  templates and deployment runs are ignored. Before rolling back, destroy
+  the declarations of these three kinds, or accept them as unmanaged.
 
 ### Verified for real
 - **Plan on an existing cluster** (harvlab, three nested nodes): templates for a VM network (VLAN 3999 on `mgmt`), a storage

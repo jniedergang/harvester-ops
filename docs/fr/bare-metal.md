@@ -567,7 +567,14 @@ secret (et dit quels chemins il a retirés), garde les clés publiques et les
 qui parle de mot de passe, et refuse le code libre qui affecte un secret,
 des identifiants dans une adresse ou une fonction qui cache une valeur
 (`base64decode`, `sensitive`). Le même contrôle est rejoué sur le modèle
-rendu : la valeur d'une variable ne fait pas entrer de secret.
+rendu : une valeur qui ressemble à un secret est refusée elle aussi. Ce
+contrôle est lexical (noms de clés de secret, lignes de mot de passe dans
+`user_data`, identifiants dans une adresse) : un jeton donné comme valeur
+d'une variable au nom neutre, par exemple `echo {{x}}` dans `user_data`,
+n'est pas détecté. Les valeurs d'un plan ne sont pas faites pour les
+secrets, car elles sont gardées dans le résultat du déroulé. Garder le
+secret dans un Secret Kubernetes et le désigner par les champs
+`*_secret_name`.
 
 **Fenêtre Déployer.** **Appliquer un plan** sur la page d'un hôte
 Harvester, ou **Déployer** dans l'onglet Plans, ouvre une fenêtre à trois
@@ -609,7 +616,9 @@ diffèrent** a été coché au lancement.
 
 **Arrêter et reprendre.** **Arrêter** (ou le dock) arrête le déroulé : une
 installation en cours est arrêtée, une exécution Terraform va à son terme,
-les modèles non commencés sont sautés. **Reprendre** (onglet Historique, sur
+les modèles non commencés sont sautés (`cancelled`). Un arrêt pendant le
+dernier modèle n'a plus rien à sauter : le déroulé finit `done`, avec
+`cancel_requested` dans son résultat. **Reprendre** (onglet Historique, sur
 un déroulé en erreur, partiel, arrêté ou interrompu) lance une nouvelle
 action `deploy:` qui relit le résultat de la première, revérifie à peu de
 frais chaque phase terminée (cluster déclaré et nœuds présents,
@@ -633,7 +642,7 @@ demande aucun secret.
 
 | Geste | Rôle |
 |---|---|
-| Lire les plans et les modèles | lecteur |
+| Lire les plans et les modèles (un lecteur voit `(hidden)` à la place du cloud-init) | lecteur |
 | Écrire ou supprimer un plan ou un modèle | admin |
 | Appliquer un plan à un cluster existant, l'arrêter, le reprendre | opérateur |
 | Une chaîne avec installation, ou sa reprise | admin |
@@ -672,6 +681,17 @@ HÔTE=NOM] ACTION`, et `install --profile P --nodes FICHIER --cluster-name N
 --vip IP PLAN` pour une série avec plan. `--json` écrit un document à chaque
 sortie. Codes de sortie : 0 fait, 1 erreur ou partiel, 3 arrêté. La ligne de
 commande a les droits du répertoire d'état (elle ne contrôle pas les rôles).
+
+**Revenir à une 2.3.x.** La mise à jour vers la 2.4.0 est additive et
+laisse les déclarations existantes telles quelles. Un retour à une 2.3.x
+(onglet Mise à jour) se fait sans plantage, avec trois limites : la 2.3.x
+liste les déclarations de réseau de VM, de classe de stockage et de pool
+d'adresses mais ne sait ni les planifier, ni les appliquer, ni les détruire
+(leurs objets restent sur le cluster, sans gestion) ; un profil enregistré
+en 2.3.x perd son champ `plan` ; les plans, les modèles et les déroulés
+sont ignorés jusqu'au retour de la 2.4.0. Avant de revenir en arrière,
+détruire les déclarations de ces trois genres, ou les accepter sans
+gestion.
 
 ### Historique des actions bare-metal (2.1.0)
 
