@@ -53,6 +53,12 @@ const CapiCreate = (() => {
     'memory-short': (v) => tr('capi.new.fd.memory-short', v),
     'endpoint-dhcp': (v) => tr('capi.new.fd.endpoint-dhcp', v),
     'cluster-unreachable': (v) => tr('capi.new.fd.cluster-unreachable', v),
+    'identity-rules-unknown': (v) => tr('capi.new.fd.identity-rules-unknown', v),
+    'target-namespace-forced': (v) => tr('capi.new.fd.target-namespace-forced', v),
+    'cloud-provider-binding-taken': (v) => tr('capi.new.fd.cloud-provider-binding-taken', v),
+    'identity-name-reserved': (v) => tr('capi.new.fd.identity-name-reserved', v),
+    'rights-missing': (v) => tr('capi.new.fd.rights-missing', v),
+    'rights-unchecked': (v) => tr('capi.new.fd.rights-unchecked', v),
   };
   const LEVEL_CLASS = { block: 'sev-critical', warn: 'sev-watch', ok: 'sev-info' };
   const LEVEL_RANK = { block: 0, warn: 1, ok: 2 };

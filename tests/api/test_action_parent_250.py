@@ -322,6 +322,23 @@ def test_retention_counts_top_level_actions_and_children_follow_their_parent(db,
     assert len(left) == 503
 
 
+def test_retention_purges_an_orphan_child_in_its_turn(db, monkeypatch):
+    """Une fille dont le parent n'est plus en base (retour à la 2.4.0, qui
+    purgeait sans connaître `parent`) compte comme une action de premier
+    niveau : elle part à son tour, sinon la table grandit sans fin."""
+    monkeypatch.setattr(app_module, "ACTIONS_KEEP", 500)
+    orphan_old = _row(db, parent="e" * 12, started_at=1)
+    tops = [_row(db, started_at=10 + i) for i in range(500)]
+    orphan_new = _row(db, parent="d" * 12, started_at=2000)
+    conn = sqlite3.connect(str(db))
+    app_module._actions_purge(conn)
+    conn.close()
+    left = _ids(db)
+    assert orphan_old not in left, "the oldest orphan is purged in order"
+    assert orphan_new in left and set(tops[1:]) <= left and tops[0] not in left
+    assert len(left) == 500
+
+
 def test_retention_never_drops_a_running_parent_or_its_children(db, monkeypatch):
     run_parent = _row(db, started_at=1, status="running")
     kid = _row(db, parent=run_parent, started_at=2)
