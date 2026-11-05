@@ -1212,3 +1212,7 @@ est publié.
      2.6.0 ; le réglage existant reste le geste manuel ; le brancher sur les
      registres déclarés vient avec la 2.7.0 si un contenu Terraform en a
      besoin.
+
+## Décisions (05/11/2026)
+
+Les recommandations des points 180 à 196 sont retenues, bancs compris : harvlab2, règle nftables temporaire sur node2, faux registre client temporaire sur node1 (port 5443, ouvert à chaud puis refermé), 172.16.2.76 réservée dans NetBox et Pi-hole ; harv4 seulement si un essai l'exige.
