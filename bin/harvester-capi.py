@@ -747,6 +747,10 @@ def _not_found(e):
     return "NotFound" in str(e) or "not found" in str(e)
 
 
+def _forbidden(e):
+    return "Forbidden" in str(e) or "forbidden" in str(e)
+
+
 def identity_down(kube, ns, name):
     """Retire les objets de l'identité d'un cluster, chacun par son nom
     (`ci.teardown`) : aucune liste à l'échelle du cluster, que l'identité
@@ -755,11 +759,18 @@ def identity_down(kube, ns, name):
     `gardés` liste ce qui n'a pas pu être lu ou supprimé : l'appelant
     échoue alors (jamais « supprimé » avec un jeton encore vivant)."""
     side = None
+    absent = False
     try:
         sa = kube.get("serviceaccounts", ns, ci.IDENTITY)
         if sa is not None:
             raw = ((sa.get("metadata") or {}).get("annotations") or {}).get(ci.SIDE_NAMESPACES) or ""
             side = [n for n in raw.split(",") if n]
+        else:
+            # Revue finale 2.5.0 (I2) : le compte part en dernier et reste dès
+            # qu'un objet reste ; son absence prouve qu'il n'y a rien à retirer
+            # (cluster d'avant la 2.5.0, ou identité déjà retirée). Une lecture
+            # refusée ne bloque alors pas la suppression.
+            absent = True
     except KubeError as e:
         step("identity", "running", f"serviceaccounts {ci.IDENTITY} not read: {str(e)[:120]}")
     gone, kept = 0, []
@@ -770,6 +781,8 @@ def identity_down(kube, ns, name):
         try:
             obj = kube.get(kind, ons, oname)
         except KubeError as e:
+            if absent and _forbidden(e):
+                continue
             kept.append(where)
             step("identity", "running", f"{where} not read: {str(e)[:120]}")
             continue
@@ -819,7 +832,9 @@ def cmd_create(args):
                                      f"({len(ci.docs(spec, out['caphv_version']))} object(s))")
         print(as_yaml(cc.masked(docs)))
         return EXIT_OK
-    ns_existed = ns in inventory_namespaces(kube)
+    # Revue finale 2.5.0 (I1) : seul un namespace créé ICI peut être retiré
+    # par la reprise ; un état inconnu (lecture en échec) vaut « existait »
+    ns_created = False
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     applied = False
@@ -827,7 +842,7 @@ def cmd_create(args):
         ident = None
         try:
             if restricted:
-                _ensure_namespace(kube, ns)
+                ns_created = _ensure_namespace(kube, ns)
                 ident = identity_up(kube, spec, out["caphv_version"])
             docs = render(spec, ident or kc, origin)
         finally:
@@ -846,7 +861,7 @@ def cmd_create(args):
         return EXIT_OK
     except Cancelled:
         step("cancel", "error", "cancelled, the cluster is being deleted")
-        _undo(kube, ns, name, ns_existed, applied, args.timeout)
+        _undo(kube, ns, name, ns_created, applied, args.timeout)
         return EXIT_CANCELLED
     except TimeoutError as e:
         step("provision", "error", f"not available in time ({str(e)[:200]}); "
@@ -856,24 +871,18 @@ def cmd_create(args):
         step("provision" if applied else "prepare", "error", str(e)[:300])
         if not applied:
             # rien n'a été déclaré : l'identité et le namespace créé partent
-            _undo(kube, ns, name, ns_existed, False, args.timeout)
+            _undo(kube, ns, name, ns_created, False, args.timeout)
         return EXIT_FAIL
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
-def inventory_namespaces(kube):
-    try:
-        return {n["metadata"]["name"] for n in kube.list("namespaces")}
-    except KubeError:
-        return set()
-
-
-def _undo(kube, ns, name, ns_existed, applied, timeout=2400):
+def _undo(kube, ns, name, ns_created, applied, timeout=2400):
     """Défait une création interrompue. Manifestes appliqués : la suppression
     complète (le cluster d'abord, son identité ensuite) ; sinon l'identité et
-    le namespace créé pour lui."""
+    le namespace, seulement s'il a été créé par cette création
+    (`ns_created`) : un namespace qui existait n'est jamais supprimé."""
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
@@ -885,7 +894,7 @@ def _undo(kube, ns, name, ns_existed, applied, timeout=2400):
             step("cancel", "error", f"identity of {ns}/{name}: {len(kept)} object(s) kept "
                                     f"({', '.join(kept[:6])}); run delete again")
             return
-        if not ns_existed:
+        if ns_created:
             kube.delete("namespaces", None, ns)
     except KubeError as e:
         step("cancel", "error", f"could not delete {ns}/{name}: {str(e)[:200]}")
@@ -927,7 +936,14 @@ def remove_cluster(kube, ns, name, timeout, sleep=None, now=None):
         # compléments, et le secret d'identité qui porte un kubeconfig Harvester.
         gone = 0
         for kind in cc.GENERATED_KINDS:
-            for obj in kube.list(kind, ns, selector=f"{cc.GENERATED}=true"):
+            try:
+                found = kube.list(kind, ns, selector=f"{cc.GENERATED}=true")
+            except KubeError as e:
+                # un genre illisible n'empêche pas de retirer les autres,
+                # dont le secret qui porte un kubeconfig Harvester
+                step("delete", "running", f"{kind.partition('.')[0]} not listed in {ns}: {str(e)[:120]}")
+                continue
+            for obj in found:
                 try:
                     kube.delete(kind, ns, obj["metadata"]["name"])
                     gone += 1

@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "bin" / "lib"))
 import capi_cluster as cc  # noqa: E402
 import capi_identity as ci  # noqa: E402
+from kube import KubeError  # noqa: E402
 
 V = "v0.10.1"
 
@@ -704,7 +705,7 @@ def test_undo_before_the_manifests_fails_loudly_when_the_identity_stays(cli, cap
             raise cli.KubeError("Error from server (Forbidden): nope")
         return real(k, ns, name, *a, **kw)
     kube.delete = refuse
-    cli._undo(kube, "web", "web", ns_existed=False, applied=False)
+    cli._undo(kube, "web", "web", ns_created=True, applied=False)
     err = capsys.readouterr().err
     assert "STEP_EVENT|cancel|error|" in err
     assert ("namespaces", None, "web") in kube.objs
@@ -858,3 +859,83 @@ def test_check_reads_the_vm_namespace(cli, monkeypatch):
     out = cli._check(k, demand(image="default/opensuse-leap-cloud", ssh_keypair="default/capi-ssh-key"),
                      None, "restricted")
     assert "vm-namespace-taken" in [f["code"] for f in out["findings"]] and out["blocked"]
+
+
+# ---------------------------------------------------------------------------
+# Revue finale 2.5.0 (I1, I2) : un namespace qui existait n'est jamais
+# supprimé ; un cluster d'avant la 2.5.0 se supprime sans lire le RBAC
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("broken", ["list", "get", None])
+def test_a_namespace_that_existed_survives_a_failure_before_the_manifests(cli, sim, monkeypatch, broken):
+    kube = Kube(token=False)
+    kube.objs[("namespaces", None, "web")] = {"metadata": {"name": "web"}}
+    real_list, real_get = kube.list, kube.get
+
+    def lst(kind, ns=None, selector=None):
+        if broken == "list" and kind == "namespaces":
+            raise cli.KubeError("Unable to connect to the server: net/http: TLS handshake timeout")
+        return real_list(kind, ns, selector)
+
+    def get(kind, ns, name):
+        if broken == "get" and kind == "namespaces":
+            raise cli.KubeError("Unable to connect to the server: net/http: TLS handshake timeout")
+        return real_get(kind, ns, name)
+    kube.list, kube.get = lst, get
+    monkeypatch.setattr(cli, "TOKEN_WAIT", 0)
+    assert _create(cli, kube, monkeypatch) == cli.EXIT_FAIL
+    assert ("delete", "namespaces", None, "web") not in kube.calls, "a namespace that existed was deleted"
+    assert ("namespaces", None, "web") in kube.objs
+
+
+class ForbiddenRbacKube(Kube):
+    """Membre de projet : il supprime un Cluster de son namespace mais ne lit
+    aucun objet RBAC hors de celui-ci (refus du serveur)."""
+
+    def get(self, kind, ns, name):
+        if "rbac" in kind and ns != "old":
+            self.calls.append(("get", kind, ns, name))
+            raise KubeError(f'Error from server (Forbidden): {kind} "{name}" is forbidden')
+        return super().get(kind, ns, name)
+
+
+def _old_world(cls=ForbiddenRbacKube):
+    kube = cls()
+    kube.objs = {
+        ("namespaces", None, "old"): {"metadata": {"name": "old", "labels": {"harvester-ops.io/managed": "true"}}},
+        ("secrets", "old", "old-identity"): {"metadata": {"name": "old-identity", "namespace": "old",
+                                                          "labels": {"harvester-ops.io/generated": "true"}}},
+    }
+    return kube
+
+
+def test_a_cluster_made_before_250_is_deleted_by_a_project_member(cli, capsys):
+    kube = _old_world()
+    assert cli.remove_cluster(kube, "old", "old", 60, sleep=lambda s: None) == cli.EXIT_OK
+    err = capsys.readouterr().err
+    assert "STEP_EVENT|delete|done|" in err and "kept" not in err
+    assert any(c[0] == "get" and "rbac" in c[1] for c in kube.calls), "the refusals were exercised"
+    assert ("delete", "secrets", "old", "old-identity") in kube.calls, \
+        "the secret holding the console kubeconfig stays"
+    assert ("namespaces", None, "old") not in kube.objs
+
+
+def test_an_unlisted_generated_kind_does_not_keep_the_identity_secret(cli, capsys):
+    kube = _old_world(Kube)
+    real = kube.list
+
+    def lst(kind, ns=None, selector=None):
+        if kind.startswith("clusterclasses"):
+            raise cli.KubeError("Error from server (Forbidden): clusterclasses is forbidden")
+        return real(kind, ns, selector)
+    kube.list = lst
+    assert cli.remove_cluster(kube, "old", "old", 60, sleep=lambda s: None) == cli.EXIT_OK
+    assert ("delete", "secrets", "old", "old-identity") in kube.calls
+    assert "clusterclasses not listed in old" in capsys.readouterr().err
+
+
+def test_a_refused_read_still_fails_while_the_identity_account_exists(cli, capsys):
+    kube = _world_on(ForbiddenRbacKube)
+    assert cli.remove_cluster(kube, "web", "web", 60, sleep=lambda s: None) == cli.EXIT_FAIL
+    assert "STEP_EVENT|delete|error|" in capsys.readouterr().err
+    assert ("serviceaccounts", "web", ci.IDENTITY) in kube.objs
