@@ -2546,6 +2546,16 @@ le téléchargement du kubeconfig. L'annuler retire ce qu'elle a créé.
   un kubeconfig du cluster Harvester) dès qu'aucun autre cluster de
   l'espace de noms ne s'en sert, puis l'espace de noms si la console l'a
   créé.
+- **Suppression d'un cluster à identité restreinte (2.5.0)** : le `Cluster`
+  part d'abord et la console attend sa disparition (CAPHV a besoin de son
+  identité pour retirer VMs, volumes, répartiteur et pool). Ensuite, chaque
+  objet de l'identité est relu et supprimé par son nom, sans aucune liste
+  sur tous les espaces de noms, et un objet du même nom qui appartient à un
+  autre cluster est laissé en place. Si l'un d'eux ne peut être ni lu ni
+  supprimé, la suppression se termine en erreur, garde l'espace de noms et
+  le compte de l'identité, et une nouvelle suppression reprend là. L'objet
+  LoadBalancer d'un point d'accès DHCP reste une limite connue de Harvester
+  (harvester/harvester#11767).
 - Les montées de version de Kubernetes ne sont pas implémentées.
 - Les volumes que réclament les applications du nouveau cluster sont des
   volumes Harvester (PVC nommées `pvc-<id>` dans l'espace de noms des VMs).
@@ -2556,6 +2566,61 @@ le téléchargement du kubeconfig. L'annuler retire ce qu'elle a créé.
   sans eux les pods qui publient un port d'hôte (ingress-nginx) ne
   démarrent pas. Le contrôle préalable le signale. L'image cloud openSUSE
   Leap 15.6 fonctionne telle quelle.
+
+### Identité CAPHV restreinte (2.5.0)
+
+Chaque nouveau cluster, créé depuis la fenêtre ou par un plan de
+déploiement, reçoit sa propre identité CAPHV à la place du kubeconfig de la
+console (qui est `system:masters`). Les droits sont ceux qu'emploie CAPHV
+v0.10.1, relevés appel par appel dans sa source à l'étiquette (commit
+`734c983`), chacun avec sa ligne source dans `bin/lib/capi_identity.py` :
+
+| Portée | Ressource | Verbes |
+|---|---|---|
+| namespace des VMs | virtualmachines | get, create, delete |
+| namespace des VMs | virtualmachineinstances | get |
+| namespace des VMs | secrets, services | get, create, update, delete |
+| namespace des VMs | serviceaccounts (`<nom>` seulement) | get |
+| namespace des VMs | persistentvolumeclaims | list, delete |
+| namespace des VMs | loadbalancers | get, create, delete |
+| namespace de l'image | virtualmachineimages | list |
+| namespace de la clé | keypairs (la clé seulement) | get |
+| harvester-system | deployments (`harvester`) | get |
+| kube-system | services (`ingress-expose`) | get |
+| cluster | namespaces (son namespace de VMs) | get |
+| cluster | ippools (les pools de la demande) | get, update |
+| cluster | ippools (`<ns>-<nom>-ippool`) | delete |
+| cluster | nodes | list |
+| cluster | clusterrolebindings (`<nom>`) | get |
+
+- Les VMs vont dans un namespace à elles, `<namespace>-vms`, créé et
+  supprimé avec l'identité ; une demande qui fixe un autre namespace de VMs
+  est refusée, de même qu'un namespace de VMs qui existe déjà et appartient
+  à autre chose (`vm-namespace-taken`). Pas le namespace du cluster : CAPHV
+  y nommerait le jeton du fournisseur de cloud `<cluster>-token`, le nom du
+  jeton d'amorçage RKE2, relirait le mauvais secret, et le cluster ne serait
+  jamais prêt. Rien n'est accordé dans le namespace du cluster, qui porte
+  ses secrets (jeton d'amorçage, kubeconfig).
+- Le compte du fournisseur de cloud `<nom>` et sa liaison à
+  `harvesterhci.io:cloudprovider` sont créés d'avance par la console :
+  l'identité n'a jamais besoin de `bind`. Le jeton est un Secret de jeton de
+  compte de service, supprimé avec le cluster.
+- La console crée ces objets avec l'identité de la personne qui lance la
+  création. Le contrôle préalable de la fenêtre et d'un plan demande au
+  serveur, en un seul lot de `SelfSubjectAccessReview`, si cette personne
+  peut créer, modifier, lire et supprimer chaque objet et détient chaque
+  droit qu'il accorde (`rights-missing`, `rights-unchecked`).
+- Une version de CAPHV dont la source n'a pas été relue n'a pas de règles :
+  l'identité restreinte est refusée (`identity-rules-unknown`), jamais
+  devinée. Les noms de cluster qui se confondraient avec les objets de
+  l'identité (`caphv-identity...`, `harvester-ops-caphv-...`) ou un
+  namespace qui finit par `-vms` sont refusés
+  (`identity-name-reserved`).
+- Les clusters créés avant la 2.5.0 gardent l'identité de la console ; les
+  détails disent « Identité : console (tous droits) ».
+- L'adresse de Harvester donnée à l'identité est lue sur
+  `kube-system/rke2-traefik` (installation neuve de 1.9) ou sur
+  `kube-system/ingress-expose` (cluster mis à jour depuis 1.8).
 
 ### Services sur les clusters créés (1.52.0)
 
@@ -2599,9 +2664,12 @@ v0.6.4) :
   téléchargement, et contrôle de compatibilité avec la version de
   Harvester.
 - `harvester-capi status | install | cleanup-legacy | inventory | check |
-  render | create | delete | services | service-check | service-deploy |
-  service-remove`, chacune avec `--cluster` ou `--kubeconfig` ; `create` et
-  `service-deploy` sortent en 2 quand le contrôle préalable bloque. Les manifestes sont
+  render | create | delete | state | services | service-check |
+  service-deploy | service-remove`, chacune avec `--cluster` ou
+  `--kubeconfig` ; `create` et `service-deploy` sortent en 2 quand le
+  contrôle préalable bloque. 2.5.0 : `create --identity restricted|console`
+  (restreinte par défaut), `create --origin`, `check --many` (une liste
+  JSON de demandes, contrôlées d'un bloc), `state --name ns/nom`. Les manifestes sont
   produits par `caphv-generate`, livré avec la console (repris de CAPHV à
   un commit fixé, voir `bin/caphv-generate.PROVENANCE`).
 
@@ -2792,6 +2860,15 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   installation ou une série (admin), en une seule action suivie
   `deploy:<cluster>`, avec arrêt, reprise, essai à blanc et sans
   destruction. Ligne de commande : `bin/harvester-plans.py`.
+
+- **Cluster API et clusters enfants dans les plans (2.5.0)** : la phase
+  **capi** déclare la pile Cluster API depuis le paquet actif (Harvester 1.9
+  ou plus), la phase **clusters** crée jusqu'à 16 clusters RKE2 enfants l'un
+  après l'autre depuis des **modèles de cluster** nommés, chacun avec sa
+  propre identité CAPHV restreinte (section 4). Capacité, adresses des
+  pools et droits de la personne sont contrôlés pour tous les clusters
+  ensemble avant que rien ne commence. Les actions filles sont rangées sous
+  l'action `deploy:` dans l'Activité et dans le dock.
 
 - **Une machine qui porte déjà un système est gardée (2.2.0)** : la
   fenêtre d'installation liste ce que montre le BMC (entrées de démarrage

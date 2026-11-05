@@ -516,3 +516,35 @@ Avec une installation (admin) : renseigner le champ **Plan** de la fenêtre
 d'installation d'une machine ou de la fenêtre de série d'un profil.
 L'installation devient la première phase ; ses secrets sont demandés au
 lancement et à la reprise, jamais gardés.
+
+## 15. Clusters enfants depuis un plan de déploiement (2.5.0)
+
+Un plan sait aussi déclarer la pile Cluster API et créer des clusters RKE2
+enfants, chacun avec sa propre identité CAPHV restreinte, sur Harvester 1.9
+ou plus. Référence complète : [bare-metal.md](bare-metal.md), section
+« Plans de déploiement : Cluster API et clusters enfants » ; l'identité :
+Capacités, section 4.
+
+1. **Admin, une fois :** remplir la fenêtre de création de Cluster API >
+   Clusters sur un cluster qui a les images, réseaux, clés et pools, puis
+   **Enregistrer comme modèle** ; ou écrire le modèle dans Plans > Modèles
+   de cluster, avec **Variable...** pour une référence qui change d'un site
+   à l'autre. Donner à chaque cluster enfant une classe de stockage d'image
+   que ses nœuds savent placer (une réplique sur un cluster à un nœud).
+2. Dans le plan, activer **Cluster API** et **Clusters**, ajouter les
+   clusters (ou **Plusieurs** avec un motif de nom qui contient `{{n}}`),
+   leur ordre et « dépend de ».
+3. **Contrôler avant d'agir :** **Appliquer un plan** sur la page de
+   l'hôte. Les contrôles comptent tous les clusters du plan ensemble : CPU,
+   mémoire, place Longhorn, adresses des pools, vos droits sur Harvester,
+   versions. Lancer reste désactivé tant qu'un constat bloque.
+4. **Lancer** et suivre `deploy:<cluster>` : déplier la ligne dans
+   l'Activité pour voir `capi-install` et un `capi-cluster-create` par
+   cluster.
+5. **En cas d'échec**, les clusters indépendants suivants continuent. Un
+   cluster resté en échec n'est jamais supprimé par le plan : le supprimer
+   depuis Cluster API > Clusters, puis **Reprendre**. Un arrêt laisse la
+   création en cours aller à son terme.
+6. **Supprimer un cluster enfant** depuis Cluster API > Clusters. Si la
+   suppression se termine par « object(s) kept », rétablir le droit qui
+   manque et supprimer à nouveau : elle reprend là où elle s'est arrêtée.

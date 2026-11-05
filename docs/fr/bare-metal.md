@@ -23,7 +23,7 @@ sont à côté, chacun avec son adresse :
 |---|---|---|
 | **Machines** (par défaut) | `#automation/pxe/machines` (et `#automation/pxe`) | Les machines de la dernière découverte, une ligne chacune : matériel, état d'alimentation, disques, cartes réseau, et les gestes **Installer** (ou **Joindre à** *cluster* pendant une jonction), allumer, arrêt propre, arrêt forcé, redémarrer. **Découvrir...** ouvre la fenêtre de découverte ; **Relire** relit les mêmes BMC. Le bandeau de jonction et le bandeau « aucun ISO » sont au-dessus. |
 | **Profils** | `#automation/pxe/profiles` | Les profils d'installation multi-nœuds et le lancement d'une série. |
-| **Plans** (2.4.0) | `#automation/pxe/plans` | Plans de déploiement et modèles de déclaration : le contenu Terraform appliqué après une installation ou à un cluster existant (voir plus bas). |
+| **Plans** (2.4.0) | `#automation/pxe/plans` | Plans de déploiement, modèles de déclaration et modèles de cluster (2.5.0) : contenu Terraform, pile Cluster API et clusters enfants appliqués après une installation ou à un cluster existant (voir plus bas). |
 | **Images** | `#automation/pxe/images` | Le magasin d'ISO. |
 | **Historique** | `#automation/pxe/history` | Les actions bare-metal de l'Activité, en cours et passées, chacune avec un lien vers son journal. |
 
@@ -533,7 +533,8 @@ installation bare-metal. En 2.4.0, les phases sont :
 | **install** | Seulement quand le plan part de Bare-metal : l'installation d'une machine ou la série, avec la même lecture des BMC (garde 132) que sans plan. |
 | **readiness** (disponibilité) | Attend que le cluster soit utilisable : nœuds Ready, objets `ManagedChart` prêts, nœuds et volumes Longhorn sains, une classe de stockage par défaut. Relue toutes les 15 s, 20 minutes par défaut (`phases.readiness.timeout_minutes`, de 1 à 180). |
 | **terraform** | Fait de chaque **modèle de déclaration** du plan une déclaration Terraform ordinaire, `<plan>-<modèle>`, puis la planifie et l'applique. |
-| capi, clusters, registry, artefacts | Présentes dans le modèle, grisées avec « à venir (2.5+) ». Un fichier de plan qui en active une est refusé. |
+| capi, clusters | Disponibles depuis la 2.5.0 : voir « Plans de déploiement : Cluster API et clusters enfants » plus bas. |
+| registry, artefacts | Présentes dans le modèle, grisées avec « à venir (2.6+) ». Un fichier de plan qui en active une est refusé. |
 
 **Où.** L'onglet **Plans** (`#automation/pxe/plans`, entre Profils et
 Images) liste les plans à gauche et en ouvre un à droite : une carte par
@@ -692,6 +693,121 @@ en 2.3.x perd son champ `plan` ; les plans, les modèles et les déroulés
 sont ignorés jusqu'au retour de la 2.4.0. Avant de revenir en arrière,
 détruire les déclarations de ces trois genres, ou les accepter sans
 gestion.
+
+### Plans de déploiement : Cluster API et clusters enfants (2.5.0)
+
+Après le contenu Terraform, un plan sait déclarer la pile Cluster API et
+créer des clusters RKE2 enfants, sur Harvester 1.9 ou plus seulement.
+
+| Phase | Ce qu'elle fait |
+|---|---|
+| **capi** | Déclare la pile (amorçage et plan de contrôle RKE2, CAPHV, CAAPH) depuis le paquet actif, par la même commande que le bouton **Installer les fournisseurs** (`harvester-capi install`, images poussées sur les nœuds). Une pile déjà prête aux versions du paquet est laissée telle quelle (rien de déclaré, aucune action fille). 10 minutes par défaut (`phases.capi.timeout_minutes`, de 1 à 60). |
+| **clusters** | Crée les clusters enfants du plan **l'un après l'autre**, chacun depuis un **modèle de cluster** nommé, par la même commande que la fenêtre de création (`harvester-capi create`). Une action fille `capi-cluster-create:<ns>/<nom>` par cluster. 30 minutes par cluster par défaut (`phases.clusters.timeout_minutes`, de 5 à 180). 16 clusters au plus par plan. |
+
+**Modèles de cluster.** Un modèle de cluster porte une demande du
+formulaire de création Cluster API, sans nom ni namespaces (le plan les
+donne). Les valeurs peuvent employer des `{{variables}}`, comme les modèles
+de déclaration. Ils sont rangés dans `<état>/capi-templates.d/<nom>.yaml`,
+mode 0600, avec une révision. La partie **Modèles de cluster** de l'onglet
+Plans les liste et les édite dans le formulaire de création (mode modèle,
+**Variable...** dans chaque champ de référence), et **Enregistrer comme
+modèle** dans la fenêtre de création de Cluster API > Clusters garde la
+demande remplie. Un modèle employé par un plan enregistré ne peut pas être
+supprimé (409 `template-in-use`). Lecture : rôle lecteur ; écriture : rôle
+administrateur.
+
+**Clusters d'un plan.** La carte Clusters liste les entrées dans l'ordre :
+nom du cluster (aussi son namespace, 40 caractères au plus une fois rendu,
+`{{cluster}}` et variables du plan admis), modèle et « dépend de ». Le
+raccourci **Plusieurs** ajoute `count` clusters depuis un modèle, nommés par
+un motif qui contient `{{n}}` (1, 2, 3...) ; ils sont ajoutés à la fin de la
+liste à l'enregistrement du plan. Dans un fichier de plan :
+
+```yaml
+phases:
+  capi: {enabled: true, timeout_minutes: 20}
+  clusters:
+    enabled: true
+    timeout_minutes: 45
+    items:
+      - {name: site1-apps, template: rke2-petit}
+    template: rke2-petit        # raccourci, développé à l'enregistrement
+    count: 3
+    name_pattern: "site1-k{{n}}"
+```
+
+**Une identité restreinte par cluster enfant.** Jusqu'en 2.4.0, CAPHV
+agissait sur Harvester avec le kubeconfig de la console. Un cluster créé par
+un plan, ou par la fenêtre de création, reçoit maintenant son propre compte
+de service, avec les seuls droits qu'emploie CAPHV v0.10.1, relevés appel
+par appel dans sa source (voir Capacités, section 4). Ses VMs vont dans un
+namespace à elles, `<nom>-vms`, créé et supprimé avec le cluster (un modèle
+qui fixe un autre namespace de VMs est refusé). La console crée l'identité, le compte du fournisseur de cloud et
+sa liaison avec l'identité de la personne qui lance l'exécution ; le
+contrôle vérifie d'avance, en un seul lot de `SelfSubjectAccessReview`, que
+cette personne peut créer, modifier et supprimer chacun de ces objets et
+détient chaque droit qu'ils accordent.
+
+**Contrôles avant d'agir.** En plus des constats de la 2.4.0, pour tous les
+clusters du plan ensemble et en une seule lecture du cluster : CPU et
+mémoire libres, place Longhorn pour chaque disque (répliques sur des nœuds
+distincts), adresses libres de chaque pool, droits de la personne, version
+de Harvester, version de la pile, et les règles de la fenêtre de création
+pour chaque cluster.
+
+- Bloquants : `capi-bundle-missing`, `capi-bundle-no-turtles`,
+  `capi-needs-harvester-1.9`, `capi-version-differs` (un plan ne met jamais
+  une pile à niveau, même un plan qui n'a que la phase clusters : la mise à
+  niveau se fait dans Cluster API > Installation), `capi-stack-missing`,
+  `capi-template-missing`, `cluster-var-missing`, `cluster-name-taken`,
+  `identity-rules-unknown`, `identity-name-reserved`,
+  `target-namespace-forced`, `vm-namespace-taken`, `cloud-provider-binding-taken`,
+  `capi-check-failed`, `fleet-name-twice`, `fleet-cpu-short`,
+  `fleet-memory-short`, `fleet-storage-short`, `fleet-replicas-nodes`,
+  `fleet-pool-short`, `rights-missing`.
+- Avertissements : `rights-unchecked`, `cluster-failed`, et les
+  avertissements de la fenêtre de création (un seul nœud de plan de
+  contrôle, version non éprouvée...).
+- Information : `cluster-exists`, `capi-later`, `refs-later`,
+  `fleet-dhcp-leases`, `fleet-sizes`.
+
+Un manque que la fenêtre de création signale seulement en avertissement
+bloque un plan : la chaîne tourne sans surveillance.
+
+**Suivre une exécution.** Étapes `phase-capi` (sous-étape `capi-providers`)
+et `phase-clusters` (une `k8s-<nom>` par cluster). Les actions filles sont
+rangées sous l'action `deploy:` dans l'Activité (déplier la ligne) et dans
+le dock (le parent et sa fille en cours). Le résultat consigne, par
+cluster, si cette exécution l'a créé, la révision du modèle et ses actions
+filles.
+
+**Arrêt, reprise, échec.** Un arrêt laisse le cluster en cours de création
+aller à son terme et saute les suivants. Un arrêt pendant que l'exécution
+attend un cluster qu'elle a repris met fin à cette attente aussitôt.
+Annuler l'action fille elle-même supprime ce cluster. **Reprendre**
+revérifie la pile, puis prend chaque cluster à son tour : un cluster déjà
+fait par ce plan et pas en échec est attendu ; un cluster en échec reste en
+erreur (`cluster-failed`) : supprimez-le, puis reprenez. Un plan ne supprime
+jamais un cluster de lui-même.
+
+**Supprimer un cluster enfant.** Depuis Cluster API > Clusters, comme
+avant. Le `Cluster` part d'abord ; une fois disparu, les objets de
+l'identité sont retirés un par un, par leur nom, puis ce que la console a
+généré et le namespace qu'elle a créé. Si un objet de l'identité ne peut
+être ni lu ni supprimé (un droit manquant, par exemple), la suppression se
+termine en erreur et garde le namespace : corrigez la cause et supprimez à
+nouveau, la suppression reprend là.
+
+**Ligne de commande.** `harvester-plans capi-template
+list|show|save|delete` ; `check` et `apply` couvrent les deux phases.
+`harvester-capi create --identity restricted|console` (restreinte par
+défaut ; console seulement pour un diagnostic), `--origin
+plan=P,template=M,run=ID`, `harvester-capi check --many --spec FICHIER`
+(une liste JSON, contrôlée d'un bloc), `harvester-capi state --name
+ns/nom`.
+
+**Vu en réel (2.5.0).** Voir le CHANGELOG de la 2.5.0 pour les bancs, les
+durées et ce qui n'est pas vérifié.
 
 ### Historique des actions bare-metal (2.1.0)
 

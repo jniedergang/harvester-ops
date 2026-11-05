@@ -370,6 +370,36 @@ While the first control plane node is not up, the load balancer address
 of the new cluster has no backend, and the connection ends on the
 Harvester API server. This is normal until the control plane counts 1.
 
+### Deleting a cluster ends with "identity of ns/name: N object(s) kept" (2.5.0)
+
+The `Cluster` is gone, but some objects of its restricted identity could
+not be read or deleted, most often because the Harvester identity of the
+person who deleted it lacks `get` or `delete` on roles, bindings, service
+accounts or secrets in one of the namespaces listed. The namespace and the
+identity account are kept on purpose: the account lists the side
+namespaces. Give the missing right (or ask someone who has it), then delete
+the cluster again from Cluster API > Clusters or with `harvester-capi delete
+--name ns/name`: the deletion resumes on the identity and finishes.
+
+### A cluster stays "Deleting" and the CAPHV log says "forbidden" (2.5.0)
+
+CAPHV deletes the pool `<namespace>-<name>-ippool` unconditionally when a
+cluster goes, and a refusal is not "not found": without that right it
+retries forever and the cluster never disappears. The restricted identity
+holds this right; it is missing only if someone edited the ClusterRole
+`harvester-ops-caphv-<namespace>`. Compare it with
+`kubectl auth can-i --list --as=system:serviceaccount:<ns>:caphv-identity`
+and the table of Capabilities, section 4, put the rule back, and the
+deletion goes on by itself.
+
+### "the Harvester address is unknown" when creating a cluster (2.5.0)
+
+The restricted identity needs the Harvester address. It is read from
+`kube-system/rke2-traefik` (fresh 1.9 install), then from
+`kube-system/ingress-expose` (cluster upgraded from 1.8). If neither has an
+address, check those services on the cluster (`kubectl -n kube-system get
+svc rke2-traefik ingress-expose`).
+
 ## Recovering from a half-done shutdown
 
 If the script was killed (Ctrl-C, lost SSH, ...) and some nodes are off while others are still up:

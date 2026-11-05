@@ -164,14 +164,14 @@ réconciliation (`util/util.go:115`).
 | `virtualmachineinstances` (kubevirt.io) | namespace des VMs | get | `getIPAddressesFromVMI` (`:404`) |
 | `secrets` | namespace des VMs | get, create, update, delete | `:952 à 965`, `:1594` (cloud-init) ; `util/cloud_provider.go:136, 160` (jeton du fournisseur de cloud) |
 | `services` | namespace des VMs | get, create, update, delete | `harvestercluster_controller.go:378, 430, 573, 758` |
-| `serviceaccounts` | namespace des VMs | get, create | `util/cloud_provider.go:69, 81, 126` |
+| `serviceaccounts` | namespace des VMs | get (create à `:81` jamais appelé : compte créé d'avance, relu en tâche 2) | `util/cloud_provider.go:69, 81, 126` |
 | `persistentvolumeclaims` | namespace des VMs | list, delete | `harvestermachine_controller.go:1661, 1674` |
 | `loadbalancers` (loadbalancer.harvesterhci.io) | namespace des VMs | get, create, delete | `harvestercluster_controller.go:693, 722, 1398` |
 | `virtualmachineimages` (harvesterhci.io) | namespace de l'image | list | `harvestermachine_controller.go:843` |
 | `keypairs` (harvesterhci.io) | namespace de la clé | get | `:874` |
 | `deployments` (apps) | `harvester-system` | get (`harvester`) | `harvestercluster_controller.go:1327` |
 | `services` | `kube-system` | get (`ingress-expose` ; `rke2-traefik` pour #276) | `util/cloud_provider.go:166` |
-| `namespaces` | cluster | get, create si absent | `harvestercluster_controller.go:314, 317` |
+| `namespaces` | cluster | get (create si absent, jamais appelé : namespace créé par la console, relu en tâche 2) | `harvestercluster_controller.go:314, 317` |
 | `ippools` (loadbalancer.harvesterhci.io) | cluster | get, update (allocation des adresses des machines dans `status.allocated` par `Update`) | `harvestermachine_controller.go:1404, 1447, 1504, 1528` |
 | `ippools` | cluster | **delete inconditionnel** de `<ns>-<nom>-ippool` à la suppression | `harvestercluster_controller.go:774` |
 | `ippools` | cluster | create, delete (pools en ligne, modes que la console n'emploie pas) | `:1205, 739, 795, 1453` |
@@ -302,8 +302,9 @@ Fichiers : nouveau `bin/lib/capi_identity.py`, `bin/harvester-capi.py`
     `virtualmachineimages`) et dans celui de la clé (get `keypairs`,
     `resourceNames` = la clé), fusionnés si c'est le même namespace ;
   - `Role caphv-identity-<ns>` dans `harvester-system` (get `deployments`
-    `harvester`) et dans `kube-system` (get `services` `ingress-expose`,
-    `rke2-traefik`), avec leurs liaisons ;
+    `harvester`) et dans `kube-system` (get `services` `ingress-expose` ;
+    `rke2-traefik` n'est lu qu'à partir de la PR #276, relu en tâche 2),
+    avec leurs liaisons ;
   - `ClusterRole` et `ClusterRoleBinding` `harvester-ops-caphv-<ns>` :
     get `namespaces` (`<ns>`), get et update `ippools` (`ip_pool` et
     `ip_pool_refs`), delete `ippools` (`rfc1035_name([ns, nom, "ippool"])`),
@@ -833,4 +834,16 @@ publié.
 
 ## Décisions (05/11/2026)
 
-Les recommandations des points 163 à 176 sont retenues. Le point 162 (bancs) attend l'accord du propriétaire du produit pour harv4, harvlab2 à 32 Gio et un cluster sur harv1.
+Les recommandations des points 163 à 176 sont retenues.
+
+**Revu en tâche 9 (essai réel sur harvlab2, 05/11/2026), point 164.** Dans
+le namespace du cluster, CAPHV crée le jeton du fournisseur de cloud sous
+le nom `<cluster>-token` (`util/cloud_provider.go:132`), celui que CAPRKE2
+donne au jeton d'amorçage du cluster dans ce namespace : CAPHV relit le
+secret de CAPRKE2, sans `token`, et le répartiteur de l'API n'est jamais
+créé (nœud du plan de contrôle prêt, cluster jamais disponible). Les VMs
+vont donc dans un namespace propre au cluster, `<namespace>-vms`, créé et
+supprimé avec l'identité ; l'intention du point 164 (une identité
+n'atteint que les VMs de son cluster) est gardée, et rien n'est plus
+accordé dans le namespace du cluster, qui porte les secrets de CAPRKE2.
+À confirmer par le propriétaire du produit. Le point 162 (bancs) attend l'accord du propriétaire du produit pour harv4, harvlab2 à 32 Gio et un cluster sur harv1.
