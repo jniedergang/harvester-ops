@@ -198,7 +198,9 @@ Ce qui est réutilisé, sans copie :
   (`registry-pull-is-push`) : ce compte finira dans un fichier des nœuds.
 - **Côté clusters enfants** : Secrets `<cluster>-registry-<registre>-auth`
   (`username`, `password`, compte de lecture) et
-  `<cluster>-registry-<registre>-ca` (`kubernetes.io/tls`, `ca.crt`) dans le
+  `<cluster>-registry-<registre>-ca` (`Opaque`, `ca.crt` seul : un Secret
+  `kubernetes.io/tls` exige `tls.crt` et `tls.key`, vides ils cassent
+  containerd, essais préalables) dans le
   namespace du cluster, étiquetés `GENERATED` pour partir avec lui.
 - **Délais** : publication, 60 minutes par défaut
   (`phases.registry.publish_timeout_minutes`, entier de 5 à 600) ; registre
@@ -1216,3 +1218,124 @@ est publié.
 ## Décisions (05/11/2026)
 
 Les recommandations des points 180 à 196 sont retenues, bancs compris : harvlab2, règle nftables temporaire sur node2, faux registre client temporaire sur node1 (port 5443, ouvert à chaud puis refermé), 172.16.2.76 réservée dans NetBox et Pi-hole ; harv4 seulement si un essai l'exige.
+
+## Essais préalables (tâche 1, 05/11/2026, harvlab2)
+
+node2 allumé par son iLO, harvlab2 démarré (Harvester v1.9.0, pile Cluster
+API de la 2.5.0). 172.16.2.76 réservée avant usage : NetBox
+(`harvlab2-registry`, `infra-dotfiles` f591eea) et Pi-hole
+(`harvlab2-registry.home.lo`). Tout a été retiré du banc après les essais,
+sauf ces deux réservations.
+
+**Registre dans un pod (critère 3 : réussi).**
+- `registry.suse.com/suse/registry:3.1` est Distribution v3.1.1.
+  Utilisateur `registry`, uid et gid 499. Configuration
+  `/etc/registry/config.yml`, données `/var/lib/docker-registry` (VOLUME),
+  port 5000. Index multi-architecture
+  `sha256:40748574613462a186825ce49652be7ddc6fd2dbdc9e4d6b5ca4e62c5235536d`,
+  image linux/amd64 `sha256:de84c976e7934762d3c2cee87d56567889d19bbddccf5dbdaeb1f910cff755a1`.
+- `runAsNonRoot` refuse un utilisateur non numérique : il faut
+  `runAsUser: 499`, `runAsGroup: 499`, et `fsGroup: 499` pour le volume
+  Longhorn (PVC `harv-rep1` de 2 Gio, lié aussitôt).
+- Image importée par `ctr` depuis une archive écrite par `oci_layout` :
+  nommée seulement par son tag, elle est introuvable pour un pod qui
+  l'épingle par empreinte (`ErrImageNeverPull`). L'archive porte donc aussi
+  le nom `<dépôt>@<empreinte>` (fait dans `export_ctr_tar`) ; le pod a
+  ensuite démarré sans rien tirer.
+- Service LoadBalancer annoté `kube-vip.io/loadbalancerIPs: 172.16.2.76` :
+  adresse servie par le kube-vip de Harvester ; `/v2/` répond 401 depuis
+  node1 sans identifiant.
+- **L'authentification htpasswd de Distribution n'a pas de droits** : le
+  compte `pull` pousse aussi (session d'envoi acceptée, vu sur un
+  conteneur local). Séparation prouvée par deux conteneurs dans le même pod
+  sur le même volume : une instance en lecture seule
+  (`storage.maintenance.readonly.enabled: true`, comptes `push` et `pull`)
+  sur le port 443 du service, une instance en écriture (compte `push`
+  seulement) sur le port 5443. Mesuré : `pull` et `push` lisent sur 443,
+  toute écriture y reçoit 405 ; `pull` est refusé sur 5443. Une image
+  poussée sur 5443 se lit aussitôt sur 443 (pas de cache de descripteurs).
+  Point 197 ci-dessous.
+
+**Miroirs RKE2 par CAPRKE2 (critère 1 : réussi, avec deux corrections).**
+- Cluster 1+1 (`harvester-capi render`, gabarits retouchés à la main) :
+  `privateRegistriesConfig` (miroir `ghcr.io` vers `https://172.16.2.76`,
+  `rewrite` `^(.*)$` vers `ghcr.io/$1`, `authSecret` au compte de lecture)
+  et un fichier `files` `/etc/rancher/rke2/config.yaml.d/50-harvester-ops-registry.yaml`
+  portant `disable-default-registry-endpoint: true`. RKE2 v1.34.11 lit bien
+  ce répertoire : le `hosts.toml` de `ghcr.io` n'a plus de ligne `server`
+  (aucun repli). Même résultat sur le plan de contrôle et sur le worker.
+- Image présente : tirée du registre (journal du registre :
+  `GET /v2/ghcr.io/stefanprodan/podinfo/...` avec le compte `pull`). Tag
+  absent : `not found` (404 du miroir), pas de repli vers Internet.
+- Les registres sans miroir gardent leur point d'accès : le cluster a monté
+  avec les images système de RKE2 tirées de `docker.io`. **Conséquence** :
+  miroiter `docker.io` sans repli exige les images système de RKE2 dans le
+  registre (point 198).
+- **Correction 1** : un Secret `kubernetes.io/tls` exige `tls.crt` et
+  `tls.key` ; vides, CAPRKE2 écrit `cert_file` et `key_file` vides et
+  containerd refuse tout tirage de ce registre (« failed to load X509 key
+  pair »). Un Secret `Opaque` portant seulement `ca.crt` marche (CAPRKE2 ne
+  regarde pas le type) : seul `ca_file` est écrit. Les Secrets
+  `<cluster>-registry-<registre>-ca` seront donc `Opaque`.
+- **Correction 2** : `insecureSkipVerify` laissé absent : vérification
+  active (la description du CRD, « default is true », est trompeuse).
+
+**CAAPH et OCI (critère 2 : réussi, pas de repli HTTP).**
+- `HelmChartProxy` `repoURL: oci://172.16.2.76/charts`, `chartName:
+  podinfo`, `credentials` (Secret `config.json` de Docker) et
+  `tlsConfig.caSecret` (`ca.crt`), Secrets sur le cluster Harvester :
+  `HelmReleaseProxy` prêt, release `podinfo` déployée, pod `Running` dans
+  le cluster enfant, image tirée par le miroir.
+- Un chart absent au chemin attendu donne « FetchReference ... not found » :
+  la CA et le compte étaient acceptés. Le chart doit être sous
+  `<repoURL>/<chartName>:<version>`, soit `charts/podinfo:6.9.2`
+  (`oci_layout.chart_repo`).
+- Un chart rangé par `chart_to_layout` (configuration écrite par la
+  console) est tiré par `helm pull oci://` à la même empreinte.
+
+**Sonde depuis le réseau des VMs (point 192 : réussie).** Pod bref
+`bci-busybox:16.0` attaché par Multus à `default/lab-net`, capacités
+`NET_ADMIN` et `NET_RAW` : bail DHCP obtenu de Pi-hole, route vers
+172.16.2.76 par `net1`, `wget` de `/v2/` : 401. `bci-busybox` n'a pas de
+script `udhcpc` : la sonde fournit le sien (`ip addr add`) et doit passer
+`-R` pour rendre le bail (deux baux de l'essai, 172.16.11.86 et .204,
+expirent en 24 h).
+
+**Outils (point 183).** `openssl` (openssl-3 3.5.0) est déjà dans
+`registry.suse.com/bci/python:3.11` ; `apache2-utils` 2.4.66 est dans le
+dépôt SLE_BCI et ajoute `libapr1`, `libapr-util1`, `libgdbm4` (paquets
+marqués sans support de l'éditeur). `htpasswd -niB <compte>` lit le mot de
+passe sur l'entrée standard (coût bcrypt 5 par défaut). Pas de bcrypt en
+Python pur.
+
+**CA générée par la console.** Python 3.13 vérifie les certificats en mode
+strict : une CA sans `keyUsage` est refusée (« CA cert does not include
+key usage extension »). La CA porte `basicConstraints=critical,CA:TRUE`,
+`keyUsage=critical,keyCertSign,cRLSign`, `subjectKeyIdentifier` ; le
+certificat du registre `subjectAltName` (nom et adresse),
+`keyUsage=critical,digitalSignature`, `extendedKeyUsage=serverAuth`,
+`authorityKeyIdentifier`.
+
+**Copie en flux (tâche 2, contre de vrais registres).**
+`registry.suse.com/suse/registry:3.1` (49 Mo) copié en 1,4 s,
+`ghcr.io/stefanprodan/podinfo:6.9.2` (33 Mo) en 2,7 à 3,9 s, jetons
+anonymes de registry.suse.com et ghcr.io ; 30 Mio de mémoire au plus pour
+82 Mo. Distribution 3.1 accepte les morceaux `PATCH` (4 Mio), le montage
+entre dépôts (201, huit couches sur huit) et la reprise par `Range` (206,
+deux tiers du blob seulement relus).
+
+Points nouveaux, soumis avant les tâches concernées :
+
+197. **Séparer lecture et écriture du registre d'amorçage** (tâche 7).
+     Options : A deux conteneurs Distribution dans le pod, lecture seule sur
+     443 et écriture sur 5443, même volume (essayé) ; B un seul conteneur,
+     compte `pull` capable d'écrire (risque : il est dans un fichier de
+     chaque nœud) ; C serveur de jetons. Recommandation : A.
+198. **Miroir de `docker.io` sans repli** (tâches 9 et 13). Couper le repli
+     pour `docker.io` coupe aussi les images système de RKE2 au démarrage
+     des nœuds. Options : A pas de `no_fallback` par défaut pour
+     `docker.io`, avertissement s'il est demandé sans les images système
+     dans le registre ; B images système de RKE2 ajoutées au paquet
+     (lot du point 191). Recommandation : A pour la 2.6.0, et la preuve de
+     la tâche 13 miroite `docker.io` avec repli puis coupe Internet par la
+     table nftables, qui prouve seule l'absence de repli.

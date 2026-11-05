@@ -33,10 +33,17 @@ class FakeRegistry:
     """Registre v2 en mémoire : Bearer optionnel (jeton contre Basic),
     blobs GET redirigés optionnels vers /cdn/ (refuse Authorization)."""
 
-    def __init__(self, user=None, password=None, redirect_blobs=False):
+    def __init__(self, user=None, password=None, redirect_blobs=False, basic=False):
         self.blobs, self.manifests, self.uploads = {}, {}, []
         self.user, self.password, self.redirect = user, password, redirect_blobs
         self.blobs_cdn_broken = False
+        # v2.6.0 : Range, envoi par morceaux (PATCH) et reprise, montage,
+        # pannes injectées, journal des requêtes
+        self.basic, self.range_ok, self.mount_ok, self.digest_header = basic, True, True, True
+        self.corrupt, self.sessions, self.log = set(), {}, []
+        self.fail_patch, self.patches, self.mounts = set(), 0, []
+        self.sink, self.sunk = False, {}       # sink : envoi haché au fil de l'eau, rien gardé
+        self.where = None                      # ensemble (dépôt, empreinte) : blobs rangés par dépôt
         reg = self
 
         class H(BaseHTTPRequestHandler):
@@ -50,7 +57,9 @@ class FakeRegistry:
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 if self.command != "HEAD":
-                    self.wfile.write(body)
+                    view = memoryview(body)          # par tranches, sans copie
+                    for i in range(0, len(view), 1 << 16):
+                        self.wfile.write(view[i:i + (1 << 16)])
 
             def _body(self):
                 return self.rfile.read(int(self.headers.get("Content-Length") or 0))
@@ -67,8 +76,12 @@ class FakeRegistry:
             def do_PUT(self):
                 self._route()
 
+            def do_PATCH(self):
+                self._route()
+
             def _route(self):
                 path, _, query = self.path.partition("?")
+                reg.log.append((self.command, path, self.headers.get("Authorization"), self.headers.get("Range")))
                 if path == "/token":
                     want = "Basic " + base64.b64encode(f"{reg.user}:{reg.password}".encode()).decode()
                     if self.headers.get("Authorization") != want:
@@ -80,7 +93,11 @@ class FakeRegistry:
                     if reg.blobs_cdn_broken:
                         return self._send(404, b"not found")
                     return self._send(200, reg.blobs[path[5:]])
-                if reg.user is not None and self.headers.get("Authorization") != "Bearer good-token":
+                if reg.user is not None and reg.basic:
+                    want = "Basic " + base64.b64encode(f"{reg.user}:{reg.password}".encode()).decode()
+                    if self.headers.get("Authorization") != want:
+                        return self._send(401, b"{}", {"WWW-Authenticate": 'Basic realm="fake"'})
+                elif reg.user is not None and self.headers.get("Authorization") != "Bearer good-token":
                     return self._send(401, b"{}", {"WWW-Authenticate":
                                                    f'Bearer realm="{reg.url}/token",service="fake",scope="repository:x:pull"'})
                 if path == "/v2/":
@@ -90,21 +107,79 @@ class FakeRegistry:
                     return self._send(404)
                 repo, what, up, ref = m.groups()
                 if what == "blobs" and up:
+                    q = urllib.parse.parse_qs(query)
                     if self.command == "POST":
-                        return self._send(202, headers={"Location": f"/v2/{repo}/blobs/uploads/{uuid.uuid4().hex}"})
+                        if "mount" in q:
+                            reg.mounts.append((q["mount"][0], q.get("from", [""])[0]))
+                            if reg.mount_ok and q["mount"][0] in reg.blobs:
+                                if reg.where is not None:
+                                    reg.where.add((repo, q["mount"][0]))
+                                return self._send(201, headers={"Docker-Content-Digest": q["mount"][0]})
+                        sid = uuid.uuid4().hex
+                        reg.sessions[sid] = bytearray()
+                        return self._send(202, headers={"Location": f"/v2/{repo}/blobs/uploads/{sid}"})
+                    sid = ref
+                    if sid not in reg.sessions:
+                        return self._send(404, b"unknown upload")
+                    buf = reg.sessions[sid]
+                    if self.command == "GET":
+                        return self._send(204, headers={"Range": f"0-{len(buf) - 1}",
+                                                        "Location": f"/v2/{repo}/blobs/uploads/{sid}"})
+                    if reg.sink and self.command in ("PATCH", "PUT"):
+                        h = reg.sunk.setdefault(sid, [hashlib.sha256(), 0])
+                        left = int(self.headers.get("Content-Length") or 0)
+                        while left:
+                            b = self.rfile.read(min(left, 1 << 16))
+                            h[0].update(b)
+                            h[1] += len(b)
+                            left -= len(b)
+                        if self.command == "PATCH":
+                            reg.patches += 1
+                            return self._send(202, headers={"Range": f"0-{h[1] - 1}",
+                                                            "Location": f"/v2/{repo}/blobs/uploads/{sid}"})
+                        digest = urllib.parse.parse_qs(query)["digest"][0]
+                        if "sha256:" + h[0].hexdigest() != digest:
+                            return self._send(400, b"digest mismatch")
+                        reg.uploads.append(digest)
+                        return self._send(201, headers={"Docker-Content-Digest": digest})
                     data = self._body()
-                    digest = urllib.parse.parse_qs(query)["digest"][0]
-                    if sha(data) != digest:
+                    if self.command == "PATCH":
+                        reg.patches += 1
+                        start = int((self.headers.get("Content-Range") or "0-0").split("-")[0])
+                        if start != len(buf):
+                            return self._send(416, b"out of order")
+                        if reg.patches in reg.fail_patch:     # coupure : la moitié seulement
+                            buf.extend(data[: len(data) // 2])
+                            return self._send(500, b"connection lost")
+                        buf.extend(data)
+                        return self._send(202, headers={"Range": f"0-{len(buf) - 1}",
+                                                        "Location": f"/v2/{repo}/blobs/uploads/{sid}"})
+                    buf.extend(data)
+                    digest = q["digest"][0]
+                    if sha(bytes(buf)) != digest:
                         return self._send(400, b"digest mismatch")
-                    reg.blobs[digest] = data
+                    reg.blobs[digest] = bytes(buf)
                     reg.uploads.append(digest)
+                    if reg.where is not None:
+                        reg.where.add((repo, digest))
+                    del reg.sessions[sid]
                     return self._send(201, headers={"Docker-Content-Digest": digest})
                 if what == "blobs":
-                    if ref not in reg.blobs:
+                    if ref not in reg.blobs or (reg.where is not None and (repo, ref) not in reg.where):
                         return self._send(404)
                     if self.command == "GET" and reg.redirect:
                         return self._send(307, headers={"Location": f"{reg.url}/cdn/{ref}"})
-                    return self._send(200, reg.blobs[ref])
+                    data = reg.blobs[ref]
+                    if ref in reg.corrupt:
+                        data = data[:-1] + bytes([data[-1] ^ 1])
+                    rng = self.headers.get("Range")
+                    if rng and reg.range_ok and self.command == "GET":
+                        start = int(rng.split("=")[1].split("-")[0])
+                        if start >= len(data):
+                            return self._send(416)
+                        return self._send(206, data[start:],
+                                          {"Content-Range": f"bytes {start}-{len(data) - 1}/{len(data)}"})
+                    return self._send(200, data)
                 if self.command == "PUT":
                     body = self._body()
                     mt = self.headers.get("Content-Type")
@@ -114,12 +189,15 @@ class FakeRegistry:
                 if (repo, ref) not in reg.manifests:
                     return self._send(404)
                 body, mt = reg.manifests[(repo, ref)]
-                return self._send(200, body, {"Content-Type": mt, "Docker-Content-Digest": sha(body)})
+                hdr = {"Content-Type": mt}
+                if reg.digest_header:
+                    hdr["Docker-Content-Digest"] = sha(body)
+                return self._send(200, body, hdr)
 
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.host = f"127.0.0.1:{self.srv.server_address[1]}"
         self.url = f"http://{self.host}"
-        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        threading.Thread(target=self.srv.serve_forever, args=(0.05,), daemon=True).start()
 
     def close(self):
         self.srv.shutdown()
@@ -297,3 +375,228 @@ def test_an_unreachable_registry_is_a_registry_error(vddk):
     with pytest.raises(op.RegistryError, match=f"127.0.0.1:{port}"):
         op.push_vddk_image(vddk[0], f"127.0.0.1:{port}/ju/vddk:1", base=f"127.0.0.1:{port}/bci/bci-busybox:16.0",
                            plain_http=True, base_plain_http=True)
+
+
+# ---------------------------------------------------------------------------
+# v2.6.0 : flux, reprise, envoi par morceaux, montage, CA propre au registre
+# ---------------------------------------------------------------------------
+import os  # noqa: E402
+import shutil  # noqa: E402
+import ssl  # noqa: E402
+import subprocess  # noqa: E402
+import tracemalloc  # noqa: E402
+
+
+def payload(n, seed=b"layer"):
+    """n octets déterministes et peu compressibles."""
+    out, h = bytearray(), seed
+    while len(out) < n:
+        h = hashlib.sha256(h).digest()
+        out.extend(h)
+    return bytes(out[:n])
+
+
+@pytest.fixture
+def reg():
+    r = FakeRegistry(user="ju", password="pw", basic=True)
+    yield r
+    r.close()
+
+
+def client(r, **kw):
+    return op.Registry(r.host, {"username": "ju", "password": "pw"}, plain_http=True, **kw)
+
+
+def test_a_blob_is_streamed_to_disk_under_a_memory_ceiling(reg, tmp_path):
+    data = payload(5 << 20)
+    reg.blobs[sha(data)] = data
+    out = tmp_path / "blob"
+    c = client(reg)
+    c.manifest_digest("x/y", "none")            # authentification faite avant la mesure
+    tracemalloc.start()
+    try:
+        c.blob_to_file("x/y", sha(data), out)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert out.read_bytes() == data and not (tmp_path / "blob.part").exists()
+    assert peak < (5 << 20) // 2, f"{peak} bytes held in memory for a 5 MiB blob"
+
+
+def test_a_blob_is_sent_from_a_file_under_a_memory_ceiling(reg, tmp_path):
+    data = payload(5 << 20, b"up")
+    src = tmp_path / "src"
+    src.write_bytes(data)
+    reg.sink = True
+    c = client(reg)
+    c.manifest_digest("x/y", "none")
+    for chunk in (1 << 20, 64 << 20):              # par morceaux, puis d'un seul PUT
+        reg.uploads.clear()
+        tracemalloc.start()
+        try:
+            assert c.push_blob_file("x/y", sha(data), src, len(data), chunk=chunk) is True
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert reg.uploads == [sha(data)]
+        assert peak < (5 << 20) // 2, f"{peak} bytes held in memory (chunk {chunk})"
+
+
+@pytest.mark.parametrize("case", ["corrupt", "corrupt-after-resume"])
+def test_a_wrong_digest_removes_the_partial_file(reg, tmp_path, case):
+    data = payload(300_000)
+    d = sha(data)
+    reg.blobs[d] = data
+    reg.corrupt.add(d)
+    out = tmp_path / "blob"
+    if case == "corrupt-after-resume":
+        (tmp_path / "blob.part").write_bytes(data[:1000])
+    with pytest.raises(op.RegistryError) as e:
+        client(reg).blob_to_file("x/y", d, out)
+    assert e.value.code == "digest-mismatch"
+    assert not out.exists() and not (tmp_path / "blob.part").exists()
+
+
+@pytest.mark.parametrize("range_ok,fetched", [(True, 200_000), (False, 300_000)])
+def test_an_interrupted_copy_is_resumed_where_it_stopped(reg, tmp_path, range_ok, fetched):
+    data = payload(300_000)
+    d = sha(data)
+    reg.blobs[d], reg.range_ok = data, range_ok
+    (tmp_path / "blob.part").write_bytes(data[:100_000])
+    got = []
+    client(reg).blob_to_file("x/y", d, tmp_path / "blob", on_bytes=got.append)
+    assert (tmp_path / "blob").read_bytes() == data
+    assert sum(got) == fetched                       # sans Range : tout est relu
+    assert ("GET", f"/v2/x/y/blobs/{d}", reg.log[-1][2], "bytes=100000-") == reg.log[-1]
+
+
+def test_a_complete_partial_file_is_kept(reg, tmp_path):
+    data = payload(4096)
+    reg.blobs[sha(data)] = data
+    (tmp_path / "blob.part").write_bytes(data)
+    client(reg).blob_to_file("x/y", sha(data), tmp_path / "blob")      # 416 du registre
+    assert (tmp_path / "blob").read_bytes() == data
+
+
+def test_a_redirected_streamed_blob_goes_without_the_credentials(tmp_path):
+    r = FakeRegistry(user="reader", password="pw", redirect_blobs=True)
+    try:
+        data = payload(70_000)
+        r.blobs[sha(data)] = data
+        c = op.Registry(r.host, {"username": "reader", "password": "pw"}, plain_http=True)
+        c.blob_to_file("x/y", sha(data), tmp_path / "b")
+        assert (tmp_path / "b").read_bytes() == data
+        cdn = [entry for entry in r.log if entry[1].startswith("/cdn/")]
+        assert cdn and all(entry[2] is None for entry in cdn)
+    finally:
+        r.close()
+
+
+def test_a_digest_that_is_not_one_is_refused_before_any_request(reg, tmp_path):
+    with pytest.raises(op.RegistryError, match="not a sha256 digest"):
+        client(reg).blob_to_file("x/y", "sha256:../../etc", tmp_path / "b")
+    assert reg.log == []
+
+
+@pytest.mark.parametrize("size,chunk,fail,patches", [
+    (100_000, 1 << 20, set(), 0),                 # petit : un seul PUT
+    (300_000, 100_000, set(), 3),                 # par morceaux
+    (300_000, 100_000, {2}, 4),                   # coupure au 2e morceau : reprise
+])
+def test_uploads_go_whole_or_by_resumable_chunks(reg, tmp_path, size, chunk, fail, patches):
+    data = payload(size, b"chunks")
+    src = tmp_path / "src"
+    src.write_bytes(data)
+    reg.fail_patch = fail
+    sent = []
+    assert client(reg).push_blob_file("x/y", sha(data), src, size, chunk=chunk, on_bytes=sent.append) is True
+    assert reg.blobs[sha(data)] == data and reg.patches == patches
+    assert sum(sent) >= size
+
+
+def test_an_upload_that_keeps_failing_gives_up(reg, tmp_path):
+    data = payload(300_000, b"fail")
+    src = tmp_path / "src"
+    src.write_bytes(data)
+    reg.fail_patch = set(range(1, 50))
+    with pytest.raises(op.RegistryError, match="HTTP 500"):
+        client(reg).push_blob_file("x/y", sha(data), src, len(data), chunk=100_000)
+    assert sha(data) not in reg.blobs
+
+
+@pytest.mark.parametrize("where,mount_from,mount_ok,result,sent", [
+    ({("x/y", 1)}, None, True, False, False),          # déjà dans ce dépôt : rien
+    ({("a/b", 1)}, "a/b", True, "mounted", False),     # monté depuis un autre dépôt
+    ({("a/b", 1)}, "a/b", False, True, True),          # montage refusé (202) : envoyé
+    ({("a/b", 1)}, None, True, True, True),            # pas de source de montage
+    (set(), "x/y", True, True, True),                  # source = cible : pas de montage tenté
+])
+def test_a_blob_is_skipped_mounted_or_sent(reg, tmp_path, where, mount_from, mount_ok, result, sent):
+    data = payload(5000, b"m")
+    src = tmp_path / "src"
+    src.write_bytes(data)
+    if where:
+        reg.blobs[sha(data)] = data
+    reg.where = {(repo, sha(data)) for repo, _ in where}
+    reg.mount_ok = mount_ok
+    assert client(reg).push_blob_file("x/y", sha(data), src, len(data), mount_from=mount_from) == result
+    assert (sha(data) in reg.uploads) == sent
+    assert ("x/y", sha(data)) in reg.where
+    assert reg.mounts == ([(sha(data), mount_from)] if mount_from and mount_from != "x/y" and result != False else [])
+
+
+@pytest.mark.parametrize("header,known", [(True, True), (False, True), (True, False)])
+def test_a_manifest_digest_is_read_by_head(reg, header, known):
+    body = b'{"schemaVersion":2}'
+    if known:
+        reg.manifests[("x/y", "1.0")] = (body, op.M_OCI)
+    reg.digest_header = header
+    assert client(reg).manifest_digest("x/y", "1.0") == (sha(body) if known else None)
+
+
+@pytest.fixture(scope="module")
+def tls_pki(tmp_path_factory):
+    if not shutil.which("openssl"):
+        pytest.skip("openssl needed to make a test CA")
+    d = tmp_path_factory.mktemp("pki")
+
+    def run(*a):
+        subprocess.run(["openssl", *a], cwd=d, check=True, capture_output=True)
+    run("req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key",
+        "-out", "ca.crt", "-days", "2", "-subj", "/CN=test CA", "-addext", "basicConstraints=critical,CA:TRUE",
+        "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-addext", "subjectKeyIdentifier=hash")
+    run("req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "tls.key",
+        "-out", "tls.csr", "-subj", "/CN=127.0.0.1")
+    (d / "ext").write_text("subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n"
+                           "keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n"
+                           "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n")
+    run("x509", "-req", "-in", "tls.csr", "-CA", "ca.crt", "-CAkey", "ca.key", "-CAcreateserial",
+        "-out", "tls.crt", "-days", "2", "-extfile", "ext")
+    return d
+
+
+@pytest.fixture
+def tls_reg(tls_pki):
+    r = FakeRegistry()
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(tls_pki / "tls.crt", tls_pki / "tls.key")
+    r.srv.socket = ctx.wrap_socket(r.srv.socket, server_side=True)
+    yield r
+    r.close()
+
+
+@pytest.mark.parametrize("ca,ok", [("own", True), (None, False), ("garbage", None)])
+def test_a_registry_ca_of_its_own_is_trusted_only_when_given(tls_pki, tls_reg, ca, ok):
+    body = b'{"schemaVersion":2}'
+    tls_reg.manifests[("x/y", "1")] = (body, op.M_OCI)
+    pem = {"own": (tls_pki / "ca.crt").read_text(), None: None, "garbage": "-----BEGIN CERTIFICATE-----\nzz\n"}[ca]
+    if ok is None:
+        with pytest.raises(op.RegistryError, match="unreadable registry CA"):
+            op.Registry(tls_reg.host, ca_pem=pem)
+        return
+    c = op.Registry(tls_reg.host, ca_pem=pem)
+    if ok:
+        assert c.manifest_digest("x/y", "1") == sha(body)
+    else:
+        with pytest.raises(op.RegistryError, match="CERTIFICATE_VERIFY_FAILED|certificate verify failed"):
+            c.manifest_digest("x/y", "1")
