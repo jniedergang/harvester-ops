@@ -365,3 +365,21 @@ JS = ROOT / "web" / "static" / "js"
 ])
 def test_child_names_are_escaped(path, needle):
     assert needle in (JS / path).read_text()
+
+
+def test_bare_metal_history_folds_children_under_their_parent():
+    """auto-history.js dans node : une fille dont le parent est dans la liste
+    se range sous lui (repliée, bouton à bulle), une fille sans son parent
+    reste au premier niveau."""
+    import test_auto_tabs_220 as tat
+    answers = {"baremetal-": {"in_progress": [], "actions_done": [
+        {"id": "b1", "action": "baremetal-batch:harv9", "status": "done", "started_at": 10, "ended_at": 90,
+         "cluster": "(local)", "parent": None},
+        {"id": "i1", "action": "baremetal-install:<img src=x onerror=pwn()>", "status": "done",
+         "started_at": 11, "ended_at": 80, "cluster": "(local)", "parent": "b1"},
+        {"id": "i2", "action": "baremetal-install:n2", "status": "done", "started_at": 12, "ended_at": 70,
+         "cluster": "(local)", "parent": "zzzzzzzzzzzz"}]}}
+    out = tat.run_history(answers, queries=("baremetal-",))
+    assert out["ids"] == ["b1", "i2"], "child folded under its parent, orphan kept"
+    assert 'data-history-expand="b1"' in out["html"] and "activity.expandTip" in out["html"]
+    assert "<img" not in out["html"]

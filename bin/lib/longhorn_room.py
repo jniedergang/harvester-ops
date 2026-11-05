@@ -86,3 +86,61 @@ def storage_room(lh_nodes, storage_classes, over, minimal, new_volume=False):
         classes[name] = {"replicas": replicas, "allocatable": allocatable,
                          "reason": reason}
     return {"disks": disks, "classes": classes, "schedulable_nodes": len(rooms)}
+
+
+OVER_DEFAULT, MINIMAL_DEFAULT = 200.0, 25.0
+
+
+def read_numbers(kube):
+    """(nœuds Longhorn, sur-provisionnement %, minimum libre %), lus par un
+    client `kube` (get/list, comme bin/lib/kube.Kube) ; valeurs par défaut
+    de Longhorn si un réglage manque."""
+    out = {}
+    for name, default in (("storage-over-provisioning-percentage", OVER_DEFAULT),
+                          ("storage-minimal-available-percentage", MINIMAL_DEFAULT)):
+        s = kube.get("settings.longhorn.io", "longhorn-system", name) or {}
+        try:
+            out[name] = float(s.get("value"))
+        except (TypeError, ValueError):
+            out[name] = default
+    nodes = kube.list("nodes.longhorn.io", "longhorn-system")
+    return nodes, out["storage-over-provisioning-percentage"], out["storage-minimal-available-percentage"]
+
+
+def fits(lh_nodes, over, minimal, volumes):
+    """Les volumes tiennent-ils ENSEMBLE ? Placement glouton : le plus gros
+    volume d'abord, chaque réplique sur le nœud qui a le plus de place parmi
+    ceux qui n'en portent pas déjà une (une réplique par nœud, comme
+    Longhorn), sur la place par disque de `storage_room` (calcul prudent de
+    la création de VM : les disques des VMs s'écrivent).
+
+    `volumes` : [{"name", "size" (octets), "replicas", "class"}]. Rend
+    {"fits": bool, "short": [{"volume", "class", "size", "replicas",
+    "placed", "nodes"}]} ; `nodes` : les nœuds qui portent déjà une réplique
+    de ce volume. Les sélecteurs de disques et de nœuds des classes ne sont
+    pas pris en compte."""
+    room = storage_room(lh_nodes, [], over, minimal)
+    disks = [dict(d) for d in room["disks"] if d["schedulable"]]
+    short = []
+    for v in sorted(volumes, key=lambda x: (-int(x.get("size") or 0), str(x.get("name")))):
+        size = int(v.get("size") or 0)
+        want = max(1, int(v.get("replicas") or 1))
+        used = []
+        for _ in range(want):
+            best = None
+            for d in disks:
+                if d["node"] in used or d["room"] < size:
+                    continue
+                # le nœud qui a le plus de place, puis son disque le plus libre
+                node_room = max(x["room"] for x in disks if x["node"] == d["node"])
+                key = (node_room, d["room"])
+                if best is None or key > best[0]:
+                    best = (key, d)
+            if best is None:
+                break
+            best[1]["room"] -= size
+            used.append(best[1]["node"])
+        if len(used) < want:
+            short.append({"volume": v.get("name"), "class": v.get("class"), "size": size,
+                          "replicas": want, "placed": len(used), "nodes": sorted(used)})
+    return {"fits": not short, "short": short}

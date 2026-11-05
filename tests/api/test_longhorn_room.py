@@ -81,3 +81,56 @@ def test_non_longhorn_classes_are_ignored():
     room = longhorn_room.storage_room([lh_node()], [sc("nfs", provisioner="nfs.csi.k8s.io")],
                                       over=200, minimal=25)
     assert room["classes"] == {}
+
+
+# ---------------------------------------------------------------------------
+# 2.5.0 : placement cumulé de volumes (fits), clusters enfants d'un plan
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+
+def vol(name, gib, replicas=1):
+    return {"name": name, "size": gib * GIB, "replicas": replicas, "class": f"r{replicas}"}
+
+
+@pytest.mark.parametrize("nodes,volumes,fits,short", [
+    # un nœud de 100 Gio : 3 volumes de 30 tiennent, un 4e non
+    ([lh_node("n1")], [vol("a", 30), vol("b", 30), vol("c", 30)], True, []),
+    ([lh_node("n1")], [vol("a", 30), vol("b", 30), vol("c", 30), vol("d", 30)], False, ["d"]),
+    # deux répliques : jamais deux sur le même nœud, même s'il a la place
+    ([lh_node("n1", maximum=500 * GIB, available=500 * GIB)], [vol("a", 10, 2)], False, ["a"]),
+    ([lh_node("n1"), lh_node("n2")], [vol("a", 60, 2), vol("b", 30, 2)], True, []),
+    ([lh_node("n1"), lh_node("n2")], [vol("a", 60, 2), vol("b", 50, 2)], False, ["b"]),
+    # trois nœuds dont un fermé : trois répliques ne tiennent pas
+    ([lh_node("n1"), lh_node("n2"), lh_node("n3", schedulable=False)], [vol("a", 10, 3)], False, ["a"]),
+    # le plus gros d'abord : 70 puis 30 tiennent sur n1 (100) et n2 (40)
+    ([lh_node("n1"), lh_node("n2", maximum=40 * GIB, available=40 * GIB)],
+     [vol("small", 30), vol("big", 70)], True, []),
+])
+def test_fits_places_volumes_together(nodes, volumes, fits, short):
+    got = longhorn_room.fits(nodes, 100, 0, volumes)
+    assert got["fits"] is fits
+    assert [s["volume"] for s in got["short"]] == short
+
+
+def test_fits_reports_where_the_replicas_went():
+    got = longhorn_room.fits([lh_node("n1"), lh_node("n2", schedulable=False)], 100, 0, [vol("a", 10, 2)])
+    assert got["short"] == [{"volume": "a", "class": "r2", "size": 10 * GIB, "replicas": 2,
+                             "placed": 1, "nodes": ["n1"]}]
+
+
+def test_read_numbers_defaults_and_values():
+    class K:
+        def __init__(self, settings):
+            self.settings = settings
+
+        def get(self, kind, ns, name):
+            v = self.settings.get(name)
+            return None if v is None else {"value": v}
+
+        def list(self, kind, ns=None, selector=None):
+            return [lh_node()]
+    assert longhorn_room.read_numbers(K({}))[1:] == (200.0, 25.0)
+    assert longhorn_room.read_numbers(K({"storage-over-provisioning-percentage": "150",
+                                         "storage-minimal-available-percentage": "x"}))[1:] == (150.0, 25.0)

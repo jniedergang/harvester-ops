@@ -1,0 +1,705 @@
+{
+ "_source": "harvester-capi inventory, harv1 read-only, 2026-11-05 (Harvester v1.9.0, one node)",
+ "class_replicas": {
+  "harv-rep1": 1,
+  "harvester-longhorn": 3,
+  "lh-0943a9a9-bba1-4286-9bdd-7aa1e3dd5422": 1,
+  "lh-14d1e229-ddd6-496d-a925-413e9cc0b855": 1,
+  "lh-473972d0-9491-434d-8337-b1adf3a8f688": 1,
+  "lh-ebf52afb-3201-4c33-9d5e-9b92f7f04507": 1,
+  "longhorn": 3,
+  "longhorn-image-9dlfh": 1,
+  "longhorn-image-c7rvm": 1,
+  "longhorn-image-dqhmm": 1,
+  "longhorn-image-jcf68": 1,
+  "longhorn-image-nhtf9": 1,
+  "longhorn-image-zrvxk": 1,
+  "longhorn-opensuse-leap-cloud": 1,
+  "longhorn-opensuse-tumbleweed": 1,
+  "longhorn-opensuse-tumbleweed-aiscale": 1,
+  "longhorn-rocky8-genericcloud": 1,
+  "longhorn-rocky9-genericcloud": 1,
+  "longhorn-static": 3,
+  "longhorn-test-upload-no-path": 1,
+  "longhorn-win2025-core-autounattend": 1,
+  "vmstate-persistence": 3
+ },
+ "clusters": [
+  "fleet-local/local"
+ ],
+ "default_version": null,
+ "free_cpu_m": 938,
+ "free_memory": 39008067895,
+ "images": [
+  {
+   "display_name": "sles-16.0-minimal-vm.x86_64-cloud-qu0.qcow2",
+   "iso": false,
+   "name": "image-dqhmm",
+   "os": "sles",
+   "ready": true,
+   "ref": "default/image-dqhmm",
+   "size": 315621376,
+   "storage_class": "longhorn-image-dqhmm",
+   "virtual_size": 1408237568
+  },
+  {
+   "display_name": "sles15-sp7-minimal-vm.x86_64-cloud-qu2.qcow2",
+   "iso": false,
+   "name": "image-nhtf9",
+   "os": "sles",
+   "ready": true,
+   "ref": "default/image-nhtf9",
+   "size": 342327296,
+   "storage_class": "longhorn-image-nhtf9",
+   "virtual_size": 1567621120
+  },
+  {
+   "display_name": "leap156-fips.qcow2",
+   "iso": false,
+   "name": "image-leap-fips",
+   "os": "opensuse",
+   "ready": true,
+   "ref": "default/image-leap-fips",
+   "size": 10737418240,
+   "storage_class": "lh-0943a9a9-bba1-4286-9bdd-7aa1e3dd5422",
+   "virtual_size": 10737418240
+  },
+  {
+   "display_name": "leap156-fix211.qcow2",
+   "iso": false,
+   "name": "image-fvkzr",
+   "os": "opensuse",
+   "ready": true,
+   "ref": "default/image-fvkzr",
+   "size": 723648512,
+   "storage_class": "lh-14d1e229-ddd6-496d-a925-413e9cc0b855",
+   "virtual_size": 10737418240
+  },
+  {
+   "display_name": "openSUSE Tumbleweed Cloud",
+   "iso": false,
+   "name": "opensuse-tumbleweed",
+   "os": "opensuse",
+   "ready": true,
+   "ref": "default/opensuse-tumbleweed",
+   "size": 298795520,
+   "storage_class": "longhorn-opensuse-tumbleweed",
+   "virtual_size": 2147483648
+  },
+  {
+   "display_name": "openSUSE Tumbleweed Cloud (AISCALEIMAGE)",
+   "iso": false,
+   "name": "opensuse-tumbleweed-aiscale",
+   "os": "opensuse",
+   "ready": true,
+   "ref": "default/opensuse-tumbleweed-aiscale",
+   "size": 300490240,
+   "storage_class": "longhorn-opensuse-tumbleweed-aiscale",
+   "virtual_size": 2147483648
+  },
+  {
+   "display_name": "openSUSE-Leap-15.6-Minimal-VM-Cloud.qcow2",
+   "iso": false,
+   "name": "opensuse-leap-cloud",
+   "os": "opensuse",
+   "ready": true,
+   "ref": "default/opensuse-leap-cloud",
+   "size": 276579328,
+   "storage_class": "longhorn-opensuse-leap-cloud",
+   "virtual_size": 877658112
+  },
+  {
+   "display_name": "Rocky Linux 8 GenericCloud",
+   "iso": false,
+   "name": "rocky8-genericcloud",
+   "os": "rocky",
+   "ready": true,
+   "ref": "default/rocky8-genericcloud",
+   "size": 2065760256,
+   "storage_class": "longhorn-rocky8-genericcloud",
+   "virtual_size": 10737418240
+  },
+  {
+   "display_name": "Rocky Linux 9 GenericCloud",
+   "iso": false,
+   "name": "rocky9-genericcloud",
+   "os": "rocky",
+   "ready": true,
+   "ref": "default/rocky9-genericcloud",
+   "size": 648806400,
+   "storage_class": "longhorn-rocky9-genericcloud",
+   "virtual_size": 10737418240
+  },
+  {
+   "display_name": "rhel-8.10-x86_64-kvm.qcow2",
+   "iso": false,
+   "name": "image-jcf68",
+   "os": "rhel",
+   "ready": true,
+   "ref": "default/image-jcf68",
+   "size": 1065091072,
+   "storage_class": "longhorn-image-jcf68",
+   "virtual_size": 10737418240
+  },
+  {
+   "display_name": "rhel-9.7-x86_64-kvm.qcow2",
+   "iso": false,
+   "name": "image-c7rvm",
+   "os": "rhel",
+   "ready": true,
+   "ref": "default/image-c7rvm",
+   "size": 1229979648,
+   "storage_class": "longhorn-image-c7rvm",
+   "virtual_size": 10737418240
+  },
+  {
+   "display_name": "xfer-768b7672-disk-1.raw",
+   "iso": false,
+   "name": "xfer-768b7672-disk-1",
+   "os": null,
+   "ready": true,
+   "ref": "default/xfer-768b7672-disk-1",
+   "size": 42949672960,
+   "storage_class": "lh-ebf52afb-3201-4c33-9d5e-9b92f7f04507",
+   "virtual_size": 42949672960
+  },
+  {
+   "display_name": "opensuse-tumbleweed-dvd-x86_64.iso",
+   "iso": true,
+   "name": "image-9dlfh",
+   "os": "opensuse",
+   "ready": true,
+   "ref": "default/image-9dlfh",
+   "size": 4578082816,
+   "storage_class": "longhorn-image-9dlfh",
+   "virtual_size": 4578082816
+  },
+  {
+   "display_name": "debian-13.4.0-amd64-netinst.iso",
+   "iso": true,
+   "name": "image-fmt4d",
+   "os": "debian",
+   "ready": true,
+   "ref": "default/image-fmt4d",
+   "size": 790626304,
+   "storage_class": "lh-473972d0-9491-434d-8337-b1adf3a8f688",
+   "virtual_size": 790626304
+  },
+  {
+   "display_name": "win2025-core-autounattend",
+   "iso": true,
+   "name": "win2025-core-autounattend",
+   "os": null,
+   "ready": true,
+   "ref": "default/win2025-core-autounattend",
+   "size": 72511488,
+   "storage_class": "longhorn-win2025-core-autounattend",
+   "virtual_size": 72511488
+  },
+  {
+   "display_name": "windows_server_2025_eval_x64fre_en-us.iso",
+   "iso": true,
+   "name": "image-zrvxk",
+   "os": null,
+   "ready": true,
+   "ref": "default/image-zrvxk",
+   "size": 8152356864,
+   "storage_class": "longhorn-image-zrvxk",
+   "virtual_size": 8152356864
+  }
+ ],
+ "keypairs": [
+  "default/capi-ssh-key"
+ ],
+ "longhorn": {
+  "minimal": 25.0,
+  "nodes": [
+   {
+    "apiVersion": "longhorn.io/v1beta2",
+    "kind": "Node",
+    "metadata": {
+     "name": "harv1.home.lo",
+     "namespace": "longhorn-system"
+    },
+    "spec": {
+     "allowScheduling": true,
+     "disks": {
+      "default-disk-4e8c552350d4148b": {
+       "allowScheduling": true,
+       "diskDriver": "",
+       "diskType": "filesystem",
+       "evictionRequested": false,
+       "path": "/var/lib/harvester/defaultdisk",
+       "storageReserved": 1110304621363,
+       "tags": []
+      }
+     },
+     "evictionRequested": false,
+     "instanceManagerCPURequest": 0,
+     "name": "harv1.home.lo",
+     "tags": []
+    },
+    "status": {
+     "autoEvicting": false,
+     "conditions": [
+      {
+       "lastProbeTime": "",
+       "lastTransitionTime": "2026-09-16T18:53:43Z",
+       "message": "Node harv1.home.lo is ready",
+       "reason": "",
+       "status": "True",
+       "type": "Ready"
+      },
+      {
+       "lastProbeTime": "",
+       "lastTransitionTime": "2025-12-03T17:31:25Z",
+       "message": "",
+       "reason": "",
+       "status": "True",
+       "type": "Schedulable"
+      },
+      {
+       "lastProbeTime": "",
+       "lastTransitionTime": "2025-12-03T17:31:25Z",
+       "message": "",
+       "reason": "",
+       "status": "True",
+       "type": "Multipathd"
+      },
+      {
+       "lastProbeTime": "",
+       "lastTransitionTime": "2025-12-03T17:31:25Z",
+       "message": "",
+       "reason": "",
+       "status": "True",
+       "type": "NFSClientInstalled"
+      },
+      {
+       "lastProbeTime": "",
+       "lastTransitionTime": "2025-12-03T17:31:25Z",
+       "message": "Kernel modules [dm_crypt] are loaded",
+       "reason": "",
+       "status": "True",
+       "type": "KernelModulesLoaded"
+      },
+      {
+       "lastProbeTime": "",
+       "lastTransitionTime": "2025-12-03T17:31:55Z",
+       "message": "",
+       "reason": "",
+       "status": "True",
+       "type": "MountPropagation"
+      }
+     ],
+     "cpuPolicy": "none",
+     "diskStatus": {
+      "default-disk-4e8c552350d4148b": {
+       "conditions": [
+        {
+         "lastProbeTime": "",
+         "lastTransitionTime": "2026-09-16T18:53:39Z",
+         "message": "Disk default-disk-4e8c552350d4148b(/var/lib/harvester/defaultdisk) on node harv1.home.lo is ready",
+         "reason": "",
+         "status": "True",
+         "type": "Ready"
+        },
+        {
+         "lastProbeTime": "",
+         "lastTransitionTime": "2026-09-16T18:53:39Z",
+         "message": "Disk default-disk-4e8c552350d4148b(/var/lib/harvester/defaultdisk) on node harv1.home.lo is schedulable",
+         "reason": "",
+         "status": "True",
+         "type": "Schedulable"
+        }
+       ],
+       "diskDriver": "",
+       "diskName": "default-disk-4e8c552350d4148b",
+       "diskPath": "/var/lib/harvester/defaultdisk",
+       "diskType": "filesystem",
+       "diskUUID": "d05e0660-477f-4de4-a17b-e22ca0543fdd",
+       "filesystemType": "ext2/ext3",
+       "healthData": {
+        "default-disk-4e8c552350d4148b": {
+         "attributes": [
+          {
+           "name": "CriticalWarning",
+           "rawValue": 0
+          },
+          {
+           "name": "Temperature",
+           "rawValue": 64
+          },
+          {
+           "name": "AvailableSpare",
+           "rawValue": 100
+          },
+          {
+           "name": "AvailableSpareThreshold",
+           "rawValue": 10
+          },
+          {
+           "name": "PercentageUsed",
+           "rawValue": 8
+          },
+          {
+           "name": "DataUnitsRead",
+           "rawValue": 676178575
+          },
+          {
+           "name": "DataUnitsWritten",
+           "rawValue": 137084163
+          },
+          {
+           "name": "HostReads",
+           "rawValue": 3858263162
+          },
+          {
+           "name": "HostWrites",
+           "rawValue": 8047007365
+          },
+          {
+           "name": "ControllerBusyTime",
+           "rawValue": 37667
+          },
+          {
+           "name": "PowerCycles",
+           "rawValue": 121
+          },
+          {
+           "name": "PowerOnHours",
+           "rawValue": 17232
+          },
+          {
+           "name": "UnsafeShutdowns",
+           "rawValue": 70
+          },
+          {
+           "name": "MediaErrors",
+           "rawValue": 0
+          },
+          {
+           "name": "NumErrLogEntries",
+           "rawValue": 2
+          },
+          {
+           "name": "WarningTempTime",
+           "rawValue": 6439
+          },
+          {
+           "name": "CriticalCompTime",
+           "rawValue": 0
+          }
+         ],
+         "capacity": 4000787030016,
+         "diskName": "/dev/nvme0",
+         "diskType": "nvme",
+         "firmwareVersion": "4B2QJXD7",
+         "healthStatus": "PASSED",
+         "modelName": "Samsung SSD 990 PRO with Heatsink 4TB",
+         "serialNumber": "S7DSNJ0WB00433P",
+         "source": "SMART",
+         "temperature": 64
+        }
+       },
+       "healthDataLastCollectedAt": "2026-11-05T14:06:44Z",
+       "instanceManagerName": "instance-manager-89b420838291d1fe3b3bf77004be3938",
+       "scheduledBackingImage": {
+        "vmi-01e9038f-4160-418a-8fe9-d5f403229c59": 2057228288,
+        "vmi-0943a9a9-bba1-4286-9bdd-7aa1e3dd5422": 10737422336,
+        "vmi-14d1e229-ddd6-496d-a925-413e9cc0b855": 721063936,
+        "vmi-26a98dfb-3e9f-4eea-8172-ef852fff0c2b": 297316352,
+        "vmi-3f2cac80-4cf9-492c-904c-45153831b42c": 645423104,
+        "vmi-473972d0-9491-434d-8337-b1adf3a8f688": 790134784,
+        "vmi-751ed0ab-40ba-4000-b36e-6cec2b92b2ec": 299274240,
+        "vmi-9d081188-b439-4821-9cc7-9962cb142049": 341274624,
+        "vmi-d58d147d-fd95-4aa7-b95a-e663ab627a73": 4574277632,
+        "vmi-e26d968f-8b4f-43f7-b419-45fa9ed523ab": 1224552448,
+        "vmi-e5f3dfd3-4efc-44e8-8119-b9a14b82930b": 71856128,
+        "vmi-e729851f-958a-4a5f-83ca-c2416ab65b4a": 1060945920,
+        "vmi-ebf52afb-3201-4c33-9d5e-9b92f7f04507": 42949681152,
+        "vmi-ed068c79-db2a-4fa7-bb20-400cc40ecbe7": 8148697088,
+        "vmi-f03c207e-4690-4feb-a197-433d8b3966d3": 314359808,
+        "vmi-f83dbc91-3fb0-4ef5-8e4d-3b1abbb695fe": 275369984
+       },
+       "scheduledReplica": {
+        "pvc-040964c2-503a-40b5-8e28-2326f570a313-r-0e756c52": 21474836480,
+        "pvc-09eaf1e8-0a4f-45db-9484-cc71591ff710-r-1e047e51": 85899345920,
+        "pvc-0a8938b7-dae6-4da6-923d-fee715e15a9a-r-a002c7a1": 42949672960,
+        "pvc-1a9e5265-bca4-4da7-b594-eed45ebd8e6e-r-247d1a42": 21474836480,
+        "pvc-1d936fbf-aba4-42e9-b116-dcf5231c44a0-r-cdb0b5d1": 42949672960,
+        "pvc-2143c18b-3dcb-4aa0-bc12-2a13b1657b6a-r-90c50134": 10737418240,
+        "pvc-2233c3c2-da5c-4ddd-8774-5bae5c4bda45-r-8447a37e": 21474836480,
+        "pvc-2bea3d38-6b8c-4f8f-8ce7-7d5ffaf9046a-r-bfc0024e": 1073741824,
+        "pvc-33cc91d2-6111-425f-8917-cd110bfa480f-r-022c96e9": 107374182400,
+        "pvc-4254679b-0e72-41e0-ae0d-44fec96df9fe-r-fc9d4db6": 21474836480,
+        "pvc-4e04d8c3-4e5f-4c92-8b8a-03147126e686-r-f7bd466a": 1073741824,
+        "pvc-5d6abccd-6f4a-4fd9-a2d2-50e3a90518f7-r-1a12ca78": 1073741824,
+        "pvc-616c431b-5f2a-4c6a-8ad5-9a6a1c5f9477-r-5929da24": 53687091200,
+        "pvc-6435e916-4c90-4a5a-85e1-420fb45319be-r-8d5c20bc": 10737418240,
+        "pvc-65a8845f-387c-4eee-a31d-1bffa2a73aff-r-2bc78f80": 10737418240,
+        "pvc-69b9ded4-8e7a-4cd5-8f01-f03727efc6f9-r-180cbdb6": 2147483648,
+        "pvc-6b957c3a-7704-4e12-b3f3-9be380edfdbd-r-f50c5e67": 1073741824,
+        "pvc-7622e52f-ec7b-45ee-9596-74348ac1d51f-r-114e76c1": 42949672960,
+        "pvc-777a52bc-7882-4ac9-828a-fe84ab136c78-r-fcddd949": 9663676416,
+        "pvc-916ea3cd-4ece-4ead-922d-4c82e9964d03-r-336b5654": 32212254720,
+        "pvc-9254f6f7-cb3d-4a1e-b70f-3e04de610f15-r-8c2237d5": 1649267441664,
+        "pvc-95e3bc6f-8fa2-4ef6-9b42-c4d175458822-r-d6976564": 10737418240,
+        "pvc-a018ecd6-1aea-4da2-b3bb-2b26a0e9b2d5-r-cc256b10": 107374182400,
+        "pvc-a3906a39-fca0-4522-9ebf-714f35bfbb96-r-22ed4670": 21474836480,
+        "pvc-b2adfa8d-048e-4e9b-a33e-d5a6c01414d8-r-2bc74335": 12884901888,
+        "pvc-ba1942f9-9388-4bec-9ce6-ff9d75cce45e-r-79873d40": 21474836480,
+        "pvc-cb1c6205-33e3-4c56-8d07-f55814ec1b89-r-a80359d4": 42949672960,
+        "pvc-d0fe363a-7248-456e-9cc8-f939fc9e7a34-r-0cdfe13d": 21474836480,
+        "pvc-d5d69156-fc7a-42fa-8659-05f466f30598-r-0113f145": 322122547200,
+        "pvc-e5535770-df58-4dfc-b0d1-3aefc0cc2a03-r-e4396f07": 1073741824,
+        "pvc-e629db07-ba27-4b88-b5e6-f02434b087e5-r-d0851511": 21474836480,
+        "pvc-e8268b12-e095-40a6-b5ea-a3ab07695d0d-r-7a60b016": 322122547200,
+        "pvc-e8b3fd7c-7d27-4ecb-9f26-1c762b9cc346-r-abf7f315": 1073741824,
+        "pvc-f4c2e4a3-4f9b-4204-906a-29f63be161ff-r-d610629c": 42949672960,
+        "pvc-f822d1c8-6b75-46e1-b3d0-c7d55d54ea3a-r-f9ec0596": 42949672960,
+        "pvc-fe6afd2f-7a51-419d-a972-193811924468-r-cb050def": 5368709120
+       },
+       "storageAvailable": 1492962508800,
+       "storageMaximum": 3701015404544,
+       "storageScheduled": 3263522095104
+      }
+     },
+     "region": "",
+     "snapshotCheckStatus": {
+      "lastPeriodicCheckedAt": "2026-11-01T00:00:00Z"
+     },
+     "zone": ""
+    }
+   }
+  ],
+  "over": 200.0
+ },
+ "namespaces": [
+  "caaph-system",
+  "caphv-ci",
+  "caphv-system",
+  "cattle-capi-system",
+  "cattle-dashboards",
+  "cattle-fleet-clusters-system",
+  "cattle-fleet-local-system",
+  "cattle-fleet-system",
+  "cattle-impersonation-system",
+  "cattle-local-user-passwords",
+  "cattle-logging-system",
+  "cattle-monitoring-system",
+  "cattle-system",
+  "cattle-turtles-system",
+  "cattle-ui-plugin-system",
+  "cluster-fleet-local-local-1a3d67d0a899",
+  "default",
+  "demo-containers",
+  "fleet-default",
+  "fleet-local",
+  "harvester-ops-kubeconfigs",
+  "harvester-public",
+  "harvester-system",
+  "kube-node-lease",
+  "kube-public",
+  "kube-system",
+  "kubeovn-owner-namespace",
+  "local",
+  "longhorn-system",
+  "rke2-bootstrap-system",
+  "rke2-control-plane-system",
+  "user-2fhwx"
+ ],
+ "networks": [
+  {
+   "cluster_network": "mgmt",
+   "ref": "default/management",
+   "type": "UntaggedNetwork",
+   "vlan": null
+  },
+  {
+   "cluster_network": "mgmt",
+   "ref": "default/ovn-overlay",
+   "type": "OverlayNetwork",
+   "vlan": null
+  },
+  {
+   "cluster_network": "mgmt",
+   "ref": "default/production",
+   "type": "UntaggedNetwork",
+   "vlan": null
+  },
+  {
+   "cluster_network": "mgmt",
+   "ref": "kube-system/external",
+   "type": "OverlayNetwork",
+   "vlan": null
+  }
+ ],
+ "overcommit": {
+  "cpu": 1600,
+  "memory": 150,
+  "storage": 200
+ },
+ "pools": [
+  {
+   "available": 16,
+   "gateway": "172.16.0.1",
+   "mask": "255.255.0.0",
+   "name": "capi-vm-pool",
+   "ranges": [
+    {
+     "end": "172.16.3.49",
+     "gateway": "172.16.0.1",
+     "size": 6,
+     "start": "172.16.3.44",
+     "subnet": "172.16.0.0/16"
+    },
+    {
+     "end": "172.16.3.69",
+     "gateway": "172.16.0.1",
+     "size": 10,
+     "start": "172.16.3.60",
+     "subnet": "172.16.0.0/16"
+    }
+   ],
+   "subnet": "172.16.0.0/16",
+   "total": 16,
+   "used": []
+  }
+ ],
+ "ssh_users": {
+  "debian": "debian",
+  "opensuse": "opensuse",
+  "rhel": "cloud-user",
+  "rocky": "rocky",
+  "sles": "sles",
+  "ubuntu": "ubuntu"
+ },
+ "stack": {
+  "contract": [],
+  "core": {
+   "managed_by_console": false,
+   "name": "cluster-api",
+   "namespace": "cattle-capi-system",
+   "phase": "Ready",
+   "ready": true,
+   "type": "core",
+   "version": "v1.13.3"
+  },
+  "harvester_version": "v1.9.0",
+  "legacy": false,
+  "legacy_namespaces": [],
+  "missing": [],
+  "optional": [],
+  "providers": [
+   {
+    "managed_by_console": true,
+    "name": "helm",
+    "namespace": "caaph-system",
+    "phase": "Ready",
+    "ready": true,
+    "type": "addon",
+    "version": "v0.6.4"
+   },
+   {
+    "managed_by_console": true,
+    "name": "harvester",
+    "namespace": "caphv-system",
+    "phase": "Ready",
+    "ready": true,
+    "type": "infrastructure",
+    "version": "v0.10.1"
+   },
+   {
+    "managed_by_console": true,
+    "name": "rke2",
+    "namespace": "rke2-bootstrap-system",
+    "phase": "Ready",
+    "ready": true,
+    "type": "bootstrap",
+    "version": "v0.25.2"
+   },
+   {
+    "managed_by_console": true,
+    "name": "rke2",
+    "namespace": "rke2-control-plane-system",
+    "phase": "Ready",
+    "ready": true,
+    "type": "controlPlane",
+    "version": "v0.25.2"
+   }
+  ],
+  "ready": true,
+  "shim": {
+   "needed": false,
+   "ours": false,
+   "present": false,
+   "vip": "172.16.3.100"
+  },
+  "turtles": true
+ },
+ "storage_classes": [
+  {
+   "default": true,
+   "name": "harv-rep1",
+   "replicas": 1
+  },
+  {
+   "default": false,
+   "name": "harvester-longhorn",
+   "replicas": 3
+  },
+  {
+   "default": false,
+   "name": "longhorn",
+   "replicas": 3
+  },
+  {
+   "default": false,
+   "name": "longhorn-opensuse-leap-cloud",
+   "replicas": 1
+  },
+  {
+   "default": false,
+   "name": "longhorn-opensuse-tumbleweed",
+   "replicas": 1
+  },
+  {
+   "default": false,
+   "name": "longhorn-opensuse-tumbleweed-aiscale",
+   "replicas": 1
+  },
+  {
+   "default": false,
+   "name": "longhorn-rocky8-genericcloud",
+   "replicas": 1
+  },
+  {
+   "default": false,
+   "name": "longhorn-rocky9-genericcloud",
+   "replicas": 1
+  },
+  {
+   "default": false,
+   "name": "longhorn-static",
+   "replicas": 3
+  },
+  {
+   "default": false,
+   "name": "longhorn-test-upload-no-path",
+   "replicas": 1
+  },
+  {
+   "default": false,
+   "name": "longhorn-win2025-core-autounattend",
+   "replicas": 1
+  },
+  {
+   "default": false,
+   "name": "vmstate-persistence",
+   "replicas": 3
+  }
+ ],
+ "unreachable": false,
+ "version_names": [],
+ "versions": []
+}

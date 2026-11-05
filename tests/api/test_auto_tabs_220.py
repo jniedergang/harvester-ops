@@ -227,7 +227,7 @@ HISTORY_RUNNER = r"""
 const fs = require('fs');
 const inp = JSON.parse(fs.readFileSync(0, 'utf8'));
 global.window = global;
-const box = { innerHTML: '' };
+const box = { innerHTML: '', dataset: {}, addEventListener: () => {}, contains: () => true };
 global.document = { body: { contains: () => true } };
 global.i18n = { t: (k) => k };
 global.Icons = { svg: () => '' };

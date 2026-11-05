@@ -17468,6 +17468,9 @@ def api_capi_inventory(cluster):
     if err:
         return err
     out, _rc = got
+    # 2.5.0 : les nœuds Longhorn bruts ne servent qu'au contrôle de N
+    # clusters (check --many), pas au formulaire
+    out.pop("longhorn", None)
     _CAPI_INVENTORY_CACHE[cluster] = (time.time(), out)
     return jsonify(out)
 

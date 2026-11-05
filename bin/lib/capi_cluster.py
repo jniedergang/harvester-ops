@@ -565,6 +565,156 @@ def check(spec, facts):
     return out
 
 
+def _volumes(spec, facts):
+    """Les volumes Longhorn que créeront les VMs d'une demande : un disque
+    racine par VM (`disk_size`, classe de l'image : `status.storageClassName`,
+    jamais un nom fabriqué) et le disque supplémentaire s'il est demandé.
+    Une classe inconnue est laissée aux constats de `check`."""
+    replicas = facts.get("class_replicas") or {}
+    img = (facts.get("images") or {}).get(spec.get("image")) or {}
+    disks = [("root", spec.get("disk_size"), img.get("storage_class"))]
+    if spec.get("extra_disk_size"):
+        disks.append(("extra", spec["extra_disk_size"], spec.get("extra_disk_class")))
+    out = []
+    for i in range(spec.get("cp_replicas", 0) + spec.get("worker_replicas", 0)):
+        for kind, size, klass in disks:
+            if klass in replicas and _bytes(size):
+                out.append({"name": f"{spec.get('namespace')}/{spec.get('name')}/vm{i + 1}-{kind}",
+                            "size": _bytes(size), "replicas": replicas[klass], "class": klass})
+    return out
+
+
+def _pool_demands(specs, pools, extra=None):
+    """Adresses demandées par pool : un cluster à un seul pool y puise tout ;
+    un cluster à plusieurs pools remplit ses pools dans l'ordre, et ce qui
+    manque reste compté sur le dernier. Rend {pool: (demandé, places)}."""
+    left = {p: (pools.get(p) or {}).get("available") or 0 for p in pools}
+    asked = {}
+    for pool, n in (extra or {}).items():
+        asked[pool] = asked.get(pool, 0) + int(n)
+        left[pool] = left.get(pool, 0) - int(n)
+    multi = []
+    for s in specs:
+        names = [p for p in [s.get("ip_pool")] + list(s.get("ip_pool_refs") or []) if p]
+        names = [p for i, p in enumerate(names) if p not in names[:i] and p in pools]
+        if not names:
+            continue
+        if len(names) == 1:
+            n = addresses_needed(s)
+            asked[names[0]] = asked.get(names[0], 0) + n
+            left[names[0]] -= n
+        else:
+            multi.append((s, names))
+    for s, names in multi:
+        need = addresses_needed(s)
+        for p in names:
+            take = min(need, max(0, left[p])) if p != names[-1] else need
+            asked[p] = asked.get(p, 0) + take
+            left[p] -= take
+            need -= take
+            if need <= 0:
+                break
+    return {p: (asked[p], (pools.get(p) or {}).get("available") or 0)
+            for p in asked if left.get(p, 0) < 0}
+
+
+def check_many(specs, facts, extra_addresses=None):
+    """Constats pour N demandes lues en une fois (chaîne d'un plan, décision
+    169) : `check` pour chacune (règles du formulaire, inchangées, chaque
+    constat porte `cluster`), puis les constats de flotte, BLOQUANTS : la
+    chaîne tourne sans surveillance, alors que les manques de `check`
+    restent des avertissements pour une personne qui décide.
+
+    `facts` : ceux de `check`, plus `longhorn` ({nodes, over, minimal}),
+    `class_replicas` ({classe: répliques}), `images[...]["storage_class"]`,
+    et `denied` (accès refusés par le serveur, None si non contrôlés).
+    `extra_addresses` : {pool: adresses} prévues en plus (services
+    LoadBalancer des artefacts, 2.7.0 ; rien en 2.5.0)."""
+    import longhorn_room as _lr
+    out = []
+    for s in specs:
+        ref = f"{s.get('namespace')}/{s.get('name')}"
+        for f in check(s, facts):
+            out.append(dict(f, cluster=ref))
+    names, spaces = {}, {}
+    for s in specs:
+        names[s.get("name")] = names.get(s.get("name"), 0) + 1
+        spaces[s.get("namespace")] = spaces.get(s.get("namespace"), 0) + 1
+    for v in sorted(n for n, c in names.items() if c > 1):
+        out.append(finding("fleet-name-twice", "block", name=v))
+    # un cluster par namespace (le générateur nomme ses objets sans le nom
+    # du cluster) : deux noms différents dans le même namespace s'écraseraient
+    for v in sorted(n for n, c in spaces.items() if c > 1 and names.get(n, 0) < 2):
+        out.append(finding("fleet-name-twice", "block", namespace=v))
+    cpu = sum(requests_needed(s, facts.get("overcommit"))[0] for s in specs)
+    mem = sum(requests_needed(s, facts.get("overcommit"))[1] for s in specs)
+    free_cpu, free_mem = facts.get("free_cpu_m"), facts.get("free_memory")
+    if free_cpu is not None and cpu > free_cpu:
+        out.append(finding("fleet-cpu-short", "block", needed=round(cpu / 1000, 2),
+                           free=round(free_cpu / 1000, 2), clusters=len(specs)))
+    if free_mem is not None and mem > free_mem:
+        out.append(finding("fleet-memory-short", "block", needed=mem, free=free_mem, clusters=len(specs)))
+    lh = facts.get("longhorn")
+    volumes = [v for s in specs for v in _volumes(s, facts)]
+    if lh is not None:
+        nodes = _lr.storage_room(lh.get("nodes") or [], [], lh.get("over", 200.0),
+                                 lh.get("minimal", 25.0))["schedulable_nodes"]
+        for klass in sorted({v["class"] for v in volumes}):
+            want = next(v["replicas"] for v in volumes if v["class"] == klass)
+            if want > nodes:
+                out.append(finding("fleet-replicas-nodes", "block", storage_class=klass,
+                                   replicas=want, nodes=nodes))
+        room = _lr.fits(lh.get("nodes") or [], lh.get("over", 200.0), lh.get("minimal", 25.0), volumes)
+        if not room["fits"]:
+            first = room["short"][0]
+            out.append(finding("fleet-storage-short", "block", volumes=len(room["short"]),
+                               volume=first["volume"], storage_class=first["class"],
+                               size=first["size"], nodes=", ".join(first["nodes"]) or "-"))
+    for pool, (asked, avail) in sorted(_pool_demands(specs, facts.get("pools") or {},
+                                                     extra_addresses).items()):
+        out.append(finding("fleet-pool-short", "block", pool=pool, needed=asked, available=avail))
+    denied = facts.get("denied")
+    if denied:
+        out.append(finding("rights-missing", "block", count=len(denied),
+                           denied=", ".join(_access_text(d) for d in denied[:8])))
+    elif denied is None and "denied" in facts:
+        out.append(finding("rights-unchecked", "warn"))
+    out.append(finding("fleet-dhcp-leases", "ok", leases=len(specs)))
+    out.append(finding("fleet-sizes", "ok", clusters=len(specs),
+                       vms=sum(s.get("cp_replicas", 0) + s.get("worker_replicas", 0) for s in specs),
+                       vcpu=sum((s.get("cp_replicas", 0) + s.get("worker_replicas", 0)) * s.get("cpu", 0)
+                                for s in specs),
+                       memory=sum((s.get("cp_replicas", 0) + s.get("worker_replicas", 0))
+                                  * _bytes(s.get("memory")) for s in specs),
+                       disks=sum(v["size"] for v in volumes),
+                       addresses=sum(addresses_needed(s) for s in specs)
+                       + sum(int(n) for n in (extra_addresses or {}).values())))
+    return out
+
+
+def _access_text(a):
+    ns, verb, group, resource, name = a
+    res = f"{resource}.{group}" if group else resource
+    return f"{verb} {res}{'/' + name if name else ''}{' in ' + ns if ns else ''}"
+
+
+# Ressource (groupe, nom au pluriel) de chaque genre que pose le rendu
+RENDERED_RESOURCES = (("cluster.x-k8s.io", "clusters"),) + tuple(
+    (k.partition(".")[2], k.partition(".")[0]) for k in GENERATED_KINDS)
+
+
+def manifest_reviews(spec):
+    """Ce que la personne doit pouvoir faire pour poser les manifestes du
+    cluster (application côté serveur : create et patch) et son namespace :
+    [(namespace ou None, verbe, groupe, ressource, nom ou None)]."""
+    ns = spec.get("namespace")
+    out = [(None, "create", "", "namespaces", None)]
+    for group, res in RENDERED_RESOURCES:
+        for verb in ("create", "patch"):
+            out.append((ns, verb, group, res, None))
+    return out
+
+
 # Ce que coûte une VM à l'ordonnanceur, au-delà de sa mémoire invitée
 # (relevé sur harv1 : 4 Gio demandés pour 3,08 Gio de requête à 150 %).
 VM_MEMORY_OVERHEAD = 350 * 1024 ** 2

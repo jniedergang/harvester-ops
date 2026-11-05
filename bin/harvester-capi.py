@@ -5,7 +5,7 @@
     harvester-capi install   --cluster C --components DIR [--push-images]
     harvester-capi cleanup-legacy --cluster C [--dry-run]
     harvester-capi inventory --cluster C [--components DIR] --json
-    harvester-capi check     --cluster C --spec FICHIER [--components DIR] [--identity I] [--json]
+    harvester-capi check     --cluster C --spec FICHIER [--components DIR] [--identity I] [--many] [--json]
     harvester-capi render    --cluster C --spec FICHIER [--show-secrets]
     harvester-capi create    --cluster C --spec FICHIER [--components DIR] [--timeout S]
                              [--identity restricted|console] [--origin plan=P,template=M,run=ID]
@@ -56,6 +56,7 @@ import capi_cluster as cc  # noqa: E402
 import capi_identity as ci  # noqa: E402
 import capi_stack as cs  # noqa: E402
 import capi_services as sv  # noqa: E402
+import longhorn_room as lr  # noqa: E402
 from kube import Kube, KubeError, cluster_config  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_BLOCKED, EXIT_CANCELLED = 0, 1, 2, 3
@@ -174,7 +175,10 @@ def _image_info(img):
     # GenericCloud » sur harv1) et deux images peuvent en partager un.
     return {"ref": _ref(img), "name": img["metadata"]["name"], "display_name": display,
             "ready": bool(ready), "iso": iso, "size": st.get("size"),
-            "virtual_size": st.get("virtualSize"), "os": hint}
+            "virtual_size": st.get("virtualSize"), "os": hint,
+            # 2.5.0 : la classe que Harvester a créée pour l'image (`lh-<uuid>`
+            # pour les récentes) : jamais un nom fabriqué
+            "storage_class": st.get("storageClassName")}
 
 
 # Proposée en premier : l'image dont le système a été éprouvé avec RKE2 ici.
@@ -191,7 +195,8 @@ def _image_facts(images):
     console) ou par son nom affiché (ce qu'écrit un script à la main)."""
     out = {}
     for i in images:
-        info = {"ready": i["ready"], "iso": i["iso"], "os": i.get("os")}
+        info = {"ready": i["ready"], "iso": i["iso"], "os": i.get("os"),
+                "storage_class": i.get("storage_class")}
         ns = i["ref"].split("/", 1)[0]
         out.setdefault(f"{ns}/{i['display_name']}", info)
         out[i["ref"]] = info
@@ -290,14 +295,21 @@ def inventory(kube, desc):
         nets.append({"ref": _ref(n), "vlan": conf.get("vlan"),
                      "cluster_network": labels.get("network.harvesterhci.io/clusternetwork"),
                      "type": labels.get("network.harvesterhci.io/type")})
-    scs = []
+    scs, replicas = [], {}
     for s in kube.list("storageclasses"):
         ann = (s.get("metadata") or {}).get("annotations") or {}
         name = s["metadata"]["name"]
+        if s.get("provisioner") == "driver.longhorn.io":
+            replicas[name] = _replicas(s)
         if name.startswith(("longhorn-image-", "lh-")):
             continue                              # classes propres à une image
-        scs.append({"name": name,
+        scs.append({"name": name, "replicas": replicas.get(name),
                     "default": ann.get("storageclass.kubernetes.io/is-default-class") == "true"})
+    try:
+        lh_nodes, over, minimal = lr.read_numbers(kube)
+        longhorn = {"nodes": lh_nodes, "over": over, "minimal": minimal}
+    except KubeError:
+        longhorn = None
     free_cpu, free_mem = _free_capacity(kube)
     return dict(base, **{
         "unreachable": False,
@@ -307,9 +319,18 @@ def inventory(kube, desc):
         "images": sorted(images, key=_image_rank),
         "keypairs": sorted(_ref(k) for k in kube.list("keypairs.harvesterhci.io")),
         "networks": sorted(nets, key=lambda n: n["ref"]),
-        "storage_classes": scs, "pools": pools,
+        "storage_classes": scs, "pools": pools, "class_replicas": replicas, "longhorn": longhorn,
         "free_cpu_m": free_cpu, "free_memory": free_mem, "overcommit": _overcommit(kube),
     })
+
+
+def _replicas(sc):
+    """Répliques d'une classe Longhorn (3 par défaut, comme longhorn_room)."""
+    try:
+        n = int(((sc.get("parameters") or {}).get("numberOfReplicas")) or 3)
+    except (TypeError, ValueError):
+        n = 3
+    return max(1, n)
 
 
 def facts_from(inv):
@@ -325,6 +346,7 @@ def facts_from(inv):
                      if isinstance(v, dict) and v.get("tested")] or inv["version_names"],
         "free_cpu_m": inv["free_cpu_m"], "free_memory": inv["free_memory"],
         "overcommit": inv["overcommit"],
+        "class_replicas": inv.get("class_replicas") or {}, "longhorn": inv.get("longhorn"),
     }
 
 
@@ -518,8 +540,83 @@ def _check(kube, spec, desc, identity="console"):
             "identity": identity, "caphv_version": version}
 
 
+def rights_denied(kube, reviews):
+    """Accès refusés par le serveur à l'identité du kubeconfig, en une
+    requête (SelfSubjectAccessReview, une par accès) ; None si la lecture
+    échoue."""
+    if not reviews:
+        return []
+    items = []
+    for ns, verb, group, resource, name in reviews:
+        attrs = {"verb": verb, "group": group, "resource": resource}
+        if ns:
+            attrs["namespace"] = ns
+        if name:
+            attrs["name"] = name
+        items.append({"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview",
+                      "spec": {"resourceAttributes": attrs}})
+    try:
+        out = kube.create({"apiVersion": "v1", "kind": "List", "items": items})
+    except (KubeError, ValueError):
+        return None
+    got = out.get("items") if out.get("kind") == "List" else [out]
+    if len(got or []) != len(reviews):
+        return None
+    return [r for r, res in zip(reviews, got) if not ((res.get("status") or {}).get("allowed"))]
+
+
+def _check_many(kube, specs, desc, identity="restricted"):
+    """`check_many` sur une seule lecture du cluster, droits de la personne
+    compris (tout ce que posera la chaîne : namespace, identité, manifestes)."""
+    total = {}
+    inv = inventory(kube, desc)
+    if inv.get("unreachable"):
+        return {"findings": [cc.finding("cluster-unreachable", "block")], "blocked": True,
+                "amount": total, "identity": identity, "caphv_version": None}
+    facts = facts_from(inv)
+    version = ci.caphv_version(inv.get("stack"), desc)
+    reviews, extra = [], []
+    for s in specs:
+        reviews += cc.manifest_reviews(s)
+        if identity == "restricted":
+            extra += [dict(f, cluster=f"{s['namespace']}/{s['name']}")
+                      for f in ci.findings(s, version, identity, _cloud_provider_bindings(kube, s["name"]))]
+            if ci.rules_for(version) is not None:
+                reviews += ci.access_reviews(s, version)
+    facts["denied"] = rights_denied(kube, list(dict.fromkeys(reviews)))
+    findings = cc.check_many(specs, facts) + extra
+    for s in specs:
+        for k, v in amount(s, inv["overcommit"]).items():
+            total[k] = total.get(k, 0) + v
+    return {"findings": findings, "blocked": bool(cc.blocking(findings)), "amount": total,
+            "identity": identity, "caphv_version": version}
+
+
+def specs_from(path):
+    """Liste JSON de demandes (`check --many`), chacune normalisée."""
+    raw = json.load(sys.stdin) if path == "-" else json.loads(Path(path).read_text())
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("--many expects a non-empty JSON list of requests")
+    return [cc.normalize(r) for r in raw]
+
+
 def cmd_check(args):
     kube, _, _ = kube_from(args)
+    if args.many:
+        try:
+            specs = [ci.force_target_namespace(s, args.identity) for s in specs_from(args.spec)]
+        except ValueError as e:
+            out = {"findings": [cc.finding("invalid", "block", option="-", message=str(e))],
+                   "blocked": True}
+            print(json.dumps(out) if args.json else str(e))
+            return EXIT_BLOCKED
+        out = _check_many(kube, specs, components_from(args.components), args.identity)
+        if args.json:
+            print(json.dumps(out))
+        else:
+            for f in out["findings"]:
+                print(f"[{f['level']}] {f['code']} {f.get('cluster') or ''} {json.dumps(f['facts'])}")
+        return EXIT_BLOCKED if out["blocked"] else EXIT_OK
     try:
         spec = ci.force_target_namespace(spec_from(args.spec), args.identity)
     except ValueError as e:
@@ -987,6 +1084,9 @@ def main(argv=None):
             sp.add_argument("--name", required=True, help="namespace/name of the service")
         if "sspec" in extra:
             sp.add_argument("--spec", required=True, help="JSON service request, '-' for stdin")
+        if name == "check":
+            sp.add_argument("--many", action="store_true",
+                            help="--spec is a JSON list of requests, checked together (capacity, pools, rights)")
         if "identity" in extra:
             sp.add_argument("--identity", choices=ci.IDENTITIES, default="restricted",
                             help="restricted: a CAPHV identity of its own for the cluster (default); "
