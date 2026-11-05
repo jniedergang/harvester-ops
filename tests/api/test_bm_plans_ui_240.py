@@ -25,7 +25,19 @@ HTML = (ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
 
 FINDING_CODES = ["plan-invalid", "phase-not-available", "template-missing", "var-missing", "var-invalid",
                  "decl-name-taken", "tf-missing", "cluster-unreachable", "template-newer", "decl-differs",
-                 "plan-changed", "decl-exists", "readiness-later", "admin-kind", "forbidden-construct"]
+                 "plan-changed", "decl-exists", "readiness-later", "admin-kind", "forbidden-construct",
+                 # 2.5.0 : phases Cluster API et Clusters (constats de flotte compris)
+                 "capi-bundle-missing", "capi-bundle-no-turtles", "capi-needs-harvester-1.9", "capi-later",
+                 "capi-version-differs", "capi-stack-missing", "capi-template-missing", "cluster-var-missing",
+                 "cluster-name-taken", "cluster-exists", "identity-rules-unknown", "refs-later",
+                 "cluster-failed", "capi-check-failed", "capi-install-admin",
+                 # identité restreinte, copiés de check --many (2.5.0, revue)
+                 "identity-name-reserved", "target-namespace-forced", "cloud-provider-binding-taken",
+                 "vm-namespace-taken", "vm-namespace-too-long",
+                 "fleet-name-twice", "fleet-cpu-short", "fleet-memory-short", "fleet-storage-short",
+                 "fleet-storage-unknown",
+                 "fleet-replicas-nodes", "fleet-pool-short", "fleet-dhcp-leases", "fleet-sizes",
+                 "rights-missing", "rights-unchecked"]
 
 
 # --- onglet, historique, page d'hôte (source) ----------------------------------
@@ -113,7 +125,7 @@ def test_no_em_dash_nor_unicode_arrow_in_new_text(path):
 def test_every_finding_code_has_a_label():
     src = PLANS.read_text()
     table = src.split("const FINDINGS = {", 1)[1].split("};", 1)[0]
-    assert sorted(re.findall(r"'([a-z-]+)': \(\) => tr\('dpw\.f\.", table)) == sorted(FINDING_CODES)
+    assert sorted(re.findall(r"'([a-z0-9.-]+)': \(\) => tr\('dpw\.f\.", table)) == sorted(FINDING_CODES)
 
 
 # --- bm-plans.js sous node ---------------------------------------------------------

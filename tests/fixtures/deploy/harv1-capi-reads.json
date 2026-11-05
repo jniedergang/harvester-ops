@@ -1,0 +1,404 @@
+{
+ "_source": "harv1, read-only kubectl get, 2026-11-05 (Harvester v1.9.0)",
+ "server_version": "v1.9.0",
+ "traefik": {
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": {
+   "name": "rke2-traefik",
+   "namespace": "kube-system",
+   "labels": {
+    "app.kubernetes.io/instance": "rke2-traefik-kube-system",
+    "app.kubernetes.io/managed-by": "Helm",
+    "app.kubernetes.io/name": "rke2-traefik",
+    "helm.sh/chart": "rke2-traefik-40.1.009"
+   }
+  },
+  "spec": {
+   "type": "LoadBalancer",
+   "ports": [
+    {
+     "name": "web",
+     "nodePort": 32154,
+     "port": 80,
+     "protocol": "TCP",
+     "targetPort": "web"
+    },
+    {
+     "name": "websecure",
+     "nodePort": 31088,
+     "port": 443,
+     "protocol": "TCP",
+     "targetPort": "websecure"
+    }
+   ]
+  },
+  "status": {
+   "loadBalancer": {
+    "ingress": [
+     {
+      "ip": "172.16.3.100",
+      "ipMode": "VIP",
+      "ports": [
+       {
+        "port": 80,
+        "protocol": "TCP"
+       },
+       {
+        "port": 443,
+        "protocol": "TCP"
+       }
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "capi_providers": [
+  {
+   "apiVersion": "turtles-capi.cattle.io/v1alpha1",
+   "kind": "CAPIProvider",
+   "metadata": {
+    "name": "helm",
+    "namespace": "caaph-system",
+    "labels": {
+     "harvester-ops.io/managed": "true"
+    }
+   },
+   "spec": {
+    "fetchConfig": {
+     "selector": {
+      "matchLabels": {
+       "provider.cluster.x-k8s.io/name": "helm",
+       "provider.cluster.x-k8s.io/type": "addon"
+      }
+     }
+    },
+    "name": "helm",
+    "type": "addon",
+    "version": "v0.6.4"
+   },
+   "status": {
+    "phase": "Ready",
+    "installedVersion": "v0.6.4",
+    "conditions": [
+     {
+      "message": "Deployment has minimum availability.",
+      "observedGeneration": 1,
+      "reason": "MinimumReplicasAvailable",
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "message": "Provider is unknown",
+      "observedGeneration": 1,
+      "reason": "ProviderUnknown",
+      "status": "Unknown",
+      "type": "CheckLatestVersionTime"
+     },
+     {
+      "message": "All preflight checks passed",
+      "observedGeneration": 1,
+      "reason": "PreflightChecksPassed",
+      "status": "True",
+      "type": "PreflightCheckPassed"
+     },
+     {
+      "message": "Provider installed successfully",
+      "observedGeneration": 1,
+      "reason": "ProviderInstalled",
+      "status": "True",
+      "type": "ProviderInstalled"
+     },
+     {
+      "message": "Certificates are now managed by wrangler",
+      "observedGeneration": 1,
+      "reason": "CertificatesManaged",
+      "status": "True",
+      "type": "WranglerManagedCertificates"
+     }
+    ],
+    "name": "helm"
+   }
+  },
+  {
+   "apiVersion": "turtles-capi.cattle.io/v1alpha1",
+   "kind": "CAPIProvider",
+   "metadata": {
+    "name": "harvester",
+    "namespace": "caphv-system",
+    "labels": {
+     "harvester-ops.io/managed": "true"
+    }
+   },
+   "spec": {
+    "fetchConfig": {
+     "selector": {
+      "matchLabels": {
+       "provider.cluster.x-k8s.io/name": "harvester",
+       "provider.cluster.x-k8s.io/type": "infrastructure"
+      }
+     }
+    },
+    "name": "harvester",
+    "patches": [
+     {
+      "patch": "- op: remove\n  path: /metadata/labels/cluster.x-k8s.io~1v1beta2\n",
+      "target": {
+       "kind": "CustomResourceDefinition",
+       "name": "harvestermachines.infrastructure.cluster.x-k8s.io"
+      }
+     }
+    ],
+    "type": "infrastructure",
+    "version": "v0.10.1"
+   },
+   "status": {
+    "phase": "Ready",
+    "installedVersion": "v0.10.1",
+    "conditions": [
+     {
+      "message": "Deployment has minimum availability.",
+      "observedGeneration": 1,
+      "reason": "MinimumReplicasAvailable",
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "message": "Provider is unknown",
+      "observedGeneration": 1,
+      "reason": "ProviderUnknown",
+      "status": "Unknown",
+      "type": "CheckLatestVersionTime"
+     },
+     {
+      "message": "All preflight checks passed",
+      "observedGeneration": 1,
+      "reason": "PreflightChecksPassed",
+      "status": "True",
+      "type": "PreflightCheckPassed"
+     },
+     {
+      "message": "Provider installed successfully",
+      "observedGeneration": 1,
+      "reason": "ProviderInstalled",
+      "status": "True",
+      "type": "ProviderInstalled"
+     },
+     {
+      "message": "Certificates are now managed by wrangler",
+      "observedGeneration": 1,
+      "reason": "CertificatesManaged",
+      "status": "True",
+      "type": "WranglerManagedCertificates"
+     }
+    ],
+    "name": "harvester"
+   }
+  },
+  {
+   "apiVersion": "turtles-capi.cattle.io/v1alpha1",
+   "kind": "CAPIProvider",
+   "metadata": {
+    "name": "cluster-api",
+    "namespace": "cattle-capi-system"
+   },
+   "spec": {
+    "additionalManifests": {
+     "name": "capi-additional-rbac-roles",
+     "namespace": "cattle-capi-system"
+    },
+    "configSecret": {
+     "name": "capi-env-variables"
+    },
+    "enableAutomaticUpdate": false,
+    "fetchConfig": {
+     "selector": {
+      "matchLabels": {
+       "managed-by.turtles.cattle.io": "true",
+       "provider.cluster.x-k8s.io/name": "cluster-api",
+       "provider.cluster.x-k8s.io/type": "core"
+      }
+     }
+    },
+    "name": "cluster-api",
+    "type": "core",
+    "version": "v1.13.3"
+   },
+   "status": {
+    "phase": "Ready",
+    "installedVersion": "v1.13.3",
+    "conditions": [
+     {
+      "message": "Deployment has minimum availability.",
+      "observedGeneration": 2,
+      "reason": "MinimumReplicasAvailable",
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "message": "Latest version is set",
+      "observedGeneration": 2,
+      "reason": "LatestVersionSet",
+      "status": "True",
+      "type": "CheckLatestVersionTime"
+     },
+     {
+      "message": "All preflight checks passed",
+      "observedGeneration": 1,
+      "reason": "PreflightChecksPassed",
+      "status": "True",
+      "type": "PreflightCheckPassed"
+     },
+     {
+      "message": "Provider installed successfully",
+      "observedGeneration": 1,
+      "reason": "ProviderInstalled",
+      "status": "True",
+      "type": "ProviderInstalled"
+     },
+     {
+      "message": "Certificates are now managed by wrangler",
+      "observedGeneration": 1,
+      "reason": "CertificatesManaged",
+      "status": "True",
+      "type": "WranglerManagedCertificates"
+     }
+    ],
+    "name": "cluster-api"
+   }
+  },
+  {
+   "apiVersion": "turtles-capi.cattle.io/v1alpha1",
+   "kind": "CAPIProvider",
+   "metadata": {
+    "name": "rke2-bootstrap",
+    "namespace": "rke2-bootstrap-system",
+    "labels": {
+     "harvester-ops.io/managed": "true"
+    }
+   },
+   "spec": {
+    "fetchConfig": {
+     "selector": {
+      "matchLabels": {
+       "provider.cluster.x-k8s.io/name": "rke2",
+       "provider.cluster.x-k8s.io/type": "bootstrap"
+      }
+     }
+    },
+    "name": "rke2",
+    "type": "bootstrap",
+    "version": "v0.25.2"
+   },
+   "status": {
+    "phase": "Ready",
+    "installedVersion": "v0.25.2",
+    "conditions": [
+     {
+      "message": "Deployment has minimum availability.",
+      "observedGeneration": 1,
+      "reason": "MinimumReplicasAvailable",
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "message": "Provider is unknown",
+      "observedGeneration": 1,
+      "reason": "ProviderUnknown",
+      "status": "Unknown",
+      "type": "CheckLatestVersionTime"
+     },
+     {
+      "message": "All preflight checks passed",
+      "observedGeneration": 1,
+      "reason": "PreflightChecksPassed",
+      "status": "True",
+      "type": "PreflightCheckPassed"
+     },
+     {
+      "message": "Provider installed successfully",
+      "observedGeneration": 1,
+      "reason": "ProviderInstalled",
+      "status": "True",
+      "type": "ProviderInstalled"
+     },
+     {
+      "message": "Certificates are now managed by wrangler",
+      "observedGeneration": 1,
+      "reason": "CertificatesManaged",
+      "status": "True",
+      "type": "WranglerManagedCertificates"
+     }
+    ],
+    "name": "rke2"
+   }
+  },
+  {
+   "apiVersion": "turtles-capi.cattle.io/v1alpha1",
+   "kind": "CAPIProvider",
+   "metadata": {
+    "name": "rke2-control-plane",
+    "namespace": "rke2-control-plane-system",
+    "labels": {
+     "harvester-ops.io/managed": "true"
+    }
+   },
+   "spec": {
+    "fetchConfig": {
+     "selector": {
+      "matchLabels": {
+       "provider.cluster.x-k8s.io/name": "rke2",
+       "provider.cluster.x-k8s.io/type": "controlPlane"
+      }
+     }
+    },
+    "name": "rke2",
+    "type": "controlPlane",
+    "version": "v0.25.2"
+   },
+   "status": {
+    "phase": "Ready",
+    "installedVersion": "v0.25.2",
+    "conditions": [
+     {
+      "message": "Deployment has minimum availability.",
+      "observedGeneration": 1,
+      "reason": "MinimumReplicasAvailable",
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "message": "Provider is unknown",
+      "observedGeneration": 1,
+      "reason": "ProviderUnknown",
+      "status": "Unknown",
+      "type": "CheckLatestVersionTime"
+     },
+     {
+      "message": "All preflight checks passed",
+      "observedGeneration": 1,
+      "reason": "PreflightChecksPassed",
+      "status": "True",
+      "type": "PreflightCheckPassed"
+     },
+     {
+      "message": "Provider installed successfully",
+      "observedGeneration": 1,
+      "reason": "ProviderInstalled",
+      "status": "True",
+      "type": "ProviderInstalled"
+     },
+     {
+      "message": "Certificates are now managed by wrangler",
+      "observedGeneration": 1,
+      "reason": "CertificatesManaged",
+      "status": "True",
+      "type": "WranglerManagedCertificates"
+     }
+    ],
+    "name": "rke2"
+   }
+  }
+ ]
+}

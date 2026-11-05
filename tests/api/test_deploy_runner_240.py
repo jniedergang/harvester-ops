@@ -137,7 +137,7 @@ def test_chain_readiness_then_terraform(world):
     assert res["resumes"] is None and res["dry_run"] is False and res["status"] == "done"
     assert res["variables"] == {"equipe": "ops"}
     assert [p["id"] for p in res["phases"]] == ["readiness", "terraform", "capi"]
-    assert res["phases"][2] == {"id": "capi", "status": "disabled", "message": "coming in 2.5+"}
+    assert res["phases"][2] == {"id": "capi", "status": "disabled", "message": "disabled in the plan"}
     [item] = res["phases"][1]["items"]
     d = world["store"].find_by_name("harvlab", "site-cles")
     assert item["template"] == "cles" and item["status"] == "done" and item["declaration_id"] == d["id"]
@@ -308,7 +308,7 @@ def test_secrets_never_in_steps_result_or_db(world):
 # --- installation enchaînée ---------------------------------------------------
 
 def _fake_child(status="done", gate=None, seen=None):
-    def launch(rows, cluster_name, concurrency=None):
+    def launch(rows, cluster_name, concurrency=None, parent=None):
         if seen is not None:
             seen.append([dict(r) for r in rows])
         run = wapp.ActionRun(wapp.uuid.uuid4().hex[:12], f"baremetal-batch:{cluster_name}", "(local)", [])

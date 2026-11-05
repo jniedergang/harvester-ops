@@ -350,7 +350,7 @@ def cluster_state(monkeypatch, nodes, vmis=(), vms=(), volumes=(), replicas=()):
 def tracked(monkeypatch):
     runs = []
     monkeypatch.setattr(wapp, "track_action",
-                        lambda label, cluster, worker, *args: runs.append((label, worker, args)) or "act1")
+                        lambda label, cluster, worker, *args, **_kw: runs.append((label, worker, args)) or "act1")
     return runs
 
 

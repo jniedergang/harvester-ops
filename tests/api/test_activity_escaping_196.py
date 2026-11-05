@@ -28,12 +28,15 @@ REGIONS = [
 def unescaped(src):
     """Interpolations `${...}` qui sortent un champ d'action sans escapeHtml.
     Ne comptent pas : une comparaison (`it.status === 'done' ? ...`), un test
-    d'appartenance (`expanded.has(a.id)`), un calcul de date."""
+    d'appartenance (`expanded.has(a.id)`), un calcul de date, une adresse
+    encodée par encodeURIComponent."""
     bad = []
     src = re.sub(r"escapeHtml\(`[^`]*`\)", "", src)   # gabarit entier échappé
     for m in INTERP_RE.finditer(src):
         expr = m.group(1)
-        if "escapeHtml(" in expr:
+        if "escapeHtml(" in expr or expr.strip().startswith("encodeURIComponent("):
+            # encodeURIComponent : une adresse passée à fetch (filles d'une
+            # action, 2.5.0), jamais du HTML ; elle encode < > " & de toute façon
             continue
         rest = re.sub(rf"\b{OBJ}\.{FIELDS}\s*(===|!==)", "", expr)
         rest = re.sub(r"\.has\([^)]*\)", "", rest)

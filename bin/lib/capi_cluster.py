@@ -73,6 +73,9 @@ LIST_FLAGS = {"dns": "--dns", "ip_pool_refs": "--ip-pool-refs"}
 CONSOLE_OPTIONS = {"extra_disk_size", "extra_disk_class", "target_namespace",
                    "rancher_import", "extra_networks", "service_cidr"}
 KNOWN = set(FLAGS) | set(LIST_FLAGS) | CONSOLE_OPTIONS
+# Options entières : `normalize` les convertit, le rendu d'un modèle de
+# cluster (deploy_plans) donne ce type à une chaîne qui n'est qu'une variable.
+INT_OPTIONS = ("cp_replicas", "worker_replicas", "cpu", "cni_mtu")
 
 
 def _as_list(v):
@@ -95,7 +98,7 @@ def normalize(raw):
         if v is None or v == "":
             continue
         spec[k] = v
-    for k in ("cp_replicas", "worker_replicas", "cpu", "cni_mtu"):
+    for k in INT_OPTIONS:
         if k in spec:
             try:
                 spec[k] = int(spec[k])
@@ -243,6 +246,17 @@ def kube_vip_docs(namespace):
     ]
 
 
+# 2.5.0 : le HarvesterCluster porte le nom du cluster (et non
+# `<cluster>-<aléa>`, gabarit par défaut du cœur, exp/topology/desiredstate,
+# CAPI v1.13) : CAPHV supprime à la fin le pool `<ns>-<nom du
+# HarvesterCluster>-ippool`, que l'identité restreinte doit pouvoir nommer
+# d'avance (capi_identity.generated_pool).
+INFRA_NAMING = {"template": "{{ .cluster.name }}"}
+# 2.5.0 : origine d'un cluster créé par la chaîne d'un plan (reprise, refus
+# d'un nom déjà pris par autre chose)
+ORIGIN_LABELS = {"plan": "harvester-ops.io/plan", "template": "harvester-ops.io/plan-template"}
+ORIGIN_ANNOTATIONS = {"run": "harvester-ops.io/plan-run"}
+
 INFRA_OLD = "infrastructure.cluster.x-k8s.io/v1alpha1"
 INFRA_NEW = "infrastructure.cluster.x-k8s.io/v1beta1"
 
@@ -261,7 +275,7 @@ def _retarget_refs(node):
             _retarget_refs(v)
 
 
-def postprocess(docs, spec):
+def postprocess(docs, spec, origin=None):
     """Corrige les documents produits par le générateur ; rend une copie.
 
     - **v1alpha1 -> v1beta1 pour les objets Harvester.** Le générateur écrit
@@ -279,6 +293,10 @@ def postprocess(docs, spec):
       le Cluster, pour que la suppression n'oublie rien.
     - **kube-vip** (v1.52.0), sans quoi aucun service LoadBalancer du
       cluster n'obtient d'adresse.
+    - **Nom du HarvesterCluster** = nom du cluster (2.5.0, INFRA_NAMING).
+    - **Origine** (2.5.0) : étiquettes et annotation d'un cluster créé par un
+      plan, passées par `origin` ({plan, template, run}), jamais par la
+      demande, qui reste une liste blanche.
     """
     out = []
     for d in docs:
@@ -289,8 +307,16 @@ def postprocess(docs, spec):
         if d.get("kind") not in ("Namespace", "Cluster"):
             meta = d.setdefault("metadata", {})
             meta["labels"] = dict(meta.get("labels") or {}, **{GENERATED: "true"})
+        if d.get("kind") == "ClusterClass":
+            d.setdefault("spec", {})["infrastructureNamingStrategy"] = dict(INFRA_NAMING)
         if d.get("kind") == "Cluster":
             labels = d.setdefault("metadata", {}).setdefault("labels", {})
+            for k, label in ORIGIN_LABELS.items():
+                if (origin or {}).get(k):
+                    labels[label] = origin[k]
+            for k, ann in ORIGIN_ANNOTATIONS.items():
+                if (origin or {}).get(k):
+                    d["metadata"].setdefault("annotations", {})[ann] = origin[k]
             if spec.get("rancher_import"):
                 labels[AUTO_IMPORT] = "true"
             else:
@@ -311,6 +337,34 @@ def postprocess(docs, spec):
     have = {(d.get("kind"), (d.get("metadata") or {}).get("name")) for d in out}
     if cluster and ("ClusterResourceSet", KUBE_VIP_CRS) not in have:
         out.extend(kube_vip_docs(cluster["metadata"].get("namespace") or "default"))
+    return out
+
+
+def parse_origin(text):
+    """`plan=<p>,template=<m>,run=<id>` -> dict. Clés connues seulement ;
+    `plan` et `template` sont des noms RFC 1123 (valeurs d'étiquette), `run`
+    un identifiant d'action (12 hexadécimaux). ValueError sinon."""
+    out = {}
+    for part in [x for x in str(text or "").split(",") if x.strip()]:
+        k, sep, v = part.strip().partition("=")
+        if not sep or k not in ORIGIN_LABELS and k not in ORIGIN_ANNOTATIONS:
+            raise ValueError(f"--origin: unknown key '{k}' (plan, template, run)")
+        if k in out:
+            raise ValueError(f"--origin: '{k}' given twice")
+        ok = re.match(r"^[0-9a-f]{12}$", v) if k == "run" else K8S_NAME_RE.match(v)
+        if not ok:
+            raise ValueError(f"--origin: invalid value for '{k}'")
+        out[k] = v
+    return out
+
+
+def origin_of(cluster):
+    """Origine lue sur un Cluster (inverse de `postprocess`) : {plan,
+    template, run}, clés absentes omises."""
+    meta = (cluster or {}).get("metadata") or {}
+    labels, ann = meta.get("labels") or {}, meta.get("annotations") or {}
+    out = {k: labels[v] for k, v in ORIGIN_LABELS.items() if labels.get(v)}
+    out.update({k: ann[v] for k, v in ORIGIN_ANNOTATIONS.items() if ann.get(v)})
     return out
 
 
@@ -518,6 +572,177 @@ def check(spec, facts):
     if free_mem is not None and need_mem > free_mem:
         out.append(finding("memory-short", "warn", needed=need_mem, free=free_mem))
     out.append(finding("endpoint-dhcp", "ok"))
+    return out
+
+
+def _volumes(spec, facts):
+    """Les volumes Longhorn que créeront les VMs d'une demande : un disque
+    racine par VM (`disk_size`, classe de l'image : `status.storageClassName`,
+    jamais un nom fabriqué) et le disque supplémentaire s'il est demandé.
+    Une classe inconnue est laissée aux constats de `check`."""
+    replicas = facts.get("class_replicas") or {}
+    img = (facts.get("images") or {}).get(spec.get("image")) or {}
+    disks = [("root", spec.get("disk_size"), img.get("storage_class"))]
+    if spec.get("extra_disk_size"):
+        disks.append(("extra", spec["extra_disk_size"], spec.get("extra_disk_class")))
+    out = []
+    for i in range(spec.get("cp_replicas", 0) + spec.get("worker_replicas", 0)):
+        for kind, size, klass in disks:
+            if klass in replicas and _bytes(size):
+                out.append({"name": f"{spec.get('namespace')}/{spec.get('name')}/vm{i + 1}-{kind}",
+                            "size": _bytes(size), "replicas": replicas[klass], "class": klass})
+    return out
+
+
+def _pool_demands(specs, pools, extra=None):
+    """Adresses demandées par pool : un cluster à un seul pool y puise tout ;
+    un cluster à plusieurs pools remplit ses pools dans l'ordre, et ce qui
+    manque reste compté sur le dernier. Rend {pool: (demandé, places)}."""
+    left = {p: (pools.get(p) or {}).get("available") or 0 for p in pools}
+    asked = {}
+    for pool, n in (extra or {}).items():
+        asked[pool] = asked.get(pool, 0) + int(n)
+        left[pool] = left.get(pool, 0) - int(n)
+    multi = []
+    for s in specs:
+        names = [p for p in [s.get("ip_pool")] + list(s.get("ip_pool_refs") or []) if p]
+        names = [p for i, p in enumerate(names) if p not in names[:i] and p in pools]
+        if not names:
+            continue
+        if len(names) == 1:
+            n = addresses_needed(s)
+            asked[names[0]] = asked.get(names[0], 0) + n
+            left[names[0]] -= n
+        else:
+            multi.append((s, names))
+    for s, names in multi:
+        need = addresses_needed(s)
+        for p in names:
+            take = min(need, max(0, left[p])) if p != names[-1] else need
+            asked[p] = asked.get(p, 0) + take
+            left[p] -= take
+            need -= take
+            if need <= 0:
+                break
+    return {p: (asked[p], (pools.get(p) or {}).get("available") or 0)
+            for p in asked if left.get(p, 0) < 0}
+
+
+def check_many(specs, facts, extra_addresses=None):
+    """Constats pour N demandes lues en une fois (chaîne d'un plan, décision
+    169) : `check` pour chacune (règles du formulaire, inchangées, chaque
+    constat porte `cluster`), puis les constats de flotte, BLOQUANTS : la
+    chaîne tourne sans surveillance, alors que les manques de `check`
+    restent des avertissements pour une personne qui décide.
+
+    `facts` : ceux de `check`, plus `longhorn` ({nodes, over, minimal}),
+    `class_replicas` ({classe: répliques}), `images[...]["storage_class"]`,
+    et `denied` (accès refusés par le serveur, None si non contrôlés).
+    `extra_addresses` : {pool: adresses} prévues en plus (services
+    LoadBalancer des artefacts, 2.7.0 ; rien en 2.5.0)."""
+    import longhorn_room as _lr
+    out = []
+    for s in specs:
+        ref = f"{s.get('namespace')}/{s.get('name')}"
+        for f in check(s, facts):
+            out.append(dict(f, cluster=ref))
+    names, spaces = {}, {}
+    for s in specs:
+        names[s.get("name")] = names.get(s.get("name"), 0) + 1
+        spaces[s.get("namespace")] = spaces.get(s.get("namespace"), 0) + 1
+    for v in sorted(n for n, c in names.items() if c > 1):
+        out.append(finding("fleet-name-twice", "block", name=v))
+    # un cluster par namespace (le générateur nomme ses objets sans le nom
+    # du cluster) : deux noms différents dans le même namespace s'écraseraient
+    for v in sorted(n for n, c in spaces.items() if c > 1 and names.get(n, 0) < 2):
+        out.append(finding("fleet-name-twice", "block", namespace=v))
+    cpu = sum(requests_needed(s, facts.get("overcommit"))[0] for s in specs)
+    mem = sum(requests_needed(s, facts.get("overcommit"))[1] for s in specs)
+    free_cpu, free_mem = facts.get("free_cpu_m"), facts.get("free_memory")
+    if free_cpu is not None and cpu > free_cpu:
+        out.append(finding("fleet-cpu-short", "block", needed=round(cpu / 1000, 2),
+                           free=round(free_cpu / 1000, 2), clusters=len(specs)))
+    if free_mem is not None and mem > free_mem:
+        out.append(finding("fleet-memory-short", "block", needed=mem, free=free_mem, clusters=len(specs)))
+    lh = facts.get("longhorn")
+    volumes = [v for s in specs for v in _volumes(s, facts)]
+    # revue m10 : une image sans classe (import en cours) laisse ses disques
+    # racine hors de la somme ; le dire plutôt que les compter pour rien
+    replicas = facts.get("class_replicas") or {}
+    for img in sorted({s.get("image") for s in specs}):
+        info = (facts.get("images") or {}).get(img)
+        if info is not None and info.get("storage_class") not in replicas:
+            out.append(finding("fleet-storage-unknown", "warn", image=img,
+                               storage_class=info.get("storage_class") or "-"))
+    if lh is not None:
+        nodes = _lr.storage_room(lh.get("nodes") or [], [], lh.get("over", 200.0),
+                                 lh.get("minimal", 25.0))["schedulable_nodes"]
+        unplaceable = set()
+        for klass in sorted({v["class"] for v in volumes}):
+            want = next(v["replicas"] for v in volumes if v["class"] == klass)
+            if want > nodes:
+                unplaceable.add(klass)
+                out.append(finding("fleet-replicas-nodes", "block", storage_class=klass,
+                                   replicas=want, nodes=nodes))
+        # une classe déjà signalée ne se place nulle part : la compter encore
+        # dans la place ferait un second constat pour la même cause
+        room = _lr.fits(lh.get("nodes") or [], lh.get("over", 200.0), lh.get("minimal", 25.0),
+                        [v for v in volumes if v["class"] not in unplaceable])
+        if not room["fits"]:
+            first = room["short"][0]
+            out.append(finding("fleet-storage-short", "block", volumes=len(room["short"]),
+                               volume=first["volume"], storage_class=first["class"],
+                               size=first["size"], nodes=", ".join(first["nodes"]) or "-"))
+    for pool, (asked, avail) in sorted(_pool_demands(specs, facts.get("pools") or {},
+                                                     extra_addresses).items()):
+        out.append(finding("fleet-pool-short", "block", pool=pool, needed=asked, available=avail))
+    out += rights_findings(facts)
+    out.append(finding("fleet-dhcp-leases", "ok", leases=len(specs)))
+    out.append(finding("fleet-sizes", "ok", clusters=len(specs),
+                       vms=sum(s.get("cp_replicas", 0) + s.get("worker_replicas", 0) for s in specs),
+                       vcpu=sum((s.get("cp_replicas", 0) + s.get("worker_replicas", 0)) * s.get("cpu", 0)
+                                for s in specs),
+                       memory=sum((s.get("cp_replicas", 0) + s.get("worker_replicas", 0))
+                                  * _bytes(s.get("memory")) for s in specs),
+                       disks=sum(v["size"] for v in volumes),
+                       addresses=sum(addresses_needed(s) for s in specs)
+                       + sum(int(n) for n in (extra_addresses or {}).values())))
+    return out
+
+
+def rights_findings(facts):
+    """`rights-missing` (bloquant) ou `rights-unchecked` d'après
+    `facts["denied"]` : absent = pas contrôlé, rien ; None = lecture
+    impossible ; liste = accès refusés par le serveur."""
+    denied = facts.get("denied")
+    if denied:
+        return [finding("rights-missing", "block", count=len(denied),
+                        denied=", ".join(_access_text(d) for d in denied[:8]))]
+    if denied is None and "denied" in facts:
+        return [finding("rights-unchecked", "warn")]
+    return []
+
+
+def _access_text(a):
+    ns, verb, group, resource, name = a
+    res = f"{resource}.{group}" if group else resource
+    return f"{verb} {res}{'/' + name if name else ''}{' in ' + ns if ns else ''}"
+
+
+# Ressource (groupe, nom au pluriel) de chaque genre que pose le rendu
+RENDERED_RESOURCES = (("cluster.x-k8s.io", "clusters"),) + tuple(
+    (k.partition(".")[2], k.partition(".")[0]) for k in GENERATED_KINDS)
+
+
+def manifest_reviews(spec):
+    """Ce que la personne doit pouvoir faire pour poser les manifestes du
+    cluster (application côté serveur : create et patch) et son namespace :
+    [(namespace ou None, verbe, groupe, ressource, nom ou None)]."""
+    ns = spec.get("namespace")
+    out = [(None, "create", "", "namespaces", None)]
+    for group, res in RENDERED_RESOURCES:
+        for verb in ("create", "patch"):
+            out.append((ns, verb, group, res, None))
     return out
 
 

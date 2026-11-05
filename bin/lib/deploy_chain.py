@@ -21,7 +21,12 @@ Une phase simple a `execute(ctx, state) -> PhaseOutcome`. Le statut
 `poll` secondes jusqu'au délai, puis `error`. Une phase à éléments
 (Terraform : un élément par modèle) a `items` et `run_item(ctx, state,
 item) -> ItemOutcome` : le moteur tient l'ordre, les dépendances, l'arrêt
-entre éléments et la reprise élément par élément.
+entre éléments et la reprise élément par élément. 2.5.0 : `before(ctx,
+state)` d'une phase à éléments est appelé une fois avant le premier
+élément (contrôle rejoué au début de la phase : capacité de N clusters) ;
+un PhaseOutcome rendu termine la phase sans lancer d'élément (les éléments
+de l'action reprise y sont recopiés tels quels, rien n'est perdu pour la
+reprise suivante), None la laisse continuer.
 
 `state` : {"phase": id, "previous": entrée de l'action reprise ou None,
 "results": {id: entrée déjà produite par ce déroulé}}.
@@ -63,8 +68,8 @@ from dataclasses import dataclass, field
 import secret_store
 
 ORDER = ("install", "readiness", "terraform", "capi", "clusters", "registry", "artefacts")
-COMING = ("capi", "clusters", "registry", "artefacts")
-COMING_MESSAGE = "coming in 2.5+"
+COMING = ("registry", "artefacts")
+COMING_MESSAGE = "coming in 2.6+"
 CHECKED_MESSAGE = "already done (checked)"
 POLL_SECONDS = 15
 SECRET_CLASS = "plan-run"
@@ -106,6 +111,7 @@ class Phase:
     verify_item: object = None        # verify_item(ctx, state, entrée précédente) -> bool
     item_key: str = "id"              # clé de l'identifiant dans l'entrée (template)
     item_step: str = "item-"          # préfixe des étapes d'élément (tf-)
+    before: object = None             # before(ctx, state) -> PhaseOutcome | None (2.5.0)
 
 
 def _exc_name(e):
@@ -152,6 +158,14 @@ def _run_items(ctx, ph, state, previous, progress=None):
     if previous:
         for it in previous.get("items") or []:
             prev_items[it.get(ph.item_key)] = it
+    if ph.before is not None:
+        out, err = _safe_call(ph.before, ctx, state)
+        if err or (out is not None and not isinstance(out, PhaseOutcome)):
+            out = PhaseOutcome("error", message=err or "TypeError")
+        if out is not None:
+            kept = [dict(it) for it in (previous or {}).get("items") or []]
+            return PhaseOutcome(out.status if out.status in ("done", "error", "cancelled") else "error",
+                                items=kept, message=out.message, data=out.data)
     entries, status_of = [], {}
     cancelled = False
     for item in ph.items or []:

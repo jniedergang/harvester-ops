@@ -349,7 +349,7 @@ def route(monkeypatch, tmp_path):
     monkeypatch.setattr(wapp, "ISO_DIR", tmp_path / "iso")
     monkeypatch.setattr(wapp, "_iso_free_bytes", lambda p: 10 ** 12)
     monkeypatch.setattr(wapp, "track_action",
-                        lambda label, cl, worker, *args: started.append((label, args)) or "a1")
+                        lambda label, cl, worker, *args, **_kw: started.append((label, args)) or "a1")
     monkeypatch.setattr(wapp._ufg.socket, "getaddrinfo", _resolver(DNS))
 
     def post(url, **extra):

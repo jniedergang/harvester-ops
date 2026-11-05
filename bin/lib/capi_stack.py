@@ -108,6 +108,7 @@ def stack_status(kube, wanted=()):
     out["core"] = next((s for s in states if s["type"] == "core"), None)
     out["providers"] = [s for s in states if s["type"] != "core"]
     out["optional"] = []
+    out["differs"] = []
     for w in wanted or []:
         got = next((s for s in out["providers"]
                     if s["name"] == w["name"] and s["type"] == w["type"]), None)
@@ -116,6 +117,10 @@ def stack_status(kube, wanted=()):
             gap = f"{w['type']}/{w['name']}"
         elif w.get("version") and got["version"] != w["version"]:
             gap = f"{w['type']}/{w['name']} {w['version']} (installed {got['version']})"
+            # 2.5.0 (décision 171) : une autre version que le paquet, dite à
+            # part ; un plan ne la met jamais à niveau en silence
+            out["differs"].append({"provider": f"{w['type']}/{w['name']}",
+                                   "installed": got["version"], "bundle": w["version"]})
         if w.get("optional"):
             # v1.52.0 : un fournisseur facultatif (CAAPH, les services) ne
             # bloque pas la création de clusters ; il est dit à part.
@@ -187,6 +192,34 @@ def contract_state(kube, wanted=()):
 SHIM_NS, SHIM_NAME = "kube-system", "ingress-expose"
 
 
+VIP_ANNOTATION = "kube-vip.io/loadbalancerIPs"
+
+
+def harvester_vip(kube):
+    """L'adresse de Harvester (VIP), ou None. Une installation neuve de 1.9
+    la porte dans le statut de `kube-system/rke2-traefik` ; un cluster mis à
+    jour depuis 1.8 n'a pas ce service et garde `kube-system/ingress-expose`
+    (statut et annotation kube-vip : vu sur harvlab2 le 05/11/2026). Le
+    service de remplacement de la console n'a que l'annotation."""
+    traefik = kube.get("services", SHIM_NS, "rke2-traefik") or {}
+    ing = ((traefik.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
+    if ing and _usable(ing[0].get("ip")):
+        return ing[0]["ip"]
+    expose = kube.get("services", SHIM_NS, SHIM_NAME) or {}
+    ing = ((expose.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
+    if ing and _usable(ing[0].get("ip")):
+        return ing[0]["ip"]
+    ann = ((expose.get("metadata") or {}).get("annotations") or {}).get(VIP_ANNOTATION) or ""
+    first = ann.split(",")[0].strip()
+    return first if _usable(first) else None
+
+
+def _usable(ip):
+    """Une VIP en DHCP porte `0.0.0.0` dans l'annotation kube-vip tant
+    qu'elle n'a pas de bail : ce n'est pas une adresse joignable."""
+    return bool(ip) and ip not in ("0.0.0.0", "::")
+
+
 def shim_state(kube, wanted=()):
     """CAPHV <= v0.10.1 lit l'adresse de Harvester dans l'annotation
     `kube-vip.io/loadbalancerIPs` du service `kube-system/ingress-expose`.
@@ -196,11 +229,7 @@ def shim_state(kube, wanted=()):
     harv1 le 25/09/2026)."""
     needed_by = [w for w in wanted or [] if "ingress-expose" in (w.get("workarounds") or [])]
     svc = kube.get("services", SHIM_NS, SHIM_NAME)
-    vip = None
-    if svc is None:
-        traefik = kube.get("services", SHIM_NS, "rke2-traefik") or {}
-        ing = ((traefik.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
-        vip = ing[0].get("ip") if ing else None
+    vip = harvester_vip(kube) if svc is None else None
     present = svc is not None
     ours = present and _labels(svc).get(SHIM_LABEL) == "caphv-ingress-expose"
     return {"needed": bool(needed_by) and (not present or ours),
@@ -295,7 +324,8 @@ def install(kube, desc, step, wait=True, timeout=300, now=time.time, sleep=time.
     shim = shim_state(kube, providers)
     if shim["needed"] and not shim["present"]:
         if not shim["vip"]:
-            raise RuntimeError("cannot find the Harvester VIP (service kube-system/rke2-traefik)")
+            raise RuntimeError("cannot find the Harvester VIP (services kube-system/rke2-traefik "
+                               "and ingress-expose have no address)")
         kube.apply([shim_manifest(shim["vip"])])
         step("compatibility", "done", f"ingress-expose recreated for CAPHV (VIP {shim['vip']})")
     for left in contract_state(kube, providers):

@@ -488,3 +488,33 @@ already declared. Full reference: [bare-metal.md](bare-metal.md), section
 With an install (admin): set the **Plan** field in the install window of a
 machine or the batch window of a profile. The install becomes the first
 phase; its secrets are asked at launch and again on resume, never stored.
+
+## 15. Child clusters from a deployment plan (2.5.0)
+
+A plan can also declare the Cluster API stack and create child RKE2
+clusters, each with its own restricted CAPHV identity, on Harvester 1.9 or
+later. Full reference: [bare-metal.md](bare-metal.md), section "Deployment
+plans: Cluster API and child clusters"; the identity: Capabilities,
+section 4.
+
+1. **Admin, once:** fill the creation window of Cluster API > Clusters on a
+   cluster that has the images, networks, keys and pools, then **Save as
+   template**; or write the template in Plans > Cluster templates, with
+   **Variable...** for a reference that changes per site. Give each child
+   cluster an image storage class that its nodes can place (one replica on
+   a one-node cluster).
+2. In the plan, switch on **Cluster API** and **Clusters**, add the
+   clusters (or **Several** with a name pattern holding `{{n}}`), their
+   order and "depends on".
+3. **Check before acting:** **Apply a plan** on the host page. The checks
+   count every cluster of the plan together: CPU, memory, Longhorn space,
+   pool addresses, your rights on Harvester, versions. Launch stays
+   disabled while one blocks.
+4. **Launch** and follow `deploy:<cluster>`: unfold the row in Activity to
+   see `capi-install` and one `capi-cluster-create` per cluster.
+5. **On a failure** the next independent clusters go on. A cluster left in
+   failure is never deleted by the plan: delete it from Cluster API >
+   Clusters, then **Resume**. A stop lets the creation in progress finish.
+6. **Delete a child cluster** from Cluster API > Clusters. If the deletion
+   ends with "object(s) kept", fix the right that is missing and delete
+   again: it resumes where it stopped.

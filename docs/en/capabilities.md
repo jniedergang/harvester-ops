@@ -2268,6 +2268,11 @@ be read).
   exist.
 - **Older Harvester releases** keep the previous install: cert-manager,
   Cluster API core and providers, all from the bundle.
+- **The legacy Uninstall** (2.5.0) is refused on a stack managed by Turtles,
+  and its button is greyed with the reason: it deletes namespaces and images,
+  not the `CAPIProvider` objects, and would break what Harvester and the
+  plans declared. It stays available for a stack made by the previous
+  install.
 
 ### Creating a cluster (1.48.0, window with menus in 1.53.0)
 
@@ -2319,6 +2324,15 @@ Cancelling it removes what it created.
   templates, add-ons, and the identity secret, which holds a kubeconfig of
   the Harvester cluster) once no other cluster in the namespace uses them,
   then the namespace if the console created it.
+- **Deletion of a cluster with a restricted identity (2.5.0)**: the
+  `Cluster` goes first and the console waits until it is gone (CAPHV needs
+  its identity to remove VMs, volumes, load balancer and pool). Then each
+  identity object is read and deleted by its name, without any list across
+  namespaces, and an object of the same name that belongs to another
+  cluster is left alone. If one cannot be read or deleted, the deletion
+  ends in error, keeps the namespace and the identity account, and a new
+  deletion resumes there. The load balancer object of a DHCP endpoint is a
+  known Harvester limit (harvester/harvester#11767).
 - Kubernetes version upgrades are not implemented.
 - Volumes that the new cluster's workloads claim are Harvester volumes
   (PVCs named `pvc-<id>` in the VM namespace). Deleting their claims in the
@@ -2328,6 +2342,66 @@ Cancelling it removes what it created.
   installs `iptables` and `qemu-guest-agent` on each node, and without them
   pods that publish a host port (ingress-nginx) do not start. The
   pre-check says so. The openSUSE Leap 15.6 cloud image works as is.
+
+### Restricted CAPHV identity (2.5.0)
+
+Each new cluster, created from the window or by a deployment plan, gets
+its own CAPHV identity instead of the console kubeconfig (which is
+`system:masters`). The rights are those CAPHV v0.10.1 uses, read call by
+call in its source at the tag (commit `734c983`), each with its source line
+in `bin/lib/capi_identity.py`:
+
+| Scope | Resource | Verbs |
+|---|---|---|
+| VM namespace | virtualmachines | get, create, delete |
+| VM namespace | virtualmachineinstances | get |
+| VM namespace | secrets, services | get, create, update, delete |
+| VM namespace | serviceaccounts (`<name>` only) | get |
+| VM namespace | persistentvolumeclaims | list, delete |
+| VM namespace | loadbalancers | get, create, delete |
+| image namespace | virtualmachineimages | list |
+| key namespace | keypairs (the key only) | get |
+| harvester-system | deployments (`harvester`) | get |
+| kube-system | services (`ingress-expose`) | get |
+| cluster | namespaces (its VM namespace) | get |
+| cluster | ippools (the pools of the request) | get, update |
+| cluster | ippools (`<ns>-<name>-ippool`) | delete |
+| cluster | nodes | list |
+| cluster | clusterrolebindings (`<name>`) | get |
+
+- The VMs go to a namespace of their own, `<namespace>-vms`, created and
+  deleted with the identity; a request that sets another VM namespace is
+  refused, and so is a VM namespace that already exists and belongs to
+  something else (`vm-namespace-taken`), or a namespace whose `-vms` name
+  would pass 63 characters (`vm-namespace-too-long`). The VM namespace is
+  deleted with all its content when the cluster is deleted: do not put
+  anything else in it. Not the cluster namespace: there
+  CAPHV would name the cloud provider token `<cluster>-token`, the name of
+  the RKE2 bootstrap token, read the wrong secret, and the cluster would
+  never be ready. Nothing is granted in the cluster namespace, which holds
+  the secrets of the cluster (bootstrap token, kubeconfig).
+- The cloud provider account `<name>` and its binding to
+  `harvesterhci.io:cloudprovider` are created by the console beforehand, so
+  the identity never needs `bind`. The token is a service account token
+  Secret, deleted with the cluster. Since the identity may create secrets
+  in the VM namespace, where that account lives, it can obtain a token of
+  the account, and so the rights of `harvesterhci.io:cloudprovider`: CAPHV
+  does exactly that to give the cloud provider its kubeconfig.
+- The console creates these objects with the identity of the person who
+  launches the creation. The pre-check of the window and of a plan asks the
+  server, in one batch of `SelfSubjectAccessReview`, whether this person may
+  create, update, read and delete each object and holds each right it
+  grants (`rights-missing`, `rights-unchecked`).
+- A CAPHV version whose source was not read has no rules: the restricted
+  identity is refused (`identity-rules-unknown`), never guessed. Cluster
+  names that would collide with the identity objects (`caphv-identity...`,
+  `harvester-ops-caphv-...`), and a namespace ending in `-vms`, are refused
+  (`identity-name-reserved`).
+- Clusters created before 2.5.0 keep the console identity; the details say
+  "Identity: console (all rights)".
+- The Harvester address given to the identity is read from
+  `kube-system/rke2-traefik` (fresh 1.9 install) or from
+  `kube-system/ingress-expose` (cluster upgraded from 1.8).
 
 ### Services on the created clusters (1.52.0)
 
@@ -2366,9 +2440,12 @@ API, through the Cluster API add-on provider for Helm (CAAPH v0.6.4):
 - Timestamped airgap bundles with an active marker, inspect, upload,
   download, and a Harvester version compatibility check.
 - `harvester-capi status | install | cleanup-legacy | inventory | check |
-  render | create | delete | services | service-check | service-deploy |
-  service-remove`, each with `--cluster` or `--kubeconfig`; `create` and
-  `service-deploy` exit 2 when the pre-check blocks. The manifests are rendered by
+  render | create | delete | state | services | service-check |
+  service-deploy | service-remove`, each with `--cluster` or
+  `--kubeconfig`; `create` and `service-deploy` exit 2 when the pre-check
+  blocks. 2.5.0: `create --identity restricted|console` (restricted by
+  default), `create --origin`, `check --many` (a JSON list of requests,
+  checked together), `state --name ns/name`. The manifests are rendered by
   `caphv-generate`, shipped with the console (taken from CAPHV at a fixed
   commit, see `bin/caphv-generate.PROVENANCE`).
 
@@ -2543,6 +2620,15 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   page (operator), or chained after an install or a batch (admin), as one
   tracked `deploy:<cluster>` action with stop, resume, dry run and no
   destruction. Command line: `bin/harvester-plans.py`.
+
+- **Cluster API and child clusters in plans (2.5.0)**: the **capi** phase
+  declares the Cluster API stack from the active bundle (Harvester 1.9 or
+  later), the **clusters** phase creates up to 16 child RKE2 clusters one
+  after another from named **cluster templates**, each with its own
+  restricted CAPHV identity (section 4). Capacity, pool addresses and the
+  rights of the person are checked for all the clusters together before
+  anything starts. Child actions are nested under the `deploy:` action in
+  Activity and in the dock.
 
 - **A machine that already carries a system is guarded (2.2.0)**: the
   install window lists what the BMC shows (UEFI boot entries of a loader

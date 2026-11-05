@@ -1,0 +1,23 @@
+# Plan enregistré par la 2.4.0 lors de son essai réel (planbm, console de la
+# tâche 6), recopié tel quel ; les deux phases désactivées à clés libres sont
+# ajoutées comme la 2.4.0 les acceptait (format 2.5+ non figé alors).
+name: planbm
+revision: 1
+description: 'planbm : installation, disponibilité, clé'
+variables:
+- equipe
+phases:
+  readiness:
+    enabled: true
+    timeout_minutes: 40
+  terraform:
+    enabled: true
+    templates:
+    - template: planbm-key
+  capi:
+    enabled: false
+    providers:
+      caaph: true
+  clusters:
+    enabled: false
+    pools: 2

@@ -262,7 +262,8 @@ def test_history_is_activity_filtered_on_bare_metal_actions(context, flask_serve
     page.locator('#tab-automation [data-bm-tab="history"]').click()
     rows = page.locator("#bm-history tr.bm-history-row")
     expect(rows).to_have_count(4)
-    assert sorted(set(asked)) == ["baremetal-", "bmc-power", "deploy"]
+    # 2.5.0 : les clusters enfants d'un plan (rangés sous leur déroulé)
+    assert sorted(set(asked)) == ["baremetal-", "bmc-power", "capi-cluster-create", "deploy"]
     tables = page.locator("#bm-history table.bm-history")
     expect(tables).to_have_count(2)                                    # en cours, puis passées
     expect(tables.nth(0)).to_contain_text("Install or join")

@@ -383,6 +383,41 @@ d'équilibrage du nouveau cluster n'a pas de destination, et la connexion
 aboutit sur le serveur d'API de Harvester. C'est normal jusqu'à ce que le
 plan de contrôle compte 1.
 
+### La suppression d'un cluster se termine par « identity of ns/nom: N object(s) kept » (2.5.0)
+
+Le `Cluster` est parti, mais des objets de son identité restreinte n'ont pu
+être ni lus ni supprimés, le plus souvent parce que l'identité Harvester de
+la personne qui l'a supprimé n'a pas `get` ou `delete` sur les rôles,
+liaisons, comptes de service ou secrets d'un des namespaces cités. Le
+namespace et le compte de l'identité sont gardés exprès : le compte porte
+la liste des namespaces annexes. Donnez le droit qui manque (ou demandez à
+quelqu'un qui l'a), puis supprimez à nouveau le cluster depuis Cluster API
+> Clusters ou par `harvester-capi delete --name ns/nom` : la suppression
+reprend sur l'identité et se termine.
+
+### Un cluster reste « Deleting » et le journal de CAPHV dit « forbidden » (2.5.0)
+
+CAPHV supprime le pool `<namespace>-<nom>-ippool` sans condition quand un
+cluster part, et un refus n'est pas une absence : sans ce droit, il
+recommence sans fin et le cluster ne disparaît jamais. L'identité
+restreinte détient ce droit ; il ne manque que si quelqu'un a modifié le
+ClusterRole `harvester-ops-caphv-<namespace>`. Comparez-le avec `kubectl
+auth can-i --list --as=system:serviceaccount:<ns>:caphv-identity` et le
+tableau de Capacités, section 4, et remettez la règle. La suppression
+reprend d'elle-même à la tentative suivante de CAPHV, qui espace ses
+tentatives après des erreurs répétées : sur le banc, elle est venue 8
+minutes après la correction (jusqu'à 17 minutes environ). Vu en réel :
+droit retiré, le `Cluster` est resté `Deleting` 10 minutes, avec `cannot
+delete resource "ippools"` dans le journal de CAPHV.
+
+### « the Harvester address is unknown » à la création d'un cluster (2.5.0)
+
+L'identité restreinte a besoin de l'adresse de Harvester. Elle est lue sur
+`kube-system/rke2-traefik` (installation neuve de 1.9), puis sur
+`kube-system/ingress-expose` (cluster mis à jour depuis 1.8). Si aucun des
+deux n'a d'adresse, vérifiez ces services sur le cluster (`kubectl -n
+kube-system get svc rke2-traefik ingress-expose`).
+
 ## Reprendre une extinction interrompue
 
 Si le script a été tué (Ctrl-C, perte SSH, ...) avec certains nodes éteints et d'autres encore up :

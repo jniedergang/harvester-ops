@@ -1591,6 +1591,12 @@ class ActionRun:
         # 2.0.0 : geste réversible (dossiers) : {"path": route d'annulation} ;
         # None = pas de bouton « Annuler »
         self.undo = None
+        # 2.5.0 (décision 174) : action parente (identifiant) d'une action
+        # fille, posée AVANT que la fille soit visible (_register_action) ;
+        # `children` : identifiants des filles en mémoire, ordre de lancement
+        self.parent = None
+        self.children = []
+        self._persisted = False
         self.proc = None
         self._cond = threading.Condition()
         self._closed = False
@@ -1670,6 +1676,8 @@ class ActionRun:
             "progress_current": self.progress_last,
             "result": dict(self.result),
             "cancel_requested": self.cancel_requested,
+            "parent": self.parent,
+            "children": list(self.children),
             # 2.0.0 : seulement pour une action qui sait s'annuler (dossiers)
             **({"undo": dict(self.undo)} if self.undo else {}),
             **_folder_resume(self.action, self.status, self.id),
@@ -1678,6 +1686,35 @@ class ActionRun:
 
 ACTIONS = {}  # run_id -> ActionRun
 ACTIONS_LOCK = threading.Lock()
+
+ACTION_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def _register_action(run, parent=None):
+    """2.5.0 : rend `run` visible (ACTIONS) avec son parent DÉJÀ posé : une
+    lecture concurrente ne voit jamais une fille sans parent. Le parent est
+    écrit en base dès sa première fille (statut en cours, jamais purgé),
+    pour que la rétention ne garde jamais une fille sans son parent.
+    À appeler SOUS ACTIONS_LOCK ; rend le parent à écrire (ou None), à
+    passer à _persist_parent une fois le verrou rendu."""
+    run.parent = parent or None
+    ACTIONS[run.id] = run
+    if not run.parent:
+        return None
+    p = ACTIONS.get(run.parent)
+    if p is None:
+        return None
+    p.children.append(run.id)
+    return None if p._persisted else p
+
+
+def _persist_parent(p):
+    if p is None:
+        return
+    try:
+        _actions_persist(p)
+    except Exception:              # noqa: BLE001 : la base ne bloque jamais une action
+        pass
 
 # v1.5.7: ACTIONS used to grow without bound across the process lifetime.
 # Now finished runs are evicted by a background GC thread once they've
@@ -1757,6 +1794,13 @@ def _actions_init_db():
         conn.execute("ALTER TABLE actions ADD COLUMN undo TEXT")
     except sqlite3.OperationalError:
         pass
+    # 2.5.0 (décision 174) : action parente d'une action fille ; NULL = premier
+    # niveau (toutes les lignes d'avant). Même migration additive, à chaud.
+    try:
+        conn.execute("ALTER TABLE actions ADD COLUMN parent TEXT")
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("CREATE INDEX IF NOT EXISTS actions_parent ON actions(parent)")
     conn.execute("CREATE INDEX IF NOT EXISTS actions_started ON actions(started_at DESC)")
     # v1.6.0: compound index for "recent actions per cluster" lookup
     # (the dock + activity tab queries by cluster + recency).
@@ -1780,12 +1824,13 @@ def _actions_persist(run):
         result_json = "{}"
     undo = getattr(run, "undo", None)
     undo_json = json.dumps(undo) if isinstance(undo, dict) and undo else None
+    run._persisted = True
     conn = sqlite3.connect(str(ACTIONS_DB))
     conn.execute("""
         INSERT INTO actions(id, action, cluster, status, exit_code,
                             started_at, ended_at, dry_run, cmd, events,
-                            error_summary, result, undo)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            error_summary, result, undo, parent)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
             exit_code=excluded.exit_code,
@@ -1796,18 +1841,36 @@ def _actions_persist(run):
             undo=excluded.undo
     """, (run.id, run.action, run.cluster, run.status, run.exit_code,
           run.started_at, run.ended_at, int(bool(run.dry_run)),
-          cmd_str, events_json, run.error_summary, result_json, undo_json))
+          cmd_str, events_json, run.error_summary, result_json, undo_json,
+          getattr(run, "parent", None)))
     conn.commit()
-    # Cap history at 500 rows (drop oldest done/error)
-    conn.execute("""
-        DELETE FROM actions WHERE id IN (
-            SELECT id FROM actions
-            WHERE status NOT IN ('starting','running')
-            ORDER BY started_at DESC LIMIT -1 OFFSET 500
-        )
-    """)
-    conn.commit()
+    _actions_purge(conn)
     conn.close()
+
+
+ACTIONS_KEEP = 500
+
+
+def _actions_purge(conn, keep=None):
+    """Garde les `keep` (500) dernières actions finies DE PREMIER NIVEAU ;
+    les filles partent avec leur parent (trois niveaux possibles), jamais
+    seules. Une fille dont le parent n'est pas en base compte comme une
+    action de premier niveau (base écrite avant la 2.5.0, parent perdu)."""
+    keep = ACTIONS_KEEP if keep is None else keep
+    conn.execute("""
+        WITH RECURSIVE doomed(id) AS (
+            SELECT id FROM (
+                SELECT id FROM actions a
+                WHERE status NOT IN ('starting','running')
+                  AND (parent IS NULL
+                       OR NOT EXISTS (SELECT 1 FROM actions p WHERE p.id = a.parent))
+                ORDER BY started_at DESC LIMIT -1 OFFSET ?)
+            UNION
+            SELECT c.id FROM actions c JOIN doomed d ON c.parent = d.id
+        )
+        DELETE FROM actions WHERE id IN (SELECT id FROM doomed)
+    """, (int(keep),))
+    conn.commit()
 
 
 def _row_result(raw):
@@ -1878,11 +1941,33 @@ def _actions_load_history():
                 run.result = _row_result(row["result"])
             if "undo" in row.keys():
                 run.undo = _row_undo(row["undo"])
+            if "parent" in row.keys():
+                run.parent = row["parent"]
+            run._persisted = True
             run._closed = True
             ACTIONS[row["id"]] = run
             restored += 1
         except Exception as e:
             log_actions.warning("failed to restore %s: %s", row["id"], e)
+    # 2.5.0 : filles relues rattachées à leur parent, ordre de lancement
+    for run in sorted(ACTIONS.values(), key=lambda r: r.started_at):
+        p = ACTIONS.get(run.parent) if run.parent else None
+        if p is not None and run.id not in p.children:
+            p.children.append(run.id)
+    # un parent écrit en cours (dès sa première fille) et tué par le
+    # redémarrage : la base le dit interrompu, comme la mémoire
+    interrupted = [r.id for r in ACTIONS.values() if r.status == "interrupted"]
+    if interrupted:
+        try:
+            conn = sqlite3.connect(str(ACTIONS_DB))
+            conn.executemany(
+                "UPDATE actions SET status='interrupted', exit_code=-1, ended_at=started_at"
+                " WHERE id=? AND status IN ('starting','running')",
+                [(i,) for i in interrupted])
+            conn.commit()
+            conn.close()
+        except sqlite3.Error:
+            pass
     if restored:
         log_actions.info("restored %d actions from %s", restored, ACTIONS_DB)
 
@@ -1896,7 +1981,7 @@ _actions_load_history()
 # /api/action/<id> and /api/stream/<id> for runs no longer in memory.
 _ACTIONS_LIST_COLUMNS = ("id", "action", "cluster", "status", "exit_code",
                          "started_at", "ended_at", "dry_run", "error_summary",
-                         "result", "undo")
+                         "result", "undo", "parent")
 
 
 _FOLDER_RESUMABLE = ("error", "interrupted")
@@ -1937,7 +2022,7 @@ def _row_finish(d):
 
 
 def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
-                       q=None):
+                       q=None, parent=None, top_level=False):
     """Most recent persisted runs, WITHOUT the events blob (list views).
 
     Les filtres s'appliquent EN SQL, pas après coup sur la page renvoyée :
@@ -1959,6 +2044,14 @@ def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
         where.append("(id LIKE ? OR action LIKE ? OR cluster LIKE ?"
                      " OR IFNULL(error_summary,'') LIKE ?)")
         params += [f"%{q}%"] * 4
+    # 2.5.0 : filles d'une action, ou premier niveau seulement (une fille dont
+    # le parent n'est pas en base compte comme une action de premier niveau)
+    if parent:
+        where.append("parent = ?")
+        params.append(parent)
+    elif top_level:
+        where.append("(parent IS NULL OR NOT EXISTS"
+                     " (SELECT 1 FROM actions p WHERE p.id = actions.parent))")
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     try:
         conn = sqlite3.connect(str(ACTIONS_DB))
@@ -1972,6 +2065,41 @@ def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
     except sqlite3.Error:
         return []
     return [_row_finish({k: r[k] for k in _ACTIONS_LIST_COLUMNS}) for r in rows]
+
+
+def _actions_db_children(ids):
+    """{parent: {identifiants des filles en base}} pour `ids`."""
+    ids = [i for i in ids if i]
+    out = {}
+    if not ids:
+        return out
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB))
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            for p, c in conn.execute(
+                    "SELECT parent, id FROM actions WHERE parent IN ({})"
+                    .format(",".join("?" * len(chunk))), chunk):
+                out.setdefault(p, set()).add(c)
+        conn.close()
+    except sqlite3.Error:
+        pass
+    return out
+
+
+def _actions_db_known(ids):
+    """Les identifiants de `ids` présents en base."""
+    ids = [i for i in ids if i]
+    if not ids:
+        return set()
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB))
+        found = {r[0] for r in conn.execute(
+            "SELECT id FROM actions WHERE id IN ({})".format(",".join("?" * len(ids))), ids)}
+        conn.close()
+        return found
+    except sqlite3.Error:
+        return set()
 
 
 def _actions_db_count():
@@ -8191,7 +8319,8 @@ def _baremetal_batch_steps(run, plan, concurrency):
             opts = data
         with app.app_context():
             action_id, busy = _bm_track(f"baremetal-install:{opts['hostname']}",
-                                        opts["bmc_host"], _baremetal_install_runner, opts)
+                                        opts["bmc_host"], _baremetal_install_runner, opts,
+                                        parent=run.id)
         if busy:
             raise RuntimeError(f"BMC {opts['bmc_host']} is busy")
         with lock:
@@ -8243,11 +8372,12 @@ def _bm_batch_prepare(prof, batch, secrets_, confirms=None, join_all=False):
     return plan, None, None
 
 
-def _bm_batch_launch(plan, cluster_name, concurrency=_bmp.DEFAULT_CONCURRENCY):
-    """Lance l'action parente d'une série préparée ; rend son identifiant."""
+def _bm_batch_launch(plan, cluster_name, concurrency=_bmp.DEFAULT_CONCURRENCY, parent=None):
+    """Lance l'action parente d'une série préparée ; rend son identifiant.
+    2.5.0 : `parent`, le déroulé de plan qui la lance."""
     concurrency = max(1, min(4, int(concurrency or _bmp.DEFAULT_CONCURRENCY)))
     return track_action(f"baremetal-batch:{cluster_name}", "(local)",
-                        _baremetal_batch_runner, plan, concurrency)
+                        _baremetal_batch_runner, plan, concurrency, parent=parent)
 
 
 def _bm_batch_start(prof, batch, secrets_, concurrency=_bmp.DEFAULT_CONCURRENCY, confirms=None):
@@ -8512,9 +8642,10 @@ def _bm_busy(host):
                      and r.status in ("starting", "running")), None)
 
 
-def _bm_track(label, host, worker, opts):
+def _bm_track(label, host, worker, opts, parent=None):
     """`track_action` refusé si le BMC est déjà piloté : (action_id, None)
-    ou (None, réponse 409). Contrôle et inscription sous un même verrou."""
+    ou (None, réponse 409). Contrôle et inscription sous un même verrou.
+    2.5.0 : `parent`, l'action parente (série, déroulé de plan)."""
     with _BM_LAUNCH_LOCK:
         busy = _bm_busy(host)
         if busy:
@@ -8522,7 +8653,7 @@ def _bm_track(label, host, worker, opts):
                 "error": f"{busy.action} is already driving the BMC {host} "
                          f"(action {busy.id}); wait for it to end or cancel it",
                 "running": busy.id, "running_action": busy.action}), 409)
-        action_id = track_action(label, "(local)", worker, opts)
+        action_id = track_action(label, "(local)", worker, opts, parent=parent)
         with ACTIONS_LOCK:
             run = ACTIONS.get(action_id)
             if run is not None:
@@ -13500,27 +13631,48 @@ def api_activity():
     """Return current and historical activity, optionally filtered.
 
     Query params: `cluster`, `status`, `action` (substring), `q` (free
-    text), `limit`.
+    text), `limit`. 2.5.0 (décision 174) : sans filtre, les actions de
+    premier niveau seulement, chacune avec `children_count` ; `?parent=<id>`
+    rend les filles d'une action (même forme, ordre de lancement) ; avec un
+    filtre, liste à plat où chaque fille porte son `parent`.
     """
     try:
         limit = max(1, min(int(request.args.get("limit", 50)), 500))
     except ValueError:
         limit = 50
+    f_parent = (request.args.get("parent") or "").strip()
+    if f_parent and not ACTION_ID_RE.match(f_parent):
+        return jsonify({"error": "parent must be an action identifier (12 hexadecimal characters)"}), 400
     f_cluster = (request.args.get("cluster") or "").strip()
     f_status = (request.args.get("status") or "").strip()
     f_action = (request.args.get("action") or "").strip()
     f_q = (request.args.get("q") or "").strip()
     filtering = any((f_cluster, f_status, f_action, f_q))
+    nested = not filtering
 
     def keep(e):
         return _activity_matches(e, f_cluster, f_status, f_action, f_q)
 
     with ACTIONS_LOCK:
-        in_progress = [a.to_dict() for a in ACTIONS.values()
-                       if a.status in ("starting", "running")]
-        done = [a.to_dict() for a in ACTIONS.values()
-                if a.status not in ("starting", "running")]
-        mem_ids = {a["id"] for a in in_progress} | {a["id"] for a in done}
+        runs = list(ACTIONS.values())
+        mem_ids = {a.id for a in runs}
+        if f_parent:
+            runs = [a for a in runs if a.parent == f_parent]
+        mem_children = {}
+        for a in ACTIONS.values():
+            if a.parent:
+                mem_children.setdefault(a.parent, set()).add(a.id)
+        in_progress = [a.to_dict() for a in runs if a.status in ("starting", "running")]
+        done = [a.to_dict() for a in runs if a.status not in ("starting", "running")]
+        # le dock montre la fille en cours d'une action parente
+        current = {}
+        for d in in_progress:
+            kids = [ACTIONS.get(c) for c in d.get("children") or []]
+            kids = [k for k in kids if k is not None]
+            if kids:
+                live = [k for k in kids if k.status in ("starting", "running")]
+                k = (live or kids)[-1]
+                current[d["id"]] = {"id": k.id, "action": k.action, "status": k.status}
     in_progress.sort(key=lambda a: a["started_at"], reverse=True)
     # v1.6.5: merge the SQLite history (last 500 runs) so completed actions
     # survive Flask restarts and the in-memory GC. In-memory entries win on
@@ -13529,13 +13681,28 @@ def api_activity():
     # dans la page déjà chargée.
     for row in _actions_db_recent(limit, cluster=f_cluster or None,
                                   status=f_status or None,
-                                  action=f_action or None, q=f_q or None):
+                                  action=f_action or None, q=f_q or None,
+                                  parent=f_parent or None,
+                                  top_level=nested and not f_parent):
         if row["id"] not in mem_ids:
             done.append(row)
+    if nested and not f_parent:
+        # premier niveau : une fille dont le parent n'existe plus nulle part
+        # (base d'avant la 2.5.0, parent perdu) y reste visible
+        orphans = {d["parent"] for d in in_progress + done if d.get("parent")} - mem_ids
+        known = mem_ids | _actions_db_known(sorted(orphans))
+        in_progress = [d for d in in_progress if not d.get("parent") or d["parent"] not in known]
+        done = [d for d in done if not d.get("parent") or d["parent"] not in known]
+    if nested:
+        db_children = _actions_db_children([d["id"] for d in in_progress + done])
+        for d in in_progress + done:
+            d["children_count"] = len(mem_children.get(d["id"], set()) | db_children.get(d["id"], set()))
+            if d["id"] in current:
+                d["child_current"] = current[d["id"]]
 
     # Filesystem log files (CLI runs + previous Flask sessions)
     all_logs = []
-    if LOG_DIR.exists():
+    if LOG_DIR.exists() and not f_parent:
         for p in sorted(LOG_DIR.glob("*.log"), reverse=True)[:200]:
             try:
                 all_logs.append(_log_file_entry(p, p.stat()))
@@ -13550,7 +13717,12 @@ def api_activity():
     in_progress = [a for a in in_progress if keep(a)]
     done = [a for a in done if keep(a)]
     fs_logs = [f for f in all_logs if keep(f)][:100]
-    done.sort(key=lambda a: a.get("ended_at") or a["started_at"], reverse=True)
+    if f_parent:
+        # filles : ordre de lancement
+        in_progress.sort(key=lambda a: a["started_at"])
+        done.sort(key=lambda a: a["started_at"])
+    else:
+        done.sort(key=lambda a: a.get("ended_at") or a["started_at"], reverse=True)
 
     # Valeurs proposables dans les menus de filtre : celles réellement
     # présentes, y compris pour un cluster retiré de la configuration dont
@@ -13561,7 +13733,8 @@ def api_activity():
         "actions_done": done[:limit],
         "log_files": fs_logs,
         "filters": {"cluster": f_cluster, "status": f_status,
-                    "action": f_action, "q": f_q, "active": filtering},
+                    "action": f_action, "q": f_q, "active": filtering,
+                    "parent": f_parent},
         "matched": len(in_progress) + len(done[:limit]) + len(fs_logs),
         "total": total,
         "facets": facets,
@@ -13682,15 +13855,17 @@ def api_doc_render(lang, filename):
 # -----------------------------------------------------------------------------
 # Per-VM runStrategy patch
 # -----------------------------------------------------------------------------
-def track_action(label, cluster, worker, *worker_args):
+def track_action(label, cluster, worker, *worker_args, parent=None):
     """Create an ActionRun and spawn the worker in a daemon thread.
     Returns the action_id (string) immediately. The worker must take
-    (run, *args) and eventually call run.close().
+    (run, *args) and eventually call run.close(). 2.5.0 : `parent`,
+    l'action parente, posée avant que l'action soit visible.
     """
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, label, cluster, [], dry_run=False)
     with ACTIONS_LOCK:
-        ACTIONS[run_id] = run
+        pending = _register_action(run, parent)
+    _persist_parent(pending)
     READ_SHARE.invalidate("_activity")
     threading.Thread(target=worker, args=(run, *worker_args), daemon=True).start()
     return run_id
@@ -16891,6 +17066,8 @@ def api_capi_bundles_list():
     return jsonify({
         "bundles": items,
         "active": active_name or "",
+        # 2.5.0 : versions que déclarerait la phase capi d'un plan
+        "active_providers": _capi_provider_names(_capi_bundle_providers()),
         "bundle_dir": str(CAPI_BUNDLE_DIR),
         "total_used": total_used,
         "disk_free": disk["free_bytes"],
@@ -17149,6 +17326,8 @@ def api_capi_install(cluster):
 # suppression. Voir docs/design/2026-09-25-creation-cluster-capi.md.
 # -----------------------------------------------------------------------------
 import capi_cluster as _cc  # noqa: E402
+import capi_identity as _ci  # noqa: E402
+import capi_stack as _cs  # noqa: E402
 
 CAPI_SCRIPT = "harvester-capi.py"
 _CAPI_INVENTORY_CACHE = {}          # cluster -> (horodatage, réponse)
@@ -17211,14 +17390,40 @@ def _capi_components_dir():
     return dest
 
 
-def _capi_base(cluster, sub):
+def _capi_cmd(kc, sub):
+    """La commande de l'outil pour un kubeconfig, ou None s'il n'est pas
+    déployé. Seul endroit qui la construit (routes et chaîne d'un plan)."""
     script = _capi_script()
     if script is None:
+        return None
+    return [sys.executable, str(script), sub, "--kubeconfig", kc]
+
+
+def _capi_bundle_providers():
+    """Fournisseurs Turtles du paquet actif (turtles.json), [] sans paquet
+    ou sans fournisseurs."""
+    comp = _capi_components_dir()
+    if comp is None:
+        return []
+    try:
+        return _cs.load_components(comp).get("providers") or []
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def _capi_provider_names(providers):
+    """`type/nom version` de chaque fournisseur, pour l'affichage et le
+    résultat de la phase capi."""
+    return [f"{p.get('type')}/{p.get('name')} {p.get('version')}" for p in providers or []]
+
+
+def _capi_base(cluster, sub):
+    if _capi_script() is None:
         return None, (jsonify({"error": f"{CAPI_SCRIPT} not deployed"}), 503)
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
-    return [sys.executable, str(script), sub, "--kubeconfig", kc], None
+    return _capi_cmd(kc, sub), None
 
 
 def _capi_run_json(cmd, spec=None, timeout=180):
@@ -17292,6 +17497,9 @@ def api_capi_inventory(cluster):
     if err:
         return err
     out, _rc = got
+    # 2.5.0 : les nœuds Longhorn bruts ne servent qu'au contrôle de N
+    # clusters (check --many), pas au formulaire
+    out.pop("longhorn", None)
     _CAPI_INVENTORY_CACHE[cluster] = (time.time(), out)
     return jsonify(out)
 
@@ -17340,9 +17548,12 @@ def api_capi_cluster_preview(cluster):
     return jsonify({"yaml": proc.stdout})
 
 
+_UNSET = object()
+
+
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
                 capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
-                setup=None):
+                setup=None, parent=None, cluster_user=_UNSET):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
@@ -17357,7 +17568,10 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     `setup(run)` règle l'action (rôle, délai avant SIGKILL...) AVANT qu'elle
     soit visible et que son fil parte ; le contrôle d'occupation et l'ajout
     à ACTIONS se font sous le même verrou (deux gestes simultanés sur le
-    même plan : un seul passe)."""
+    même plan : un seul passe). 2.5.0 : `parent`, l'action parente (chaîne
+    d'un plan), posée avant que l'action soit visible ; `cluster_user`
+    passé par un appelant hors requête (identité figée au déclenchement),
+    sinon lu dans la requête."""
     wd = _capi_work_dir()
     spec_file = None
     if spec is not None:
@@ -17374,14 +17588,15 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
                        and not a.partition("=")[2].startswith("/")
                        and a not in ("--kubeconfig", "--db")]
     run = ActionRun(run_id, label, cluster, public, dry_run=dry_run)
-    run.cluster_user = (current_cluster_identity() or {}).get("user")
+    run.cluster_user = ((current_cluster_identity() or {}).get("user") if cluster_user is _UNSET
+                        else cluster_user)
     if setup is not None:
         setup(run)
     with ACTIONS_LOCK:
         busy = (_transfer_busy(tuple(busy_clusters or (cluster,)), label, prefix=busy_prefix)
                 if check_busy else None)
-        if not busy:
-            ACTIONS[run_id] = run
+        pending = None if busy else _register_action(run, parent)
+    _persist_parent(pending)
     if busy:
         run.status = "cancelled"               # jamais lancée : rien à persister
         run._closed = True
@@ -17405,9 +17620,29 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     return run, None
 
 
-def _capi_action(cluster, label, cmd, spec=None, dry_run=False):
+def _capi_action(cluster, label, cmd, spec=None, dry_run=False, parent=None, cluster_user=_UNSET):
     return _cli_action(cluster, label, cmd, "harvester-capi", spec, dry_run,
-                       after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None))
+                       after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None),
+                       parent=parent, cluster_user=cluster_user)
+
+
+def _capi_launch(cluster, kc, sub, args, spec=None, parent=None, cluster_user=None, label=None,
+                 dry_run=False):
+    """Lancement hors requête (chaîne d'un plan, 2.5.0) : ne lit ni la
+    requête, ni la session, ni l'identité de la personne ; `kc` et
+    `cluster_user` sont figés au déclenchement. Même commande que les routes
+    (_capi_cmd), même action suivie (_capi_action). (action, None) ou
+    (None, {"error", ...})."""
+    cmd = _capi_cmd(kc, sub)
+    if cmd is None:
+        return None, {"error": f"{CAPI_SCRIPT} not deployed"}
+    with app.app_context():                    # réponse d'occupation (jsonify) hors requête
+        run, err = _capi_action(cluster, label or f"capi-{sub}:{cluster}", cmd + list(args), spec, dry_run,
+                                parent=parent, cluster_user=cluster_user)
+    if err:
+        body = err[0].get_json(silent=True) if hasattr(err[0], "get_json") else None
+        return None, body or {"error": "refused"}
+    return run, None
 
 
 # ---------------------------------------------------------------------------
@@ -21692,9 +21927,21 @@ def api_capi_cluster_details(cluster, namespace, name):
                 })
         except Exception:
             pass
+    # 2.5.0 (décision 168) : identité restreinte (compte étiqueté pour ce
+    # cluster) ou kubeconfig de la console (clusters d'avant la 2.5.0)
+    rc3, sa_out, _ = kc_run("-n", namespace, "get", "serviceaccount", _ci.IDENTITY, "-o", "json")
+    identity = "console"
+    if rc3 == 0:
+        try:
+            lab = json.loads(sa_out).get("metadata", {}).get("labels") or {}
+            if lab.get(_ci.L_CLUSTER) == name and lab.get(_ci.L_NAMESPACE) == namespace:
+                identity = "restricted"
+        except ValueError:
+            pass
     return jsonify({
         "name": name,
         "namespace": namespace,
+        "identity": identity,
         "phase": cl.get("status", {}).get("phase", ""),
         # v1.48.0 : le cœur de Turtles répond en v1beta2 (plus de
         # `status.controlPlaneReady`)
@@ -21889,6 +22136,16 @@ def api_capi_uninstall(cluster):
                               current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"error": "kubeconfig missing"}), 400
+    # Revue 2.5.0 (D2) : ce retrait d'avant Turtles supprime des namespaces
+    # et des images, pas les objets CAPIProvider ; sur une pile Turtles il
+    # casserait ce que Harvester et les plans ont déclaré. Refusé, le bouton
+    # est grisé avec la raison (réécriture prévue).
+    stack_cmd, err = _capi_base(cluster, "status")
+    if not err:
+        got, _err = _capi_run_json(stack_cmd + ["--json"], timeout=90)
+        if got and (got[0] or {}).get("turtles"):
+            return jsonify({"error": "this stack is managed by Rancher Turtles: the legacy uninstall "
+                                     "would break it", "code": "turtles-stack"}), 409
     data = request.get_json(force=True, silent=True) or {}
     dry_run = bool(data.get("dry_run", False))
     keep_cm = bool(data.get("keep_cert_manager", True))
@@ -28643,7 +28900,7 @@ class TfLaunchError(Exception):
 
 
 def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster_user=None,
-                    target_kind="harvester", holder=None, role=None):
+                    target_kind="harvester", holder=None, role=None, parent=None):
     """Lance plan, apply ou destroy d'une déclaration gardée par la console,
     en action suivie ; rend (identifiant de l'action, empreinte du contenu).
     `mode` : plan | apply | destroy | destroy-plan. 2.3.0 : `target_kind`
@@ -28715,7 +28972,8 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
     # v1.55.0 : l'historique d'une déclaration retrouve ses actions par là.
     run.result = {"declaration_id": decl["id"], "by": user, "mode": mode}
     with ACTIONS_LOCK:
-        ACTIONS[run_id] = run
+        pending = _register_action(run, parent)
+    _persist_parent(pending)
     threading.Thread(target=_tf_decl_runner,
                      args=(run, cluster, kc, decl, rendered, mode, h, bool(plan_hash), user),
                      daemon=True).start()
@@ -32018,7 +32276,23 @@ DEPLOY_FINDING_LEVELS = {
     "admin-kind": "blocking", "forbidden-construct": "blocking",
     "template-newer": "warning", "decl-differs": "warning", "plan-changed": "warning",
     "decl-exists": "info", "readiness-later": "info",
+    # 2.5.0 : phases capi et clusters
+    "capi-bundle-missing": "blocking", "capi-bundle-no-turtles": "blocking",
+    "capi-needs-harvester-1.9": "blocking", "capi-version-differs": "blocking", "capi-install-admin": "blocking",
+    "capi-stack-missing": "blocking", "capi-template-missing": "blocking",
+    "cluster-var-missing": "blocking", "cluster-name-taken": "blocking", "capi-check-failed": "blocking",
+    "cluster-failed": "warning",
+    "capi-later": "info", "cluster-exists": "info", "refs-later": "info",
 }
+# Constats de `harvester-capi check --many` repris dans la phase clusters :
+# niveau de l'outil -> niveau d'un lancement
+DEPLOY_CHECK_LEVELS = {"block": "blocking", "warn": "warning", "ok": "info"}
+# Constats d'une référence absente, et les clés de la demande qu'ils visent :
+# désignée par une variable d'un modèle de cluster alors que la phase
+# Terraform est activée, elle peut être créée par elle (`refs-later`)
+DEPLOY_REF_KEYS = {"image-missing": ("image",), "keypair-missing": ("ssh_keypair",),
+                   "network-missing": ("network", "extra_networks"),
+                   "storage-class-missing": ("extra_disk_class",), "pool-missing": ("ip_pool", "ip_pool_refs")}
 
 
 def _tf_template_field_type(kind, path):
@@ -32305,11 +32579,200 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
     if (phases.get("readiness") or {}).get("enabled"):
         findings.append(_deploy_finding("readiness-later", "readiness",
                                         "readiness is checked again when the phase starts"))
-    estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) + (30 if install else 0)
-    summary = {"declarations": decls, "estimate_minutes": estimate}
+    capi = _deploy_capi_prepare(kc, plan, values, install, findings, role=role)
+    estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) \
+        + (30 if install else 0) + capi["estimate"]
+    summary = {"declarations": decls, "estimate_minutes": estimate, "capi": capi["capi"],
+               "clusters": capi["summary"]}
     ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
-           "update_differing": bool(update_differing)}
+           "update_differing": bool(update_differing), "clusters": capi["entries"]}
     return findings, summary, ctx
+
+
+def _deploy_capi_json(kc, sub, args, spec=None, timeout=180):
+    """Sous-commande en lecture de harvester-capi (même commande que les
+    routes) : (sortie JSON, code, None) ou (None, None, message d'erreur).
+    Hors requête comme dans la requête."""
+    cmd = _capi_cmd(kc, sub)
+    if cmd is None:
+        return None, None, f"{CAPI_SCRIPT} not deployed"
+    with app.app_context():
+        got, err = _capi_run_json(cmd + list(args), spec=spec, timeout=timeout)
+    if err:
+        body = err[0].get_json(silent=True) or {}
+        return None, None, str(body.get("error") or "failed")[:300]
+    return got[0], got[1], None
+
+
+def _deploy_capi_args():
+    comp = _capi_components_dir()
+    return ["--components", str(comp)] if comp else []
+
+
+def _deploy_stack(kc):
+    """(état de la pile Cluster API, None) ou (None, message)."""
+    out, _rc, err = _deploy_capi_json(kc, "status", _deploy_capi_args() + ["--json"], timeout=90)
+    return (out, None) if err is None and isinstance(out, dict) else (None, err or "unreadable")
+
+
+def _deploy_cluster_brief(kc, name):
+    """`harvester-capi state` d'un cluster enfant (namespace = nom), ou None
+    si la lecture échoue."""
+    out, _rc, err = _deploy_capi_json(kc, "state", ["--name", f"{name}/{name}", "--json"], timeout=60)
+    return out if err is None and isinstance(out, dict) else None
+
+
+def _deploy_cluster_is_ours(brief, plan_name, template):
+    """Vrai si le cluster lu porte l'origine de ce plan et de ce modèle
+    (seule règle de reprise, décision 176 ; contrôle et déroulé)."""
+    o = (brief or {}).get("origin") or {}
+    return o.get("plan") == plan_name and o.get("template") == template
+
+
+def _deploy_check_detail(f):
+    facts = f.get("facts") or {}
+    text = ", ".join(f"{k}={v}" for k, v in facts.items() if v not in (None, ""))
+    return (f"{f['cluster']}: " if f.get("cluster") else "") + (text or f.get("code", ""))
+
+
+def _deploy_check_many(kc, specs):
+    """`harvester-capi check --many` (identité restreinte) : (sortie, None)
+    ou (None, message)."""
+    out, _rc, err = _deploy_capi_json(kc, "check", _deploy_capi_args() + [
+        "--many", "--spec", "-", "--identity", "restricted", "--json"], spec=specs, timeout=180)
+    return (out, None) if err is None and isinstance(out, dict) else (None, err or "unreadable")
+
+
+def _deploy_capi_install_refused(role):
+    """Vrai si ce rôle ne peut pas installer la pile Cluster API : réservé à
+    l'admin, comme Cluster API > Installation (`/install`, décision D3 de la
+    revue 2.5.0). None : ligne de commande locale."""
+    return role is not None and ROLE_RANK.get(role, 0) < ROLE_RANK["admin"]
+
+
+CAPI_INSTALL_ADMIN = "capi-install-admin"
+
+
+def _deploy_capi_prepare(kc, plan, values, install, findings, role=None):
+    """Constats et contexte des phases capi et clusters (2.5.0), lecture
+    seule : paquet actif, version de Harvester et pile (décisions 117,
+    171), modèles et rendu de chaque entrée, clusters déjà présents (repris
+    ou nom pris), puis `check --many` pour ceux à créer (capacité, pools,
+    droits, identité). Rend {"capi", "summary", "entries", "estimate"}."""
+    phases = plan["phases"]
+    capi_on = bool((phases.get("capi") or {}).get("enabled"))
+    cl_on = bool((phases.get("clusters") or {}).get("enabled")) and bool(_dpl.plan_clusters(plan))
+    out = {"capi": None, "summary": [], "entries": [], "estimate": 0}
+    if not (capi_on or cl_on):
+        return out
+    providers = _capi_bundle_providers()
+    if _capi_bundle_active_path() is None:
+        findings.append(_deploy_finding("capi-bundle-missing", "capi", "no active Cluster API bundle"))
+    elif not providers:
+        findings.append(_deploy_finding("capi-bundle-no-turtles", "capi",
+                                        "the active bundle has no Turtles providers"))
+    stack = None
+    if install:
+        findings.append(_deploy_finding("capi-later", "capi", "the Harvester version and the Cluster API "
+                                                              "stack are checked when the phase starts"))
+    elif kc:
+        stack, err = _deploy_stack(kc)
+        if err:
+            findings.append(_deploy_finding("capi-check-failed", "capi", f"stack: {err}"))
+    if stack:
+        ver = stack.get("harvester_version")
+        if _drd.harvester_too_old(ver):
+            findings.append(_deploy_finding("capi-needs-harvester-1.9", "capi",
+                                            f"Harvester {ver}: Cluster API needs v1.9 or later"))
+        for d in stack.get("differs") or []:
+            findings.append(_deploy_finding(
+                "capi-version-differs", "capi", f"{d['provider']} {d['installed']} is installed, the bundle has "
+                f"{d['bundle']}: a plan never upgrades it (Cluster API > Installation)"))
+        if not stack.get("ready") and not stack.get("differs") and cl_on and not capi_on:
+            findings.append(_deploy_finding("capi-stack-missing", "clusters",
+                                            "missing: " + ", ".join(stack.get("missing") or [])))
+    if capi_on:
+        out["capi"] = {"providers": _capi_provider_names(providers), "ready": bool(stack and stack.get("ready")),
+                       "installed_version_differs": bool(stack and stack.get("differs"))}
+        if not (stack and stack.get("ready")):
+            out["estimate"] += 2
+        if _deploy_capi_install_refused(role) and (install or (stack and not stack.get("ready")
+                                                                and not stack.get("differs"))):
+            # la pile est à installer : geste d'admin ; déjà prête, la phase
+            # ne fait que la vérifier et reste permise à l'opérateur
+            findings.append(_deploy_finding(
+                CAPI_INSTALL_ADMIN, "capi", "the Cluster API stack must be installed: the 'admin' role is "
+                "needed, as for Cluster API > Installation"))
+    if not cl_on:
+        return out
+    state = _deploy_state()
+    tf_on = bool((phases.get("terraform") or {}).get("enabled") and _dpl.plan_templates(plan))
+    loaded, names = {}, {}
+    for e in _dpl.plan_clusters(plan):
+        if e["template"] not in loaded:
+            loaded[e["template"]] = _dpl.load_capi_template(state, e["template"])
+        t = loaded[e["template"]]
+        if t is None:
+            findings.append(_deploy_finding("capi-template-missing", "clusters",
+                                            f"{e['template']} (cluster {e['name']})"))
+            continue
+        try:
+            name = _dpl.render_cluster_name(e["name"], values)
+            spec = _dpl.render_capi_template(t, values, name)
+        except _dpl.ProfileError as ex:
+            for where, why in ex.errors:
+                code = "cluster-var-missing" if "missing variable" in why else "var-invalid"
+                findings.append(_deploy_finding(code, "clusters", f"{where}: {why}"))
+            continue
+        names[e["name"]] = name
+        out["entries"].append({"name": name, "template": t["name"], "template_revision": t["revision"],
+                               "spec": spec, "raw": t["spec"],
+                               "depends_on": [names.get(d, d) for d in e.get("depends_on") or []]})
+    absent = []
+    for e in out["entries"]:
+        vms = int(e["spec"].get("cp_replicas") or 0) + int(e["spec"].get("worker_replicas") or 0)
+        row = {"name": e["name"], "template": e["template"], "vms": vms, "exists": False}
+        b = None
+        if not install and kc:
+            b = _deploy_cluster_brief(kc, e["name"])
+            if b is None:
+                findings.append(_deploy_finding("capi-check-failed", "clusters", f"{e['name']}: state unreadable"))
+        if b and b.get("present"):
+            row["exists"] = True
+            if not _deploy_cluster_is_ours(b, plan["name"], e["template"]):
+                findings.append(_deploy_finding("cluster-name-taken", "clusters",
+                                                f"{e['name']} exists and was not made by this plan and template"))
+            elif (b.get("state") or {}).get("failed"):
+                findings.append(_deploy_finding("cluster-failed", "clusters", f"{e['name']} failed: delete it, "
+                                                "then resume (the plan never deletes a cluster)"))
+            else:
+                findings.append(_deploy_finding("cluster-exists", "clusters",
+                                                f"{e['name']} exists: it is adopted and waited for"))
+        else:
+            absent.append(e)
+            out["estimate"] += 5 + (10 if e["spec"].get("worker_replicas") else 0)
+        out["summary"].append(row)
+    if install or not kc or not absent or not providers:
+        return out
+    res, err = _deploy_check_many(kc, [e["spec"] for e in absent])
+    if err:
+        findings.append(_deploy_finding("capi-check-failed", "clusters", f"check: {err}"))
+        return out
+    by_ref = {f"{e['name']}/{e['name']}": e for e in absent}
+    for f in res.get("findings") or []:
+        if f.get("code") == "stack-not-ready":
+            continue                            # dit par la phase capi ou capi-stack-missing
+        if f.get("cluster") and f.get("level") == "ok":
+            continue                            # informations par cluster : le résumé de flotte suffit
+        level = DEPLOY_CHECK_LEVELS.get(f.get("level"), "blocking")
+        code = f.get("code") or "check"
+        e = by_ref.get(f.get("cluster") or "")
+        if tf_on and e and code in DEPLOY_REF_KEYS and any(
+                _bmp.variables_in(e["raw"].get(k)) for k in DEPLOY_REF_KEYS[code]):
+            code, level = "refs-later", "info"
+            f = dict(f, facts=dict(f.get("facts") or {}, check=f.get("code")))
+        findings.append({"code": code, "level": level, "phase": "clusters", "detail": _deploy_check_detail(f)})
+    return out
 
 
 def _deploy_resources_differ(rendered, existing):
@@ -32395,6 +32858,36 @@ def _deploy_read_cluster(kc, cluster):
         return {k: f.result() for k, f in futs.items()}
 
 
+def _deploy_read_capi(kc, cluster):
+    """Lectures Cluster API de la disponibilité (2.5.0, décision 155) :
+    version de Harvester, services rke2-traefik et ingress-expose, CAPIProvider ; None pour une
+    lecture en échec."""
+    def setting():
+        d = _kubectl_json(kc, "get", "settings.harvesterhci.io", "server-version", timeout=20, cluster=cluster)
+        return (d or {}).get("value") or None
+
+    def traefik():
+        return _kubectl_json(kc, "get", "services", "-n", "kube-system", "rke2-traefik", timeout=20,
+                             cluster=cluster)
+
+    def ingress_expose():
+        # cluster mis à jour depuis 1.8 : l'adresse est là, pas sur rke2-traefik
+        return _kubectl_json(kc, "get", "services", "-n", "kube-system", "ingress-expose", timeout=20,
+                             cluster=cluster)
+
+    def providers():
+        d = _kubectl_json(kc, "get", "capiproviders.turtles-capi.cattle.io", "-A", timeout=30, cluster=cluster)
+        return None if d is None else (d.get("items") or [])
+    jobs = {"server_version": setting, "traefik": traefik, "ingress_expose": ingress_expose,
+            "capi_providers": providers}
+    if not kc:
+        return {k: None for k in jobs}
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futs = {k: pool.submit(f) for k, f in jobs.items()}
+        return {k: f.result() for k, f in futs.items()}
+
+
 def _deploy_install_verify(cluster, expected):
     """Installation revérifiée : cluster déclaré, joignable, nœuds attendus
     présents. (vrai, nœuds lus)."""
@@ -32449,11 +32942,12 @@ def _deploy_install_phase(run, spec, store):
                                      data={"actions": [], "nodes": spec["hostnames"]})
         prepared = _deploy_install_secrets_get(store, ctx.run_id, rows)
         if spec["kind"] == "batch":
-            child = _bm_batch_launch(prepared, spec["cluster"], spec.get("concurrency"))
+            child = _bm_batch_launch(prepared, spec["cluster"], spec.get("concurrency"), parent=run.id)
         else:
             with app.app_context():
                 child, busy = _bm_track(f"baremetal-install:{prepared[0]['hostname']}",
-                                        prepared[0]["bmc_host"], _baremetal_install_runner, prepared[0])
+                                        prepared[0]["bmc_host"], _baremetal_install_runner, prepared[0],
+                                        parent=run.id)
             if busy:
                 return _dch.PhaseOutcome("error", message=f"BMC {prepared[0]['bmc_host']} is busy",
                                          data={"actions": [], "nodes": spec["hostnames"]})
@@ -32474,10 +32968,14 @@ def _deploy_install_phase(run, spec, store):
 
 def _deploy_readiness_phase(cluster, kc_ref, plan, expected=None):
     seen = {}
+    capi_on = [p for p in _drd.CAPI_PHASES if (plan["phases"].get(p) or {}).get("enabled")]
 
     def evaluate():
         kc = kc_ref()
-        return _drd.evaluate(_deploy_read_cluster(kc, cluster), expected_nodes=expected)
+        reads = _deploy_read_cluster(kc, cluster)
+        if capi_on:
+            reads.update(_deploy_read_capi(kc, cluster))
+        return _drd.evaluate(reads, expected_nodes=expected, phases=capi_on)
 
     def execute(ctx, state):
         ev = evaluate()
@@ -32552,7 +33050,8 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
         try:
             kc = kc_ref()
             pid, h = _tf_decl_launch(cluster, kc, decl["id"], "plan", user=user,
-                                     cluster_user=cluster_user, holder=run.id, role=run.launch_role)
+                                     cluster_user=cluster_user, holder=run.id, role=run.launch_role,
+                                     parent=run.id)
             actions.append(pid)
             status, child = _deploy_wait_child(pid)
             if not _tf_decl_wait_idle(decl["id"]):
@@ -32580,7 +33079,8 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
                 return _dch.ItemOutcome("done", "kept: values differ from the declaration" if kept
                                         else "nothing to change", data=data)
             aid, _h = _tf_decl_launch(cluster, kc, decl["id"], "apply", plan_hash=h, user=user,
-                                      cluster_user=cluster_user, holder=run.id, role=run.launch_role)
+                                      cluster_user=cluster_user, holder=run.id, role=run.launch_role,
+                                      parent=run.id)
             actions.append(aid)
             status, _child = _deploy_wait_child(aid)
             if not _tf_decl_wait_idle(decl["id"]):
@@ -32605,6 +33105,214 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
                       item_key="template", item_step="tf-")
 
 
+def _deploy_capi_phase(run, cluster, kc_ref, plan):
+    """Phase capi : pile Cluster API du paquet actif par le chemin déjà
+    livré (`harvester-capi install`, comme Cluster API > Installation),
+    Harvester 1.9 ou plus seulement (117), jamais de mise à niveau d'une
+    pile d'une autre version (171), CAAPH déclaré avec elle (172). Pile
+    prête aux versions du paquet : rien à faire, aucune action fille."""
+    timeout_s = int((plan["phases"].get("capi") or {}).get("timeout_minutes") or _dpl.CAPI_TIMEOUT[2]) * 60
+    dry = bool(run.dry_run)
+
+    def read():
+        providers = _capi_bundle_providers()
+        if _capi_bundle_active_path() is None:
+            return None, providers, "capi-bundle-missing"
+        if not providers:
+            return None, providers, "capi-bundle-no-turtles"
+        stack, err = _deploy_stack(kc_ref())
+        if err:
+            return None, providers, f"stack unreadable ({err})"[:200]
+        if _drd.harvester_too_old(stack.get("harvester_version")):
+            return stack, providers, "capi-needs-harvester-1.9"
+        if stack.get("differs"):
+            return stack, providers, "capi-version-differs"
+        return stack, providers, None
+
+    def execute(ctx, state):
+        stack, providers, why = read()
+        data = {"actions": [], "providers": _capi_provider_names(providers), "installed": False}
+        if why:
+            return _dch.PhaseOutcome("error", message=why, data=data)
+        if stack.get("ready"):
+            return _dch.PhaseOutcome("done", message="stack ready at the bundle versions", data=data)
+        missing = [m for m in stack.get("missing") or [] if m not in ("turtles", "core/cluster-api")]
+        if len(missing) != len(stack.get("missing") or []):
+            return _dch.PhaseOutcome("error", message="turtles-not-ready", data=data)
+        # le facultatif (CAAPH, 172) est déclaré avec la pile : compté aussi
+        provs = [m for m in missing if not m.startswith("compatibility/")] + [
+            o.get("provider") for o in stack.get("optional") or [] if not o.get("ready")]
+        compat = [m for m in missing if m.startswith("compatibility/")]
+        what = f"{len(provs)} provider(s)" + (f" and restore {', '.join(compat)}" if compat else "")
+        if _deploy_capi_install_refused(getattr(run, "launch_role", None)):
+            # rejoué ici : la pile a pu disparaître depuis le contrôle (reprise)
+            return _dch.PhaseOutcome("error", message=CAPI_INSTALL_ADMIN, data=data)
+        if dry:
+            return _dch.PhaseOutcome("done", message=f"would declare {what}", data=data)
+        args = ["--cluster", cluster, "--components", str(_capi_bundle_active_path()),
+                "--timeout", str(timeout_s)]
+        if (_deploy_cluster_entry(cluster) or {}).get("nodes"):
+            args.append("--push-images")
+        child, err = _capi_launch(cluster, kc_ref(), "install", args, parent=run.id,
+                                  cluster_user=run.cluster_user, label=f"capi-install:{cluster}")
+        if err:
+            return _dch.PhaseOutcome("error", message=str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        status, _c = _deploy_wait_child(child.id)
+        if status != "done":
+            return _dch.PhaseOutcome("error", message=f"install failed (action {child.id})", data=data)
+        after, _p, why = read()
+        if why or not after.get("ready"):
+            return _dch.PhaseOutcome("error", message=f"stack not ready after the install (action {child.id})",
+                                     data=data)
+        data["installed"] = True
+        return _dch.PhaseOutcome("done", message=f"declared {what}", data=data)
+
+    def verify(ctx, state):
+        stack, _p, why = read()
+        return why is None and bool(stack.get("ready"))
+    return _dch.Phase("capi", execute=execute, verify=verify)
+
+
+def _deploy_clusters_phase(run, cluster, kc_ref, dctx):
+    """Phase clusters : un élément par cluster enfant, créés l'un après
+    l'autre (170) par `harvester-capi create --identity restricted --origin`
+    en action fille. Au début de la phase, `check --many` rejoué pour ceux à
+    créer (capacité, pools, droits : les objets de la phase Terraform
+    existent maintenant) ; un constat bloquant l'arrête avant toute
+    écriture. Un cluster présent avec cette origine est repris et attendu,
+    en échec il reste en erreur (`cluster-failed`), jamais supprimé par la
+    chaîne (176) ; un arrêt laisse la création en cours aller à son terme
+    (175). Ce qu'une exécution a créé porte `undo` (Défaire, 2.7.0)."""
+    plan = dctx["plan"]
+    timeout_s = int((plan["phases"].get("clusters") or {}).get("timeout_minutes")
+                    or _dpl.CLUSTERS_TIMEOUT[2]) * 60
+    entries = {e["name"]: e for e in dctx.get("clusters") or []}
+    capi_on = bool((plan["phases"].get("capi") or {}).get("enabled"))
+    dry = bool(run.dry_run)
+
+    def ours(brief, e):
+        return _deploy_cluster_is_ours(brief, plan["name"], e["template"])
+
+    def before(ctx, state):
+        kc = kc_ref()
+        if _capi_bundle_active_path() is None or not _capi_bundle_providers():
+            return _dch.PhaseOutcome("error", message="capi-bundle-missing")
+        stack, err = _deploy_stack(kc)
+        if err:
+            return _dch.PhaseOutcome("error", message=f"stack unreadable ({err})"[:200])
+        if not stack.get("ready"):
+            if dry and capi_on:
+                # essai : la pile n'a pas été déclarée, les clusters ne se rendent pas
+                return _dch.PhaseOutcome("done", message="dry run: the clusters are checked once the stack "
+                                                         "is declared")
+            return _dch.PhaseOutcome("error", message="capi-stack-missing",
+                                     data={"missing": stack.get("missing") or []})
+        absent = []
+        for e in entries.values():
+            b = _deploy_cluster_brief(kc, e["name"])
+            if b is None:
+                return _dch.PhaseOutcome("error", message=f"state unreadable ({e['name']})")
+            if not b.get("present"):
+                absent.append(e["spec"])
+        if not absent:
+            return None
+        res, err = _deploy_check_many(kc, absent)
+        if err:
+            return _dch.PhaseOutcome("error", message=f"check failed ({err})"[:200])
+        blocking = [f for f in res.get("findings") or [] if f.get("level") == "block"]
+        if blocking:
+            codes = sorted({f.get("code") or "check" for f in blocking})
+            return _dch.PhaseOutcome("error", message="blocked by the pre-check: " + ", ".join(codes),
+                                     data={"blocked_by": [{"code": f.get("code"), "detail": _deploy_check_detail(f)}
+                                                          for f in blocking][:20]})
+        return None
+
+    def wait_adopted(ctx, kc, name):
+        end = time.time() + timeout_s
+        while True:
+            b = _deploy_cluster_brief(kc, name)
+            st = (b or {}).get("state") or {}
+            if b and b.get("present") and st.get("ready"):
+                return "done", "adopted, now available"
+            if b is not None and not b.get("present"):
+                return "error", "cluster disappeared while waited for"
+            if st.get("failed"):
+                return "error", "cluster-failed"
+            if time.time() > end:
+                return "error", "not available in time; left in place"
+            if ctx.cancelled():
+                return "error", "stopped while waiting for the cluster"
+            time.sleep(DEPLOY_POLL)
+
+    def run_item(ctx, state, item):
+        e = entries[item.id]
+        name = e["name"]
+        ref = f"{name}/{name}"
+        data = {"ref": ref, "template": e["template"], "template_revision": e["template_revision"],
+                "identity": "restricted", "created": False, "actions": []}
+        prev = next((it for it in ((state.get("previous") or {}).get("items") or [])
+                     if it.get("cluster") == item.id), {})
+        kc = kc_ref()
+        b = _deploy_cluster_brief(kc, name)
+        if b is None:
+            return _dch.ItemOutcome("error", "state unreadable", data=data)
+        if b.get("present"):
+            if not ours(b, e):
+                return _dch.ItemOutcome("error", "cluster-name-taken", data=data)
+            if prev.get("created"):
+                # créé par une exécution précédente de la même chaîne de reprises
+                data.update({k: prev[k] for k in ("created", "undo", "namespace_created") if k in prev})
+            st = b.get("state") or {}
+            if st.get("failed"):
+                return _dch.ItemOutcome("error", "cluster-failed", data=data)
+            if st.get("ready"):
+                return _dch.ItemOutcome("done", "already present, adopted", data=data)
+            if dry:
+                return _dch.ItemOutcome("done", "present, not available yet (dry run)", data=data)
+            status, msg = wait_adopted(ctx, kc, name)
+            return _dch.ItemOutcome(status, msg, data=data)
+        if not dry:
+            data["namespace_created"] = not b.get("namespace_present", False)
+        args = _deploy_capi_args() + ["--identity", "restricted", "--origin",
+                                      f"plan={plan['name']},template={e['template']},run={run.id}",
+                                      "--timeout", str(timeout_s)]
+        if dry:
+            args.append("--dry-run")
+        child, err = _capi_launch(cluster, kc, "create", args, spec=e["spec"], parent=run.id,
+                                  cluster_user=run.cluster_user, label=f"capi-cluster-create:{ref}",
+                                  dry_run=dry)
+        if err:
+            return _dch.ItemOutcome("error", str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        # décision 175 : un arrêt de la chaîne laisse la création aller à son
+        # terme ; annuler l'action fille elle-même supprime ce cluster
+        status, _c = _deploy_wait_child(child.id)
+        if dry:
+            return _dch.ItemOutcome("done" if status == "done" else "error",
+                                    "checked and rendered (dry run)" if status == "done"
+                                    else f"dry run refused (action {child.id})", data=data)
+        after = _deploy_cluster_brief(kc, name)
+        if after and after.get("present") and (after.get("origin") or {}).get("run") == run.id:
+            data["created"] = True
+            data["undo"] = {"kind": "capi-cluster", "ref": ref}
+        if status == "done" and after and after.get("present") and (after.get("state") or {}).get("ready"):
+            return _dch.ItemOutcome("done", "created", data=data)
+        if status == "cancelled":
+            return _dch.ItemOutcome("error", f"creation cancelled (action {child.id})", data=data)
+        return _dch.ItemOutcome("error", f"creation failed (action {child.id})", data=data)
+
+    def verify_item(ctx, state, prev):
+        e = entries.get(prev.get("cluster"))
+        if e is None:
+            return False
+        b = _deploy_cluster_brief(kc_ref(), e["name"])
+        return bool(b and b.get("present") and ours(b, e) and (b.get("state") or {}).get("ready"))
+    items = [_dch.Item(e["name"], tuple(d for d in e["depends_on"] if d in entries)) for e in entries.values()]
+    return _dch.Phase("clusters", items=items, run_item=run_item, verify_item=verify_item, before=before,
+                      item_key="cluster", item_step="k8s-")
+
+
 def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=None, store=None):
     """Phases du déroulé, branchées sur les mécanismes existants."""
     plan = dctx["plan"]
@@ -32626,6 +33334,10 @@ def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=
                                                   expected=(install or {}).get("hostnames")))
         elif pid == "terraform":
             phases.append(_deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, created))
+        elif pid == "capi":
+            phases.append(_deploy_capi_phase(run, cluster, kc_ref, plan))
+        elif pid == "clusters":
+            phases.append(_deploy_clusters_phase(run, cluster, kc_ref, dctx))
     return phases
 
 
@@ -32954,6 +33666,69 @@ def api_deploy_template_delete(name):
         return jsonify({"error": "invalid name (RFC 1123)"}), 400
     if not _dpl.delete_template(_deploy_state(), name):
         return jsonify({"error": "no such template"}), 404
+    return "", 204
+
+
+@app.route("/api/baremetal/capi-templates", methods=["GET"])
+@requires_auth
+def api_capi_templates_list():
+    """2.5.0 : modèles de cluster (demande de création Cluster API à
+    variables). Lecture : tout rôle ; écriture : administrateur (préfixe
+    /api/baremetal/), comme les modèles de déclaration."""
+    return jsonify({"templates": _dpl.list_capi_templates(_deploy_state()),
+                    "builtins": list(_dpl.BUILTIN_VARS),
+                    "forbidden": list(_dpl.CAPI_TEMPLATE_FORBIDDEN)})
+
+
+@app.route("/api/baremetal/capi-templates/<name>", methods=["GET"])
+@requires_auth
+def api_capi_template_get(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)"}), 400
+    t = _dpl.load_capi_template(_deploy_state(), name)
+    if t is None:
+        path = _dpl.capi_template_path(_deploy_state(), name)
+        if path is not None and path.is_file():
+            return jsonify({"name": name, "invalid": True}), 200
+        return jsonify({"error": "no such cluster template"}), 404
+    return jsonify(dict(t, used_by=_dpl.plans_using_capi_template(_deploy_state(), name)))
+
+
+@app.route("/api/baremetal/capi-templates/<name>", methods=["PUT"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_capi_template_put(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)", "fields": ["name"]}), 400
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return _bm_errors_json([("template", "not a mapping")], "invalid cluster template")
+    rev, err = _deploy_revision(data)
+    if err:
+        return err
+    try:
+        out = _dpl.save_capi_template(_deploy_state(), name, _deploy_doc(data), rev,
+                                      by=current_user() or "")
+    except _dpl.PlanConflict as e:
+        return jsonify({"error": "the cluster template changed in the meantime", "code": "conflict",
+                        "current_revision": e.current_revision}), 409
+    except _dpl.ProfileError as e:
+        return _bm_errors_json(e.errors, "invalid cluster template")
+    return jsonify(out), 201 if out["revision"] == 1 else 200
+
+
+@app.route("/api/baremetal/capi-templates/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_capi_template_delete(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)"}), 400
+    used = _dpl.plans_using_capi_template(_deploy_state(), name)
+    if used:
+        return jsonify({"error": "saved plans use this cluster template", "code": "template-in-use",
+                        "plans": used}), 409
+    if not _dpl.delete_capi_template(_deploy_state(), name):
+        return jsonify({"error": "no such cluster template"}), 404
     return "", 204
 
 

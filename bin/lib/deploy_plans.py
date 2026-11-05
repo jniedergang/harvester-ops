@@ -3,9 +3,9 @@
 Un plan de déploiement est nommé et réutilisable. Il s'applique à un
 cluster Harvester déclaré, ou s'enchaîne après une installation bare-metal
 (un profil le désigne par son champ `plan`). Il active des phases :
-disponibilité et contenu Terraform en 2.4.0 ; gestion Cluster API,
-clusters enfants, registre et artefacts existent déjà dans le format, mais
-seulement désactivés (« coming in 2.5+ »), pour que le format ne change pas.
+disponibilité et contenu Terraform en 2.4.0 ; pile Cluster API et clusters
+enfants en 2.5.0 ; registre et artefacts existent déjà dans le format, mais
+seulement désactivés (« coming in 2.6+ »), pour que le format ne change pas.
 
 Un modèle de déclaration porte les ressources d'une déclaration Terraform
 (format de web/tf_store.py), chaînes à variables `{{nom}}`. La phase
@@ -13,8 +13,9 @@ Terraform en fait des déclarations ordinaires nommées `<plan>-<modèle>`.
 
 Rangement, comme les profils (bm_profiles) :
 
-    <état>/plans.d/<nom>.yaml          un plan (0600), nom RFC 1123
-    <état>/tf-templates.d/<nom>.yaml   un modèle (0600), nom RFC 1123
+    <état>/plans.d/<nom>.yaml            un plan (0600), nom RFC 1123
+    <état>/tf-templates.d/<nom>.yaml     un modèle (0600), nom RFC 1123
+    <état>/capi-templates.d/<nom>.yaml   un modèle de cluster (2.5.0)
 
 Aucun secret n'y entre. Un modèle perd à l'enregistrement toute valeur d'une
 clé qui désigne un secret (règle de kvm_templates.scrub), sauf les clés
@@ -46,6 +47,7 @@ from pathlib import Path
 import yaml
 
 import bm_profiles as _bmp
+import capi_cluster as _cc
 import hcl_guard as _hcl
 import kvm_templates as _kvt
 
@@ -54,14 +56,25 @@ NAME_RE = _bmp.NAME_RE
 
 PLAN_DIR = "plans.d"
 TEMPLATE_DIR = "tf-templates.d"
+# 2.5.0 : modèles de cluster (demande du formulaire de création Cluster API,
+# chaînes à variables) ; nom, namespace et namespace des VMs viennent de
+# l'entrée du plan et de la règle du namespace (décision 164)
+CAPI_TEMPLATE_DIR = "capi-templates.d"
+CAPI_TEMPLATE_FORBIDDEN = ("name", "namespace", "target_namespace")
 PHASES = ("readiness", "terraform", "capi", "clusters", "registry", "artefacts")
-AVAILABLE = ("readiness", "terraform")
+AVAILABLE = ("readiness", "terraform", "capi", "clusters")
 BUILTIN_VARS = ("cluster", "vip")
 MAX_TEMPLATES = 32
 TIMEOUT_MIN, TIMEOUT_MAX, TIMEOUT_DEFAULT = 1, 180, 20
+# 2.5.0 : délais des phases Cluster API (minutes) : (min, max, défaut)
+CAPI_TIMEOUT = (1, 60, 10)
+CLUSTERS_TIMEOUT = (5, 180, 30)
+MAX_CLUSTERS = 16
+# `n` : variable intégrée du seul raccourci `name_pattern` (1 à `count`)
+PATTERN_VAR = "n"
 MAX_DESCRIPTION = 500
 MAX_DECL_NAME = 63
-COMING = "coming in 2.5+"
+COMING = "coming in 2.6+"
 
 # Noms de clés qui désignent un objet public ou le NOM d'un Secret, pas un
 # secret : la clé publique d'une ressource ssh_key, les clés d'une VM
@@ -315,13 +328,126 @@ def _check_terraform(ph, errors, plan_name, known_templates):
     return out
 
 
-def check_plan(doc, known_templates=None):
-    """Plan normalisé {description, variables, phases}, ou ProfileError
-    [(où, raison)]. `known_templates` (noms) : refuse un modèle absent ;
-    sans lui, l'existence des modèles est contrôlée au lancement."""
+def _check_timeout(ph, where, bounds, errors):
+    lo, hi, default = bounds
+    t = ph.get("timeout_minutes", default)
+    if isinstance(t, bool) or not isinstance(t, int) or not lo <= t <= hi:
+        errors.append((f"{where}.timeout_minutes", f"an integer from {lo} to {hi}"))
+        return default
+    return t
+
+
+def _check_capi_phase(ph, errors):
+    """Phase capi : {enabled, timeout_minutes} (pile Cluster API du paquet
+    actif ; CAAPH toujours déclaré avec elle, décision 172)."""
+    unknown = sorted(set(ph) - {"enabled", "timeout_minutes"})
+    errors.extend((f"phases.capi.{k}", "unknown key") for k in unknown)
+    return {"enabled": ph.get("enabled", True) is not False,
+            "timeout_minutes": _check_timeout(ph, "phases.capi", CAPI_TIMEOUT, errors)}
+
+
+def cluster_name_shape_ok(name):
+    """Forme d'un nom de cluster enfant AVANT rendu : chaque variable
+    remplacée par une lettre, le résultat suit capi_cluster.NAME_RE. Le nom
+    rendu est contrôlé de nouveau au lancement (longueur réelle)."""
+    return isinstance(name, str) and bool(_cc.NAME_RE.match(_bmp.VAR_RE.sub("a", name)))
+
+
+def _expand_shortcut(ph, where, errors):
+    """Raccourci `{template, count, name_pattern}` développé en entrées
+    (`n` de 1 à `count`), ou []."""
+    if not any(k in ph for k in ("count", "name_pattern", "template")):
+        return []
+    count, pattern, tname = ph.get("count"), ph.get("name_pattern"), ph.get("template")
+    bad = False
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_CLUSTERS:
+        errors.append((f"{where}.count", f"an integer from 1 to {MAX_CLUSTERS}"))
+        bad = True
+    if not isinstance(pattern, str) or PATTERN_VAR not in _bmp.VAR_RE.findall(pattern):
+        errors.append((f"{where}.name_pattern", "a name holding {{n}}"))
+        bad = True
+    if not isinstance(tname, str) or not NAME_RE.match(tname):
+        errors.append((f"{where}.template", "missing or invalid template name"))
+        bad = True
+    if bad:
+        return []
+    return [{"template": tname, "name": _bmp.VAR_RE.sub(
+        lambda m: str(i) if m.group(1) == PATTERN_VAR else m.group(0), pattern)}
+        for i in range(1, count + 1)]
+
+
+def _check_clusters_phase(ph, errors, variables):
+    """Phase clusters : {enabled, timeout_minutes, items: [{template, name,
+    depends_on}]} ; le raccourci est développé à la suite des entrées.
+    Noms à variables (plan et intégrées), uniques, 16 entrées au plus ;
+    `depends_on` désigne une entrée placée avant (règle de la phase
+    Terraform)."""
+    where = "phases.clusters"
+    unknown = sorted(set(ph) - {"enabled", "timeout_minutes", "items", "template", "count", "name_pattern"})
+    errors.extend((f"{where}.{k}", "unknown key") for k in unknown)
+    timeout = _check_timeout(ph, where, CLUSTERS_TIMEOUT, errors)
+    raw = ph.get("items")
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        errors.append((f"{where}.items", "not a list"))
+        raw = []
+    raw = list(raw) + _expand_shortcut(ph, where, errors)
+    if len(raw) > MAX_CLUSTERS:
+        errors.append((f"{where}.items", f"more than {MAX_CLUSTERS} clusters"))
+        raw = []
+    known = set(BUILTIN_VARS) | set(variables or [])
+    out, seen = [], []
+    for i, entry in enumerate(raw):
+        w = f"{where}.items[{i}]"
+        if not isinstance(entry, dict):
+            errors.append((w, "not a mapping"))
+            continue
+        unknown = sorted(set(entry) - {"template", "name", "depends_on"})
+        errors.extend((f"{w}.{k}", "unknown key") for k in unknown)
+        tname, name = entry.get("template"), entry.get("name")
+        if not isinstance(tname, str) or not NAME_RE.match(tname):
+            errors.append((f"{w}.template", "missing or invalid template name"))
+            continue
+        if not cluster_name_shape_ok(name):
+            errors.append((f"{w}.name", "lowercase letters, digits and '-', starting with a letter, "
+                                        "variables allowed"))
+            continue
+        undeclared = [v for v in _bmp.VAR_RE.findall(name) if v not in known]
+        if undeclared:
+            errors.append((f"{w}.name", f"undeclared variable {undeclared[0]}"))
+            continue
+        if name in seen:
+            errors.append((f"{w}.name", f"{name} listed twice"))
+            continue
+        deps = entry.get("depends_on") or []
+        if isinstance(deps, str):
+            deps = [deps]
+        if not isinstance(deps, list):
+            errors.append((f"{w}.depends_on", "not a list"))
+            deps = []
+        clean = []
+        for d in deps:
+            if d == name:
+                errors.append((f"{w}.depends_on", "a cluster does not depend on itself"))
+            elif d not in seen:
+                errors.append((f"{w}.depends_on", f"{d} is not listed before this cluster"))
+            elif d not in clean:
+                clean.append(d)
+        seen.append(name)
+        item = {"template": tname, "name": name}
+        if clean:
+            item["depends_on"] = clean
+        out.append(item)
+    return {"enabled": ph.get("enabled", True) is not False, "timeout_minutes": timeout, "items": out}
+
+
+def check_plan_warnings(doc, known_templates=None):
+    """(plan normalisé, avertissements) ; voir check_plan. Avertissements :
+    clés d'une phase Cluster API désactivée d'un plan de 2.4.0, retirées."""
     if not isinstance(doc, dict):
         raise ProfileError([("plan", "not a mapping")], "invalid plan")
-    errors = []
+    errors, warnings = [], []
     name = doc.get("name")
     if name is not None and (not isinstance(name, str) or not NAME_RE.match(name)):
         errors.append(("name", "invalid name (RFC 1123)"))
@@ -356,8 +482,26 @@ def check_plan(doc, known_templates=None):
             if enabled:
                 errors.append((f"phases.{pid}", f"{COMING}: set enabled: false"))
                 continue
-            # format de 2.5+ non figé : gardé tel quel, jamais lu en 2.4.0
+            # format de 2.6+ non figé : gardé tel quel, jamais lu
             phases[pid] = dict(ph, enabled=False)
+            continue
+        if pid in ("capi", "clusters") and not enabled:
+            # Plan écrit en 2.4.0 : la phase désactivée y gardait des clés
+            # libres (format non figé alors). Acceptée, clés inconnues
+            # ignorées et retirées au prochain enregistrement, avec un
+            # avertissement ; activée, la règle stricte s'applique.
+            sub = []
+            phases[pid] = (_check_capi_phase(ph, sub) if pid == "capi"
+                           else _check_clusters_phase(ph, sub, variables))
+            phases[pid]["enabled"] = False
+            for where, why in sub:
+                warnings.append(f"{where}: {why}, ignored (phase disabled)")
+            continue
+        if pid == "capi":
+            phases[pid] = _check_capi_phase(ph, errors)
+            continue
+        if pid == "clusters":
+            phases[pid] = _check_clusters_phase(ph, errors, variables)
             continue
         if pid == "readiness":
             unknown = sorted(set(ph) - {"enabled", "timeout_minutes"})
@@ -375,7 +519,14 @@ def check_plan(doc, known_templates=None):
                            "templates": _check_terraform(ph, errors, name, known_templates)}
     if errors:
         raise ProfileError(errors, "invalid plan")
-    return {"description": desc, "variables": variables, "phases": phases}
+    return {"description": desc, "variables": variables, "phases": phases}, warnings
+
+
+def check_plan(doc, known_templates=None):
+    """Plan normalisé {description, variables, phases}, ou ProfileError
+    [(où, raison)]. `known_templates` (noms) : refuse un modèle absent ;
+    sans lui, l'existence des modèles est contrôlée au lancement."""
+    return check_plan_warnings(doc, known_templates)[0]
 
 
 def enabled_phases(plan):
@@ -387,6 +538,25 @@ def plan_templates(plan):
     return list(((plan.get("phases") or {}).get("terraform") or {}).get("templates") or [])
 
 
+def plan_clusters(plan):
+    """Entrées de la phase clusters d'un plan, dans l'ordre ([] si absente)."""
+    return list(((plan.get("phases") or {}).get("clusters") or {}).get("items") or [])
+
+
+def render_cluster_name(name, values):
+    """Nom d'une entrée de la phase clusters rendu avec les valeurs du
+    lancement ; ProfileError (variable absente, nom rendu invalide)."""
+    missing = [v for v in _bmp.VAR_RE.findall(name) if v not in (values or {})]
+    if missing:
+        raise ProfileError([(f"clusters[{name}].name", f"missing variable {missing[0]}")], "missing variable")
+    out = _bmp.VAR_RE.sub(lambda m: str(values[m.group(1)]), name)
+    if not _cc.NAME_RE.match(out):
+        raise ProfileError([(f"clusters[{name}].name", f"rendered name {out[:45]} is not valid: lowercase "
+                                                       "letters, digits and '-', starting with a letter, "
+                                                       "1 to 40 characters")], "invalid name")
+    return out
+
+
 def _named(doc, name):
     return dict(doc, name=name) if isinstance(doc, dict) else doc
 
@@ -395,7 +565,10 @@ def save_plan(state, name, doc, revision=None):
     """Écrit le plan (0600, remplacement atomique) à la révision lue ;
     PlanConflict si elle est périmée, ProfileError s'il est invalide. Le nom
     d'enregistrement fait foi pour le contrôle des noms de déclaration."""
-    return _save(state, PLAN_DIR, name, doc, revision, lambda d: check_plan(_named(d, name)))
+    out = _save(state, PLAN_DIR, name, doc, revision, lambda d: check_plan_warnings(_named(d, name)))
+    out, warnings = out
+    # avertissements rendus, jamais écrits (clés d'une phase désactivée retirées)
+    return dict(out, warnings=warnings) if warnings else out
 
 
 def load_plan(state, name):
@@ -676,3 +849,159 @@ def render_templates(plan, templates, values, field_type=None):
     if errors:
         raise ProfileError(errors, "cannot render the plan")
     return out
+
+
+# --- modèles de cluster (2.5.0) -------------------------------------------------
+
+def capi_template_path(state, name):
+    return _path(state, CAPI_TEMPLATE_DIR, name)
+
+
+def _capi_url_refusals(spec, base):
+    """Identifiants dans une adresse (`fleet_repo` surtout) : refusés, comme
+    dans un modèle de déclaration."""
+    out = []
+    for k, v in spec.items():
+        for i, s in enumerate(v if isinstance(v, list) else [v]):
+            if isinstance(s, str) and (_URL_USERINFO_RE.search(s) or _URL_QUERY_SECRET_RE.search(s)):
+                out.append((f"{base}.{k}" + (f"[{i}]" if isinstance(v, list) else ""), "credentials in a URL"))
+    return out
+
+
+def check_capi_template(doc):
+    """Modèle de cluster normalisé {description, variables, spec}, ou
+    ProfileError. `spec` : la demande du formulaire de création (liste
+    blanche de capi_cluster, moins nom et namespaces) ; les valeurs sans
+    variable passent par capi_cluster.validate sur une demande d'essai, pour
+    refuser tôt ce qui ne passerait jamais."""
+    if not isinstance(doc, dict):
+        raise ProfileError([("template", "not a mapping")], "invalid cluster template")
+    errors = []
+    name = doc.get("name")
+    if name is not None and (not isinstance(name, str) or not NAME_RE.match(name)):
+        errors.append(("name", "invalid name (RFC 1123)"))
+    unknown = sorted(set(doc) - {"name", "revision", "description", "variables", "spec", "updated_by"})
+    errors.extend((k, "unknown key") for k in unknown)
+    desc = _check_description(doc, errors)
+    variables = _check_variables(doc, errors)
+    spec = doc.get("spec")
+    spec = {} if spec is None else spec
+    if not isinstance(spec, dict):
+        errors.append(("spec", "not a mapping"))
+        spec = {}
+    clean = {}
+    for k, v in spec.items():
+        if k in CAPI_TEMPLATE_FORBIDDEN:
+            errors.append((f"spec.{k}", "set by the plan, not by the template"))
+        elif k not in _cc.KNOWN:
+            errors.append((f"spec.{k}", "unknown key"))
+        elif not (isinstance(v, (str, int, bool)) or v is None
+                  or isinstance(v, list) and all(isinstance(x, str) for x in v)):
+            errors.append((f"spec.{k}", "a string, a number, a boolean or a list of strings"))
+        elif v not in (None, "", []):
+            clean[k] = v
+    known = set(BUILTIN_VARS) | set(variables)
+    for var in sorted(_bmp.variables_in(clean)):
+        if var not in known:
+            errors.append((f"{{{{{var}}}}}", "undeclared variable"))
+    errors.extend(_capi_url_refusals(clean, "spec"))
+    fixed = {k: v for k, v in clean.items() if not _bmp.variables_in(v)}
+    trial = dict(fixed, name="trial", namespace="trial", target_namespace="trial")
+    try:
+        for k, why in _cc.validate(_cc.normalize(trial)):
+            if k in fixed:
+                errors.append((f"spec.{k}", why))
+    except ValueError as e:                    # entier illisible (`cpu: deux`)
+        errors.append(("spec", str(e)))
+    if errors:
+        raise ProfileError(errors, "invalid cluster template")
+    return {"description": desc, "variables": variables, "spec": clean}
+
+
+def save_capi_template(state, name, doc, revision=None, by=""):
+    """Modèle de cluster écrit (0600, remplacement atomique) à la révision
+    lue ; PlanConflict, ProfileError. `by` : qui écrit cette révision."""
+    def check(d):
+        return dict(check_capi_template(d), updated_by=str(by or "")[:128])
+    return _save(state, CAPI_TEMPLATE_DIR, name, doc, revision, check)
+
+
+def load_capi_template(state, name):
+    t = _load(state, CAPI_TEMPLATE_DIR, name, check_capi_template)
+    if t is not None:
+        by = (_read(capi_template_path(state, name)) or {}).get("updated_by")
+        t["updated_by"] = by if isinstance(by, str) else ""
+    return t
+
+
+def list_capi_templates(state):
+    return _list(state, CAPI_TEMPLATE_DIR, check_capi_template, lambda t: {
+        "name": t["name"], "revision": t["revision"], "description": t["description"],
+        "variables": t["variables"], "uses": sorted(_bmp.variables_in(t["spec"])),
+        "vms": int(t["spec"].get("cp_replicas", _cc.DEFAULTS["cp_replicas"]) or 0)
+        + int(t["spec"].get("worker_replicas", _cc.DEFAULTS["worker_replicas"]) or 0)
+        if not _bmp.variables_in([t["spec"].get("cp_replicas"), t["spec"].get("worker_replicas")]) else None})
+
+
+def delete_capi_template(state, name):
+    return _delete(state, CAPI_TEMPLATE_DIR, name)
+
+
+def plans_using_capi_template(state, name):
+    """Plans enregistrés qui désignent ce modèle de cluster (phase clusters,
+    entrées ou raccourci `template`), activée ou non."""
+    out = []
+    d = Path(state) / PLAN_DIR
+    try:
+        files = sorted(p for p in d.glob("*.yaml") if p.is_file())
+    except OSError:
+        return out
+    for p in files:
+        doc = _read(p) or {}
+        ph = ((doc.get("phases") or {}) if isinstance(doc.get("phases"), dict) else {}).get("clusters")
+        if not isinstance(ph, dict):
+            continue
+        items = ph.get("items") if isinstance(ph.get("items"), list) else []
+        names = {i.get("template") for i in items if isinstance(i, dict)} | {ph.get("template")}
+        if name in names:
+            out.append(p.stem)
+    return out
+
+
+def render_capi_template(t, values, name, where=None):
+    """Demande de création rendue pour le cluster `name` : variables posées
+    par bm_profiles.render_advanced (jetons neutres, une valeur à syntaxe
+    YAML arrive telle quelle), entiers pour les options entières, puis nom,
+    namespace et namespace des VMs = `name` (décision 164), puis
+    capi_cluster.normalize. ProfileError : variable absente (avec son
+    chemin), valeur invalide, nom invalide, identifiants dans une adresse."""
+    where = where or f"clusters[{name}].template[{t.get('name')}]"
+    errors = []
+    for k, v in sorted((values or {}).items()):
+        why = _bmp.check_value(k, v)
+        if why:
+            errors.append((f"variables.{k}", why))
+    if errors:
+        raise ProfileError(errors, "invalid values")
+    spec = t.get("spec") or {}
+    text = yaml.safe_dump(spec, sort_keys=False, allow_unicode=True, width=1 << 20)
+    ints = set(_cc.INT_OPTIONS)
+    try:
+        out = _bmp.render_advanced(text, values or {}, lambda p: "int" if p in ints else None) or {}
+    except KeyError as e:
+        raise ProfileError([(_var_path(spec, e.args[0], f"{where}.spec") or f"{where}.spec",
+                             "missing variable")], "cannot render the cluster template") from None
+    if not isinstance(name, str) or not _cc.NAME_RE.match(name):
+        errors.append((f"{where}.name", "lowercase letters, digits and '-', starting with a letter, "
+                                        "1 to 40 characters"))
+    errors.extend(_capi_url_refusals(out, f"{where}.spec"))
+    if errors:
+        raise ProfileError(errors, "cannot render the cluster template")
+    # namespace des VMs : imposé par harvester-capi (identité restreinte,
+    # capi_identity.force_target_namespace), jamais par le modèle
+    out = dict(out, name=name, namespace=name)
+    out.pop("target_namespace", None)
+    try:
+        return _cc.normalize(out)
+    except ValueError as e:
+        raise ProfileError([(f"{where}.spec", str(e))], "cannot render the cluster template") from None

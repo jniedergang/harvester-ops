@@ -23,7 +23,7 @@ each with its own address:
 |---|---|---|
 | **Machines** (default) | `#automation/pxe/machines` (also `#automation/pxe`) | The machines of the last discovery, one row each: hardware, power state, disks, network cards, and the gestures **Install** (or **Join** *cluster* during a join), power on, graceful shutdown, force off, restart. **Discover...** opens the discovery window; **Re-read** reads the same BMCs again. The join banner and the "no ISO" banner sit on top. |
 | **Profiles** | `#automation/pxe/profiles` | Multi-node install profiles and the batch launch. |
-| **Plans** (2.4.0) | `#automation/pxe/plans` | Deployment plans and declaration templates: Terraform content applied after an install or to an existing cluster (see below). |
+| **Plans** (2.4.0) | `#automation/pxe/plans` | Deployment plans, declaration templates and cluster templates (2.5.0): Terraform content, Cluster API stack and child clusters applied after an install or to an existing cluster (see below). |
 | **Images** | `#automation/pxe/images` | The ISO store. |
 | **History** | `#automation/pxe/history` | The bare-metal actions of Activity, running and past, each with a link to its log. |
 
@@ -506,7 +506,8 @@ In 2.4.0 the phases are:
 | **install** | Only when the plan starts from Bare-metal: the single-machine install or the batch, with the same BMC check (guard 132) as without a plan. |
 | **readiness** | Waits until the cluster is usable: nodes Ready, `ManagedChart` objects ready, Longhorn nodes and volumes healthy, a default storage class. Read again every 15 s, 20 minutes by default (`phases.readiness.timeout_minutes`, 1 to 180). |
 | **terraform** | Instantiates each **declaration template** of the plan as an ordinary Terraform declaration, `<plan>-<template>`, then plans and applies it. |
-| capi, clusters, registry, artefacts | In the model, shown greyed with "coming in 2.5+". A plan file that enables one is refused. |
+| capi, clusters | Available since 2.5.0: see "Deployment plans: Cluster API and child clusters" below. |
+| registry, artefacts | In the model, shown greyed with "coming in 2.6+". A plan file that enables one is refused. |
 
 **Where it lives.** The **Plans** tab (`#automation/pxe/plans`, between
 Profiles and Images) lists the plans on the left and opens one on the right:
@@ -612,6 +613,7 @@ secret.
 | Write or delete a plan or a template | admin |
 | Apply a plan to an existing cluster, stop, resume | operator |
 | A chain with an install, or its resume | admin |
+| A plan whose capi phase must install the Cluster API stack (an operator may run it when the stack is already installed at the bundle versions: the phase then only checks it) | admin |
 | A plan whose templates create VM networks, storage classes, IP pools (or, in free code, cluster networks, VLAN configurations, load balancers, settings, PCI or SR-IOV devices) | admin |
 
 An operator may launch a plan whose templates hold free code: an admin wrote
@@ -621,6 +623,12 @@ declaration produced records who wrote the template revision
 and only an admin plans, applies or destroys it from Terraform >
 Declarations. The server decides; the window shows the `admin-kind`
 finding and keeps Launch disabled.
+
+Installing the Cluster API stack is reserved to administrators, in a plan as
+in Cluster API > Installation. When the stack must be installed, an operator
+gets the `capi-install-admin` finding and Launch stays disabled; the capi
+phase checks the role again when it starts, so a resume or a stack removed in
+the meantime is refused the same way.
 
 **One cluster at a time.** One `deploy:` action runs per cluster (409
 `deploy-running`); a shutdown or startup of the cluster blocks it, and a
@@ -655,6 +663,117 @@ class and IP pool declarations but cannot plan, apply or destroy them
 loses its `plan` field; plans, templates and deployment runs are ignored
 until 2.4.0 is back. Before rolling back, destroy the declarations of these
 three kinds, or accept them as unmanaged.
+
+### Deployment plans: Cluster API and child clusters (2.5.0)
+
+After the Terraform content, a plan can declare the Cluster API stack and
+create child RKE2 clusters, on Harvester 1.9 or later only.
+
+| Phase | What it does |
+|---|---|
+| **capi** | Declares the stack (RKE2 bootstrap and control plane, CAPHV, CAAPH) from the active bundle, with the same command as the **Install the providers** button (`harvester-capi install`, images pushed to the nodes). A stack already ready at the bundle versions is left as it is (nothing declared, no child action). 10 minutes by default (`phases.capi.timeout_minutes`, 1 to 60). |
+| **clusters** | Creates the child clusters of the plan **one after another**, each from a named **cluster template**, with the same command as the creation window (`harvester-capi create`). One child action `capi-cluster-create:<ns>/<name>` per cluster. 30 minutes per cluster by default (`phases.clusters.timeout_minutes`, 5 to 180). 16 clusters at most per plan. |
+
+**Cluster templates.** A cluster template holds a cluster request of the
+Cluster API creation form, without name nor namespaces (the plan gives
+them). Values may use `{{variables}}`, like declaration templates. They are
+kept in `<state>/capi-templates.d/<name>.yaml`, mode 0600, with a revision.
+The **Cluster templates** part of the Plans tab lists and edits them in the
+creation form (template mode, **Variable...** in each reference field), and
+**Save as template** in the creation window of Cluster API > Clusters
+stores the request you filled. A template used by a saved plan cannot be
+deleted (409 `template-in-use`). Reading needs the viewer role, writing the
+admin role.
+
+**Clusters of a plan.** The Clusters card lists the entries in order:
+cluster name (also its namespace, 40 characters at most once rendered,
+`{{cluster}}` and plan variables allowed), template, and "depends on". The
+**Several** shortcut adds `count` clusters from one template, named by a
+pattern holding `{{n}}` (1, 2, 3...); they are appended to the list when the
+plan is saved. In a plan file:
+
+```yaml
+phases:
+  capi: {enabled: true, timeout_minutes: 20}
+  clusters:
+    enabled: true
+    timeout_minutes: 45
+    items:
+      - {name: site1-apps, template: rke2-small}
+    template: rke2-small        # shortcut, expanded at save
+    count: 3
+    name_pattern: "site1-k{{n}}"
+```
+
+**One restricted identity per child cluster.** Up to 2.4.0, CAPHV acted on
+Harvester with the console kubeconfig. A cluster created by a plan, or by
+the creation window, now gets its own service account with only the rights
+CAPHV v0.10.1 uses, read call by call in its source (see Capabilities,
+section 4). Its VMs go to a namespace of their own, `<name>-vms`, created
+and deleted with the cluster (a template that sets another VM namespace is
+refused). The console creates the identity, the
+cloud provider account and its binding with the identity of the person who
+launched the run; the check verifies beforehand, in one batch of
+`SelfSubjectAccessReview`, that this person may create, update and delete
+each of these objects and hold each right they grant.
+
+**Checks before acting.** On top of the 2.4.0 findings, for all the
+clusters of the plan together and in one read of the cluster: free CPU and
+memory, Longhorn space for every disk (replicas on distinct nodes), free
+addresses in each IP pool, the rights of the person, the Harvester version,
+the stack version, and the per-cluster rules of the creation window.
+
+- Blocking: `capi-bundle-missing`, `capi-bundle-no-turtles`,
+  `capi-needs-harvester-1.9`, `capi-version-differs` (a plan never upgrades
+  a stack, even for a plan with the clusters phase only: upgrade from
+  Cluster API > Installation), `capi-stack-missing`,
+  `capi-install-admin` (the stack must be installed and the role is not
+  admin), `capi-template-missing`, `cluster-var-missing`, `cluster-name-taken`,
+  `identity-rules-unknown`, `identity-name-reserved`,
+  `target-namespace-forced`, `vm-namespace-taken`, `vm-namespace-too-long`,
+  `cloud-provider-binding-taken`,
+  `capi-check-failed`, `fleet-name-twice`, `fleet-cpu-short`,
+  `fleet-memory-short`, `fleet-storage-short`, `fleet-replicas-nodes`,
+  `fleet-pool-short`, `rights-missing`.
+- Warnings: `rights-unchecked`, `cluster-failed`, `fleet-storage-unknown`
+  (an image still importing, its root disks not counted), and the warnings of the
+  creation window (one control plane node, version not tested...).
+- Information: `cluster-exists`, `capi-later`, `refs-later`,
+  `fleet-dhcp-leases`, `fleet-sizes`.
+
+A shortage that the creation window only reports as a warning blocks a
+plan: the chain runs unattended.
+
+**Following a run.** Steps `phase-capi` (sub-step `capi-providers`) and
+`phase-clusters` (one `k8s-<name>` per cluster). The child actions are
+nested under the `deploy:` action in Activity (unfold the row) and in the
+dock (the parent and its current child). The result records, per cluster,
+whether this run created it, the template revision and its child actions.
+
+**Stop, resume, failure.** A stop lets the cluster being created go to its
+end and skips the next ones. A stop while the run waits on a cluster it
+resumed ends that wait at once. Cancelling the child action itself deletes
+that cluster. **Resume** checks the stack again, then takes each cluster in
+turn: one already made by this plan and not failed is waited for; one in
+failure stays in error (`cluster-failed`): delete it, then resume. A plan
+never deletes a cluster on its own.
+
+**Deleting a child cluster.** From Cluster API > Clusters, as before. The
+`Cluster` goes first; once it is gone, the identity objects are removed one
+by one by name, then what the console generated and the namespace it
+created. If an object of the identity cannot be read or deleted (a right
+missing, for example), the deletion ends in error and keeps the namespace:
+fix the cause and delete again, the deletion resumes there.
+
+**Command line.** `harvester-plans capi-template list|show|save|delete`;
+`check` and `apply` cover the two phases. `harvester-capi create
+--identity restricted|console` (restricted by default; console only for a
+diagnosis), `--origin plan=P,template=M,run=ID`, `harvester-capi check
+--many --spec FILE` (a JSON list, checked together), `harvester-capi state
+--name ns/name`.
+
+**Seen for real (2.5.0).** See the CHANGELOG of 2.5.0 for the benches,
+timings and what is not verified.
 
 ### History of the bare-metal actions (2.1.0)
 

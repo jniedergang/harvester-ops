@@ -4,12 +4,16 @@
  * Onglet Plans de Bare-metal (#automation/pxe/plans) :
  *   - la liste des plans à gauche, le plan choisi à droite : nom,
  *     description, variables, une carte par phase avec son interrupteur
- *     (Cluster API, Clusters, Registre et Artefacts grisés : à venir en
- *     2.5), délai de disponibilité, modèles Terraform choisis dans une liste
- *     et ordonnés par boutons monter/descendre, dépendances ;
+ *     (Registre et Artefacts grisés : à venir en 2.6+), délai de
+ *     disponibilité, modèles Terraform choisis dans une liste et ordonnés
+ *     par boutons monter/descendre, dépendances ; 2.5.0 : pile Cluster API
+ *     (délai, versions du paquet actif) et clusters enfants (modèle, nom à
+ *     variables, dépendance, raccourci « Plusieurs ») ;
  *   - les modèles de déclaration : liste, édition par les formulaires
  *     Terraform (TFForm / TF_SCHEMA, sans genre écrit en dur), retraits de
- *     secrets annoncés.
+ *     secrets annoncés ;
+ *   - 2.5.0 : les modèles de cluster (Cluster API), édités par le
+ *     formulaire de création en mode modèle (CapiCreate.templateForm).
  *
  * Fenêtre « Déployer » (openDeploy) : Paramètres, Vérifications (constats de
  * la console, bloquants d'abord) et Résumé ; « Lancer » reste grisé tant
@@ -66,6 +70,38 @@ const BMPlans = (() => {
     'readiness-later': () => tr('dpw.f.readinessLater'),
     'admin-kind': () => tr('dpw.f.adminKind'),
     'forbidden-construct': () => tr('dpw.f.forbiddenConstruct'),
+    // 2.5.0 : phases Cluster API et Clusters
+    'capi-bundle-missing': () => tr('dpw.f.capiBundleMissing'),
+    'capi-bundle-no-turtles': () => tr('dpw.f.capiBundleNoTurtles'),
+    'capi-needs-harvester-1.9': () => tr('dpw.f.capiNeedsHarvester19'),
+    'capi-later': () => tr('dpw.f.capiLater'),
+    'capi-version-differs': () => tr('dpw.f.capiVersionDiffers'),
+    'capi-stack-missing': () => tr('dpw.f.capiStackMissing'),
+    'capi-install-admin': () => tr('dpw.f.capiInstallAdmin'),
+    'capi-template-missing': () => tr('dpw.f.capiTemplateMissing'),
+    'cluster-var-missing': () => tr('dpw.f.clusterVarMissing'),
+    'cluster-name-taken': () => tr('dpw.f.clusterNameTaken'),
+    'cluster-exists': () => tr('dpw.f.clusterExists'),
+    'identity-rules-unknown': () => tr('dpw.f.identityRulesUnknown'),
+    'identity-name-reserved': () => tr('dpw.f.identityNameReserved'),
+    'target-namespace-forced': () => tr('dpw.f.targetNamespaceForced'),
+    'cloud-provider-binding-taken': () => tr('dpw.f.cloudProviderBindingTaken'),
+    'vm-namespace-taken': () => tr('dpw.f.vmNamespaceTaken'),
+    'vm-namespace-too-long': () => tr('dpw.f.vmNamespaceTooLong'),
+    'refs-later': () => tr('dpw.f.refsLater'),
+    'cluster-failed': () => tr('dpw.f.clusterFailed'),
+    'capi-check-failed': () => tr('dpw.f.capiCheckFailed'),
+    'fleet-name-twice': () => tr('dpw.f.fleetNameTwice'),
+    'fleet-cpu-short': () => tr('dpw.f.fleetCpuShort'),
+    'fleet-memory-short': () => tr('dpw.f.fleetMemoryShort'),
+    'fleet-storage-short': () => tr('dpw.f.fleetStorageShort'),
+    'fleet-storage-unknown': () => tr('dpw.f.fleetStorageUnknown'),
+    'fleet-replicas-nodes': () => tr('dpw.f.fleetReplicasNodes'),
+    'fleet-pool-short': () => tr('dpw.f.fleetPoolShort'),
+    'fleet-dhcp-leases': () => tr('dpw.f.fleetDhcpLeases'),
+    'fleet-sizes': () => tr('dpw.f.fleetSizes'),
+    'rights-missing': () => tr('dpw.f.rightsMissing'),
+    'rights-unchecked': () => tr('dpw.f.rightsUnchecked'),
   };
   const LEVELS = {
     blocking: () => tr('dpw.lvl.blocking'), warning: () => tr('dpw.lvl.warning'), info: () => tr('dpw.lvl.info'),
@@ -134,17 +170,28 @@ const BMPlans = (() => {
   // =========================================================================
   let plansData = { plans: [], phases: [], available: [], builtins: [] };
   let tplData = { templates: [], kinds: [] };
-  let edit = null;           // plan affiché : { name, revision, isNew, doc, items }
+  let ctplData = { templates: [] };       // 2.5.0 : modèles de cluster
+  let bundleProviders = null;             // fournisseurs du paquet actif (null : non lu)
+  const AVAILABLE_DEFAULT = ['readiness', 'terraform', 'capi', 'clusters'];
+  const MAX_CLUSTERS = 16;
+  const CAPI_TIMEOUT = [1, 60, 10];
+  const CLUSTERS_TIMEOUT = [5, 180, 30];
+  // plan affiché : { name, revision, isNew, doc, items, clusters, shortcut }
+  let edit = null;
   let lastMsg = '';
 
   async function loadLists() {
-    const [p, t] = await Promise.all([
+    const [p, t, c, b] = await Promise.all([
       api('GET', '/api/baremetal/plans').catch(() => ({ ok: false, d: {} })),
       api('GET', '/api/baremetal/tf-templates').catch(() => ({ ok: false, d: {} })),
+      api('GET', '/api/baremetal/capi-templates').catch(() => ({ ok: false, d: {} })),
+      api('GET', '/api/capi/bundles').catch(() => ({ ok: false, d: {} })),
     ]);
     if (p.ok) plansData = Object.assign({ plans: [], phases: [], available: [], builtins: [] }, p.d);
     if (t.ok) tplData = Object.assign({ templates: [], kinds: [] }, t.d);
-    return p.ok && t.ok;
+    if (c.ok) ctplData = Object.assign({ templates: [] }, c.d);
+    bundleProviders = b.ok && Array.isArray(b.d.active_providers) ? b.d.active_providers : null;
+    return p.ok && t.ok && c.ok;
   }
 
   async function render() {
@@ -182,8 +229,9 @@ const BMPlans = (() => {
             <button type="button" class="btn btn-primary btn-sm bmpl-new tip needs-admin" data-tip="${esc(tr('bmpl.t.new'))}">${icon('add', { size: 14 })} ${esc(tr('bmpl.new'))}</button>
           </div>`}</section>
       </div>
-      ${templatesHtml()}`;
-    if (edit) paintTemplates();
+      ${templatesHtml()}
+      ${capiTemplatesHtml()}`;
+    if (edit) { paintTemplates(); paintClusters(); }
   }
 
   // --- éditeur d'un plan ---------------------------------------------------
@@ -198,6 +246,9 @@ const BMPlans = (() => {
       name: name || '', revision: revision || 0, isNew: !name, doc: d,
       items: (((d.phases || {}).terraform || {}).templates || []).map(x => ({
         template: x.template, depends_on: (x.depends_on || []).slice() })),
+      clusters: (((d.phases || {}).clusters || {}).items || []).map(x => ({
+        template: x.template, name: x.name || '', depends_on: (x.depends_on || []).slice() })),
+      shortcut: null,
     };
     lastMsg = '';
   }
@@ -219,7 +270,7 @@ const BMPlans = (() => {
     const d = edit.doc;
     const phases = plansData.phases && plansData.phases.length ? plansData.phases
       : ['readiness', 'terraform', 'capi', 'clusters', 'registry', 'artefacts'];
-    const available = plansData.available && plansData.available.length ? plansData.available : ['readiness', 'terraform'];
+    const available = plansData.available && plansData.available.length ? plansData.available : AVAILABLE_DEFAULT;
     const tip = (t) => `class="tip" data-tip="${esc(t)}"`;
     return `
       <form class="capi-form bmpl-form" style="padding:14px;" autocomplete="off" novalidate>
@@ -265,6 +316,42 @@ const BMPlans = (() => {
           <button type="button" class="btn btn-secondary btn-sm btn-ico tip bmpl-add-tpl-go"
                   data-tip="${esc(tr('bmpl.t.addTemplate'))}">${icon('add')} ${esc(tr('bmpl.addTemplate'))}</button>
         </div>`;
+    } else if (pid === 'capi') {
+      const provs = bundleProviders;
+      body = `<label class="tip" data-tip="${esc(tr('bmpl.t.capiTimeout'))}">${esc(tr('bmpl.f.capiTimeout'))}
+          <input type="number" name="capi_timeout" min="${CAPI_TIMEOUT[0]}" max="${CAPI_TIMEOUT[1]}" step="1"
+                 value="${esc(ph && ph.timeout_minutes != null ? ph.timeout_minutes : CAPI_TIMEOUT[2])}"></label>
+        <div class="bmpl-capi-versions tip" style="grid-column:1/-1;" data-tip="${esc(tr('bmpl.t.capiNoUpgrade'))}">
+          <span class="form-hint">${esc(tr('bmpl.capiBundle'))}</span>
+          ${provs && provs.length ? provs.map(v => `<code class="bmpl-capi-provider">${esc(v)}</code>`).join(' ')
+            : `<span class="badge warn">${esc(tr('bmpl.capiNoBundle'))}</span>`}
+          <p class="form-hint">${icon('info', { size: 12 })} ${esc(tr('bmpl.t.capiNoUpgrade'))}</p></div>`;
+    } else if (pid === 'clusters') {
+      body = `<label class="tip" data-tip="${esc(tr('bmpl.t.clustersTimeout'))}">${esc(tr('bmpl.f.clustersTimeout'))}
+          <input type="number" name="clusters_timeout" min="${CLUSTERS_TIMEOUT[0]}" max="${CLUSTERS_TIMEOUT[1]}" step="1"
+                 value="${esc(ph && ph.timeout_minutes != null ? ph.timeout_minutes : CLUSTERS_TIMEOUT[2])}"></label>
+        <p class="form-hint" style="grid-column:1/-1;">${esc(tr('bmpl.clustersHint', { max: MAX_CLUSTERS }))}</p>
+        <ol class="bmpl-clusters" style="grid-column:1/-1;"></ol>
+        <div class="bmpl-cl-pending" style="grid-column:1/-1;"></div>
+        <div class="apply-bar" style="grid-column:1/-1;">
+          <button type="button" class="btn btn-secondary btn-sm btn-ico tip bmpl-cl-add"
+                  data-tip="${esc(tr('bmpl.t.clusterAdd'))}">${icon('add')} ${esc(tr('bmpl.clusterAdd'))}</button>
+          <button type="button" class="btn btn-secondary btn-sm btn-ico tip bmpl-cl-several"
+                  data-tip="${esc(tr('bmpl.t.clusterSeveral'))}">${icon('add')} ${esc(tr('bmpl.clusterSeveral'))}</button>
+        </div>
+        <fieldset class="bmpl-cl-shortcut" style="grid-column:1/-1;" hidden>
+          <legend>${esc(tr('bmpl.clusterSeveral'))}</legend>
+          <label class="tip" data-tip="${esc(tr('bmpl.t.clusterTemplate'))}">${esc(tr('bmpl.f.clusterTemplate'))}
+            <select class="bmpl-sc-tpl"></select></label>
+          <label class="tip" data-tip="${esc(tr('bmpl.t.clusterCount'))}">${esc(tr('bmpl.f.clusterCount'))}
+            <input type="number" class="bmpl-sc-count" min="1" max="${MAX_CLUSTERS}" step="1" value="3"></label>
+          <label class="tip" style="grid-column:1/-1;" data-tip="${esc(tr('bmpl.t.clusterPattern'))}">${esc(tr('bmpl.f.clusterPattern'))}
+            <input class="bmpl-sc-pattern" spellcheck="false" value="{{cluster}}-k8s-{{n}}"></label>
+          <div class="apply-bar" style="grid-column:1/-1;">
+            <button type="button" class="btn btn-primary btn-sm tip bmpl-sc-ok" data-tip="${esc(tr('bmpl.t.clusterSeveralOk'))}">${esc(tr('bmpl.clusterSeveralOk'))}</button>
+            <span class="bmpl-sc-msg form-hint" role="status"></span>
+          </div>
+        </fieldset>`;
     }
     // une phase = un cadre du formulaire, son interrupteur dans la légende
     return `
@@ -317,11 +404,79 @@ const BMPlans = (() => {
       const before = edit.items.slice(0, i).map(x => x.template);
       it.depends_on = it.depends_on.filter(d => before.includes(d));
     });
+    edit.clusters.forEach((it, i) => {
+      const before = edit.clusters.slice(0, i).map(x => x.name);
+      it.depends_on = it.depends_on.filter(d => before.includes(d));
+    });
+  }
+
+  // 2.5.0 : clusters enfants, dans l'ordre de création (un à la fois)
+  function paintClusters() {
+    const ol = document.querySelector('#bm-plans .bmpl-clusters');
+    if (!ol) return;
+    const tpls = (ctplData.templates || []).filter(t => !t.invalid);
+    const known = new Set(tpls.map(t => t.name));
+    const items = edit.clusters;
+    const tplOpts = (sel) => (sel && !known.has(sel) ? `<option value="${esc(sel)}" selected>${esc(sel)} (${esc(tr('bmpl.tplMissing'))})</option>` : '')
+      + tpls.map(t => `<option value="${esc(t.name)}"${t.name === sel ? ' selected' : ''}>${esc(t.name)}</option>`).join('');
+    ol.innerHTML = items.length ? items.map((it, i) => {
+      const before = items.slice(0, i).map(x => x.name).filter(Boolean);
+      const deps = before.length ? `<span class="bmpl-deps tip" data-tip="${esc(tr('bmpl.t.clusterDependsOn'))}">${esc(tr('bmpl.dependsOn'))}
+          ${before.map(b => `<label class="bm-check"><input type="checkbox" class="bmpl-cl-dep" data-i="${i}" value="${esc(b)}"
+            ${it.depends_on.includes(b) ? 'checked' : ''}> <code>${esc(b)}</code></label>`).join(' ')}</span>` : '';
+      return `<li class="bmpl-cl" data-i="${i}">
+        <select class="bmpl-cl-tpl tip" data-i="${i}" aria-label="${esc(tr('bmpl.f.clusterTemplate'))}"
+                data-tip="${esc(tr('bmpl.t.clusterTemplate'))}">${tplOpts(it.template)}</select>
+        <input class="bmpl-cl-name tip" data-i="${i}" spellcheck="false" maxlength="80" value="${esc(it.name)}"
+               placeholder="{{cluster}}-apps" aria-label="${esc(tr('bmpl.f.clusterName'))}" data-tip="${esc(tr('bmpl.t.clusterName'))}">
+        ${it.template && !known.has(it.template) ? `<span class="badge fail tip" data-tip="${esc(tr('bmpl.t.ctplMissing'))}">${esc(tr('bmpl.tplMissing'))}</span>` : ''}
+        <button type="button" class="btn btn-sm btn-secondary tip bmpl-cl-up" data-i="${i}" ${i === 0 ? 'disabled' : ''}
+                aria-label="${esc(tr('bmpl.t.up'))}" data-tip="${esc(tr('bmpl.t.up'))}">${icon('arrowUp', { size: 12 })}</button>
+        <button type="button" class="btn btn-sm btn-secondary tip bmpl-cl-down" data-i="${i}" ${i === items.length - 1 ? 'disabled' : ''}
+                aria-label="${esc(tr('bmpl.t.down'))}" data-tip="${esc(tr('bmpl.t.down'))}">${icon('arrowDown', { size: 12 })}</button>
+        <button type="button" class="btn btn-sm btn-danger tip bmpl-cl-rm" data-i="${i}"
+                aria-label="${esc(tr('bmpl.t.clusterRemove'))}" data-tip="${esc(tr('bmpl.t.clusterRemove'))}">${icon('close', { size: 12 })}</button>
+        ${deps}
+      </li>`;
+    }).join('') : `<li class="form-hint bmpl-no-cluster">${esc(tr('bmpl.noCluster'))}</li>`;
+    const sc = edit.shortcut;
+    const pend = document.querySelector('#bm-plans .bmpl-cl-pending');
+    if (pend) {
+      pend.innerHTML = sc ? `<div class="bm-imported bmpl-sc-pending">${icon('info', { size: 13 })}
+        ${esc(tr('bmpl.clusterSeveralPending', { n: sc.count, pattern: sc.name_pattern, template: sc.template }))}
+        <button type="button" class="btn btn-sm btn-secondary tip bmpl-sc-clear" aria-label="${esc(tr('bmpl.t.clusterSeveralClear'))}"
+                data-tip="${esc(tr('bmpl.t.clusterSeveralClear'))}">${icon('close', { size: 12 })}</button></div>` : '';
+    }
+    const scSel = document.querySelector('#bm-plans .bmpl-sc-tpl');
+    if (scSel) scSel.innerHTML = tpls.length ? tplOpts(sc ? sc.template : '') : `<option value="">${esc(tr('bmpl.noClusterTemplate'))}</option>`;
+    const add = document.querySelector('#bm-plans .bmpl-cl-add');
+    const several = document.querySelector('#bm-plans .bmpl-cl-several');
+    const full = items.length + (sc ? sc.count : 0) >= MAX_CLUSTERS;
+    [add, several].forEach(b => { if (b) b.disabled = full || !tpls.length; });
+  }
+
+  // Raccourci « Plusieurs » : le serveur le développe à l'enregistrement
+  // (après les entrées déjà listées) ; ici, seulement les refus évidents
+  function takeShortcut(box) {
+    const msg = box.querySelector('.bmpl-sc-msg');
+    const template = box.querySelector('.bmpl-sc-tpl').value;
+    const count = Number(box.querySelector('.bmpl-sc-count').value);
+    const pattern = box.querySelector('.bmpl-sc-pattern').value.trim();
+    if (!template) { msg.textContent = tr('bmpl.noClusterTemplate'); return; }
+    if (!Number.isInteger(count) || count < 1 || edit.clusters.length + count > MAX_CLUSTERS) {
+      msg.textContent = tr('bmpl.clusterCountBad', { max: MAX_CLUSTERS - edit.clusters.length });
+      return;
+    }
+    if (!pattern.includes('{{n}}')) { msg.textContent = tr('bmpl.clusterPatternBad'); return; }
+    edit.shortcut = { template, count, name_pattern: pattern };
+    msg.textContent = '';
+    box.hidden = true;
+    paintClusters();
   }
 
   function collect(form) {
     const phases = {};
-    const available = plansData.available && plansData.available.length ? plansData.available : ['readiness', 'terraform'];
+    const available = plansData.available && plansData.available.length ? plansData.available : AVAILABLE_DEFAULT;
     const on = (pid) => !!form.querySelector(`.bmpl-phase-on[data-phase="${pid}"]:checked`);
     available.forEach(pid => {
       if (pid === 'readiness') {
@@ -330,6 +485,13 @@ const BMPlans = (() => {
       } else if (pid === 'terraform') {
         phases.terraform = { enabled: on('terraform'), templates: edit.items.map(it => (it.depends_on.length
           ? { template: it.template, depends_on: it.depends_on.slice() } : { template: it.template })) };
+      } else if (pid === 'capi') {
+        phases.capi = { enabled: on('capi'), timeout_minutes: Number(form.querySelector('[name="capi_timeout"]').value) };
+      } else if (pid === 'clusters') {
+        phases.clusters = { enabled: on('clusters'), timeout_minutes: Number(form.querySelector('[name="clusters_timeout"]').value),
+          items: edit.clusters.map(it => Object.assign({ template: it.template, name: it.name.trim() },
+            it.depends_on.length ? { depends_on: it.depends_on.slice() } : {})) };
+        if (edit.shortcut) Object.assign(phases.clusters, edit.shortcut);
       } else {
         phases[pid] = { enabled: on(pid) };
       }
@@ -353,6 +515,15 @@ const BMPlans = (() => {
       msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('bmpl.badTimeout'))}</div>`;
       return;
     }
+    // 2.5.0 : délais des phases Cluster API et Clusters, bornes du serveur
+    for (const [field, [lo, hi]] of [['capi_timeout', CAPI_TIMEOUT], ['clusters_timeout', CLUSTERS_TIMEOUT]]) {
+      const el = form.querySelector(`[name="${field}"]`);
+      const v = el ? Number(el.value) : lo;
+      if (!Number.isInteger(v) || v < lo || v > hi) {
+        msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('bmpl.badTimeoutRange', { min: lo, max: hi }))}</div>`;
+        return;
+      }
+    }
     const body = collect(form);
     if (!edit.isNew) body.revision = edit.revision;
     const r = await api('PUT', `/api/baremetal/plans/${enc(name)}`, body);
@@ -366,7 +537,11 @@ const BMPlans = (() => {
     }
     if (!r.ok) { msg.innerHTML = refusal(r.d, r.status); msg.scrollIntoView({ block: 'nearest' }); return; }
     startEdit(name, r.d, r.d.revision);
-    lastMsg = okLine(tr('bmpl.saved', { n: r.d.revision }));
+    // clés libres d'une ancienne phase désactivée retirées : dit, pas tu
+    const warns = Array.isArray(r.d.warnings) ? r.d.warnings : [];
+    lastMsg = okLine(tr('bmpl.saved', { n: r.d.revision })) + (warns.length
+      ? `<div class="bm-refusal bm-warning bmpl-warnings">${icon('warn', { size: 14 })} ${esc(tr('bmpl.saveWarnings'))}
+          <ul class="bm-paths">${warns.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>` : '');
     await loadLists();
     paint();
   }
@@ -611,6 +786,155 @@ const BMPlans = (() => {
     await render();
   }
 
+  // --- modèles de cluster (2.5.0) -----------------------------------------
+  function capiTemplatesHtml() {
+    const rows = (ctplData.templates || []).map(t => `
+      <tr data-ctemplate="${esc(t.name)}">
+        <td><code class="bmpl-ctpl-row-name">${esc(t.name)}</code>${t.invalid ? ` <span class="badge fail">${esc(tr('bmpl.invalid'))}</span>` : ''}</td>
+        <td>${esc(t.description || '')}</td>
+        <td>${(t.variables || []).map(v => `<code>{{${esc(v)}}}</code>`).join(' ')}</td>
+        <td>${t.vms == null ? '' : esc(t.vms)}</td>
+        <td class="bm-profile-actions">
+          <button type="button" class="btn btn-sm btn-secondary tip bmpl-ctpl-edit" data-name="${esc(t.name)}"
+                  aria-label="${esc(tr('bmpl.t.ctplEdit'))}" data-tip="${esc(tr('bmpl.t.ctplEdit'))}">${icon('edit')}</button>
+          <button type="button" class="btn btn-sm btn-danger tip needs-admin bmpl-ctpl-del" data-name="${esc(t.name)}"
+                  aria-label="${esc(tr('bmpl.t.ctplDelete'))}" data-tip="${esc(tr('bmpl.t.ctplDelete'))}">${icon('trash')}</button>
+        </td>
+      </tr>`).join('') || `<tr><td colspan="5" class="empty-state">${esc(tr('bmpl.ctplEmpty'))}</td></tr>`;
+    return `
+      <div class="card bmpl-capi-templates" style="margin-top:14px;">
+        <div class="card-header"><h2>${icon('capi', { size: 18 })} ${esc(tr('bmpl.ctplTitle'))}</h2>
+          <button type="button" class="btn btn-sm btn-primary btn-ico tip needs-admin bmpl-ctpl-new"
+                  data-tip="${esc(tr('bmpl.t.ctplNew'))}">${icon('add')} ${esc(tr('bmpl.ctplNew'))}</button>
+        </div>
+        <div class="card-body">
+          <p class="form-hint">${esc(tr('bmpl.ctplHint', { v: '{{name}}' }))}</p>
+          <table class="data-table" id="bmpl-ctpl-table">
+            <thead><tr><th>${esc(tr('bmpl.f.name'))}</th><th>${esc(tr('bmpl.f.description'))}</th>
+              <th>${esc(tr('bmpl.f.variables'))}</th><th>${esc(tr('bmpl.col.vms'))}</th><th>${esc(tr('col.actions'))}</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  /** Éditeur d'un modèle de cluster : le formulaire de création en mode
+   *  modèle (décision 173). `prefill` = { spec, cluster } : la demande
+   *  courante de la fenêtre de création (« Enregistrer comme modèle »). */
+  async function openCapiTemplate(name, prefill) {
+    let t = { name: '', description: '', variables: [], spec: (prefill && prefill.spec) || {}, revision: 0 };
+    if (name) {
+      const r = await api('GET', `/api/baremetal/capi-templates/${enc(name)}`);
+      if (!r.ok) { alert(r.d.error || r.status); return null; }
+      if (r.d.invalid) { alert(tr('bmpl.invalidFile')); return null; }
+      t = r.d;
+    }
+    const id = `bm-ctpl-${name || 'new'}`;
+    if (prefill && document.getElementById(`fp-${id}`)) FloatingPanels.close(id);
+    const clusters = (window.App && App.listClusters ? App.listClusters() : []).slice();
+    let cluster = (prefill && prefill.cluster) || (window.App && App.getCurrentCluster ? App.getCurrentCluster() : '') || clusters[0] || '';
+    if (cluster && !clusters.includes(cluster)) clusters.unshift(cluster);
+    const tip = (x) => `class="tip" data-tip="${esc(x)}"`;
+    const panel = FloatingPanels.open({
+      id, icon: 'capi',
+      title: name ? `${tr('bmpl.ctplEditTitle')} · ${name}` : tr('bmpl.ctplNewTitle'),
+      width: Math.min(1080, window.innerWidth - 120), height: Math.max(520, Math.min(860, window.innerHeight - 60)),
+      bodyHtml: `
+        <form class="capi-form bmpl-ctpl-form" style="padding:14px;" autocomplete="off" novalidate>
+          <p class="form-hint">${esc(tr('bmpl.ctplEditorHint', { v: '{{name}}' }))}</p>
+          <div class="bmpl-ctpl-msg" role="status"></div>
+          <fieldset>
+            <legend>${esc(tr('bmpl.fs.ctemplate'))}</legend>
+            <label ${tip(tr('bmpl.t.ctplName'))}>${esc(tr('bmpl.f.name'))} *
+              <input data-ctpl="name" required pattern="${NAME_PATTERN}" maxlength="63" value="${esc(t.name)}"${name ? ' readonly' : ''}></label>
+            <label ${tip(tr('bmpl.t.description'))}>${esc(tr('bmpl.f.description'))}
+              <input data-ctpl="description" maxlength="500" value="${esc(t.description || '')}"></label>
+            <label ${tip(tr('bmpl.t.ctplVariables'))}>${esc(tr('bmpl.f.variables'))}
+              <input data-ctpl="variables" placeholder="vlan, image" value="${esc((t.variables || []).join(', '))}"></label>
+            <label ${tip(tr('bmpl.t.ctplCluster'))}>${esc(tr('bmpl.f.ctplCluster'))}
+              <select data-ctpl="cluster">${clusters.length ? clusters.map(c => `<option value="${esc(c)}"${c === cluster ? ' selected' : ''}>${esc(c)}</option>`).join('')
+                : `<option value="">${esc(tr('bmpl.ctplNoCluster'))}</option>`}</select></label>
+          </fieldset>
+          <div class="bmpl-ctpl-note"></div>
+          <div class="bmpl-ctpl-host"></div>
+          <div class="apply-bar">
+            <button type="submit" class="btn btn-primary btn-sm btn-ico tip needs-admin bmpl-ctpl-save"
+                    data-tip="${esc(tr('bmpl.t.ctplSave'))}">${icon('save')} ${esc(tr('bmpl.save'))}</button>
+            <span class="form-hint bmpl-ctpl-rev">${name ? esc(tr('bmpl.revision', { n: t.revision })) : ''}</span>
+          </div>
+        </form>`,
+    });
+    const form = panel.el.querySelector('.bmpl-ctpl-form');
+    if (form.dataset.bound) return panel;
+    form.dataset.bound = '1';
+    const own = (k) => form.querySelector(`[data-ctpl="${k}"]`);
+    const msg = form.querySelector('.bmpl-ctpl-msg');
+    const host = form.querySelector('.bmpl-ctpl-host');
+    let ctl = null;
+    let revision = t.revision || 0;
+    let saved = !!name;
+
+    async function load(c) {
+      const spec = ctl ? ctl.read() : t.spec;
+      let inv = {};
+      const note = form.querySelector('.bmpl-ctpl-note');
+      note.innerHTML = '';
+      host.innerHTML = `<p class="form-hint">${esc(tr('capi.new.loading'))}</p>`;
+      if (c) {
+        try {
+          const r = await fetch(`/api/capi/${enc(c)}/inventory`);
+          inv = await r.json();
+          if (!r.ok || inv.unreachable) throw new Error(inv.error || String(r.status));
+        } catch (e) {
+          inv = {};
+          note.innerHTML = `<div class="bm-refusal bm-warning">${icon('warn', { size: 14 })} ${esc(tr('bmpl.ctplNoInventory', { cluster: c }))}</div>`;
+        }
+      }
+      if (!form.isConnected) return;
+      ctl = CapiCreate.templateForm(host, inv, c, spec);
+    }
+    own('cluster').addEventListener('change', (e) => { cluster = e.target.value; load(cluster); });
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const tname = own('name').value.trim();
+      if (!new RegExp(`^${NAME_PATTERN}$`).test(tname)) {
+        msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('bmpl.badName'))}</div>`;
+        return;
+      }
+      if (!ctl) return;
+      const body = { description: own('description').value, variables: varsOf(own('variables').value), spec: ctl.read() };
+      if (saved) body.revision = revision;
+      const r = await api('PUT', `/api/baremetal/capi-templates/${enc(tname)}`, body);
+      if (r.status === 409) {
+        msg.innerHTML = `<div class="bm-refusal bmpl-conflict">${icon('warn', { size: 14 })} ${esc(r.d.current_revision == null
+          ? tr('bmpl.conflictUnreadable') : tr('bmpl.ctplConflict', { n: r.d.current_revision }))}</div>`;
+        msg.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+      if (!r.ok) { msg.innerHTML = refusal(r.d, r.status); msg.scrollIntoView({ block: 'nearest' }); return; }
+      revision = r.d.revision;
+      saved = true;
+      own('name').readOnly = true;
+      form.querySelector('.bmpl-ctpl-rev').textContent = tr('bmpl.revision', { n: revision });
+      msg.innerHTML = okLine(tr('bmpl.ctplSaved', { n: revision }));
+      await loadLists();
+      paint();
+    });
+    await load(cluster);
+    return panel;
+  }
+
+  async function removeCapiTemplate(name) {
+    if (!confirm(tr('bmpl.confirmCtplDelete', { name }))) return;
+    const r = await api('DELETE', `/api/baremetal/capi-templates/${enc(name)}`);
+    if (r.status === 409 && r.d.code === 'template-in-use') {
+      alert(tr('bmpl.ctplInUse', { plans: (r.d.plans || []).join(', ') }));
+    } else if (!r.ok && r.status !== 404) {
+      alert(r.d.error || r.status);
+    }
+    await render();
+  }
+
   // =========================================================================
   // Fenêtre Déployer (et reprise d'un déroulé)
   // =========================================================================
@@ -791,7 +1115,14 @@ const BMPlans = (() => {
             <td>${!d.exists ? `<span class="badge info">${esc(tr('dpw.declNew'))}</span>`
               : d.origin_match ? `<span class="badge ok">${esc(tr('dpw.declReused'))}</span>`
                 : `<span class="badge fail">${esc(tr('dpw.declTaken'))}</span>`}</td></tr>`).join('')}</tbody></table>`
-          : `<p class="form-hint">${esc(tr('dpw.noDecl'))}</p>`}`;
+          : `<p class="form-hint">${esc(tr('dpw.noDecl'))}</p>`}
+        ${sum.capi ? `<p class="dpw-capi">${esc(tr('dpw.capiSummary'))} ${(sum.capi.providers || []).map(v => `<code>${esc(v)}</code>`).join(' ')}
+          <span class="badge ${sum.capi.ready ? 'ok' : 'info'}">${esc(sum.capi.ready ? tr('dpw.capiReady') : tr('dpw.capiInstall'))}</span></p>` : ''}
+        ${(sum.clusters || []).length ? `<table class="data-table dpw-clusters">
+          <thead><tr><th>${esc(tr('dpw.col.cluster'))}</th><th>${esc(tr('dpw.col.template'))}</th><th>${esc(tr('dpw.col.vms'))}</th><th>${esc(tr('dpw.col.state'))}</th></tr></thead>
+          <tbody>${sum.clusters.map(c => `<tr><td><code class="dpw-cluster-name">${esc(c.name)}</code></td><td><code>${esc(c.template)}</code></td>
+            <td>${c.vms == null ? '' : esc(c.vms)}</td>
+            <td>${c.exists ? `<span class="badge ok">${esc(tr('dpw.clusterPresent'))}</span>` : `<span class="badge info">${esc(tr('dpw.clusterNew'))}</span>`}</td></tr>`).join('')}</tbody></table>` : ''}`;
       paintLaunch();
     }
 
@@ -841,6 +1172,8 @@ const BMPlans = (() => {
       if (sid.startsWith('phase-')) return text(PHASES, sid.slice(6));
       if (sid.startsWith('tf-')) return tr('dpw.stepTemplate', { name: sid.slice(3) });
       if (sid.startsWith('ready-')) return tr('dpw.stepReady', { code: sid.slice(6) });
+      if (sid.startsWith('k8s-')) return tr('dpw.stepCluster', { name: sid.slice(4) });
+      if (sid === 'capi-providers') return tr('dpw.stepProviders');
       return sid;
     }
     function follow(actionId) {
@@ -995,6 +1328,12 @@ const BMPlans = (() => {
   // =========================================================================
   // Historique : « Reprendre » sur un déroulé arrêté
   // =========================================================================
+  /** 2.5.0 : un cluster enfant créé par un plan, lien vers Cluster API > Clusters. */
+  function clusterLink(a) {
+    if (!a || !a.parent || !String(a.action || '').startsWith('capi-cluster-create:')) return '';
+    return ` <a class="tip bmpl-cluster-link" href="#automation/capi/clusters" data-tip="${esc(tr('bmh.t.clusterLink'))}">${icon('capi', { size: 12 })} ${esc(tr('bmh.clusterLink'))}</a>`;
+  }
+
   function resumeButton(a) {
     if (!a || !String(a.action || '').startsWith('deploy:') || !RESUMABLE.includes(a.status) || a.dry_run) return '';
     const ok = can('operator');
@@ -1068,6 +1407,9 @@ const BMPlans = (() => {
       if (e.target.closest('.bmpl-tpl-new')) { openTemplate(null); return; }
       if ((el = e.target.closest('.bmpl-tpl-edit'))) { openTemplate(el.dataset.name); return; }
       if ((el = e.target.closest('.bmpl-tpl-del'))) { removeTemplate(el.dataset.name); return; }
+      if (e.target.closest('.bmpl-ctpl-new')) { openCapiTemplate(null); return; }
+      if ((el = e.target.closest('.bmpl-ctpl-edit'))) { openCapiTemplate(el.dataset.name); return; }
+      if ((el = e.target.closest('.bmpl-ctpl-del'))) { removeCapiTemplate(el.dataset.name); return; }
       if (!edit) return;
       if (e.target.closest('.bmpl-reload')) { openPlan(edit.name); return; }
       if (e.target.closest('.bmpl-apply')) { openDeploy({ plan: edit.name, cluster: window.App ? App.getCurrentCluster() : '' }); return; }
@@ -1084,12 +1426,64 @@ const BMPlans = (() => {
         return;
       }
       if ((el = e.target.closest('.bmpl-rm'))) { edit.items.splice(i(el), 1); fixDeps(); paintTemplates(); return; }
+      // 2.5.0 : clusters enfants
+      const cl = edit.clusters;
+      if ((el = e.target.closest('.bmpl-cl-up'))) {
+        const k = i(el);
+        if (k > 0) { [cl[k - 1], cl[k]] = [cl[k], cl[k - 1]]; fixDeps(); paintClusters(); }
+        return;
+      }
+      if ((el = e.target.closest('.bmpl-cl-down'))) {
+        const k = i(el);
+        if (k < cl.length - 1) { [cl[k + 1], cl[k]] = [cl[k], cl[k + 1]]; fixDeps(); paintClusters(); }
+        return;
+      }
+      if ((el = e.target.closest('.bmpl-cl-rm'))) { cl.splice(i(el), 1); fixDeps(); paintClusters(); return; }
+      if (e.target.closest('.bmpl-cl-add')) {
+        const t0 = (ctplData.templates || []).find(t => !t.invalid);
+        if (t0 && cl.length < MAX_CLUSTERS) { cl.push({ template: t0.name, name: `{{cluster}}-k8s-${cl.length + 1}`, depends_on: [] }); paintClusters(); }
+        return;
+      }
+      if (e.target.closest('.bmpl-cl-several')) {
+        const fs = box.querySelector('.bmpl-cl-shortcut');
+        if (fs) fs.hidden = !fs.hidden;
+        return;
+      }
+      if (e.target.closest('.bmpl-sc-ok')) { takeShortcut(box.querySelector('.bmpl-cl-shortcut')); return; }
+      if (e.target.closest('.bmpl-sc-clear')) { edit.shortcut = null; paintClusters(); return; }
       if (e.target.closest('.bmpl-add-tpl-go')) {
         const sel = box.querySelector('.bmpl-add-tpl');
         if (sel && sel.value) { edit.items.push({ template: sel.value, depends_on: [] }); paintTemplates(); }
       }
     });
     document.addEventListener('change', (e) => {
+      const cdep = e.target.closest('#bm-plans .bmpl-cl-dep');
+      if (cdep && edit) {
+        const it = edit.clusters[Number(cdep.dataset.i)];
+        if (!it) return;
+        it.depends_on = it.depends_on.filter(x => x !== cdep.value);
+        if (cdep.checked) it.depends_on.push(cdep.value);
+        return;
+      }
+      const ctpl = e.target.closest('#bm-plans .bmpl-cl-tpl');
+      if (ctpl && edit) {
+        const it = edit.clusters[Number(ctpl.dataset.i)];
+        if (it) { it.template = ctpl.value; paintClusters(); }
+        return;
+      }
+      const cname = e.target.closest('#bm-plans .bmpl-cl-name');
+      if (cname && edit) {
+        // un nom changé : les dépendances qui le désignaient le suivent
+        const k = Number(cname.dataset.i);
+        const it = edit.clusters[k];
+        if (!it) return;
+        const old = it.name;
+        it.name = cname.value.trim();
+        edit.clusters.slice(k + 1).forEach(x => { x.depends_on = x.depends_on.map(d => (d === old ? it.name : d)); });
+        fixDeps();
+        paintClusters();
+        return;
+      }
       const dep = e.target.closest('#bm-plans .bmpl-dep');
       if (dep && edit) {
         const it = edit.items[Number(dep.dataset.i)];
@@ -1103,8 +1497,8 @@ const BMPlans = (() => {
     });
   }
 
-  return { init, render, openDeploy, openTemplate, resumeButton, mountPicker, findingsHtml, findingText,
-    actionLink, linkIds };
+  return { init, render, openDeploy, openTemplate, openCapiTemplate, resumeButton, clusterLink, mountPicker,
+    findingsHtml, findingText, actionLink, linkIds };
 })();
 
 document.addEventListener('DOMContentLoaded', BMPlans.init);

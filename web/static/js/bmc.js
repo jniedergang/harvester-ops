@@ -414,16 +414,20 @@ const BMC = (() => {
       case 'baremetal-discover': return tr('bmh.kind.discover');
       case 'bmc-power': return tr('bmh.kind.power');
       case 'deploy': return tr('bmh.kind.deploy');
+      case 'capi-cluster-create': return tr('bmh.kind.capiCluster');
       default: return verb;
     }
   }
 
   // 2.2.0 : l'historique est partagé avec Terraform et Cluster API (auto-history.js)
   const bmHistory = AutoHistory.create({
-    box: () => $('#bm-history'), queries: HISTORY_KINDS, cls: 'bm', shown: historyShown,
+    box: () => $('#bm-history'), queries: HISTORY_KINDS.concat(['capi-cluster-create']), cls: 'bm', shown: historyShown,
+    // 2.5.0 : un cluster enfant ne figure ici que créé par un plan (rangé sous lui)
+    only: (a) => !String(a.action || '').startsWith('capi-cluster-create:') || !!a.parent,
     label: (a) => kindLabel(a.action), hint: () => tr('bmh.hint'), empty: () => tr('bmh.empty'),
-    // 2.4.0 : « Reprendre » sur un déroulé de plan arrêté (bm-plans.js)
-    extra: (a) => (window.BMPlans ? BMPlans.resumeButton(a) : ''),
+    // 2.4.0 : « Reprendre » sur un déroulé de plan arrêté (bm-plans.js) ;
+    // 2.5.0 : lien d'un cluster enfant vers Cluster API > Clusters
+    extra: (a) => (window.BMPlans ? BMPlans.resumeButton(a) + BMPlans.clusterLink(a) : ''),
   });
 
   // -------------------------------------------------------------------------
