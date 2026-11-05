@@ -10,7 +10,8 @@ dans sa source à l'étiquette de la version installée (décision 126).
 Une version de CAPHV non relue n'a pas de règles : l'identité restreinte est
 alors refusée (`identity-rules-unknown`), jamais devinée.
 
-Décisions : 164 (namespace des VMs = namespace du cluster), 165 (identité
+Décisions : 164 (namespace des VMs propre au cluster, `<namespace>-vms` depuis
+la revue du 05/11/2026), 165 (identité
 restreinte par défaut), 166 (compte et liaison du fournisseur de cloud créés
 d'avance, jamais de droit `bind`), 167 (jeton porté par un secret, supprimé
 avec le cluster). Voir docs/design/2026-11-05-plans-capi-250-plan.md.
@@ -27,6 +28,7 @@ import re
 GENERATED = "harvester-ops.io/generated"
 L_CLUSTER = "harvester-ops.io/caphv-cluster"
 L_NAMESPACE = "harvester-ops.io/caphv-namespace"
+MANAGED = "harvester-ops.io/managed"        # capi_stack.MANAGED : namespace créé par la console
 
 IDENTITY = "caphv-identity"
 TOKEN_SECRET = "caphv-identity-token"
@@ -38,6 +40,14 @@ IDENTITIES = ("restricted", "console")
 SIDE_NAMESPACES = "harvester-ops.io/caphv-side-namespaces"
 # Rôles annexes posés quel que soit la demande (règles à portée fixe)
 FIXED_SIDE_NAMESPACES = ("harvester-system", "kube-system")
+# Namespace des VMs d'un cluster à identité restreinte : `<namespace>-vms`,
+# créé et supprimé par la console avec l'identité. Pas le namespace du
+# cluster : CAPHV y crée le jeton du fournisseur de cloud sous le nom
+# `<cluster>-token` (util/cloud_provider.go:132, v0.10.1), celui que CAPRKE2
+# donne au jeton d'amorçage du cluster dans le namespace du cluster ; dans le
+# même namespace, CAPHV relit le secret de CAPRKE2, sans `token`, et le
+# cluster n'est jamais prêt (vu sur harvlab2 le 05/11/2026).
+VM_NS_SUFFIX = "-vms"
 
 # Genres des objets de l'identité (liaisons avant les rôles), pour le
 # sélecteur des diagnostics ; la suppression passe par `teardown` (noms).
@@ -57,7 +67,7 @@ KINDS = (
 # 734c983), client typé de l'identité (`HarvesterClient`, `hvClient`,
 # `lbClient`), tests exclus. Chemins relatifs à internal/controller/ sauf
 # util/. Portées :
-#   ns        namespace du cluster, qui est aussi celui des VMs (décision 164)
+#   ns        namespace des VMs du cluster, `<namespace>-vms` (décision 164)
 #   image     namespace de l'image ; keypair : namespace de la clé
 #   <nom>     un namespace fixe (harvester-system, kube-system)
 #   cluster   objets de portée cluster
@@ -178,6 +188,11 @@ def rfc1035_name(parts):
     return name[:63]
 
 
+def vm_namespace(namespace):
+    """Namespace des VMs d'un cluster à identité restreinte."""
+    return f"{namespace}{VM_NS_SUFFIX}"
+
+
 def generated_pool(spec):
     """Le pool que CAPHV supprime à la suppression du cluster :
     `<namespace du HarvesterCluster>-<nom du HarvesterCluster>-ippool`. La
@@ -205,7 +220,7 @@ def _resolve(rule, spec):
         out = list(names)
     else:
         out = {
-            "namespace": [spec["namespace"]],
+            "namespace": [spec["target_namespace"]],
             "pools": pools_of(spec),
             "generated-pool": [generated_pool(spec)],
             "cloud-provider": [spec["name"]],
@@ -220,7 +235,7 @@ def _resolve(rule, spec):
 def _scope_ns(rule, spec):
     scope = rule["scope"]
     if scope == "ns":
-        return spec["namespace"]
+        return spec["target_namespace"]
     if scope == "image":
         return str(spec.get("image") or "").partition("/")[0]
     if scope == "keypair":
@@ -288,37 +303,41 @@ def side_namespaces(spec, version):
 
 def teardown(namespace, name, side=None):
     """Les objets de l'identité d'un cluster, par leur nom, dans l'ordre de
-    suppression : [(genre, namespace ou None, nom)]. Le compte de l'identité
-    vient en dernier : il porte la liste des namespaces annexes
-    (`SIDE_NAMESPACES`), une reprise la relit tant qu'il reste quelque chose.
-    `side` : ces namespaces (les namespaces fixes sont toujours compris)."""
+    suppression : [(genre, namespace ou None, nom)]. Le namespace des VMs
+    (`vm_namespace`) part avec ses rôles et le compte du fournisseur de
+    cloud. Le compte de l'identité vient en dernier : il porte la liste des
+    namespaces annexes (`SIDE_NAMESPACES`), une reprise la relit tant qu'il
+    reste quelque chose. `side` : ces namespaces (les namespaces fixes et
+    celui des VMs sont toujours compris)."""
     spec = {"namespace": namespace, "name": name}
     crole = cluster_role_name(spec)
+    vms = vm_namespace(namespace)
     out = [
         ("clusterrolebindings.rbac.authorization.k8s.io", None, name),
         ("clusterrolebindings.rbac.authorization.k8s.io", None, crole),
         ("clusterroles.rbac.authorization.k8s.io", None, crole),
     ]
-    for n in sorted((set(side or ()) | set(FIXED_SIDE_NAMESPACES)) - {namespace}):
+    for n in sorted((set(side or ()) | set(FIXED_SIDE_NAMESPACES) | {vms}) - {namespace}):
         out += [("rolebindings.rbac.authorization.k8s.io", n, side_role_name(spec)),
                 ("roles.rbac.authorization.k8s.io", n, side_role_name(spec))]
     out += [
-        ("rolebindings.rbac.authorization.k8s.io", namespace, IDENTITY),
-        ("roles.rbac.authorization.k8s.io", namespace, IDENTITY),
+        ("serviceaccounts", vms, name),
+        ("namespaces", None, vms),
         ("secrets", namespace, TOKEN_SECRET),
-        ("serviceaccounts", namespace, name),
         ("serviceaccounts", namespace, IDENTITY),
     ]
     return out
 
 
-def reserved_name(name):
+def reserved_name(name, namespace=None):
     """Un nom de cluster qui confondrait ses objets avec ceux de l'identité :
-    le compte du fournisseur de cloud `<nom>` deviendrait le compte de
-    l'identité, ou la liaison `<nom>` celle de son ClusterRole."""
-    name = str(name or "")
+    la liaison `<nom>` du fournisseur de cloud prendrait le nom de celle du
+    ClusterRole, ou un compte `caphv-identity...` celui de l'identité ; et un
+    namespace en `-vms` serait celui des VMs d'un autre cluster, dont
+    l'identité lirait les secrets."""
+    name, namespace = str(name or ""), str(namespace or "")
     return (name in (IDENTITY, TOKEN_SECRET) or name.startswith(IDENTITY + "-")
-            or name.startswith(CLUSTER_ROLE_PREFIX))
+            or name.startswith(CLUSTER_ROLE_PREFIX) or namespace.endswith(VM_NS_SUFFIX))
 
 
 def docs(spec, version):
@@ -329,9 +348,13 @@ def docs(spec, version):
     by_ns = {}
     for scope_ns, group, resource, verbs, names, _src in grants(spec, version):
         by_ns.setdefault(scope_ns, []).append(_rbac_rule(group, resource, verbs, names))
+    vms = spec["target_namespace"]
     identity_meta = dict(_meta(IDENTITY, ns, spec),
                          annotations={SIDE_NAMESPACES: ",".join(side_namespaces(spec, version))})
     out = [
+        # namespace des VMs, propre au cluster, avant les rôles qu'il porte
+        {"apiVersion": "v1", "kind": "Namespace",
+         "metadata": {"name": vms, "labels": dict(labels(spec), **{MANAGED: "true"})}},
         {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": identity_meta},
         {"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/service-account-token",
          "metadata": dict(_meta(TOKEN_SECRET, ns, spec),
@@ -358,14 +381,15 @@ def docs(spec, version):
              "metadata": _meta(rname, scope_ns, spec), "subjects": [sa_subject],
              "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": rname}},
         ]
-    # compte et liaison du fournisseur de cloud, aux noms qu'attend CAPHV
-    # (GetCloudConfigB64(..., scope.Cluster.Name, TargetNamespace),
-    # harvestercluster_controller.go:860) : CAPHV les trouve par get
+    # compte et liaison du fournisseur de cloud, aux noms et au namespace
+    # qu'attend CAPHV (GetCloudConfigB64(..., scope.Cluster.Name,
+    # TargetNamespace), harvestercluster_controller.go:860) : CAPHV les
+    # trouve par get
     out += [
-        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": _meta(name, ns, spec)},
+        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": _meta(name, vms, spec)},
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
          "metadata": _meta(name, None, spec),
-         "subjects": [{"kind": "ServiceAccount", "name": name, "namespace": ns}],
+         "subjects": [{"kind": "ServiceAccount", "name": name, "namespace": vms}],
          "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole",
                      "name": CLOUD_PROVIDER_ROLE}},
     ]
@@ -402,7 +426,8 @@ def access_reviews(spec, version):
     out = []
     for d in docs(spec, version):
         group = d["apiVersion"].rpartition("/")[0]
-        res = {"ServiceAccount": "serviceaccounts", "Secret": "secrets", "Role": "roles",
+        res = {"Namespace": "namespaces", "ServiceAccount": "serviceaccounts", "Secret": "secrets",
+               "Role": "roles",
                "RoleBinding": "rolebindings", "ClusterRole": "clusterroles",
                "ClusterRoleBinding": "clusterrolebindings"}[d["kind"]]
         ns = d["metadata"].get("namespace")
@@ -427,33 +452,41 @@ def access_reviews(spec, version):
 # ---------------------------------------------------------------------------
 
 def force_target_namespace(spec, identity, default="default"):
-    """Décision 164 : avec l'identité restreinte, les VMs vont dans le
-    namespace du cluster. La valeur par défaut est remplacée ; une autre
-    valeur choisie est refusée par `findings`. Rend une copie."""
+    """Décision 164, revue le 05/11/2026 : avec l'identité restreinte, les
+    VMs vont dans un namespace propre au cluster, `<namespace>-vms`
+    (`vm_namespace`). La valeur par défaut est remplacée ; une autre valeur
+    choisie est refusée par `findings`. Rend une copie."""
     spec = dict(spec)
     if identity == "restricted" and spec.get("target_namespace") in (None, "", default):
-        spec["target_namespace"] = spec.get("namespace")
+        spec["target_namespace"] = vm_namespace(spec.get("namespace"))
     return spec
 
 
-def findings(spec, version, identity, bindings=None):
+def findings(spec, version, identity, bindings=None, vm_namespace_labels=None):
     """Constats propres à l'identité : [{"code","level","facts"}].
     `bindings` : {nom: étiquettes} des ClusterRoleBindings existantes au nom
-    du cluster (lecture faite par l'appelant)."""
+    du cluster ; `vm_namespace_labels` : étiquettes du namespace des VMs s'il
+    existe déjà, None sinon (lectures faites par l'appelant)."""
     out = []
     if identity != "restricted":
         return out
     if rules_for(version) is None:
         out.append({"code": "identity-rules-unknown", "level": "block",
                     "facts": {"version": version or "?", "known": ", ".join(sorted(RULES))}})
-    if reserved_name(spec.get("name")):
+    if reserved_name(spec.get("name"), spec.get("namespace")):
         out.append({"code": "identity-name-reserved", "level": "block",
                     "facts": {"name": spec.get("name"), "identity": IDENTITY,
                               "prefix": CLUSTER_ROLE_PREFIX}})
-    if spec.get("target_namespace") != spec.get("namespace"):
+    if spec.get("target_namespace") != vm_namespace(spec.get("namespace")):
         out.append({"code": "target-namespace-forced", "level": "block",
                     "facts": {"target_namespace": spec.get("target_namespace"),
-                              "namespace": spec.get("namespace")}})
+                              "namespace": vm_namespace(spec.get("namespace"))}})
+    if vm_namespace_labels is not None and (vm_namespace_labels.get(L_CLUSTER) != spec.get("name")
+                                            or vm_namespace_labels.get(L_NAMESPACE) != spec.get("namespace")):
+        # namespace des VMs déjà là, pas à ce cluster : l'identité aurait les
+        # VMs et les secrets de quelqu'un d'autre
+        out.append({"code": "vm-namespace-taken", "level": "block",
+                    "facts": {"namespace": vm_namespace(spec.get("namespace"))}})
     lb = (bindings or {}).get(spec.get("name"))
     if lb is not None and (lb.get(L_NAMESPACE) != spec.get("namespace")
                            or lb.get(L_CLUSTER) != spec.get("name")):

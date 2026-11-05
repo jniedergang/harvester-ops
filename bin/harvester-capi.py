@@ -531,6 +531,16 @@ def _cloud_provider_bindings(kube, name):
     return {name: (b.get("metadata") or {}).get("labels") or {}} if b else {}
 
 
+def _vm_namespace_labels(kube, spec):
+    """Étiquettes du namespace des VMs s'il existe déjà, sinon None
+    (ci.findings : namespace pris par autre chose que ce cluster)."""
+    try:
+        o = kube.get("namespaces", None, ci.vm_namespace(spec["namespace"]))
+    except KubeError:
+        return None
+    return ((o.get("metadata") or {}).get("labels") or {}) if o else None
+
+
 def _check(kube, spec, desc, identity="console"):
     inv = inventory(kube, desc)
     if inv.get("unreachable"):
@@ -539,7 +549,8 @@ def _check(kube, spec, desc, identity="console"):
     findings = cc.check(spec, facts_from(inv))
     version = ci.caphv_version(inv.get("stack"), desc)
     if identity == "restricted":
-        findings += ci.findings(spec, version, identity, _cloud_provider_bindings(kube, spec["name"]))
+        findings += ci.findings(spec, version, identity, _cloud_provider_bindings(kube, spec["name"]),
+                                _vm_namespace_labels(kube, spec))
         if ci.rules_for(version) is not None:
             # ce que la personne posera (namespace, identité, manifestes) et
             # retirera avec le cluster : refusé ici plutôt qu'à mi-création
@@ -601,7 +612,8 @@ def _check_many(kube, specs, desc, identity="restricted"):
         reviews += cc.manifest_reviews(s)
         if identity == "restricted":
             extra += [dict(f, cluster=f"{s['namespace']}/{s['name']}")
-                      for f in ci.findings(s, version, identity, _cloud_provider_bindings(kube, s["name"]))]
+                      for f in ci.findings(s, version, identity, _cloud_provider_bindings(kube, s["name"]),
+                                           _vm_namespace_labels(kube, s))]
             reviews += _identity_reviews(s, version)
     facts["denied"] = rights_denied(kube, list(dict.fromkeys(reviews)))
     findings = cc.check_many(specs, facts) + extra

@@ -77,14 +77,14 @@ def test_save_as_template_then_edit_with_a_variable(world):
     expect(x(host, "name")).to_be_visible(timeout=5000)
     x(host, "name").fill("web")
     x(host, "name").press("Tab")
-    # namespace des VMs : celui du cluster, grisé, avec sa bulle, jamais envoyé
+    # namespace des VMs : celui du cluster suivi de -vms, grisé, avec sa bulle, jamais envoyé
     tns = x(host, "target_namespace")
     expect(tns).to_be_disabled()
-    expect(tns).to_have_value("web")
+    expect(tns).to_have_value("web-vms")
     assert "restricted identity" in tns.get_attribute("data-tip")
     host.locator('.vm-edit-nav [data-sec="kubernetes"]').click()
     x(host, "namespace").fill("apps")
-    expect(tns).to_have_value("apps")
+    expect(tns).to_have_value("apps-vms")
     x(host, "check").click()
     page.wait_for_timeout(300)
     assert st["check"] and "target_namespace" not in st["check"][-1]

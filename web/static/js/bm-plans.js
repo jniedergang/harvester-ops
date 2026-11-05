@@ -85,6 +85,7 @@ const BMPlans = (() => {
     'identity-name-reserved': () => tr('dpw.f.identityNameReserved'),
     'target-namespace-forced': () => tr('dpw.f.targetNamespaceForced'),
     'cloud-provider-binding-taken': () => tr('dpw.f.cloudProviderBindingTaken'),
+    'vm-namespace-taken': () => tr('dpw.f.vmNamespaceTaken'),
     'refs-later': () => tr('dpw.f.refsLater'),
     'cluster-failed': () => tr('dpw.f.clusterFailed'),
     'capi-check-failed': () => tr('dpw.f.capiCheckFailed'),

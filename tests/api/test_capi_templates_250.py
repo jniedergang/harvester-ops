@@ -93,7 +93,11 @@ def test_a_lone_variable_on_an_integer_option_becomes_an_integer():
     spec = dp.render_capi_template(_t(cpu="{{workers}}"), {"workers": "3", "image": "default/img"}, "site1-apps")
     assert spec["worker_replicas"] == 3 and isinstance(spec["worker_replicas"], int)
     assert spec["cpu"] == 3 and isinstance(spec["cpu"], int)
-    assert (spec["name"], spec["namespace"], spec["target_namespace"]) == ("site1-apps",) * 3
+    assert (spec["name"], spec["namespace"]) == ("site1-apps",) * 2
+    # namespace des VMs laissé au défaut : harvester-capi l'impose (`site1-apps-vms`)
+    assert spec["target_namespace"] == "default"
+    import capi_identity as ci
+    assert ci.force_target_namespace(spec, "restricted")["target_namespace"] == "site1-apps-vms"
 
 
 def test_a_value_with_yaml_syntax_arrives_as_is():

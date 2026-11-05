@@ -59,6 +59,7 @@ const CapiCreate = (() => {
     'identity-name-reserved': (v) => tr('capi.new.fd.identity-name-reserved', v),
     'rights-missing': (v) => tr('capi.new.fd.rights-missing', v),
     'rights-unchecked': (v) => tr('capi.new.fd.rights-unchecked', v),
+    'vm-namespace-taken': (v) => tr('capi.new.fd.vm-namespace-taken', v),
   };
   const LEVEL_CLASS = { block: 'sev-critical', warn: 'sev-watch', ok: 'sev-info' };
   const LEVEL_RANK = { block: 0, warn: 1, ok: 2 };
@@ -392,9 +393,12 @@ const CapiCreate = (() => {
       st.classList.toggle('is-block', !!blocked);
     }
 
-    // décision 164 : les VMs vont dans le namespace du cluster (montré grisé,
-    // posé par le serveur, jamais envoyé)
-    const syncTargetNs = () => { q('target_namespace').value = q('namespace').value || q('name').value; };
+    // décision 164 : les VMs vont dans un namespace propre au cluster,
+    // `<namespace>-vms` (montré grisé, posé par le serveur, jamais envoyé)
+    const syncTargetNs = () => {
+      const ns = q('namespace').value || q('name').value;
+      q('target_namespace').value = ns ? `${ns}-vms` : '';
+    };
     q('name').addEventListener('input', syncTargetNs);
     q('namespace').addEventListener('input', syncTargetNs);
     function body() {

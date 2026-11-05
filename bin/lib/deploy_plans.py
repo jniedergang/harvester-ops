@@ -997,7 +997,10 @@ def render_capi_template(t, values, name, where=None):
     errors.extend(_capi_url_refusals(out, f"{where}.spec"))
     if errors:
         raise ProfileError(errors, "cannot render the cluster template")
-    out = dict(out, name=name, namespace=name, target_namespace=name)
+    # namespace des VMs : imposé par harvester-capi (identité restreinte,
+    # capi_identity.force_target_namespace), jamais par le modèle
+    out = dict(out, name=name, namespace=name)
+    out.pop("target_namespace", None)
     try:
         return _cc.normalize(out)
     except ValueError as e:

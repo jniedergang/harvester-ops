@@ -68,19 +68,21 @@ def test_rfc1035_name_matches_the_caphv_source(parts, expected):
 # ---------------------------------------------------------------------------
 
 # (namespace ou None, groupe, ressource, verbes, noms)
+# Le namespace des VMs est `web-vms` (pas `web`) : CAPHV y crée `web-token`
+# pour le fournisseur de cloud, le nom du jeton d'amorçage de CAPRKE2 dans `web`.
 EXPECTED = [
-    ("web", "kubevirt.io", "virtualmachines", ["get", "create", "delete"], None),
-    ("web", "kubevirt.io", "virtualmachineinstances", ["get"], None),
-    ("web", "", "secrets", ["get", "create", "update", "delete"], None),
-    ("web", "", "services", ["get", "create", "update", "delete"], None),
-    ("web", "", "serviceaccounts", ["get"], ["web"]),
-    ("web", "", "persistentvolumeclaims", ["list", "delete"], None),
-    ("web", "loadbalancer.harvesterhci.io", "loadbalancers", ["get", "create", "delete"], None),
+    ("web-vms", "kubevirt.io", "virtualmachines", ["get", "create", "delete"], None),
+    ("web-vms", "kubevirt.io", "virtualmachineinstances", ["get"], None),
+    ("web-vms", "", "secrets", ["get", "create", "update", "delete"], None),
+    ("web-vms", "", "services", ["get", "create", "update", "delete"], None),
+    ("web-vms", "", "serviceaccounts", ["get"], ["web"]),
+    ("web-vms", "", "persistentvolumeclaims", ["list", "delete"], None),
+    ("web-vms", "loadbalancer.harvesterhci.io", "loadbalancers", ["get", "create", "delete"], None),
     ("default", "harvesterhci.io", "virtualmachineimages", ["list"], None),
     ("default", "harvesterhci.io", "keypairs", ["get"], ["ju"]),
     ("harvester-system", "apps", "deployments", ["get"], ["harvester"]),
     ("kube-system", "", "services", ["get"], ["ingress-expose"]),
-    (None, "", "namespaces", ["get"], ["web"]),
+    (None, "", "namespaces", ["get"], ["web-vms"]),
     (None, "loadbalancer.harvesterhci.io", "ippools", ["get", "update"], ["capi-vm-pool"]),
     (None, "loadbalancer.harvesterhci.io", "ippools", ["delete"], ["web-web-ippool"]),
     (None, "", "nodes", ["list"], None),
@@ -134,31 +136,39 @@ def test_minimal_demand_objects_and_labels():
     docs = ci.docs(demand(), V)
     idx = _index(docs)
     assert set(idx) == {
+        ("Namespace", None, "web-vms"),
         ("ServiceAccount", "web", "caphv-identity"), ("Secret", "web", "caphv-identity-token"),
-        ("Role", "web", "caphv-identity"), ("RoleBinding", "web", "caphv-identity"),
+        ("Role", "web-vms", "caphv-identity-web"), ("RoleBinding", "web-vms", "caphv-identity-web"),
         ("Role", "default", "caphv-identity-web"), ("RoleBinding", "default", "caphv-identity-web"),
         ("Role", "harvester-system", "caphv-identity-web"),
         ("RoleBinding", "harvester-system", "caphv-identity-web"),
         ("Role", "kube-system", "caphv-identity-web"), ("RoleBinding", "kube-system", "caphv-identity-web"),
         ("ClusterRole", None, "harvester-ops-caphv-web"), ("ClusterRoleBinding", None, "harvester-ops-caphv-web"),
-        ("ServiceAccount", "web", "web"), ("ClusterRoleBinding", None, "web"),
+        ("ServiceAccount", "web-vms", "web"), ("ClusterRoleBinding", None, "web"),
     }
+    assert docs[0]["kind"] == "Namespace", "the VM namespace comes before the roles it holds"
     for d in docs:
-        assert d["metadata"]["labels"] == {ci.GENERATED: "true", ci.L_CLUSTER: "web", ci.L_NAMESPACE: "web"}
+        want = {ci.GENERATED: "true", ci.L_CLUSTER: "web", ci.L_NAMESPACE: "web"}
+        if d["kind"] == "Namespace":
+            want["harvester-ops.io/managed"] = "true"
+        assert d["metadata"]["labels"] == want
     tok = idx[("Secret", "web", "caphv-identity-token")]
     assert tok["type"] == "kubernetes.io/service-account-token"
     assert tok["metadata"]["annotations"] == {"kubernetes.io/service-account.name": "caphv-identity"}
     cp = idx[("ClusterRoleBinding", None, "web")]
     assert cp["roleRef"]["name"] == "harvesterhci.io:cloudprovider"
-    assert cp["subjects"] == [{"kind": "ServiceAccount", "name": "web", "namespace": "web"}]
+    assert cp["subjects"] == [{"kind": "ServiceAccount", "name": "web", "namespace": "web-vms"}]
     for k in [k for k in idx if k[0] in ("RoleBinding", "ClusterRoleBinding") and k[2] != "web"]:
         assert idx[k]["subjects"] == [{"kind": "ServiceAccount", "name": "caphv-identity", "namespace": "web"}]
+    # rien n'est accordé dans le namespace du cluster, qui porte les secrets
+    # de CAPRKE2 (jeton d'amorçage, kubeconfig du cluster)
+    assert not [d for d in docs if d["kind"] == "Role" and d["metadata"]["namespace"] == "web"]
 
 
 @pytest.mark.parametrize("image,key,side", [
     ("default/img", "default/ju", {"default": ["virtualmachineimages", "keypairs"]}),
     ("images/img", "keys/ju", {"images": ["virtualmachineimages"], "keys": ["keypairs"]}),
-    ("web/img", "web/ju", {}),       # même namespace que le cluster : rôle principal
+    ("web-vms/img", "web-vms/ju", {}),   # dans le namespace des VMs : rôle de ce namespace
 ])
 def test_image_and_key_namespaces(image, key, side):
     docs = ci.docs(demand(image=image, ssh_keypair=key), V)
@@ -166,10 +176,9 @@ def test_image_and_key_namespaces(image, key, side):
              for d in docs if d["kind"] == "Role" and d["metadata"]["name"] == "caphv-identity-web"}
     roles.pop("harvester-system")
     roles.pop("kube-system")
+    in_vms = roles.pop("web-vms")
     assert roles == side
-    main = next(d for d in docs if d["kind"] == "Role" and d["metadata"]["name"] == "caphv-identity")
-    in_main = [r["resources"][0] for r in main["rules"]]
-    assert ("virtualmachineimages" in in_main) == (image.startswith("web/"))
+    assert ("virtualmachineimages" in in_vms) == (image.startswith("web-vms/"))
 
 
 def test_three_pools_are_named_and_the_first_is_not_doubled():
@@ -191,9 +200,10 @@ def test_unknown_version_is_refused():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("given,forced,blocked", [
-    (None, "web", False),            # valeur par défaut remplacée
-    ("default", "web", False),
-    ("web", "web", False),
+    (None, "web-vms", False),        # valeur par défaut remplacée
+    ("default", "web-vms", False),
+    ("web-vms", "web-vms", False),
+    ("web", "web", True),            # le namespace du cluster : refusé (jeton `web-token` de CAPRKE2)
     ("other", "other", True),        # choix explicite d'un autre namespace : refusé
 ])
 def test_target_namespace_is_forced(given, forced, blocked):
@@ -234,7 +244,8 @@ def test_caphv_version_prefers_the_installed_controller(stack, desc, expected):
 
 def test_access_reviews_cover_objects_rules_and_bind():
     rv = ci.access_reviews(demand(), V)
-    assert ("web", "create", "rbac.authorization.k8s.io", "roles", None) in rv
+    assert ("web-vms", "create", "rbac.authorization.k8s.io", "roles", None) in rv
+    assert (None, "delete", "", "namespaces", "web-vms") in rv
     assert (None, "create", "rbac.authorization.k8s.io", "clusterrolebindings", None) in rv
     assert (None, "delete", "loadbalancer.harvesterhci.io", "ippools", "web-web-ippool") in rv
     assert (None, "bind", "rbac.authorization.k8s.io", "clusterroles", "harvesterhci.io:cloudprovider") in rv
@@ -408,7 +419,7 @@ def test_create_sets_up_the_identity_before_rendering_and_erases_the_file(cli, s
     assert not sim["path"].exists(), "kubeconfig left on disk"
     assert f"token: {TOKEN}" in sim["content"] and "https://172.16.3.100:6443" in sim["content"]
     assert "/console/kubeconfig" not in sim["content"]
-    assert sim["spec"]["target_namespace"] == "web"
+    assert sim["spec"]["target_namespace"] == "web-vms"
     assert sim["origin"] == {"plan": "p1", "template": "rke2-petit"}
     applied = [c for c in kube.calls if c[0] == "apply"]
     assert applied[0] == ("apply", "namespaces", None, "web")
@@ -484,7 +495,7 @@ def _world():
     for c, n in (("web", "web"), ("api", "api")):
         for d in ci.docs(demand(name=c), V):
             md = d["metadata"]
-            assert md["labels"] == lab(c, n)
+            assert {k: v for k, v in md["labels"].items() if k != "harvester-ops.io/managed"} == lab(c, n)
             k.objs[(Kube._kind(d), md.get("namespace"), md["name"])] = d
     return k
 
@@ -502,7 +513,7 @@ def test_delete_removes_the_cluster_first_then_its_identity_and_keeps_the_neighb
             n = cluster_gone_at.setdefault("n", 0) + 1
             cluster_gone_at["n"] = n
             if n < 3:
-                assert ("roles.rbac.authorization.k8s.io", "web", "caphv-identity") in kube.objs
+                assert ("roles.rbac.authorization.k8s.io", "web-vms", "caphv-identity-web") in kube.objs
                 return {"metadata": {"name": name}}
             return None
         return real_get(kind, ns, name)
@@ -518,6 +529,7 @@ def test_delete_removes_the_cluster_first_then_its_identity_and_keeps_the_neighb
     assert ("clusterrolebindings.rbac.authorization.k8s.io", None, "harvester-ops-caphv-web") in gone
     assert ("clusterrolebindings.rbac.authorization.k8s.io", None, "web") in gone
     assert ("roles.rbac.authorization.k8s.io", "kube-system", "caphv-identity-web") in gone
+    assert ("namespaces", None, "web-vms") in gone, "the VM namespace goes with the identity"
     neighbour = [k for k in kube.objs if (kube.objs[k].get("metadata") or {}).get("labels", {})
                  .get(ci.L_CLUSTER) == "api"]
     assert len(neighbour) == len(ci.docs(demand(name="api"), V))
@@ -582,12 +594,13 @@ def _keys(d):
 @pytest.mark.parametrize("image,key", [
     ("default/image-abc", "default/ju"),        # image et clé dans le même namespace
     ("images/leap", "keys/ju"),                 # deux namespaces annexes de plus
-    ("web/leap", "web/ju"),                     # tout dans le namespace du cluster
+    ("web-vms/leap", "web-vms/ju"),             # tout dans le namespace des VMs
 ])
 def test_teardown_names_every_object_the_identity_creates(image, key):
     spec = demand(image=image, ssh_keypair=key)
     created = {_keys(d) for d in ci.docs(spec, V)}
-    side = ci.docs(spec, V)[0]["metadata"]["annotations"][ci.SIDE_NAMESPACES].split(",")
+    side = next(d for d in ci.docs(spec, V) if d["kind"] == "ServiceAccount" and d["metadata"]["name"] == ci.IDENTITY
+                )["metadata"]["annotations"][ci.SIDE_NAMESPACES].split(",")
     plan = ci.teardown("web", "web", side)
     assert {(k, n, o) for k, n, o in plan} == created
     assert plan[-1] == ("serviceaccounts", "web", ci.IDENTITY), "the account carrying the list goes last"
@@ -785,7 +798,7 @@ def test_single_check_says_when_the_rights_could_not_be_read(cli, monkeypatch):
     assert "rights-unchecked" in [f["code"] for f in out["findings"]]
 
 
-@pytest.mark.parametrize("identity,forced,dry", [("restricted", "web", True), ("console", "default", False)])
+@pytest.mark.parametrize("identity,forced,dry", [("restricted", "web-vms", True), ("console", "default", False)])
 def test_preview_renders_like_create(cli, monkeypatch, capsys, tmp_path, identity, forced, dry):
     monkeypatch.setenv("HARVESTER_OPS_WORK_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "kube_from", lambda a: (Kube(), "/console/kubeconfig", None))
@@ -808,3 +821,40 @@ def test_preview_renders_like_create(cli, monkeypatch, capsys, tmp_path, identit
     assert ("dry-run-no-token" in seen["kc"]) is dry
     if dry:
         assert not Path(seen["path"]).exists()
+
+
+# ---------------------------------------------------------------------------
+# Namespace des VMs propre au cluster (vu sur harvlab2 le 05/11/2026 : dans le
+# namespace du cluster, CAPHV relisait le jeton d'amorçage de CAPRKE2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("labels,blocked", [
+    (None, False),                                                # absent : la console le crée
+    ({ci.L_CLUSTER: "web", ci.L_NAMESPACE: "web"}, False),        # le nôtre (reprise)
+    ({ci.L_CLUSTER: "web", ci.L_NAMESPACE: "other"}, True),       # à un autre cluster
+    ({}, True),                                                   # namespace de quelqu'un d'autre
+])
+def test_vm_namespace_taken(labels, blocked):
+    codes = [f["code"] for f in ci.findings(demand(), V, "restricted", None, labels)]
+    assert ("vm-namespace-taken" in codes) is blocked
+
+
+def test_a_namespace_ending_like_a_vm_namespace_is_reserved():
+    spec = demand(name="api-vms")
+    assert spec["namespace"] == "api-vms"
+    codes = [f["code"] for f in ci.findings(spec, V, "restricted")]
+    assert "identity-name-reserved" in codes
+
+
+def test_check_reads_the_vm_namespace(cli, monkeypatch):
+    inv = json.loads((ROOT / "tests" / "fixtures" / "capi" / "harv1-inventory-2026-11-05.json").read_text())
+    monkeypatch.setattr(cli, "inventory", lambda kube, desc: json.loads(json.dumps(inv)))
+
+    class K(Kube):
+        def create_many(self, objs):
+            return [{"status": {"allowed": True}} for _ in objs]
+    k = K()
+    k.objs[("namespaces", None, "web-vms")] = {"metadata": {"name": "web-vms", "labels": {"team": "x"}}}
+    out = cli._check(k, demand(image="default/opensuse-leap-cloud", ssh_keypair="default/capi-ssh-key"),
+                     None, "restricted")
+    assert "vm-namespace-taken" in [f["code"] for f in out["findings"]] and out["blocked"]
