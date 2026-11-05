@@ -1,0 +1,399 @@
+{
+ "charts": [
+  {
+   "apiVersion": "management.cattle.io/v3",
+   "kind": "ManagedChart",
+   "metadata": {
+    "name": "harvester",
+    "namespace": "fleet-local"
+   },
+   "status": {
+    "conditions": [
+     {
+      "reason": null,
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "reason": null,
+      "status": "True",
+      "type": "Defined"
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "management.cattle.io/v3",
+   "kind": "ManagedChart",
+   "metadata": {
+    "name": "harvester-crd",
+    "namespace": "fleet-local"
+   },
+   "status": {
+    "conditions": [
+     {
+      "reason": null,
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "reason": null,
+      "status": "True",
+      "type": "Defined"
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "management.cattle.io/v3",
+   "kind": "ManagedChart",
+   "metadata": {
+    "name": "kubeovn-operator-crd",
+    "namespace": "fleet-local"
+   },
+   "status": {
+    "conditions": [
+     {
+      "reason": null,
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "reason": null,
+      "status": "True",
+      "type": "Defined"
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "management.cattle.io/v3",
+   "kind": "ManagedChart",
+   "metadata": {
+    "name": "rancher-logging-crd",
+    "namespace": "fleet-local"
+   },
+   "status": {
+    "conditions": [
+     {
+      "reason": null,
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "reason": null,
+      "status": "True",
+      "type": "Defined"
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "management.cattle.io/v3",
+   "kind": "ManagedChart",
+   "metadata": {
+    "name": "rancher-monitoring-crd",
+    "namespace": "fleet-local"
+   },
+   "status": {
+    "conditions": [
+     {
+      "reason": null,
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "reason": null,
+      "status": "True",
+      "type": "Defined"
+     }
+    ]
+   }
+  }
+ ],
+ "lh_nodes": [
+  {
+   "apiVersion": "longhorn.io/v1beta2",
+   "kind": "Node",
+   "metadata": {
+    "name": "harv1.home.lo",
+    "namespace": "longhorn-system"
+   },
+   "spec": {
+    "allowScheduling": true
+   },
+   "status": {
+    "conditions": [
+     {
+      "reason": "",
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "reason": "",
+      "status": "True",
+      "type": "Schedulable"
+     },
+     {
+      "reason": "",
+      "status": "True",
+      "type": "Multipathd"
+     },
+     {
+      "reason": "",
+      "status": "True",
+      "type": "NFSClientInstalled"
+     },
+     {
+      "reason": "",
+      "status": "True",
+      "type": "KernelModulesLoaded"
+     },
+     {
+      "reason": "",
+      "status": "True",
+      "type": "MountPropagation"
+     }
+    ]
+   }
+  }
+ ],
+ "nodes": [
+  {
+   "apiVersion": "v1",
+   "kind": "Node",
+   "metadata": {
+    "name": "harv1.home.lo"
+   },
+   "spec": {},
+   "status": {
+    "conditions": [
+     {
+      "reason": "JoinSubnetGatewayReachable",
+      "status": "False",
+      "type": "NetworkUnavailable"
+     },
+     {
+      "reason": "MemberNotLearner",
+      "status": "True",
+      "type": "EtcdIsVoter"
+     },
+     {
+      "reason": "KubeletHasSufficientMemory",
+      "status": "False",
+      "type": "MemoryPressure"
+     },
+     {
+      "reason": "KubeletHasNoDiskPressure",
+      "status": "False",
+      "type": "DiskPressure"
+     },
+     {
+      "reason": "KubeletHasSufficientPID",
+      "status": "False",
+      "type": "PIDPressure"
+     },
+     {
+      "reason": "KubeletReady",
+      "status": "True",
+      "type": "Ready"
+     }
+    ]
+   }
+  }
+ ],
+ "storageclasses": [
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "annotations": {
+     "storageclass.beta.kubernetes.io/is-default-class": "true",
+     "storageclass.kubernetes.io/is-default-class": "true"
+    },
+    "name": "harv-rep1"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "annotations": {
+     "storageclass.beta.kubernetes.io/is-default-class": "false",
+     "storageclass.kubernetes.io/is-default-class": "false"
+    },
+    "name": "harvester-longhorn"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "lh-0943a9a9-bba1-4286-9bdd-7aa1e3dd5422"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "lh-14d1e229-ddd6-496d-a925-413e9cc0b855"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "lh-473972d0-9491-434d-8337-b1adf3a8f688"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "lh-ebf52afb-3201-4c33-9d5e-9b92f7f04507"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "annotations": {
+     "storageclass.kubernetes.io/is-default-class": "false"
+    },
+    "name": "longhorn"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-image-9dlfh"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-image-c7rvm"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-image-dqhmm"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-image-jcf68"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-image-nhtf9"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-image-zrvxk"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-opensuse-leap-cloud"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-opensuse-tumbleweed"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-opensuse-tumbleweed-aiscale"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-rocky8-genericcloud"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-rocky9-genericcloud"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-static"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-test-upload-no-path"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "longhorn-win2025-core-autounattend"
+   },
+   "provisioner": "driver.longhorn.io"
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "vmstate-persistence"
+   },
+   "provisioner": "driver.longhorn.io"
+  }
+ ],
+ "version": {
+  "gitVersion": "v1.36.3+rke2r1",
+  "major": "1",
+  "minor": "36"
+ }
+}
