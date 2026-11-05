@@ -69,10 +69,10 @@ COMING = "coming in 2.5+"
 # secret de VM passe par `user_data_secret_name` vers un Secret existant).
 # `key` seul : la clé d'étiquette des `match_label_expressions` d'une classe
 # de stockage (2.4.0), jamais une valeur secrète (`api_key` reste retiré).
-_PUBLIC_KEYS = frozenset(("public_key", "ssh_keys", "key"))
+_PUBLIC_KEYS = _hcl.PUBLIC_NAMES | {"key"}
 # nom (ou espace de noms) d'un Secret : `user_data_secret_name`, et les
 # paramètres d'une classe chiffrée `csi.storage.k8s.io/...-secret-name`
-_SECRET_NAME_RE = re.compile(r"secret[_-]name(space)?$", re.I)
+_SECRET_NAME_RE = _hcl.SECRET_NAME_OK_RE
 # cloud-init retiré entier s'il parle de mot de passe (décision 152)
 _TEXT_FIELDS = frozenset(("user_data",))
 _PASSWORD_TEXT_RE = re.compile(r"password|passwd|chpasswd", re.I)
