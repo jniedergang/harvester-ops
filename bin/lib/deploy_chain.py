@@ -32,14 +32,20 @@ Règles :
   contenu ; un élément dont une dépendance n'est pas faite est sauté ;
 - arrêt : consulté avant chaque phase, chaque élément et chaque relecture ;
   un élément en cours va à son terme, les suivants sont `skipped` ;
-- reprise : une phase `done` de l'action reprise passe par `verify` ;
-  vrai, elle est sautée (« already done (checked) ») ; faux, ou sans
-  `verify`, elle est rejouée. Dans une phase à éléments non terminée, les
-  éléments `done` sont revérifiés un à un (`verify_item`) et sautés ;
+- reprise : une phase simple `done` de l'action reprise passe par
+  `verify` ; vrai, elle est sautée (« already done (checked) ») ; faux, ou
+  sans `verify`, elle est rejouée. Une phase à éléments est TOUJOURS
+  reprise élément par élément, même `done` : les éléments faits sont
+  revérifiés un à un (`verify_item`) et sautés, un élément ajouté au plan
+  depuis est exécuté ;
 - exception d'une phase ou d'un élément : `error`, avec le seul NOM de
   l'exception (règle de la série : aucun détail qui porterait un secret) ;
 - secrets du déroulé (`plan-run/<run_id>/...`) effacés à la fin, quelle
-  qu'en soit l'issue.
+  qu'en soit l'issue ; `ctx.run_id` (12 caractères hexadécimaux) est
+  contrôlé avant tout ;
+- les messages des phases et des éléments vont dans les étapes et le
+  résultat : l'appelant n'y met jamais une valeur, seulement des noms et
+  des codes.
 
 Résultat rendu et passé à `ctx.set_result` :
     {"status": "done" | "error" | "partial" | "cancelled",
@@ -50,6 +56,7 @@ Résultat rendu et passé à `ctx.set_result` :
 La console y ajoute plan, révision, cluster, `resumes` et `dry_run`.
 """
 
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -62,6 +69,7 @@ CHECKED_MESSAGE = "already done (checked)"
 POLL_SECONDS = 15
 SECRET_CLASS = "plan-run"
 EXIT_CODES = {"done": 0, "error": 1, "partial": 1, "cancelled": 3}
+RUN_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 @dataclass
@@ -139,7 +147,7 @@ def _run_simple(ctx, ph, state, sleep, now):
             return PhaseOutcome("cancelled", items=out.items, message="cancelled", data=out.data), None
 
 
-def _run_items(ctx, ph, state, previous):
+def _run_items(ctx, ph, state, previous, progress=None):
     prev_items = {}
     if previous:
         for it in previous.get("items") or []:
@@ -163,6 +171,8 @@ def _run_items(ctx, ph, state, previous):
                 ctx.emit_step(sid, "skipped", CHECKED_MESSAGE)
                 status_of[item.id] = "done"
                 entries.append(entry)
+                if progress:
+                    progress(entries)
                 continue
             else:
                 ctx.emit_step(sid, "running", "")
@@ -175,6 +185,8 @@ def _run_items(ctx, ph, state, previous):
         status_of[item.id] = entry["status"]
         ctx.emit_step(sid, entry["status"], entry.get("message", ""))
         entries.append(entry)
+        if progress:
+            progress(entries)
     done = sum(1 for e in entries if e["status"] == "done")
     errors = sum(1 for e in entries if e["status"] == "error")
     if cancelled:
@@ -190,6 +202,9 @@ def _run_items(ctx, ph, state, previous):
 
 def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=None):
     """Déroule les phases ; rend le résultat (voir l'en-tête du module)."""
+    if not isinstance(getattr(ctx, "run_id", None), str) or not RUN_ID_RE.match(ctx.run_id):
+        # avant tout secret : l'effacement final ne pourrait pas le désigner
+        raise ValueError("run_id must be 12 hexadecimal characters")
     by_id = {p.id: p for p in phases}
     prev_by_id = {p.get("id"): p for p in ((previous or {}).get("phases") or [])}
     result = {"status": "running", "phases": []}
@@ -218,19 +233,28 @@ def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=Non
             else:
                 prev = prev_by_id.get(pid)
                 state = {"phase": pid, "previous": prev, "results": results}
-                if prev and prev.get("status") == "done" and _verified(ph.verify, ctx, state):
+                # une phase à éléments n'est jamais sautée d'un bloc (revue I3)
+                if (ph.items is None and prev and prev.get("status") == "done"
+                        and _verified(ph.verify, ctx, state)):
                     entry = dict(prev, message=CHECKED_MESSAGE, checked=True)
                     ctx.emit_step(sid, "skipped", CHECKED_MESSAGE)
                 else:
                     ctx.emit_step(sid, "running", "")
                     t0 = now()
                     if ph.items is not None:
-                        out, err = _run_items(ctx, ph, state, prev), None
+                        def progress(entries, _pid=pid, _t0=t0):
+                            # avancée d'une longue phase Terraform consignée
+                            # élément par élément (revue M2)
+                            live = {"id": _pid, "status": "running", "items": [dict(e) for e in entries]}
+                            ctx.set_result(dict(result, phases=result["phases"] + [live]))
+                        out, err = _run_items(ctx, ph, state, prev, progress), None
                     else:
                         out, err = _run_simple(ctx, ph, state, sleep, now)
                     status = out.status if out.status in ("done", "error", "partial", "cancelled") else "error"
-                    entry = {"id": pid, "status": status, "message": out.message or ""}
+                    entry = {"id": pid, "status": status}
                     entry.update(out.data or {})
+                    # les données d'une phase ne remplacent ni id, ni statut, ni message (M1)
+                    entry.update(id=pid, status=status, message=out.message or "")
                     if out.items is not None:
                         entry["items"] = out.items
                     entry["seconds"] = round(now() - t0, 1)

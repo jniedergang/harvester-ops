@@ -304,6 +304,53 @@ def test_resume_verify_exception_replays():
     assert ctx.calls == ["install"] and out["status"] == "done"
 
 
+def test_resume_done_terraform_runs_new_templates():
+    """Revue I3 : une phase Terraform `done` dont le plan a gagné un modèle
+    depuis n'est pas sautée d'un bloc ; seuls les modèles faits et revérifiés
+    sont sautés, le nouveau est appliqué. Une vérification de phase vraie
+    n'y change rien."""
+    prev = {"phases": [{"id": "terraform", "status": "done", "items": [
+        {"template": "a", "status": "done", "revision_applied": 2},
+        {"template": "b", "status": "done", "revision_applied": 2}]}]}
+    ctx = Ctx()
+    ph = tf_phase(ctx, {"a": "done", "b": "done", "c": "done"},
+                  verify_item=lambda c, s, p: p["revision_applied"] == 2)
+    ph.verify = lambda c, s: True
+    out = run(ctx, [ph], previous=prev)
+    assert ctx.calls == ["tf:c"]
+    assert [i.get("checked", False) for i in out["phases"][0]["items"]] == [True, True, False]
+    assert out["status"] == "done"
+
+
+def test_phase_data_never_overrides_status():
+    """Revue M1 : `data` d'une phase ne remplace ni l'id, ni le statut, ni le message."""
+    ctx = Ctx()
+    out = run(ctx, [simple(ctx, "readiness", status="error",
+                           data={"status": "done", "id": "x", "message": "m", "unmet": []})])
+    ph = out["phases"][0]
+    assert (ph["id"], ph["status"], ph["message"]) == ("readiness", "error", "readiness error")
+    assert ph["unmet"] == [] and out["status"] == "error"
+
+
+def test_item_progress_reaches_result():
+    """Revue M2 : l'avancée d'une phase à éléments est consignée après
+    chaque élément, avant la fin de la phase."""
+    ctx = Ctx()
+    run(ctx, [tf_phase(ctx, {"a": "done", "b": "done"})])
+    live = [r for r in ctx.results if r["phases"] and r["phases"][-1].get("status") == "running"]
+    assert [[i["template"] for i in r["phases"][-1]["items"]] for r in live] == [["a"], ["a", "b"]]
+
+
+@pytest.mark.parametrize("run_id", ["", "../x", "A1B2C3D4E5F6", "a1b2c3", None])
+def test_bad_run_id_refused_before_anything(run_id):
+    """Revue M3 : un identifiant d'action invalide est refusé avant toute
+    phase (l'effacement des secrets ne pourrait pas le désigner)."""
+    ctx = Ctx(run_id=run_id)
+    with pytest.raises(ValueError):
+        dc.run(ctx, [simple(ctx, "readiness")], secrets=ss.LocalStore())
+    assert ctx.calls == [] and ctx.steps == []
+
+
 # --- exceptions -------------------------------------------------------------------
 
 def test_phase_exception_without_text_leak():
