@@ -97,6 +97,19 @@ def _safe_member(name):
     return not p.is_absolute() and ".." not in p.parts
 
 
+def unsafe_member(m):
+    """La raison de refuser un membre d'archive, ou None : chemin absolu ou
+    en '..', lien qui sort de l'arborescence, fichier spécial. Partagé avec
+    le paquet d'artefacts (v2.6.0)."""
+    if not _safe_member(m.name):
+        return f"unsafe path in the archive: {m.name}"
+    if (m.issym() or m.islnk()) and (os.path.isabs(m.linkname) or ".." in Path(m.linkname).parts):
+        return f"unsafe link in the archive: {m.name} -> {m.linkname}"
+    if m.isdev():
+        return f"device file in the archive: {m.name}"
+    return None
+
+
 def inspect_archive(path):
     """Contenu d'une archive de livraison : {"version", "top"}. Refuse ce qui
     n'en est pas une : membre absolu ou en '..', lien hors de l'arborescence,
@@ -108,12 +121,9 @@ def inspect_archive(path):
     with tf:
         tops, names, version = set(), set(), None
         for m in tf:
-            if not _safe_member(m.name):
-                raise UpdateError(f"unsafe path in the archive: {m.name}")
-            if (m.issym() or m.islnk()) and (os.path.isabs(m.linkname) or ".." in Path(m.linkname).parts):
-                raise UpdateError(f"unsafe link in the archive: {m.name} -> {m.linkname}")
-            if m.isdev():
-                raise UpdateError(f"device file in the archive: {m.name}")
+            why = unsafe_member(m)
+            if why:
+                raise UpdateError(why)
             parts = Path(m.name).parts
             if not parts:
                 continue
@@ -178,10 +188,12 @@ def _no_y(r):
     return r is not None and r.returncode != 0 and bool(_NO_Y_RE.search((r.stderr or "") + (r.stdout or "")))
 
 
-def verify_signature(archive, signature, signers, runner=subprocess.run, in_image=None):
+def verify_signature(archive, signature, signers, runner=subprocess.run, in_image=None,
+                     namespace=SIG_NAMESPACE, identity=SIG_IDENTITY):
     """True si `signature` est une signature valide de `archive` par une clé
     de `signers` (format allowed_signers d'OpenSSH). Lève UpdateError avec la
-    raison sinon.
+    raison sinon. `namespace` et `identity` : ceux d'une release par défaut ;
+    le paquet d'artefacts (v2.6.0) passe les siens.
 
     `in_image(archive, signature, signers)` (v1.87.2) : quand le
     `ssh-keygen` de l'hôte manque ou ne connaît pas `-Y`, la même
@@ -193,8 +205,8 @@ def verify_signature(archive, signature, signers, runner=subprocess.run, in_imag
         raise UpdateError("no trusted release key on this host")
     try:
         with open(archive, "rb") as data:
-            r = runner(["ssh-keygen", "-Y", "verify", "-f", str(signers), "-I", SIG_IDENTITY,
-                        "-n", SIG_NAMESPACE, "-s", str(signature)],
+            r = runner(["ssh-keygen", "-Y", "verify", "-f", str(signers), "-I", identity,
+                        "-n", namespace, "-s", str(signature)],
                        stdin=data, capture_output=True, text=True, timeout=600)
     except FileNotFoundError:
         r = None
