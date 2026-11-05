@@ -73,6 +73,9 @@ LIST_FLAGS = {"dns": "--dns", "ip_pool_refs": "--ip-pool-refs"}
 CONSOLE_OPTIONS = {"extra_disk_size", "extra_disk_class", "target_namespace",
                    "rancher_import", "extra_networks", "service_cidr"}
 KNOWN = set(FLAGS) | set(LIST_FLAGS) | CONSOLE_OPTIONS
+# Options entières : `normalize` les convertit, le rendu d'un modèle de
+# cluster (deploy_plans) donne ce type à une chaîne qui n'est qu'une variable.
+INT_OPTIONS = ("cp_replicas", "worker_replicas", "cpu", "cni_mtu")
 
 
 def _as_list(v):
@@ -95,7 +98,7 @@ def normalize(raw):
         if v is None or v == "":
             continue
         spec[k] = v
-    for k in ("cp_replicas", "worker_replicas", "cpu", "cni_mtu"):
+    for k in INT_OPTIONS:
         if k in spec:
             try:
                 spec[k] = int(spec[k])

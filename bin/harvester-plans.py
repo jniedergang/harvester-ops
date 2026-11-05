@@ -3,6 +3,8 @@
 
   harvester-plans [--state-dir D] [--json] plan list | show NOM | save NOM --file plan.yaml [--revision N] | delete NOM
   harvester-plans [--state-dir D] [--json] template list | show NOM | save NOM --file m.yaml [--revision N] | delete NOM
+  harvester-plans [--state-dir D] [--json] capi-template list | show NOM | save NOM --file m.yaml [--revision N]
+                  | delete NOM
   harvester-plans [--state-dir D] [--json] check  PLAN --cluster C [--vars vars.yaml]
   harvester-plans [--state-dir D] [--json] apply  PLAN --cluster C [--vars vars.yaml] [--dry-run]
                   [--update-declarations]
@@ -132,13 +134,30 @@ def _errors(e):
     return [[w, r] for w, r in e.errors]
 
 
+def _save_tf_template(state, name, doc, revision):
+    return deploy_plans.save_template(state, name, doc, revision, by=f"cli:{getpass.getuser()}")[0]
+
+
+# genre -> (nom affiché, lister, lire, écrire, supprimer)
+STORES = {
+    "plan": ("plan", deploy_plans.list_plans, deploy_plans.load_plan,
+             deploy_plans.save_plan, deploy_plans.delete_plan),
+    "template": ("template", deploy_plans.list_templates, deploy_plans.load_template,
+                 _save_tf_template, deploy_plans.delete_template),
+    # 2.5.0 : modèles de cluster (Cluster API)
+    "capi-template": ("cluster template", deploy_plans.list_capi_templates,
+                      deploy_plans.load_capi_template,
+                      lambda st, n, d, r: deploy_plans.save_capi_template(st, n, d, r,
+                                                                          by=f"cli:{getpass.getuser()}"),
+                      deploy_plans.delete_capi_template),
+}
+
+
 def cmd_store(args, state):
-    plan = args.cmd == "plan"
-    lister = deploy_plans.list_plans if plan else deploy_plans.list_templates
-    loader = deploy_plans.load_plan if plan else deploy_plans.load_template
-    what = "plan" if plan else "template"
+    what, lister, loader, saver, deleter = STORES[args.cmd]
+    code = what.replace(" ", "-")
     if args.scmd == "list":
-        _out({f"{what}s": lister(state)})
+        _out({f"{code.replace('-', '_')}s": lister(state)})
         return EXIT_DONE
     if not deploy_plans.NAME_RE.match(args.name):
         raise Refused(f"invalid {what} name (RFC 1123): {args.name}", "invalid-name")
@@ -149,7 +168,10 @@ def cmd_store(args, state):
         _out(obj)
         return EXIT_DONE
     if args.scmd == "delete":
-        if not (deploy_plans.delete_plan if plan else deploy_plans.delete_template)(state, args.name):
+        used = deploy_plans.plans_using_capi_template(state, args.name) if args.cmd == "capi-template" else []
+        if used:
+            raise Refused(f"saved plans use this {what}", "template-in-use", plans=used)
+        if not deleter(state, args.name):
             raise Refused(f"no such {what}: {args.name}", "not-found")
         _out({"deleted": args.name})
         return EXIT_DONE
@@ -157,16 +179,12 @@ def cmd_store(args, state):
     if isinstance(doc, dict):
         doc.pop("revision", None)
     try:
-        if plan:
-            out = deploy_plans.save_plan(state, args.name, doc, args.revision)
-        else:
-            out, _removed = deploy_plans.save_template(state, args.name, doc, args.revision,
-                                                       by=f"cli:{getpass.getuser()}")
+        out = saver(state, args.name, doc, args.revision)
     except deploy_plans.PlanConflict as e:
         raise Refused(f"the {what} changed in the meantime", "conflict",
                       current_revision=e.current_revision) from None
     except deploy_plans.ProfileError as e:
-        raise Refused(f"invalid {what}", f"invalid-{what}", _errors(e)) from None
+        raise Refused(f"invalid {what}", f"invalid-{code}", _errors(e)) from None
     _out(out)
     return EXIT_DONE
 
@@ -329,7 +347,7 @@ def build_parser():
     p.add_argument("--state-dir", help="console state directory (default: the console one)")
     p.add_argument("--json", action="store_true", help="one JSON document on stdout at every exit")
     sub = p.add_subparsers(dest="cmd", required=True)
-    for what in ("plan", "template"):
+    for what in ("plan", "template", "capi-template"):
         sp = sub.add_parser(what, allow_abbrev=False)
         ss = sp.add_subparsers(dest="scmd", required=True)
         ss.add_parser("list", allow_abbrev=False)
@@ -371,7 +389,8 @@ def build_parser():
     return p
 
 
-COMMANDS = {"plan": cmd_store, "template": cmd_store, "check": cmd_check, "apply": cmd_apply,
+COMMANDS = {"plan": cmd_store, "template": cmd_store, "capi-template": cmd_store,
+            "check": cmd_check, "apply": cmd_apply,
             "resume": cmd_resume, "install": cmd_install}
 
 

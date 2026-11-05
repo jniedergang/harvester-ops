@@ -33150,6 +33150,69 @@ def api_deploy_template_delete(name):
     return "", 204
 
 
+@app.route("/api/baremetal/capi-templates", methods=["GET"])
+@requires_auth
+def api_capi_templates_list():
+    """2.5.0 : modèles de cluster (demande de création Cluster API à
+    variables). Lecture : tout rôle ; écriture : administrateur (préfixe
+    /api/baremetal/), comme les modèles de déclaration."""
+    return jsonify({"templates": _dpl.list_capi_templates(_deploy_state()),
+                    "builtins": list(_dpl.BUILTIN_VARS),
+                    "forbidden": list(_dpl.CAPI_TEMPLATE_FORBIDDEN)})
+
+
+@app.route("/api/baremetal/capi-templates/<name>", methods=["GET"])
+@requires_auth
+def api_capi_template_get(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)"}), 400
+    t = _dpl.load_capi_template(_deploy_state(), name)
+    if t is None:
+        path = _dpl.capi_template_path(_deploy_state(), name)
+        if path is not None and path.is_file():
+            return jsonify({"name": name, "invalid": True}), 200
+        return jsonify({"error": "no such cluster template"}), 404
+    return jsonify(dict(t, used_by=_dpl.plans_using_capi_template(_deploy_state(), name)))
+
+
+@app.route("/api/baremetal/capi-templates/<name>", methods=["PUT"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_capi_template_put(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)", "fields": ["name"]}), 400
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return _bm_errors_json([("template", "not a mapping")], "invalid cluster template")
+    rev, err = _deploy_revision(data)
+    if err:
+        return err
+    try:
+        out = _dpl.save_capi_template(_deploy_state(), name, _deploy_doc(data), rev,
+                                      by=current_user() or "")
+    except _dpl.PlanConflict as e:
+        return jsonify({"error": "the cluster template changed in the meantime", "code": "conflict",
+                        "current_revision": e.current_revision}), 409
+    except _dpl.ProfileError as e:
+        return _bm_errors_json(e.errors, "invalid cluster template")
+    return jsonify(out), 201 if out["revision"] == 1 else 200
+
+
+@app.route("/api/baremetal/capi-templates/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_capi_template_delete(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)"}), 400
+    used = _dpl.plans_using_capi_template(_deploy_state(), name)
+    if used:
+        return jsonify({"error": "saved plans use this cluster template", "code": "template-in-use",
+                        "plans": used}), 409
+    if not _dpl.delete_capi_template(_deploy_state(), name):
+        return jsonify({"error": "no such cluster template"}), 404
+    return "", 204
+
+
 @app.route("/api/baremetal/tf-templates/from-declaration", methods=["POST"])
 @requires_auth
 @_rate_limit("30/minute")
