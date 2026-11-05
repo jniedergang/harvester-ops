@@ -16,7 +16,9 @@
 
 `apply`, `resume` et `install` déroulent la même chaîne que la console
 (bin/lib/deploy_chain.py, branchée par web/app.py chargé dans ce
-processus) : disponibilité, contenu Terraform, et pour `install` la série
+processus) : disponibilité, contenu Terraform, pile Cluster API et clusters
+enfants (2.5.0, sans option nouvelle : `check` en montre les constats,
+capacité des N clusters comprise), et pour `install` la série
 d'installations d'un profil d'abord (même garde que `harvester-baremetal
 profile apply` pour une machine qui porte déjà un système). L'action est
 enregistrée dans l'historique du répertoire d'état.

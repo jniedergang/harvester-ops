@@ -39,6 +39,8 @@ SPEC.loader.exec_module(cli)
 
 env = tr.env
 world = trun.world
+import test_deploy_capi_250 as _t250  # noqa: E402
+capi = _t250.capi
 
 
 def run(capsys, *argv):
@@ -281,3 +283,29 @@ def test_secrets_file_read_through_one_descriptor(tmp_path):
     d.mkdir(mode=0o700)
     with pytest.raises((web_loader.SecretsError, OSError)):
         web_loader.read_secrets(str(d))
+
+
+# --- 2.5.0 (tâche 7) : phases capi et clusters, sans option nouvelle --------------
+
+def test_check_and_apply_cover_the_cluster_api_phases(capi, tmp_path, monkeypatch, capsys):
+    fake = capi["capi"]
+    _t250.seed(capi["client"])
+    st = _state(monkeypatch, capi)
+    v = write(tmp_path / "v.yaml", {"equipe": "ops"})
+    rc, out, err = run(capsys, *st, "check", "site", "--cluster", "harvlab", "--vars", v)
+    d = json.loads(out)
+    assert rc == 0 and d["summary"]["clusters"][0]["name"] == "harvlab-apps" and "(clusters)" in err
+    fake.fleet.append({"code": "fleet-cpu-short", "level": "block", "facts": {"needed": 9, "free": 7}})
+    rc, out, err = run(capsys, *st, "check", "site", "--cluster", "harvlab", "--vars", v)
+    assert rc == 2 and "blocking: fleet-cpu-short (clusters)" in err
+    rc, out, _ = run(capsys, *st, "apply", "site", "--cluster", "harvlab", "--vars", v)
+    assert rc == 2 and json.loads(out)["code"] == "blocking-findings" and fake.launches == []
+    fake.fleet.clear()
+    rc, out, err = run(capsys, *st, "apply", "site", "--cluster", "harvlab", "--vars", v, "--dry-run")
+    assert rc == 0 and "STEP_EVENT|k8s-harvlab-apps|done|checked and rendered (dry run)" in err
+    assert fake.clusters == {}
+    rc, out, err = run(capsys, *st, "apply", "site", "--cluster", "harvlab", "--vars", v)
+    d = json.loads(out)
+    assert rc == 0 and "STEP_EVENT|phase-capi|done|stack ready at the bundle versions" in err
+    item = next(p for p in d["result"]["phases"] if p["id"] == "clusters")["items"][0]
+    assert item["created"] is True and item["undo"] == {"kind": "capi-cluster", "ref": "harvlab-apps/harvlab-apps"}
