@@ -561,10 +561,9 @@ def rights_denied(kube, reviews):
         items.append({"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview",
                       "spec": {"resourceAttributes": attrs}})
     try:
-        out = kube.create({"apiVersion": "v1", "kind": "List", "items": items})
+        got = kube.create_many(items)
     except (KubeError, ValueError):
         return None
-    got = out.get("items") if out.get("kind") == "List" else [out]
     if len(got or []) != len(reviews):
         return None
     return [r for r, res in zip(reviews, got) if not ((res.get("status") or {}).get("allowed"))]

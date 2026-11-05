@@ -33106,8 +33106,11 @@ def _deploy_capi_phase(run, cluster, kc_ref, plan):
         missing = [m for m in stack.get("missing") or [] if m not in ("turtles", "core/cluster-api")]
         if len(missing) != len(stack.get("missing") or []):
             return _dch.PhaseOutcome("error", message="turtles-not-ready", data=data)
+        provs = [m for m in missing if not m.startswith("compatibility/")]
+        compat = [m for m in missing if m.startswith("compatibility/")]
+        what = f"{len(provs)} provider(s)" + (f" and restore {', '.join(compat)}" if compat else "")
         if dry:
-            return _dch.PhaseOutcome("done", message=f"would declare {len(missing)} provider(s)", data=data)
+            return _dch.PhaseOutcome("done", message=f"would declare {what}", data=data)
         args = ["--cluster", cluster, "--components", str(_capi_bundle_active_path()),
                 "--timeout", str(timeout_s)]
         if (_deploy_cluster_entry(cluster) or {}).get("nodes"):
@@ -33125,7 +33128,7 @@ def _deploy_capi_phase(run, cluster, kc_ref, plan):
             return _dch.PhaseOutcome("error", message=f"stack not ready after the install (action {child.id})",
                                      data=data)
         data["installed"] = True
-        return _dch.PhaseOutcome("done", message=f"{len(missing)} provider(s) declared", data=data)
+        return _dch.PhaseOutcome("done", message=f"declared {what}", data=data)
 
     def verify(ctx, state):
         stack, _p, why = read()

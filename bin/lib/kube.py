@@ -78,6 +78,15 @@ class Kube:
         extra = ["--dry-run=server"] if dry_run else []
         return json.loads(self.run("create", "-f", "-", "-o", "json", *extra, input=json.dumps(obj)))
 
+    def create_many(self, objs):
+        """Crée une liste d'objets en une requête ; rend leurs réponses dans
+        l'ordre. `kubectl create -o json` d'une List écrit un document JSON
+        par objet, à la suite (pas une List) : vu sur harv1 le 05/11/2026
+        avec des SelfSubjectAccessReview."""
+        return json_documents(self.run("create", "-f", "-", "-o", "json",
+                                       input=json.dumps({"apiVersion": "v1", "kind": "List",
+                                                         "items": list(objs)})))
+
     def replace(self, obj):
         return json.loads(self.run("replace", "-f", "-", "-o", "json", input=json.dumps(obj)))
 
@@ -212,3 +221,20 @@ def cluster_config(name):
         if cluster_decl.check_decl(doc, path) is None:
             return cluster_decl.resolve(doc, state)
     raise SystemExit(f"unknown cluster: {name} (not in {cfg} nor in {state / cluster_decl.DECL_DIR})")
+
+
+def json_documents(text):
+    """Documents JSON écrits à la suite (sortie de kubectl pour plusieurs
+    objets), dans l'ordre ; une List unique est dépliée. ValueError si le
+    texte n'en est pas."""
+    dec, out, i, text = json.JSONDecoder(), [], 0, text or ""
+    while True:
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i >= len(text):
+            break
+        obj, i = dec.raw_decode(text, i)
+        out.append(obj)
+    if len(out) == 1 and isinstance(out[0], dict) and out[0].get("kind") == "List":
+        return list(out[0].get("items") or [])
+    return out

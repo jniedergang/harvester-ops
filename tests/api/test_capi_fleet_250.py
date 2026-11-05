@@ -222,13 +222,15 @@ class Kube:
         self.deny = set(deny)
         self.created = []
 
-    def create(self, obj, dry_run=False):
-        self.created.append(obj)
-        items = obj["items"]
-        return {"kind": "List", "items": [
-            {"status": {"allowed": (i["spec"]["resourceAttributes"]["verb"],
-                                    i["spec"]["resourceAttributes"]["resource"]) not in self.deny}}
-            for i in items]}
+    def create_many(self, objs):
+        # comme kubectl : un document par objet, à la suite (relu par json_documents)
+        self.created.append(objs)
+        import kube as _k
+        return _k.json_documents("\n".join(json.dumps(
+            {"kind": "SelfSubjectAccessReview",
+             "status": {"allowed": (i["spec"]["resourceAttributes"]["verb"],
+                                    i["spec"]["resourceAttributes"]["resource"]) not in self.deny}})
+            for i in objs))
 
     def get(self, kind, ns, name):
         return None
@@ -268,7 +270,31 @@ def test_check_many_refuses_a_bad_list(cli, monkeypatch, tmp_path, capsys, body)
 
 def test_rights_denied_unreadable_is_none(cli):
     class Bad:
-        def create(self, obj, dry_run=False):
+        def create_many(self, objs):
             raise cli.KubeError("forbidden")
     assert cli.rights_denied(Bad(), [(None, "get", "", "nodes", None)]) is None
     assert cli.rights_denied(Bad(), []) == []
+
+
+@pytest.mark.parametrize("text,count", [
+    ('{"kind": "A"}\n{"kind": "B"}\n', 2),          # kubectl create -o json d'une List (harv1)
+    ('{\n "kind": "A"\n}{"kind": "B"}', 2),
+    ('{"kind": "List", "items": [{"a": 1}, {"b": 2}, {"c": 3}]}', 3),
+    ('', 0),
+])
+def test_json_documents(text, count):
+    import kube as _k
+    assert len(_k.json_documents(text)) == count
+
+
+def test_json_documents_refuses_garbage():
+    import kube as _k
+    with pytest.raises(ValueError):
+        _k.json_documents('{"a": 1} nope')
+
+
+def test_a_short_answer_is_unchecked(cli):
+    class Short:
+        def create_many(self, objs):
+            return [{"status": {"allowed": True}}]
+    assert cli.rights_denied(Short(), [(None, "get", "", "nodes", None), ("x", "get", "", "pods", None)]) is None

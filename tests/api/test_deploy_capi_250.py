@@ -374,11 +374,13 @@ def test_dry_run_writes_nothing(capi):
 
 def test_dry_run_with_a_stack_to_declare(capi):
     fake = capi["capi"]
-    fake.stack.update(ready=False, missing=["infrastructure/harvester", "bootstrap/rke2"])
+    fake.stack.update(ready=False, missing=["infrastructure/harvester", "bootstrap/rke2",
+                                            "compatibility/ingress-expose"])     # harv1, 05/11/2026
     seed(capi["client"])
     run = trn.start(capi, dry_run=True)
     assert run.status == "done"
-    assert phase(run, "capi")["message"] == "would declare 2 provider(s)" and fake.launches == []
+    assert phase(run, "capi")["message"] == ("would declare 2 provider(s) and restore "
+                                             "compatibility/ingress-expose") and fake.launches == []
     assert phase(run, "clusters")["message"] == "dry run: the clusters are checked once the stack is declared"
 
 
