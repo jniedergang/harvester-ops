@@ -3,8 +3,8 @@
 # Statuts : ok (fait), part (partiel), todo (manquant), plus (console seulement), na (hors périmètre).
 # v : version où c'est arrivé (ok/part) ou prévue (todo).
 
-AS_OF = "2.3.0"
-DATE = "2026-11-02"
+AS_OF = "2.3.1"
+DATE = "2026-11-05"
 
 S = []  # sections
 

@@ -40,6 +40,7 @@ import time
 import uuid
 from collections import Counter as _TallyCounter, deque
 from functools import wraps
+import functools
 from pathlib import Path
 from urllib.parse import quote
 
@@ -92,6 +93,7 @@ import rancher_admin as _radm
 import tf_store as _tfs
 import tf_state as _tfst
 import tf_kvm as _tfk
+import tf_guard as _tfg
 import baremetal_onboarding as _bmo
 import baremetal_onboarding_runtime as _bmor
 from flask import (
@@ -26706,26 +26708,16 @@ def _tf_mirror_provider(ws_dir, namespace, ptype, version, bin_src):
 
 
 def _tf_write_rc(ws_dir):
-    """`terraformrc` de l'espace : chaque provider du miroir local vient du
-    miroir et JAMAIS d'Internet (inclus dans le miroir, exclu du direct). Réécrit
-    quand le miroir change ; None sans miroir."""
+    """`terraformrc` de l'espace : les providers viennent du miroir local de
+    l'espace et de NULLE PART ailleurs. 2.3.1 : plus de bloc `direct` (il
+    laissait OpenTofu télécharger tout provider absent du miroir :
+    hashicorp/null, hashicorp/external, hashicorp/local...), ni de cache de
+    greffons. Toujours écrit : sans miroir, `init` échoue au lieu de
+    retomber sur la configuration de l'utilisateur ou sur Internet."""
     plug_root = (ws_dir / "plugins").resolve()
-    if not plug_root.is_dir():
-        return None
-    addrs = sorted(f"{h.name}/{n.name}/{t.name}"
-                   for h in plug_root.iterdir() if h.is_dir()
-                   for n in h.iterdir() if n.is_dir()
-                   for t in n.iterdir() if t.is_dir())
-    if not addrs:
-        return None
-    inc = ", ".join(json.dumps(a) for a in addrs)
     content = ("provider_installation {\n"
                "  filesystem_mirror {\n"
-               f"    path    = {json.dumps(str(plug_root))}\n"
-               f"    include = [{inc}]\n"
-               "  }\n"
-               "  direct {\n"
-               f"    exclude = [{inc}]\n"
+               f"    path = {json.dumps(str(plug_root))}\n"
                "  }\n"
                "}\n")
     rc = ws_dir / "terraformrc"
@@ -27543,15 +27535,23 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
     dans argv) ; `drop_env` : variables retirées (SSH_AUTH_SOCK : seule la
     clé de l'hôte doit servir)."""
     _tf_secure_ws(ws_dir)
-    rc_file = _tf_write_rc(ws_dir) or (ws_dir / "terraformrc")
-    env = {
-        **os.environ,
+    # 2.3.1 : dernier rempart, quel que soit le chemin qui a écrit les
+    # fichiers (déclaration, ancien espace partagé, fichier posé à la main) :
+    # OpenTofu ne se lance jamais sur une construction refusée.
+    refused = _tfg.check_workspace(ws_dir, known_headers=(_TF_HEADER,))
+    if refused:
+        log_tf.warning("terraform %s refused in %s: %s", args[0] if args else "?", ws_dir.name,
+                       "; ".join(str(v) for v in refused[:5]))
+        return 126, "", "refused: " + "; ".join(str(v) for v in refused[:5])
+    rc_file = _tf_write_rc(ws_dir)
+    env = _tf_env(ws_dir)
+    env.update({
         "HARVESTER_KUBECONFIG": kc_path,
         "TF_INPUT": "false",
         "TF_IN_AUTOMATION": "true",
-        "TF_CLI_CONFIG_FILE": str(rc_file) if rc_file.exists() else os.environ.get("TF_CLI_CONFIG_FILE", ""),
+        "TF_CLI_CONFIG_FILE": str(rc_file),
         "NO_COLOR": "1",
-    }
+    })
     for k in drop_env:
         env.pop(k, None)
     env.update(extra_env or {})
@@ -27577,6 +27577,30 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
         return 124, "", "timeout"
     finally:
         _tf_secure_ws(ws_dir)
+
+
+# 2.3.1 : OpenTofu part d'un environnement minimal. Il héritait de tout celui
+# de la console (jetons Vault ou de cloud, TF_CLI_ARGS*, TF_VAR_*,
+# TF_PLUGIN_CACHE_DIR, SSH_AUTH_SOCK...) : seules passent les variables de
+# langue, de chemin, de proxy et d'autorités de certification.
+_TF_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ",
+                "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+                "SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
+def _tf_env(ws_dir):
+    """Environnement de base d'une commande OpenTofu : HOME et TMPDIR dans
+    l'espace (0700), pas de télémétrie, rien d'autre de la console."""
+    env = {k: os.environ[k] for k in _TF_ENV_KEEP if k in os.environ}
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    tmp = ws_dir / ".tmp"
+    try:
+        tmp.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(tmp, 0o700)
+    except OSError as e:
+        log_tf.warning("terraform tmp dir: %s", e)
+    env.update({"HOME": str(ws_dir), "TMPDIR": str(tmp), "CHECKPOINT_DISABLE": "1"})
+    return env
 
 
 _TF_STALE_LOCK = "doesn't match any of the checksums previously recorded in the dependency lock file"
@@ -27679,10 +27703,16 @@ def api_terraform_apply(cluster):
     kind = data.get("kind", "")
     spec = data.get("spec") or {}
     dry_run = bool(data.get("dry_run", False))
+    if kind == "raw" and not _tf_is_admin():
+        return _tf_raw_refused()
     tf_content = _render_tf_for_kind(kind, spec)
     if not tf_content:
         return jsonify({"error": f"unsupported kind: {kind}",
                         "supported": ["vm", "image", "ssh_key", "raw"]}), 400
+    bad = _tf_guard_rendered([(re.sub(r"[^a-z0-9_]+", "_", str(spec.get("name") or "resource").lower()),
+                               kind, spec, tf_content)])
+    if bad:
+        return _tf_guard_refused(bad)
 
     run_id = uuid.uuid4().hex[:12]
     label = f"tf-apply:{kind}:{spec.get('name', '?')}"
@@ -27710,6 +27740,91 @@ def _tf_store_error(e):
 
 def _tf_decl_id_ok(decl_id):
     return bool(_tfs.ID_RE.match(str(decl_id or "")))
+
+
+# ---------------------------------------------------------------------------
+# 2.3.1 : le code Terraform ne commande pas la machine de la console
+# ---------------------------------------------------------------------------
+# Revue interne : le code libre d'une déclaration (`raw`) se lançait au rôle
+# opérateur, et OpenTofu exécute sur la machine qui le lance (provisioner
+# local-exec, data external, module, backend, file()...). Défense en
+# profondeur : (1) le code libre est réservé à l'admin (créer, modifier,
+# planifier, appliquer, détruire) ; (2) tout code, formulaire ou libre,
+# passe par tf_guard avant chaque plan ou apply, et l'espace entier juste
+# avant chaque commande (_tf_run_cmd) ; (3) OpenTofu part d'un environnement
+# minimal, sans autre source de provider que le miroir de l'espace.
+def _tf_has_raw(resources):
+    return any(isinstance(r, dict) and r.get("kind") == "raw" for r in (resources or []))
+
+
+def _tf_is_admin():
+    return ROLE_RANK.get(current_role(), 0) >= ROLE_RANK["admin"]
+
+
+def _tf_raw_refused():
+    return jsonify({"error": "free Terraform code needs the 'admin' role", "code": "raw-admin-only",
+                    "role": current_role(),
+                    "required": "admin",
+                    "hint": "free Terraform code runs on the console host: creating, editing, "
+                            "planning, applying or destroying it needs the 'admin' role"}), 403
+
+
+@functools.lru_cache(maxsize=512)
+def _tf_guard_cached(text, target_kind, file):
+    return tuple(v.as_dict() for v in _tfg.check_resources(text, target_kind, file))
+
+
+def _tf_guard_text(text, target_kind, file):
+    """Lecture d'un fichier rendu ; gardée en cache pour les textes courts
+    (la liste relit chaque déclaration à chaque affichage), jamais pour un
+    code libre volumineux (le cache ne grossit pas au-delà de ~32 Mo)."""
+    if len(text) <= 64 * 1024:
+        return _tf_guard_cached(text, target_kind, file)
+    return tuple(v.as_dict() for v in _tfg.check_resources(text, target_kind, file))
+
+
+def _tf_guard_rendered(rendered, target_kind="harvester"):
+    """Constructions refusées dans le code rendu d'une déclaration :
+    [{construct, line, file, error, index, resource}] ; vide = permis."""
+    out = []
+    for r in rendered:
+        safe, hcl, i = r[0], r[3], (r[5] if len(r) > 5 else None)
+        body = hcl[len(_TF_HEADER):] if hcl.startswith(_TF_HEADER) else hcl
+        for v in _tf_guard_text(body, target_kind or "harvester", f"{safe}.tf"):
+            out.append(dict(v, index=i, resource=safe))
+    return out
+
+
+def _tf_guard_refused(violations):
+    return jsonify({"error": "refused: " + violations[0]["error"], "code": "forbidden-construct",
+                    "violations": violations[:20],
+                    "hint": "a declaration may only hold resources and data sources of the embedded "
+                            "providers: no provisioner, external data, module, backend, provider "
+                            "block, nor function reading files of the console host"}), 422
+
+
+def _tf_decl_startup_audit():
+    """Au démarrage : chaque déclaration enregistrée qui contient désormais
+    une construction refusée est signalée (rien n'est supprimé ; plan et
+    apply la refusent, la liste le montre). Rend {id: [violations]}."""
+    flagged = {}
+    try:
+        decls = TF_DECLS.list(None, None)
+    except Exception as e:                 # noqa: BLE001 : le démarrage passe
+        log_tf.warning("Terraform declaration audit skipped: %s", e)
+        return flagged
+    for d in decls:
+        kind = d.get("target_kind") or "harvester"
+        rendered, _errors = _tf_render_resources(d.get("resources") or [], kind)
+        bad = _tf_guard_rendered(rendered, kind)
+        if bad:
+            flagged[d["id"]] = bad
+            log_tf.warning("Terraform declaration %s (%s on %s) is blocked: %s", d["id"], d.get("name"),
+                           d.get("cluster"), "; ".join(v["error"] for v in bad[:3]))
+    if flagged:
+        log_tf.warning("Terraform declarations: %d blocked by the 2.3.1 rules (plan and apply refused "
+                       "until an admin fixes them)", len(flagged))
+    return flagged
 
 
 # Le cloud-init d'une ressource peut porter des mots de passe : lu par un
@@ -27768,6 +27883,8 @@ def api_tf_declaration_create():
             return jsonify({"error": err[0]}), err[1]
     elif not _kubectl_for_cluster(cluster):
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _tf_has_raw(data.get("resources")) and not _tf_is_admin():
+        return _tf_raw_refused()
     decl_id = str(data.get("id") or uuid.uuid4().hex[:12])
     try:
         d = TF_DECLS.create(decl_id, cluster, data.get("name"), data.get("description") or "",
@@ -27796,6 +27913,10 @@ def api_tf_declaration_update(decl_id):
     if not _tf_decl_id_ok(decl_id):
         return jsonify({"error": "invalid declaration id"}), 400
     data = request.get_json(force=True, silent=True) or {}
+    cur = TF_DECLS.get(decl_id)
+    if (_tf_has_raw(data.get("resources")) or _tf_has_raw((cur or {}).get("resources"))) \
+            and not _tf_is_admin():
+        return _tf_raw_refused()
     try:
         d = TF_DECLS.update(decl_id, data.get("revision"), user=current_user() or "",
                             name=data.get("name"), description=data.get("description"),
@@ -27929,6 +28050,8 @@ def api_terraform_apply_declaration(cluster):
                               plan_hash=data.get("plan_hash"))
     if not isinstance(resources, list) or not resources:
         return jsonify({"error": "declaration.resources must be a non-empty list"}), 400
+    if _tf_has_raw(resources) and not _tf_is_admin():
+        return _tf_raw_refused()
     rendered, errors = _tf_render_resources(resources)
 
     if errors:
@@ -27937,6 +28060,9 @@ def api_terraform_apply_declaration(cluster):
             "errors": errors,
             "supported": ["vm", "image", "ssh_key", "raw"],
         }), 400
+    bad = _tf_guard_rendered(rendered)
+    if bad:
+        return _tf_guard_refused(bad)
 
     run_id = uuid.uuid4().hex[:12]
     label = _tf_decl_label(decl.get("name", "?"), len(rendered), dry_run)
@@ -27984,7 +28110,9 @@ def _tf_render_resources(resources, target_kind="harvester"):
     départagées (`node`, `node_2`). v1.54.0 : une ressource « raw » prend le
     nom de son bloc `resource` (elle s'appelait d'après les 24 premiers
     caractères de son code, `resource_harvester_ssh_`, audit D6)."""
-    rendered, errors, seen = [], [], set()
+    # 2.3.1 : `_providers` est le fichier de la console (une ressource de ce
+    # nom écrasait l'en-tête et ses providers)
+    rendered, errors, seen = [], [], {"_providers"}
     target_kind = target_kind or "harvester"
     taken = {}                       # adresse -> rang, pour les ressources KVM
     for i, res in enumerate(resources or []):
@@ -28210,6 +28338,9 @@ def _tf_decl_view(decl):
     # dernier plan vaut encore pour ce qui est écrit.
     d["content_hash"] = _tf_decl_hash(rendered) if not errors else None
     d["incomplete"] = [e["index"] for e in errors]
+    # 2.3.1 : code libre (réservé à l'admin) et constructions refusées
+    d["raw"] = _tf_has_raw(decl.get("resources"))
+    d["blocked"] = _tf_guard_rendered(rendered, d["target_kind"])
     ws = None
     try:
         ws = _tf_decl_ws(decl, create=False)
@@ -28247,10 +28378,16 @@ def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harv
     if decl["cluster"] != cluster:
         return jsonify({"error": "declaration belongs to another cluster",
                         "cluster": decl["cluster"]}), 400
+    if _tf_has_raw(decl["resources"]) and not _tf_is_admin():
+        return _tf_raw_refused()
     rendered, errors = _tf_render_resources(decl["resources"], target_kind)
     if errors:
         return jsonify({"error": "one or more resources are incomplete", "errors": errors,
                         "supported": ["vm", "image", "ssh_key", "raw"]}), 400
+    # destroy aussi : il évalue le code (un provisioner `when = destroy` s'y lance)
+    bad = _tf_guard_rendered(rendered, target_kind)
+    if bad:
+        return _tf_guard_refused(bad)
     if mode in ("plan", "apply") and not rendered:
         return jsonify({"error": "declaration.resources must be a non-empty list"}), 400
     missing = [r[0] for r in rendered if not r[4]]
@@ -28535,18 +28672,33 @@ provider "harvester" {
 
 
 def _hcl_str(s):
-    """Quote a string for HCL — newlines become heredoc."""
+    """Quote a string for HCL; newlines become heredoc.
+
+    2.3.1 : une valeur de formulaire ne peut plus devenir du code. Les
+    séquences de gabarit `${` et `%{` sont neutralisées (`$${`, `%%{` :
+    un `${file("/etc/shadow")}` dans une description lisait un fichier de la
+    console), et le marqueur du heredoc est choisi absent de la valeur (une
+    ligne `EOT` dans un cloud-init fermait le heredoc et la suite était lue
+    comme du code, provisioner compris)."""
     if s is None:
         return '""'
     s = str(s)
     if "\n" in s:
-        return f"<<-EOT\n{s}\nEOT"
-    return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+        lines = {ln.strip() for ln in s.split("\n")}
+        delim, n = "EOT", 0
+        while delim in lines:
+            n += 1
+            delim = f"EOT{n}"
+        body = s.replace("${", "$${").replace("%{", "%%{")
+        return f"<<-{delim}\n{body}\n{delim}"
+    return _tfk.hcl_string(s)
 
 
 def _hcl_id(s):
-    """Sanitize a string for use as an HCL resource identifier."""
-    return (s or "x").replace("-", "_").replace(".", "_")
+    """Sanitize a string for use as an HCL resource identifier. 2.3.1 : tout
+    caractère hors [A-Za-z0-9_] devient `_` (un guillemet dans un nom fermait
+    l'étiquette du bloc et la suite devenait du code)."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", s or "x")
 
 
 def _render_disk_block(disk):
@@ -31284,4 +31436,8 @@ if __name__ == "__main__":
     except Exception as _e:                      # noqa: BLE001
         log_watch.error("replication follower startup failed: %s", _e)
     _announce_setup()
+    try:
+        _tf_decl_startup_audit()
+    except Exception as _e:                      # noqa: BLE001
+        log_tf.warning("Terraform declaration audit failed: %s", _e)
     app.run(host=host, port=port, ssl_context=ssl_ctx, threaded=True, debug=False)
