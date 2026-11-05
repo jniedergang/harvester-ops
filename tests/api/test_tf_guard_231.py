@@ -576,7 +576,7 @@ def test_mutation_without_the_route_guard_the_workspace_check_still_refuses(worl
 
 
 def test_mutation_without_the_role_check_an_operator_gets_through(world, monkeypatch):
-    monkeypatch.setattr(wapp, "_tf_is_admin", lambda: True)
+    monkeypatch.setattr(wapp, "_tf_role_refusal", lambda resources, role, via_plan=False: None)
     assert create(world, "d", [raw_res(SAFE_RAW)], "operator").status_code == 201
 
 

@@ -11,6 +11,9 @@ Rangement, comme les clusters déclarés par la console (cluster_decl) :
 
     <état>/profiles.d/<nom>.yaml     un profil (0600), nom RFC 1123
 
+Un profil peut désigner un plan de déploiement (`plan`, 2.4.0) enchaîné
+après l'installation (bin/lib/deploy_plans.py).
+
 Aucun secret n'y entre : ni jeton du cluster, ni mot de passe de l'OS, ni
 mot de passe de BMC. Ils sont saisis au lancement de la série.
 
@@ -217,10 +220,16 @@ def check_profile(doc):
     for name in sorted(variables_in(fields) | variables_in(adv)):
         if name not in known:
             errors.append((f"{{{{{name}}}}}", "undeclared variable"))
+    # 2.4.0 : plan de déploiement enchaîné après l'installation, désigné par
+    # son nom. Il n'est pas chargé ici : le profil reste valide si le plan
+    # est supprimé (la fenêtre le signale).
+    plan = doc.get("plan") or ""
+    if not isinstance(plan, str) or (plan and not NAME_RE.match(plan)):
+        errors.append(("plan", "invalid plan name (RFC 1123)"))
     if errors:
         raise ProfileError(errors)
     return {"description": desc, "variables": custom, "fields": dict(fields),
-            "advanced_yaml": adv}
+            "advanced_yaml": adv, "plan": plan}
 
 
 def used_variables(profile):
@@ -288,6 +297,7 @@ def list_profiles(state):
             continue
         out.append({"name": prof["name"], "description": prof["description"],
                     "variables": prof["variables"], "uses": used_variables(prof),
+                    "plan": prof["plan"],
                     "updated": p.stat().st_mtime})
     return out
 
@@ -392,11 +402,13 @@ def check_batch(profile, batch):
     return errors
 
 
-def node_opts(profile, batch, index, field_type=None, dump=None):
+def node_opts(profile, batch, index, field_type=None, dump=None, join_all=False):
     """Options d'installation d'une ligne (corps de /api/baremetal/install,
     sans secrets) : champs du profil substitués, YAML avancé substitué,
     mode créer pour la première ligne, rejoindre ensuite. ProfileError
-    pour une variable absente, avec la ligne et le nom."""
+    pour une variable absente, avec la ligne et le nom. `join_all` (2.4.0,
+    reprise d'une série dont le cluster existe) : toutes les lignes
+    rejoignent."""
     row = batch["rows"][index]
     values = dict(row.get("values") or {}, vip=str(batch.get("vip") or ""))
     where = f"row {index + 1}"
@@ -413,7 +425,7 @@ def node_opts(profile, batch, index, field_type=None, dump=None):
         opts["iso"] = batch["iso"]
     opts["bmc_host"] = row.get("bmc_host")
     opts["bmc_user"] = row.get("bmc_user")
-    if index == 0:
+    if index == 0 and not join_all:
         opts["mode"] = "create"
         opts["vip"] = values["vip"]
         opts["cluster_name"] = batch["cluster_name"]

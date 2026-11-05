@@ -14,7 +14,7 @@ example do not install CSI charts or configure array credentials.
 
 ---
 
-## The screen: four tabs (2.1.0)
+## The screen: five tabs (2.1.0, Plans in 2.4.0)
 
 Automation > Bare-metal opens on **Machines**; the other tabs sit next to it,
 each with its own address:
@@ -23,6 +23,7 @@ each with its own address:
 |---|---|---|
 | **Machines** (default) | `#automation/pxe/machines` (also `#automation/pxe`) | The machines of the last discovery, one row each: hardware, power state, disks, network cards, and the gestures **Install** (or **Join** *cluster* during a join), power on, graceful shutdown, force off, restart. **Discover...** opens the discovery window; **Re-read** reads the same BMCs again. The join banner and the "no ISO" banner sit on top. |
 | **Profiles** | `#automation/pxe/profiles` | Multi-node install profiles and the batch launch. |
+| **Plans** (2.4.0) | `#automation/pxe/plans` | Deployment plans and declaration templates: Terraform content applied after an install or to an existing cluster (see below). |
 | **Images** | `#automation/pxe/images` | The ISO store. |
 | **History** | `#automation/pxe/history` | The bare-metal actions of Activity, running and past, each with a link to its log. |
 
@@ -492,6 +493,168 @@ most 512 characters, without control characters.
   `HD.Emb.5.2`) and the name `USE6236S00`, node4 with `elemental-shim` and
   `sles-secureboot` and the name `USE6236RY3`; a wrong name was said and the
   batch did not start. The batch was never submitted.
+
+### Deployment plans: Terraform content after installation (2.4.0)
+
+A **deployment plan** is a named, reusable list of phases that the console
+runs as one tracked action, `deploy:<cluster>`. You apply it to a Harvester
+cluster already declared, or you chain it after a bare-metal installation.
+In 2.4.0 the phases are:
+
+| Phase | What it does |
+|---|---|
+| **install** | Only when the plan starts from Bare-metal: the single-machine install or the batch, with the same BMC check (guard 132) as without a plan. |
+| **readiness** | Waits until the cluster is usable: nodes Ready, `ManagedChart` objects ready, Longhorn nodes and volumes healthy, a default storage class. Read again every 15 s, 20 minutes by default (`phases.readiness.timeout_minutes`, 1 to 180). |
+| **terraform** | Instantiates each **declaration template** of the plan as an ordinary Terraform declaration, `<plan>-<template>`, then plans and applies it. |
+| capi, clusters, registry, artefacts | In the model, shown greyed with "coming in 2.5+". A plan file that enables one is refused. |
+
+**Where it lives.** The **Plans** tab (`#automation/pxe/plans`, between
+Profiles and Images) lists the plans on the left and opens one on the right:
+one card per phase with its switch, the templates of the Terraform phase
+chosen from a list (never typed), their order (up and down buttons), and an
+optional "depends on" per template. The **Declaration templates** part of
+the tab edits templates with the Terraform forms (VM, image, SSH key,
+network, storage class, IP pool, free code). Files are kept in
+`<state>/plans.d/<name>.yaml` and `<state>/tf-templates.d/<name>.yaml`,
+mode 0600, written atomically, with a revision: saving with an old revision
+gets 409 and keeps what you typed. **Save as template** in Terraform >
+Declarations turns a Harvester declaration into a template.
+
+**Variables.** A template writes `{{name}}` where a value changes from one
+cluster to another; the plan lists the variables it asks for. `cluster` and
+`vip` are built in (`vip` of an existing cluster is the address in its
+kubeconfig, if it is one). A value is one line of 512 characters at most,
+without control characters. A string that is only a variable takes the type
+of the form field (a VLAN id becomes a number). In free code, a value is
+placed according to where it stands: in a quoted string or a heredoc it is
+escaped and arrives as text; outside a string only a number or
+`true`/`false` is accepted; and the result is read again: a value that
+would change the structure of the template (a heredoc delimiter, a `$` or
+`%` followed by a `{` from the next value) is refused with its name.
+
+**No secret in a template.** Anything passed to Terraform ends in its state.
+Saving a template removes values under secret-looking keys (and says which
+paths it removed), keeps public keys and the *names* of Kubernetes Secrets
+(`user_data_secret_name`), drops a cloud-init that talks about passwords,
+and refuses free code that assigns a secret, credentials in a URL, or a
+function that hides a value (`base64decode`, `sensitive`). The same check
+runs on the rendered template, so a value that looks like a secret is
+refused too. The check is lexical (secret key names, password lines in
+`user_data`, credentials in a URL): a token given as the value of a neutral
+variable, such as `echo {{x}}` in `user_data`, is not detected. Plan values
+are not meant for secrets, as they are stored in the run result. Keep the
+secret in a Kubernetes Secret and reference it with the `*_secret_name`
+fields.
+
+**Deploy window.** **Apply a plan** on a Harvester host page, or **Deploy**
+in the Plans tab, opens a window with three tabs: **Parameters** (cluster,
+plan, variables), **Checks** (findings grouped by phase, blocking ones
+first) and **Summary** (declarations created or reused, estimated time).
+**Launch** stays disabled while a finding blocks, with the reason in its
+tooltip. **Dry run** runs the same chain but only plans: it creates the
+declarations, plans them, then removes them; nothing is written to the
+cluster.
+
+The install window of a machine and the batch window of a profile have an
+optional **Plan** field, pre-filled by the `plan` of the profile, with the
+variables of that plan; with a plan, the action that opens is `deploy:`
+and the install is its first phase.
+
+Findings: `plan-invalid`, `phase-not-available`, `template-missing`,
+`var-missing`, `var-invalid`, `decl-name-taken`, `tf-missing`,
+`cluster-unreachable`, `admin-kind`, `forbidden-construct` (blocking);
+`template-newer`, `decl-differs`, `plan-changed` (warnings);
+`decl-exists`, `readiness-later` (information).
+
+**Following a run.** The action shows one step per phase (`phase-<id>`),
+readiness sub-steps (`ready-<code>`) and one step per template
+(`tf-<template>`), each with the id of its child action (the install, the
+Terraform plan and apply) as a link. Statuses: done, error, partial (a
+template failed and the independent ones went on), cancelled. A template is
+independent unless it comes after a failed template that it names in its
+"depends on".
+
+**Never a destruction.** If the Terraform plan of a template counts a delete
+or a replace, it is not applied: the template ends in error with
+`plan-destroys` and a link to the declaration to review. A declaration that
+already exists and was made by the same plan and template is only planned
+and applied. If its content differs from what the values give, it is kept
+and the run says so (`kept: values differ from the declaration`), unless
+**Update declarations whose values differ** was ticked at launch.
+
+**Stop and resume.** **Stop** (or the dock) stops the run: an install in
+progress is stopped, a Terraform run goes to its end, templates not started
+are skipped (`cancelled`). A stop during the last template has nothing left
+to skip: the run ends `done`, with `cancel_requested` in its result.
+**Resume** (History tab, on an error, partial, cancelled or
+interrupted run) starts a new `deploy:` action that reads the result of the
+first one, checks each finished phase again cheaply (cluster declared and
+nodes present, readiness replayed, declaration present with the applied
+revision) and starts from the first phase that is not done. A run whose
+console was restarted is marked interrupted and can be resumed. A batch
+whose nodes all joined is not reinstalled; otherwise only the rows whose
+host name is not a node are installed again, with the BMC check and the
+secrets asked again. A single-machine install is not resumed: start it
+again.
+
+**Secrets.** Only the install phase uses secrets in 2.4.0 (cluster token, OS
+password, BMC passwords). They are typed at launch, kept in memory for the
+run only, cleared at the end whatever the outcome, and asked again on
+resume. They never appear in the action label, its steps, its result, the
+plan or template files. A plan applied to an existing cluster asks for no
+secret.
+
+**Roles.**
+
+| Gesture | Role |
+|---|---|
+| Read plans and templates (a viewer sees `(hidden)` in place of cloud-init) | viewer |
+| Write or delete a plan or a template | admin |
+| Apply a plan to an existing cluster, stop, resume | operator |
+| A chain with an install, or its resume | admin |
+| A plan whose templates create VM networks, storage classes, IP pools (or, in free code, cluster networks, VLAN configurations, load balancers, settings, PCI or SR-IOV devices) | admin |
+
+An operator may launch a plan whose templates hold free code: an admin wrote
+that code, and the operator only gives values, which are neutralised. The
+declaration produced records who wrote the template revision
+(`origin.template_by`). Outside the chain, that declaration stays free code
+and only an admin plans, applies or destroys it from Terraform >
+Declarations. The server decides; the window shows the `admin-kind`
+finding and keeps Launch disabled.
+
+**One cluster at a time.** One `deploy:` action runs per cluster (409
+`deploy-running`); a shutdown or startup of the cluster blocks it, and a
+running plan blocks a shutdown. The lock is a file
+(`<state>/deploy.d/<cluster>.lock`) shared by the console and the command
+line.
+
+**Seen for real (2.4.0).** On harvlab: network, storage class and IP pool
+templates, a failure left `partial`, a fix in Terraform > Declarations, a
+resume that skipped the finished templates, a stop and its resume, dry run
+with nothing written, operator and admin roles. On a Redfish bench
+(sushy-tools on a KVM machine): a one-node Harvester installed by a plan,
+then readiness and one template, 36 minutes in all (install 35 min,
+readiness 76 s, Terraform 4 s). Not seen yet: a batch with a plan, the BMC
+guard inside a plan, the resume of an install phase.
+
+**Command line.** `bin/harvester-plans.py` loads the console and runs the
+same chain: `plan list|show|save|delete`, `template list|show|save|delete`,
+`check --cluster C [--vars FILE] PLAN`, `apply --cluster C [--vars FILE]
+[--dry-run] [--update-declarations] PLAN`, `resume [--secrets-file F |
+--secrets-stdin] [--confirm-system HOST=NAME] ACTION`, and `install
+--profile P --nodes FILE --cluster-name N --vip IP PLAN` for a batch with a
+plan. `--json` prints one document at every exit. Exit codes: 0 done, 1
+error or partial, 3 cancelled. The command line runs with the rights of the
+state directory (it does not check roles).
+
+**Rolling back to 2.3.x.** The upgrade to 2.4.0 is additive and leaves
+existing declarations as they are. A rollback to 2.3.x (Update tab) works
+without a crash, with three limits: 2.3.x lists the VM network, storage
+class and IP pool declarations but cannot plan, apply or destroy them
+(their objects stay on the cluster, unmanaged); a profile saved in 2.3.x
+loses its `plan` field; plans, templates and deployment runs are ignored
+until 2.4.0 is back. Before rolling back, destroy the declarations of these
+three kinds, or accept them as unmanaged.
 
 ### History of the bare-metal actions (2.1.0)
 

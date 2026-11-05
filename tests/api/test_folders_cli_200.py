@@ -706,17 +706,26 @@ def test_resume_never_overwrites_a_filing_made_since(env, capsys):
 
 
 def test_two_simultaneous_assigns_last_write_wins_with_a_coherent_journal(env):
+    """Les deux écritures partent ensemble (barrière) ; l'ordre attendu est
+    celui des écritures d'appartenance, relevé sous verrou autour de
+    `upsert_membership` (revue m8 du bloc 3 de 2.4.0 : relevé autour de
+    `write_object`, il ne disait pas qui écrivait la base en dernier)."""
     barrier = threading.Barrier(2)
-    real = cli.write_object
+    real_write, real_upsert = cli.write_object, cli.fdb.upsert_membership
     order = []
     lock = threading.Lock()
 
     def synced(obj, path, spec, ctx):
         barrier.wait()
+        return real_write(obj, path, spec, ctx)
+
+    def upsert(conn, key, path, *a, **kw):
         with lock:
+            out = real_upsert(conn, key, path, *a, **kw)
             order.append(path)
-            return real(obj, path, spec, ctx)
-    cli.write_object, saved = synced, cli.write_object
+            return out
+    cli.write_object = synced
+    cli.fdb.upsert_membership = upsert
     try:
         ts = [threading.Thread(target=run, args=(env, f"--id=c{i}", "assign", "--to", p),
                                kwargs={"spec": {"objects": [vm("a")]}}) for i, p in ((1, "/Lab"), (2, "/Old"))]
@@ -725,7 +734,8 @@ def test_two_simultaneous_assigns_last_write_wins_with_a_coherent_journal(env):
         for t in ts:
             t.join()
     finally:
-        cli.write_object = saved
+        cli.write_object = real_write
+        cli.fdb.upsert_membership = real_upsert
     assert members(env)["harvester/harv1/nav/a"] == (order[-1], "vm")
     assert journal(env, "c1")[0][3] == journal(env, "c2")[0][3] == "done"
 

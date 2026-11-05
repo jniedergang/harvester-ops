@@ -2449,6 +2449,30 @@ Drive the Terraform provider for Harvester from saved declarations.
   workspace and the per-workspace CLI configuration: providers come from
   the workspace mirror and from nowhere else (no direct download, no plugin
   cache).
+- **Networks, storage classes and IP pools (2.4.0)**: three more forms,
+  with the fields of the embedded provider 1.9.0. **VM network**
+  (`harvester_network`): cluster network, VLAN id from 0 to 4094, route
+  mode, CIDR, gateway or DHCP server (the provider's exclusions are checked
+  before the plan), labels with Kubernetes label keys. **Storage class**
+  (`harvester_storageclass`): parameters as key-value pairs (`migratable`
+  offered), reclaim policy, binding mode, volume expansion, default class
+  (Harvester refuses a second one, the plan shows it), allowed topologies.
+  **IP pool** (`harvester_ippool`): one or more ranges, each address
+  checked, start before end, start, end and gateway inside the subnet, a
+  subnet written without host bits, an optional selector (network,
+  priority, scope). Cluster networks and VLAN configurations stay in free
+  code: they touch the physical cards.
+- **Admin-only kinds (2.4.0)**: VM networks, storage classes and IP pools
+  change the cluster for everyone, so a declaration that holds one is
+  created, edited, planned, applied and destroyed by an admin, as elsewhere
+  in the console (403 `admin-kind` for an operator; the buttons say why).
+  The same rule covers the deployment plans that create them.
+- **Declarations made by a plan (2.4.0)**: a deployment plan instantiates
+  its templates as ordinary declarations named `<plan>-<template>`, with an
+  origin (plan, template, their revisions and who wrote the template). They
+  stay editable here. The structure check above runs inside the launch
+  itself, so a plan chain goes through it too, destroy included. See
+  [bare-metal.md](bare-metal.md#deployment-plans-terraform-content-after-installation-240).
 - **Declarations**: named groups of resources (VMs, VM images, SSH keys,
   Terraform code written by hand) applied together, each with its own
   Terraform state (1.54.0). They are kept by the console (shared between
@@ -2511,6 +2535,14 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   `#automation/pxe` opens Machines. The console remembers the last
   discovery (read cache in the state directory, never the credentials):
   the list survives a reload, with its date and a **Re-read** button.
+
+- **Deployment plans (2.4.0)**: a fifth tab, **Plans**, holds named plans
+  (readiness, then Terraform templates; Cluster API, clusters, registry and
+  artefacts shown as "coming in 2.5+") and declaration templates with
+  `{{variables}}`. A plan is applied to an existing cluster from its host
+  page (operator), or chained after an install or a batch (admin), as one
+  tracked `deploy:<cluster>` action with stop, resume, dry run and no
+  destruction. Command line: `bin/harvester-plans.py`.
 
 - **A machine that already carries a system is guarded (2.2.0)**: the
   install window lists what the BMC shows (UEFI boot entries of a loader
@@ -2626,8 +2658,11 @@ Terraform workspace.
   reads, `operator` performs the everyday mutating work (VMs, snapshots,
   Terraform applies), `admin` adds what cuts a service or changes the tool's
   own configuration: cluster power sequencing, node maintenance, cluster
-  declarations, bare-metal, the ISO store, the Terraform provider and
-  Terraform declarations that hold free code (2.3.1).
+  declarations, bare-metal, the ISO store, the Terraform provider,
+  Terraform declarations that hold free code (2.3.1) and those that create
+  VM networks, storage classes or IP pools (2.4.0). Deployment plans and
+  their templates are written by an admin; an operator applies a plan to an
+  existing cluster unless it creates those admin-only objects.
 - **Enforced centrally, deny by default.** Any request that changes
   something needs at least `operator`, and an explicit list of paths needs
   `admin`. An endpoint added tomorrow is protected without anyone having to

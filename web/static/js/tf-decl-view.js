@@ -42,7 +42,7 @@ const TFDeclView = (() => {
   };
   // types de ressource proposés par famille de cible ; pas de code libre sur
   // un hôte KVM (l'espace porte la clé de l'hôte le temps d'une exécution)
-  const ADD_KINDS = { harvester: ['vm', 'image', 'ssh_key', 'raw'],
+  const ADD_KINDS = { harvester: ['vm', 'image', 'ssh_key', 'network', 'storageclass', 'ippool', 'raw'],
                       kvm: ['kvm_vm', 'kvm_volume', 'kvm_network', 'kvm_rke2'] };
   // 2.3.1 : le code libre se lance sur la machine de la console, il est
   // réservé à l'admin (le serveur le refuse aux autres ; l'écran le dit).
@@ -51,7 +51,13 @@ const TFDeclView = (() => {
     const r = window.App && App.role ? App.role() : null;
     return r != null && r !== 'admin';
   };
-  const declLocked = (d) => !!(d && d.raw) && rawLocked();
+  // 2.4.0 (décision 160) : réseaux, classes de stockage et pools d'adresses
+  // sont réservés à l'admin, ici comme ailleurs dans la console
+  const ADMIN_KINDS = ['network', 'storageclass', 'ippool'];
+  const kindLocked = (k) => (k === 'raw' || ADMIN_KINDS.includes(k)) && rawLocked();
+  const kindLockTip = (k) => (k === 'raw' ? tr('tfd.t.rawAdmin') : tr('tfd.t.adminKind'));
+  const declLocked = (d) => !!(d && (d.raw || (d.admin_kinds || []).length)) && rawLocked();
+  const declLockTip = (d) => (d && d.raw ? tr('tfd.t.rawAdmin') : tr('tfd.t.adminKind'));
   const blockedOf = (d) => (d && d.blocked) || [];
 
   // Un appel littéral par texte : le contrôle de parité des traductions ne
@@ -137,6 +143,18 @@ const TFDeclView = (() => {
     if (r.kind === 'ssh_key') {
       const parts = String(s.public_key || '').trim().split(/\s+/);
       return parts.length > 1 ? `${parts[0]} …${parts[1].slice(-10)}${parts[2] ? ' ' + parts[2] : ''}` : '';
+    }
+    if (r.kind === 'network') {
+      return [s.cluster_network_name, s.vlan_id !== undefined && s.vlan_id !== '' ? `VLAN ${s.vlan_id}` : '',
+              s.route_cidr].filter(Boolean).join(' · ');
+    }
+    if (r.kind === 'storageclass') {
+      const p = s.parameters || {};
+      return [s.volume_provisioner, p.numberOfReplicas ? `${p.numberOfReplicas}x` : '',
+              s.is_default === true ? tr('tfd.sum.default') : ''].filter(Boolean).join(' · ');
+    }
+    if (r.kind === 'ippool') {
+      return (s.range || []).map(x => `${x.start || '?'}-${x.end || '?'}`).join(', ');
     }
     if (r.kind === 'raw') return r.address || '';
     if (r.kind === 'kvm_vm') {
@@ -287,7 +305,7 @@ const TFDeclView = (() => {
     const planChanges = plan ? ((plan.summary || {}).changes || []).length : 0;
     const locked = declLocked(d);
     const blocked = blockedOf(d);
-    const stop = locked ? tr('tfd.t.rawAdmin') : blocked.length ? tr('tfd.t.blocked') : '';
+    const stop = locked ? declLockTip(d) : blocked.length ? tr('tfd.t.blocked') : '';
     const canApply = !stop && !!plan && planChanges > 0 && !(d.incomplete || []).length;
     const applyTip = stop || (!plan ? tr('tfd.t.applyNeedsPlan') : planChanges ? tr('tfd.t.apply') : tr('tfd.t.applyNothing'));
     return `
@@ -295,7 +313,7 @@ const TFDeclView = (() => {
         <div class="tfd-title">
           <h3 class="tfd-name">${esc(d.name)}</h3>
           <button type="button" class="btn-icon-sm tfd-rename tip" aria-label="${esc(tr('tf.tip.renameDecl'))}" ${locked ? 'disabled' : ''}
-                  data-tip="${esc(locked ? tr('tfd.t.rawAdmin') : tr('tf.tip.renameDecl'))}">${Icons.svg('edit', { size: 14 })}</button>
+                  data-tip="${esc(locked ? declLockTip(d) : tr('tf.tip.renameDecl'))}">${Icons.svg('edit', { size: 14 })}</button>
         </div>
         <input type="text" class="tfd-desc tip" value="${esc(d.description || '')}" maxlength="500" ${locked ? 'disabled' : ''}
                placeholder="${esc(tr('tfd.descPh'))}" aria-label="${esc(tr('tfd.descPh'))}"
@@ -328,6 +346,7 @@ const TFDeclView = (() => {
                 data-tip="${esc(applyTip)}">${Icons.svg('play', { size: 14 })} ${esc(tr('tfd.apply'))}</button>
         <span class="tfd-hint">${esc(plan ? tr('tfd.planReady', { when: when(plan.at), n: planChanges }) : tr('tfd.applyHint'))}</span>
         <button type="button" class="btn btn-sm tfd-export tip" data-tip="${esc(tr('tfd.t.export'))}">${Icons.svg('download', { size: 14 })} ${esc(tr('tfd.export'))}</button>
+        ${familyOf(d) === 'harvester' ? `<button type="button" class="btn btn-sm tfd-save-template tip needs-admin" data-tip="${esc(tr('tfd.t.saveTemplate'))}">${Icons.svg('copy', { size: 14 })} ${esc(tr('tfd.saveTemplate'))}</button>` : ''}
         <button type="button" class="btn btn-sm btn-danger tfd-destroy tip" ${deployed && !stop ? '' : 'disabled'}
                 data-tip="${esc(stop || tr('tfd.t.destroy'))}">${Icons.svg('destroy', { size: 14 })} ${esc(tr('tfd.destroy'))}</button>
         <button type="button" class="btn btn-sm tfd-delete tip" ${deployed ? 'disabled' : ''}
@@ -338,8 +357,8 @@ const TFDeclView = (() => {
   function resourcesHtml(d) {
     const cards = (d.resources || []).map(r => {
       const s = resState(d, r);
-      const lock = (r.kind === 'raw' && rawLocked()) || declLocked(d);
-      const lockAttr = lock ? `disabled data-tip="${esc(tr('tfd.t.rawAdmin'))}"` : '';
+      const lock = kindLocked(r.kind) || declLocked(d);
+      const lockAttr = lock ? `disabled data-tip="${esc(kindLocked(r.kind) ? kindLockTip(r.kind) : declLockTip(d))}"` : '';
       return `
         <article class="tfd-res tfd-res--${esc(s.cls)}" data-res="${esc(r.id)}">
           <div class="tfd-res-top"><strong>${esc(kindLabel(r.kind))} ${esc(nameOf(r))}</strong><span class="badge ${esc(s.cls)}">${esc(s.text)}</span></div>
@@ -363,8 +382,8 @@ const TFDeclView = (() => {
       <div class="tfd-add">
         <span>${esc(tr('tfd.add'))}</span>
         ${ADD_KINDS[familyOf(d)].map(k => `<button type="button" class="btn btn-sm tfd-add-kind tip" data-kind="${k}"
-            ${(k === 'raw' && rawLocked()) || declLocked(d) ? 'disabled' : ''}
-            data-tip="${esc((k === 'raw' && rawLocked()) || declLocked(d) ? tr('tfd.t.rawAdmin') : tr('tfd.t.add', { kind: kindLabel(k) }))}">${Icons.svg('add', { size: 12 })} ${esc(kindLabel(k))}</button>`).join('')}
+            ${kindLocked(k) || declLocked(d) ? 'disabled' : ''}
+            data-tip="${esc(kindLocked(k) ? kindLockTip(k) : declLocked(d) ? declLockTip(d) : tr('tfd.t.add', { kind: kindLabel(k) }))}">${Icons.svg('add', { size: 12 })} ${esc(kindLabel(k))}</button>`).join('')}
       </div>`;
   }
 
@@ -840,6 +859,21 @@ const TFDeclView = (() => {
     input.addEventListener('blur', () => finish(true));
   }
 
+  // 2.4.0 : la déclaration devient un modèle des plans de déploiement ;
+  // la console retire les secrets et le dit, chemin par chemin
+  async function saveAsTemplate(d) {
+    const guess = String(d.name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
+    const name = prompt(tr('tfd.saveTemplateAsk'), guess);
+    if (!name) return;
+    try {
+      const out = await TFDecl.saveAsTemplate(d.id, name.trim());
+      alert(out.removed.length ? tr('tfd.saveTemplateRemoved', { name: name.trim(), paths: out.removed.join(', ') })
+        : tr('tfd.saveTemplateDone', { name: name.trim() }));
+    } catch (e) {
+      alert(tr('tfd.saveTemplateFailed', { error: e.message }));
+    }
+  }
+
   async function removeDecl(d) {
     if (!confirm(tr('tf.confirmDeleteDecl', { name: d.name }))) return;
     try {
@@ -892,6 +926,7 @@ const TFDeclView = (() => {
       if (e.target.closest('.tfd-plan')) { runPlan(d); return; }
       if (e.target.closest('.tfd-apply')) { reviewLastPlan(d); return; }
       if (e.target.closest('.tfd-export')) { exportCode(d); return; }
+      if (e.target.closest('.tfd-save-template')) { saveAsTemplate(d); return; }
       if (e.target.closest('.tfd-destroy')) { runDestroy(d); return; }
       if (e.target.closest('.tfd-delete')) { removeDecl(d); return; }
     });

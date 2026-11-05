@@ -332,6 +332,106 @@ const TF_SCHEMA = {
     ],
   },
 
+  // ---------------------------------------------------------------------
+  // 2.4.0 : réseau de VM, classe de stockage, pool d'adresses. Champs et
+  // noms exactement ceux du provider Harvester 1.9.0 (constats du plan
+  // 2026-11-03). Réseau de cluster et configuration VLAN restent en code
+  // libre (décision 153). Textes : TF_SCHEMA_I18N, cinq langues.
+  // ---------------------------------------------------------------------
+  network: {
+    sections: [
+      { id: 'specs', args: ['name', 'namespace', 'cluster_network_name', 'vlan_id', 'description', 'labels'] },
+      { id: 'route', args: ['route_mode', 'route_cidr', 'route_gateway', 'route_dhcp_server_ip', 'config'] },
+    ],
+    args: [
+      { name: 'name', type: 'text', required: true, force_new: true,
+        validate: /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/ },
+      { name: 'namespace', type: 'ref', required: false, default: 'default',
+        ref_endpoint: '/api/namespaces', creatable: true },
+      { name: 'cluster_network_name', type: 'text', required: true, default: 'mgmt', suggest: ['mgmt'],
+        validate: /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/ },
+      { name: 'vlan_id', type: 'int', required: true, default: 1, min: 0, max: 4094 },
+      { name: 'description', type: 'textarea', rows: 2 },
+      { name: 'labels', type: 'map' },
+      { name: 'route_mode', type: 'enum', enum_values: ['auto', 'manual'] },
+      { name: 'route_cidr', type: 'text', required_when: { field: 'route_mode', equals: 'manual' } },
+      { name: 'route_gateway', type: 'text', required_when: { field: 'route_mode', equals: 'manual' } },
+      { name: 'route_dhcp_server_ip', type: 'text' },
+      { name: 'config', type: 'textarea', rows: 4 },
+    ],
+  },
+
+  storageclass: {
+    sections: [
+      { id: 'specs', args: ['name', 'volume_provisioner', 'reclaim_policy', 'volume_binding_mode',
+                            'allow_volume_expansion', 'is_default', 'parameters'] },
+      { id: 'topology', nested: 'match_label_expressions' },
+    ],
+    args: [
+      { name: 'name', type: 'text', required: true, force_new: true,
+        validate: /^[a-z0-9]([-a-z0-9.]{0,61}[a-z0-9])?$/ },
+      { name: 'volume_provisioner', type: 'text', default: 'driver.longhorn.io',
+        suggest: ['driver.longhorn.io'] },
+      { name: 'reclaim_policy', type: 'enum', required: true, default: 'Delete', enum_values: ['Delete', 'Retain'] },
+      { name: 'volume_binding_mode', type: 'enum', required: true, default: 'Immediate',
+        enum_values: ['Immediate', 'WaitForFirstConsumer'] },
+      { name: 'allow_volume_expansion', type: 'bool', default: true },
+      { name: 'is_default', type: 'bool', default: false },
+      // `migratable` proposé d'office : sans lui, pas de migration à chaud
+      // des VMs (description du schéma du provider)
+      { name: 'parameters', type: 'map', required: true,
+        default: { migratable: 'true', numberOfReplicas: '3', staleReplicaTimeout: '30' } },
+    ],
+    nested: {
+      match_label_expressions: {
+        min: 0, max: 8,
+        args: [
+          { name: 'key', type: 'text', required: true },
+          { name: 'values', type: 'text', required: true },
+        ],
+      },
+    },
+  },
+
+  ippool: {
+    sections: [
+      { id: 'specs', args: ['name'] },
+      { id: 'ranges', nested: 'range' },
+      { id: 'selector', nested: 'selector' },
+      { id: 'scope', nested: 'scope' },
+    ],
+    args: [
+      { name: 'name', type: 'text', required: true, force_new: true,
+        validate: /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/ },
+    ],
+    nested: {
+      range: {
+        min: 1, max: 16,
+        args: [
+          { name: 'start', type: 'text', required: true },
+          { name: 'end', type: 'text', required: true },
+          { name: 'subnet', type: 'text', required: true },
+          { name: 'gateway', type: 'text', required: true },
+        ],
+      },
+      selector: {
+        min: 0, max: 1,
+        args: [
+          { name: 'network', type: 'ref', ref_endpoint: '/api/networks', ref_namespaced: true },
+          { name: 'priority', type: 'int', min: 0 },
+        ],
+      },
+      scope: {
+        min: 0, max: 16,
+        args: [
+          { name: 'guest_cluster', type: 'text' },
+          { name: 'namespace', type: 'text' },
+          { name: 'project', type: 'text' },
+        ],
+      },
+    },
+  },
+
   // raw HCL escape hatch — kept for parity with the legacy form
   raw: {
     label: { en: 'Raw HCL', fr: 'HCL brut' },
@@ -460,7 +560,7 @@ const TF_SCHEMA = {
 
 // 2.3.0 : chaque type de ressource dit sa famille de cibles ; le code libre
 // (`raw`) reste sur Harvester.
-['vm', 'image', 'ssh_key', 'raw'].forEach((k) => { TF_SCHEMA[k].family = 'harvester'; });
+['vm', 'image', 'ssh_key', 'network', 'storageclass', 'ippool', 'raw'].forEach((k) => { TF_SCHEMA[k].family = 'harvester'; });
 
 // ---------------------------------------------------------------------------
 // v1.55.0 : libellés lisibles et cinq langues pour tout le schéma (audit
@@ -764,6 +864,52 @@ const TF_SCHEMA_I18N = {
   "kvm_rke2.dns": { label: ["DNS servers", "Serveurs DNS", "Server DNS", "Servidores DNS", "DNS-Server"], description: ["One to three addresses, comma separated; the gateway when empty.", "Une à trois adresses, séparées par des virgules ; la passerelle si vide.", "Da uno a tre indirizzi, separati da virgole; il gateway se vuoto.", "De una a tres direcciones, separadas por comas; la puerta de enlace si está vacío.", "Ein bis drei Adressen, durch Kommas getrennt; leer bedeutet das Gateway."] },
   "kvm_rke2.ssh_user": { label: ["User", "Utilisateur", "Utente", "Usuario", "Benutzer"], description: ["User created on each node, with sudo, for SSH.", "Utilisateur créé sur chaque nœud, avec sudo, pour SSH.", "Utente creato su ogni nodo, con sudo, per SSH.", "Usuario creado en cada nodo, con sudo, para SSH.", "Auf jedem Knoten angelegter Benutzer, mit sudo, für SSH."] },
   "kvm_rke2.ssh_key": { label: ["SSH public key", "Clé SSH publique", "Chiave SSH pubblica", "Clave SSH pública", "Öffentlicher SSH-Schlüssel"], description: ["One public key in OpenSSH format (ssh-ed25519 AAAA...).", "Une clé publique au format OpenSSH (ssh-ed25519 AAAA...).", "Una chiave pubblica in formato OpenSSH (ssh-ed25519 AAAA...).", "Una clave pública en formato OpenSSH (ssh-ed25519 AAAA...).", "Ein öffentlicher Schlüssel im OpenSSH-Format (ssh-ed25519 AAAA...)."] },
+  // 2.4.0 : réseau de VM, classe de stockage, pool d'adresses
+  "network": { label: ["VM network", "Réseau de VM", "Rete VM", "Red de VM", "VM-Netzwerk"], description: ["A VLAN network where Harvester VMs plug their interfaces.", "Un réseau VLAN où les VMs Harvester branchent leurs interfaces.", "Una rete VLAN a cui le VM di Harvester collegano le loro interfacce.", "Una red VLAN donde las VMs de Harvester conectan sus interfaces.", "Ein VLAN-Netzwerk, an das Harvester-VMs ihre Schnittstellen anschließen."] },
+  "network#specs": { label: ["General", "Général", "Generale", "General", "Allgemein"] },
+  "network#route": { label: ["Route", "Route", "Instradamento", "Ruta", "Route"] },
+  "network.name": { label: ["Name", "Nom", "Nome", "Nombre", "Name"], description: ["Name of the network in Harvester: lower case letters, digits and dashes.", "Nom du réseau dans Harvester : minuscules, chiffres et tirets.", "Nome della rete in Harvester: minuscole, cifre e trattini.", "Nombre de la red en Harvester: minúsculas, cifras y guiones.", "Name des Netzwerks in Harvester: Kleinbuchstaben, Ziffern und Bindestriche."] },
+  "network.namespace": { label: ["Namespace", "Espace de noms", "Namespace", "Namespace", "Namespace"], description: ["Harvester namespace of the network.", "Espace de noms Harvester du réseau.", "Namespace Harvester della rete.", "Namespace de Harvester de la red.", "Harvester-Namespace des Netzwerks."] },
+  "network.cluster_network_name": { label: ["Cluster network", "Réseau de cluster", "Rete del cluster", "Red del clúster", "Cluster-Netzwerk"], description: ["Cluster network that carries this VLAN (mgmt for the management network).", "Réseau de cluster qui porte ce VLAN (mgmt pour le réseau de management).", "Rete del cluster che trasporta questa VLAN (mgmt per la rete di gestione).", "Red del clúster que lleva esta VLAN (mgmt para la red de gestión).", "Cluster-Netzwerk, das dieses VLAN trägt (mgmt für das Verwaltungsnetz)."] },
+  "network.vlan_id": { label: ["VLAN ID", "Identifiant VLAN", "ID VLAN", "ID de VLAN", "VLAN-ID"], description: ["VLAN tag from 1 to 4094, or 0 for an untagged network.", "Étiquette VLAN de 1 à 4094, ou 0 pour un réseau non étiqueté.", "Tag VLAN da 1 a 4094, o 0 per una rete senza tag.", "Etiqueta VLAN de 1 a 4094, o 0 para una red sin etiquetar.", "VLAN-Tag von 1 bis 4094, oder 0 für ein Netz ohne Tag."] },
+  "network.description": { label: ["Description", "Description", "Descrizione", "Descripción", "Beschreibung"], description: ["Free text shown in Harvester.", "Texte libre affiché dans Harvester.", "Testo libero mostrato in Harvester.", "Texto libre mostrado en Harvester.", "Freier Text, in Harvester angezeigt."] },
+  "network.labels": { label: ["Labels", "Étiquettes", "Etichette", "Etiquetas", "Labels"], description: ["Kubernetes labels put on the network, one key and one value per row.", "Étiquettes Kubernetes posées sur le réseau, une clé et une valeur par ligne.", "Etichette Kubernetes poste sulla rete, una chiave e un valore per riga.", "Etiquetas de Kubernetes puestas en la red, una clave y un valor por fila.", "Kubernetes-Labels am Netzwerk, ein Schlüssel und ein Wert pro Zeile."] },
+  "network.route_mode": { label: ["Route mode", "Mode de route", "Modalità di instradamento", "Modo de ruta", "Routenmodus"], description: ["auto: Harvester learns the route from a DHCP server; manual: you give the subnet and the gateway.", "auto : Harvester apprend la route d'un serveur DHCP ; manual : vous donnez le sous-réseau et la passerelle.", "auto: Harvester apprende l'instradamento da un server DHCP; manual: fornite voi sottorete e gateway.", "auto: Harvester aprende la ruta de un servidor DHCP; manual: usted da la subred y la puerta de enlace.", "auto: Harvester lernt die Route von einem DHCP-Server; manual: Sie geben Subnetz und Gateway an."] },
+  "network.route_cidr": { label: ["Subnet", "Sous-réseau", "Sottorete", "Subred", "Subnetz"], description: ["Subnet of the VLAN in address/prefix form (172.16.42.0/24); required in manual mode.", "Sous-réseau du VLAN au format adresse/préfixe (172.16.42.0/24) ; obligatoire en mode manual.", "Sottorete della VLAN nel formato indirizzo/prefisso (172.16.42.0/24); obbligatoria in modalità manual.", "Subred de la VLAN en formato dirección/prefijo (172.16.42.0/24); obligatoria en modo manual.", "Subnetz des VLANs im Format Adresse/Präfix (172.16.42.0/24); im Modus manual Pflicht."] },
+  "network.route_gateway": { label: ["Gateway", "Passerelle", "Gateway", "Puerta de enlace", "Gateway"], description: ["Gateway address, inside the subnet; required in manual mode.", "Adresse de la passerelle, dans le sous-réseau ; obligatoire en mode manual.", "Indirizzo del gateway, dentro la sottorete; obbligatorio in modalità manual.", "Dirección de la puerta de enlace, dentro de la subred; obligatoria en modo manual.", "Adresse des Gateways, im Subnetz; im Modus manual Pflicht."] },
+  "network.route_dhcp_server_ip": { label: ["DHCP server", "Serveur DHCP", "Server DHCP", "Servidor DHCP", "DHCP-Server"], description: ["Address of the DHCP server to ask in auto mode; cannot go with a subnet or a gateway.", "Adresse du serveur DHCP à interroger en mode auto ; incompatible avec un sous-réseau ou une passerelle.", "Indirizzo del server DHCP da interrogare in modalità auto; incompatibile con sottorete o gateway.", "Dirección del servidor DHCP a consultar en modo auto; incompatible con una subred o una puerta de enlace.", "Adresse des im Modus auto abgefragten DHCP-Servers; nicht zusammen mit Subnetz oder Gateway."] },
+  "network.config": { label: ["CNI configuration", "Configuration CNI", "Configurazione CNI", "Configuración CNI", "CNI-Konfiguration"], description: ["Optional JSON object written as the network attachment configuration, built from the fields above when empty.", "Objet JSON facultatif écrit comme configuration de l'attachement réseau, construit d'après les champs ci-dessus si vide.", "Oggetto JSON facoltativo scritto come configurazione dell'attachment di rete, costruito dai campi sopra se vuoto.", "Objeto JSON opcional escrito como configuración del adjunto de red, construido con los campos de arriba si está vacío.", "Optionales JSON-Objekt als Konfiguration des Netzwerkanhangs, aus den Feldern oben gebildet, wenn leer."] },
+  "storageclass": { label: ["Storage class", "Classe de stockage", "Classe di archiviazione", "Clase de almacenamiento", "Speicherklasse"], description: ["A Longhorn storage class that VM disks and volumes can use.", "Une classe de stockage Longhorn que les disques et volumes des VMs peuvent employer.", "Una classe di archiviazione Longhorn utilizzabile da dischi e volumi delle VM.", "Una clase de almacenamiento Longhorn que pueden usar los discos y volúmenes de las VMs.", "Eine Longhorn-Speicherklasse für Festplatten und Volumes der VMs."] },
+  "storageclass#specs": { label: ["General", "Général", "Generale", "General", "Allgemein"] },
+  "storageclass#topology": { label: ["Topology", "Topologie", "Topologia", "Topología", "Topologie"] },
+  "storageclass.name": { label: ["Name", "Nom", "Nome", "Nombre", "Name"], description: ["Name of the class in Kubernetes: lower case letters, digits, dots and dashes.", "Nom de la classe dans Kubernetes : minuscules, chiffres, points et tirets.", "Nome della classe in Kubernetes: minuscole, cifre, punti e trattini.", "Nombre de la clase en Kubernetes: minúsculas, cifras, puntos y guiones.", "Name der Klasse in Kubernetes: Kleinbuchstaben, Ziffern, Punkte und Bindestriche."] },
+  "storageclass.volume_provisioner": { label: ["Provisioner", "Provisionneur", "Provisioner", "Aprovisionador", "Provisioner"], description: ["CSI driver that creates the volumes (driver.longhorn.io for Longhorn).", "Pilote CSI qui crée les volumes (driver.longhorn.io pour Longhorn).", "Driver CSI che crea i volumi (driver.longhorn.io per Longhorn).", "Controlador CSI que crea los volúmenes (driver.longhorn.io para Longhorn).", "CSI-Treiber, der die Volumes anlegt (driver.longhorn.io für Longhorn)."] },
+  "storageclass.reclaim_policy": { label: ["Reclaim policy", "Politique de récupération", "Criterio di recupero", "Política de recuperación", "Rückgewinnungsrichtlinie"], description: ["Delete removes the volume with its claim; Retain keeps it.", "Delete supprime le volume avec sa demande ; Retain le garde.", "Delete elimina il volume con la sua richiesta; Retain lo conserva.", "Delete borra el volumen con su solicitud; Retain lo conserva.", "Delete löscht das Volume mit seinem Claim; Retain behält es."] },
+  "storageclass.volume_binding_mode": { label: ["Binding mode", "Mode de liaison", "Modalità di associazione", "Modo de enlace", "Bindungsmodus"], description: ["Immediate creates the volume at once; WaitForFirstConsumer waits for the first VM that uses it.", "Immediate crée le volume tout de suite ; WaitForFirstConsumer attend la première VM qui l'emploie.", "Immediate crea subito il volume; WaitForFirstConsumer attende la prima VM che lo usa.", "Immediate crea el volumen enseguida; WaitForFirstConsumer espera a la primera VM que lo usa.", "Immediate legt das Volume sofort an; WaitForFirstConsumer wartet auf die erste VM, die es nutzt."] },
+  "storageclass.allow_volume_expansion": { label: ["Allow expansion", "Agrandissement permis", "Espansione consentita", "Ampliación permitida", "Vergrößerung erlaubt"], description: ["Let volumes of this class grow after creation.", "Permettre aux volumes de cette classe de grandir après leur création.", "Consentire ai volumi di questa classe di crescere dopo la creazione.", "Permitir que los volúmenes de esta clase crezcan tras su creación.", "Volumes dieser Klasse nach dem Anlegen wachsen lassen."] },
+  "storageclass.is_default": { label: ["Default class", "Classe par défaut", "Classe predefinita", "Clase por defecto", "Standardklasse"], description: ["Only one class can be the default: Harvester refuses a second one, so clear the current default first.", "Une seule classe peut être celle par défaut : Harvester refuse une seconde, retirez d'abord l'actuelle.", "Una sola classe può essere predefinita: Harvester ne rifiuta una seconda, togliete prima quella attuale.", "Solo una clase puede ser la predeterminada: Harvester rechaza una segunda, quite antes la actual.", "Nur eine Klasse kann Standard sein: Harvester lehnt eine zweite ab, entfernen Sie zuerst die aktuelle."] },
+  "storageclass.parameters": { label: ["Parameters", "Paramètres", "Parametri", "Parámetros", "Parameter"], description: ["Longhorn parameters, one per row; keep migratable = true so VMs can live migrate.", "Paramètres Longhorn, un par ligne ; gardez migratable = true pour que les VMs migrent à chaud.", "Parametri Longhorn, uno per riga; mantenete migratable = true perché le VM migrino a caldo.", "Parámetros de Longhorn, uno por fila; mantenga migratable = true para que las VMs migren en caliente.", "Longhorn-Parameter, einer pro Zeile; behalten Sie migratable = true, damit VMs live migrieren."] },
+  "storageclass.match_label_expressions": { label: ["Allowed topology", "Topologie permise", "Topologia consentita", "Topología permitida", "Erlaubte Topologie"] },
+  "storageclass.match_label_expressions.key": { label: ["Label key", "Clé d'étiquette", "Chiave dell'etichetta", "Clave de etiqueta", "Label-Schlüssel"], description: ["Node label the volumes are restricted to (topology.kubernetes.io/zone).", "Étiquette de nœud à laquelle les volumes sont restreints (topology.kubernetes.io/zone).", "Etichetta di nodo a cui i volumi sono limitati (topology.kubernetes.io/zone).", "Etiqueta de nodo a la que se restringen los volúmenes (topology.kubernetes.io/zone).", "Node-Label, auf das die Volumes beschränkt sind (topology.kubernetes.io/zone)."] },
+  "storageclass.match_label_expressions.values": { label: ["Values", "Valeurs", "Valori", "Valores", "Werte"], description: ["Accepted values of the label, separated by commas.", "Valeurs acceptées de l'étiquette, séparées par des virgules.", "Valori accettati dell'etichetta, separati da virgole.", "Valores aceptados de la etiqueta, separados por comas.", "Zulässige Werte des Labels, durch Kommas getrennt."] },
+  "ippool": { label: ["IP pool", "Pool d'adresses", "Pool di indirizzi", "Grupo de direcciones", "IP-Pool"], description: ["Addresses Harvester hands out to load balancers, for the whole cluster.", "Adresses que Harvester distribue aux répartiteurs de charge, pour tout le cluster.", "Indirizzi che Harvester assegna ai bilanciatori di carico, per tutto il cluster.", "Direcciones que Harvester reparte a los balanceadores de carga, para todo el clúster.", "Adressen, die Harvester an Load Balancer vergibt, für den ganzen Cluster."] },
+  "ippool#specs": { label: ["General", "Général", "Generale", "General", "Allgemein"] },
+  "ippool#ranges": { label: ["Ranges", "Plages", "Intervalli", "Rangos", "Bereiche"] },
+  "ippool#selector": { label: ["Selector", "Sélecteur", "Selettore", "Selector", "Selektor"] },
+  "ippool#scope": { label: ["Scope", "Portée", "Ambito", "Ámbito", "Geltungsbereich"] },
+  "ippool.name": { label: ["Name", "Nom", "Nome", "Nombre", "Name"], description: ["Name of the pool, unique in the cluster: lower case letters, digits and dashes.", "Nom du pool, unique dans le cluster : minuscules, chiffres et tirets.", "Nome del pool, unico nel cluster: minuscole, cifre e trattini.", "Nombre del grupo, único en el clúster: minúsculas, cifras y guiones.", "Name des Pools, eindeutig im Cluster: Kleinbuchstaben, Ziffern und Bindestriche."] },
+  "ippool.range": { label: ["Address ranges", "Plages d'adresses", "Intervalli di indirizzi", "Rangos de direcciones", "Adressbereiche"] },
+  "ippool.range.start": { label: ["First address", "Première adresse", "Primo indirizzo", "Primera dirección", "Erste Adresse"], description: ["First address of the range, inside the subnet.", "Première adresse de la plage, dans le sous-réseau.", "Primo indirizzo dell'intervallo, dentro la sottorete.", "Primera dirección del rango, dentro de la subred.", "Erste Adresse des Bereichs, im Subnetz."] },
+  "ippool.range.end": { label: ["Last address", "Dernière adresse", "Ultimo indirizzo", "Última dirección", "Letzte Adresse"], description: ["Last address of the range, inside the subnet and not before the first one.", "Dernière adresse de la plage, dans le sous-réseau et pas avant la première.", "Ultimo indirizzo dell'intervallo, dentro la sottorete e non prima del primo.", "Última dirección del rango, dentro de la subred y no antes de la primera.", "Letzte Adresse des Bereichs, im Subnetz und nicht vor der ersten."] },
+  "ippool.range.subnet": { label: ["Subnet", "Sous-réseau", "Sottorete", "Subred", "Subnetz"], description: ["Subnet of the range in address/prefix form (10.0.0.0/24).", "Sous-réseau de la plage au format adresse/préfixe (10.0.0.0/24).", "Sottorete dell'intervallo nel formato indirizzo/prefisso (10.0.0.0/24).", "Subred del rango en formato dirección/prefijo (10.0.0.0/24).", "Subnetz des Bereichs im Format Adresse/Präfix (10.0.0.0/24)."] },
+  "ippool.range.gateway": { label: ["Gateway", "Passerelle", "Gateway", "Puerta de enlace", "Gateway"], description: ["Gateway of the subnet, inside it.", "Passerelle du sous-réseau, à l'intérieur de celui-ci.", "Gateway della sottorete, al suo interno.", "Puerta de enlace de la subred, dentro de ella.", "Gateway des Subnetzes, darin gelegen."] },
+  "ippool.selector": { label: ["Selector", "Sélecteur", "Selettore", "Selector", "Selektor"] },
+  "ippool.selector.network": { label: ["VM network", "Réseau de VM", "Rete VM", "Red de VM", "VM-Netzwerk"], description: ["VM network whose load balancers take addresses from this pool.", "Réseau de VM dont les répartiteurs de charge prennent leurs adresses dans ce pool.", "Rete VM i cui bilanciatori di carico prendono gli indirizzi da questo pool.", "Red de VM cuyos balanceadores de carga toman sus direcciones de este grupo.", "VM-Netzwerk, dessen Load Balancer ihre Adressen aus diesem Pool nehmen."] },
+  "ippool.selector.priority": { label: ["Priority", "Priorité", "Priorità", "Prioridad", "Priorität"], description: ["When several pools match, the highest number wins.", "Quand plusieurs pools conviennent, le plus grand nombre l'emporte.", "Quando più pool corrispondono, vince il numero più alto.", "Cuando varios grupos coinciden, gana el número más alto.", "Passen mehrere Pools, gewinnt die höchste Zahl."] },
+  "ippool.scope": { label: ["Scopes", "Portées", "Ambiti", "Ámbitos", "Geltungsbereiche"] },
+  "ippool.scope.guest_cluster": { label: ["Guest cluster", "Cluster invité", "Cluster ospite", "Clúster invitado", "Gast-Cluster"], description: ["Guest cluster allowed to use the pool.", "Cluster invité autorisé à employer le pool.", "Cluster ospite autorizzato a usare il pool.", "Clúster invitado autorizado a usar el grupo.", "Gast-Cluster, der den Pool nutzen darf."] },
+  "ippool.scope.namespace": { label: ["Namespace", "Espace de noms", "Namespace", "Namespace", "Namespace"], description: ["Namespace allowed to use the pool.", "Espace de noms autorisé à employer le pool.", "Namespace autorizzato a usare il pool.", "Namespace autorizado a usar el grupo.", "Namespace, der den Pool nutzen darf."] },
+  "ippool.scope.project": { label: ["Project", "Projet", "Progetto", "Proyecto", "Projekt"], description: ["Rancher project allowed to use the pool.", "Projet Rancher autorisé à employer le pool.", "Progetto Rancher autorizzato a usare il pool.", "Proyecto de Rancher autorizado a usar el grupo.", "Rancher-Projekt, das den Pool nutzen darf."] },
 };
 
 (function applySchemaI18n() {

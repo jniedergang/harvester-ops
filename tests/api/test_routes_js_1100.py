@@ -76,7 +76,7 @@ def address_table():
         "#migrations", "#gpus", "#bookings", "#usage",
         "#automation/capi", "#automation/terraform", "#automation/pxe",
         # 2.1.0 : onglets de Bare-metal
-        "#automation/pxe/machines", "#automation/pxe/profiles", "#automation/pxe/images", "#automation/pxe/history",
+        "#automation/pxe/machines", "#automation/pxe/profiles", "#automation/pxe/plans", "#automation/pxe/images", "#automation/pxe/history",
         # 2.2.0 : onglets de Cluster API et de Terraform
         "#automation/capi/clusters", "#automation/capi/services", "#automation/capi/history",
         "#automation/capi/installation",
@@ -199,6 +199,7 @@ ERRORS = [
     ("#automation/capi/machines", "onglet de Bare-metal sous un autre sous-onglet"),
     ("#automation/pxe/machines/x", "segment de trop après l'onglet"),
     ("#automation/pxe/Machines", "onglet en majuscules"),
+    ("#automation/pxe/Plans", "onglet Plans en majuscules (2.4.0)"),
     # 2.2.0 : onglets de Cluster API et de Terraform
     ("#automation/capi/k8s", "ancien nom interne de Clusters"),
     ("#automation/capi/install", "ancien nom interne d'Installation"),

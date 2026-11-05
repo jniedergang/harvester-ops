@@ -296,6 +296,8 @@ ADDRESSES = [
     ("#automation/pxe", ["automation", "pxe", None, "#automation/pxe"]),
     ("#automation/pxe/machines", ["automation", "pxe", "machines", "#automation/pxe/machines"]),
     ("#automation/pxe/profiles", ["automation", "pxe", "profiles", "#automation/pxe/profiles"]),
+    ("#automation/pxe/plans", ["automation", "pxe", "plans", "#automation/pxe/plans"]),
+    ("#automation/pxe/Plans", ["unknown", None, None, None]),
     ("#automation/pxe/images", ["automation", "pxe", "images", "#automation/pxe/images"]),
     ("#automation/pxe/history", ["automation", "pxe", "history", "#automation/pxe/history"]),
     ("#automation/pxe/disks", ["unknown", None, None, None]),
@@ -321,7 +323,7 @@ def test_bare_metal_tab_addresses():
 def test_mutation_without_the_tab_list_the_addresses_are_unknown(tmp_path):
     """Mutation volontaire : routes.js sans la liste des onglets refuse les adresses."""
     src = (WEB / "static/js/routes.js").read_text()
-    broken = src.replace("pxe: ['machines', 'profiles', 'images', 'history']", "pxe: []")
+    broken = src.replace("pxe: ['machines', 'profiles', 'plans', 'images', 'history']", "pxe: []")
     assert broken != src
     p = tmp_path / "routes.js"
     p.write_text(broken)

@@ -34,7 +34,7 @@ NODE = {"ok": True, "host": HOST, "manufacturer": "HPE", "model": "ProLiant XL17
         "boot_targets": ["Cd", "Hdd"]}
 ISOS = {"isos": [{"name": "harvester-v1.9.0-amd64.iso", "size": 7 * 2 ** 30, "sha256": "ab" * 32}],
         "disk_free": 10 ** 11}
-TABS = ["machines", "profiles", "images", "history"]
+TABS = ["machines", "profiles", "plans", "images", "history"]
 SECRET = "E2E-BMC-SECRET-210"
 
 
@@ -78,6 +78,7 @@ def test_default_tab_is_machines_and_the_legacy_address_opens_it(context, flask_
 
 @pytest.mark.parametrize("tab,content", [
     ("profiles", "#bm-profiles .card"),
+    ("plans", "#bm-plans .bmpl"),
     ("images", "#bmc-iso-form"),
     ("history", "#bm-history .form-hint"),
     ("machines", '#bmc-body [data-bm="discover-open"]'),
@@ -261,7 +262,7 @@ def test_history_is_activity_filtered_on_bare_metal_actions(context, flask_serve
     page.locator('#tab-automation [data-bm-tab="history"]').click()
     rows = page.locator("#bm-history tr.bm-history-row")
     expect(rows).to_have_count(4)
-    assert sorted(set(asked)) == ["baremetal-", "bmc-power"]
+    assert sorted(set(asked)) == ["baremetal-", "bmc-power", "deploy"]
     tables = page.locator("#bm-history table.bm-history")
     expect(tables).to_have_count(2)                                    # en cours, puis passées
     expect(tables.nth(0)).to_contain_text("Install or join")

@@ -1572,6 +1572,7 @@ class ActionRun:
         # v1.96.0 : rôle qu'il a fallu pour lancer l'action ; l'annuler en
         # demande autant (un opérateur n'annule pas l'ajout d'hôte d'un admin)
         self.required_role = None
+        self.launch_role = None            # 2.4.0 : rôle figé de qui a lancé un plan
         # v1.96.0 : message d'une annulation pour un outil qui ne défait pas
         # tout (None : celui des transferts, « transfer undone »)
         self.cancel_summary = None
@@ -2143,10 +2144,18 @@ def start_action(action, cluster, dry_run=False, interactive=False,
         # Contrôle et inscription sous le même verrou : deux requêtes
         # simultanées ne peuvent pas passer toutes les deux.
         if action in CLUSTER_SEQUENCES and not dry_run:
+            # 2.4.0 (revue m10) : un déroulé de plan en cours sur ce cluster
+            # bloque aussi l'arrêt (l'inverse l'était déjà), qu'il tourne ici
+            # ou dans la ligne de commande (verrou du cluster)
             busy = next((r for r in ACTIONS.values()
-                         if r.cluster == cluster and r.action in CLUSTER_SEQUENCES
-                         and not r.dry_run and r.status in ("starting", "running")),
+                         if r.cluster == cluster and not r.dry_run and r.status in ("starting", "running")
+                         and (r.action in CLUSTER_SEQUENCES or r.action == f"deploy:{cluster}")),
                         None)
+            if busy is None:
+                holder = _deploy_lock_holder(cluster)
+                if holder:
+                    busy = types.SimpleNamespace(id=holder.get("run") or "", action=f"deploy:{cluster}",
+                                                 cluster=cluster)
             if busy:
                 raise ActionBusy(busy)
         ACTIONS[run_id] = run
@@ -7619,6 +7628,14 @@ def api_baremetal_install():
     # 2.2.0 : nom tapé pour une machine qui porte déjà un système ; hors des
     # données de l'installation (contrôlé par _bm_presence_refusal)
     typed = data.pop("system_confirm", None)
+    # 2.4.0 : plan enchaîné, hors des données de l'installation
+    plan_name = data.pop("plan", None)
+    plan_vars = data.pop("plan_variables", None)
+    if plan_name:
+        if not isinstance(plan_name, str) or not _dpl.NAME_RE.match(plan_name):
+            return jsonify({"error": "invalid plan name", "fields": ["plan"]}), 400
+        if _dpl.load_plan(_deploy_state(), plan_name) is None:
+            return jsonify({"error": "no such plan", "fields": ["plan"]}), 404
     # v1.77.0 : jeton et mot de passe vides repris d'un fichier importé
     err = _bm_apply_import(data)
     if err:
@@ -7626,12 +7643,32 @@ def api_baremetal_install():
     data, err = _bm_prepare_install(data)
     if err:
         return err
+    if plan_name:
+        cluster = data.get("cluster_name") if mode == "create" else data.get("cluster")
+        vip = data.get("vip") if mode == "create" else \
+            (re.match(r"https://\[?([^\]/:]+)", str(data.get("server_url") or "")) or [None, ""])[1]
+        refused = _deploy_install_precheck(plan_name, plan_vars, cluster, vip)
+        if refused:
+            return refused
     # 2.2.0 : une machine qui semble porter un système ne s'installe que si
     # son nom (série, sinon adresse du BMC) a été tapé ; contrôlé ici, sur
     # une lecture du BMC faite par la console, jamais sur ce que dit la page.
     refused = _bm_presence_refusal(data, typed)
     if refused:
         return refused
+    if plan_name:
+        # 2.4.0 : l'installation devient la phase d'installation d'un plan
+        busy = _bm_busy(data["bmc_host"])
+        if busy:
+            return jsonify({"error": f"{busy.action} is already driving the BMC {data['bmc_host']}",
+                            "running": busy.id, "running_action": busy.action}), 409
+        record = {"kind": "single", "profile": None, "concurrency": None, "batch": None}
+        body, status = _deploy_with_install(plan_name, plan_vars, cluster, vip, [data], "single", record,
+                                            user=current_user() or "")
+        if status != 202:
+            return jsonify(body), status
+        return jsonify({"action_id": body["action_id"], "hostname": data["hostname"],
+                        "cluster": cluster, "plan": plan_name}), 202
     # Le label de l'action ne porte ni token ni mot de passe.
     action_id, busy = _bm_track(f"baremetal-install:{data['hostname']}",
                                 data["bmc_host"], _baremetal_install_runner, data)
@@ -7847,7 +7884,7 @@ def _bm_profile_view(prof):
 
 
 def _bm_profile_payload(data, name):
-    doc = {k: data.get(k) for k in ("description", "variables", "fields", "advanced_yaml")}
+    doc = {k: data.get(k) for k in ("description", "variables", "fields", "advanced_yaml", "plan")}
     # la fenêtre envoie les champs en YAML (`fields_yaml`), la ligne de
     # commande et les tests en dictionnaire
     if isinstance(data.get("fields_yaml"), str):
@@ -8038,10 +8075,11 @@ def _bm_batch_presence_refusal(plan, confirms):
     return machines, refused
 
 
-def _bm_batch_plan(prof, batch, secrets_):
+def _bm_batch_plan(prof, batch, secrets_, join_all=False):
     """Options d'installation complètes et contrôlées de chaque ligne
     (jonctions contrôlées sans leur cluster, qui n'existe pas encore), ou
-    la liste des refus [(où, raison)]. Rien n'est allumé ici."""
+    la liste des refus [(où, raison)]. Rien n'est allumé ici. `join_all`
+    (2.4.0) : le cluster existe, toutes les lignes le rejoignent."""
     errors = _bmp.check_batch(prof, batch)
     if errors:
         return None, errors
@@ -8049,7 +8087,8 @@ def _bm_batch_plan(prof, batch, secrets_):
     for i, row in enumerate(batch["rows"]):
         where = f"row {i + 1}"
         try:
-            opts = _bmp.node_opts(prof, batch, i, _bm_field_type, _his.dump_install_config)
+            opts = _bmp.node_opts(prof, batch, i, _bm_field_type, _his.dump_install_config,
+                                  join_all=join_all)
         except _bmp.ProfileError as e:
             errors += e.errors
             continue
@@ -8061,7 +8100,7 @@ def _bm_batch_plan(prof, batch, secrets_):
             errors.append((f"{where} bmc_password", "missing"))
             continue
         with app.app_context():                 # jsonify hors requête (CLI)
-            data, err = _bm_prepare_install(dict(opts), defer_join=i > 0)
+            data, err = _bm_prepare_install(dict(opts), defer_join=i > 0 and not join_all)
         if err:
             errors += _bm_refusal_pairs(err, where)
             continue
@@ -8181,27 +8220,45 @@ def _baremetal_batch_steps(run, plan, concurrency):
     run.close()
 
 
-def _bm_batch_start(prof, batch, secrets_, concurrency=_bmp.DEFAULT_CONCURRENCY, confirms=None):
-    """Contrôle toute la série puis lance son action parente : (action_id,
-    None, None), (None, refus [(où, raison)], None), ou, 2.2.1, (None, None,
-    machines) quand une machine semble porter un système sans son nom tapé
-    dans `confirms` ({bmc_host: nom})."""
-    plan, errors = _bm_batch_plan(prof, batch, secrets_)
+def _bm_batch_prepare(prof, batch, secrets_, confirms=None, join_all=False):
+    """Tous les contrôles d'une série, rien d'allumé : (plan, None, None),
+    (None, refus [(où, raison)], None), ou, 2.2.1, (None, None, machines)
+    quand une machine semble porter un système sans son nom tapé dans
+    `confirms` ({bmc_host: nom}). 2.4.0 : séparé du lancement, pour que la
+    chaîne d'un plan fasse la garde 132 dans la requête, AVANT de créer son
+    action, et lance la série plus tard depuis sa phase d'installation."""
+    plan, errors = _bm_batch_plan(prof, batch, secrets_, join_all=join_all)
     if errors:
         return None, errors, None
     for o in plan:
         busy = _bm_busy(o["bmc_host"])
         if busy:
+            plan.clear()
             return None, [(o["bmc_host"], f"{busy.action} is already driving this BMC")], None
     # 2.2.1 : chaque machine est relue par la console, jamais sur ce que dit la page
     machines, refused = _bm_batch_presence_refusal(plan, confirms or {})
     if refused:
         plan.clear()                            # secrets : rien ne part
         return None, None, machines
+    return plan, None, None
+
+
+def _bm_batch_launch(plan, cluster_name, concurrency=_bmp.DEFAULT_CONCURRENCY):
+    """Lance l'action parente d'une série préparée ; rend son identifiant."""
     concurrency = max(1, min(4, int(concurrency or _bmp.DEFAULT_CONCURRENCY)))
-    action_id = track_action(f"baremetal-batch:{batch['cluster_name']}", "(local)",
-                             _baremetal_batch_runner, plan, concurrency)
-    return action_id, None, None
+    return track_action(f"baremetal-batch:{cluster_name}", "(local)",
+                        _baremetal_batch_runner, plan, concurrency)
+
+
+def _bm_batch_start(prof, batch, secrets_, concurrency=_bmp.DEFAULT_CONCURRENCY, confirms=None):
+    """Contrôle toute la série puis lance son action parente : (action_id,
+    None, None), (None, refus [(où, raison)], None), ou, 2.2.1, (None, None,
+    machines) quand une machine semble porter un système sans son nom tapé
+    dans `confirms` ({bmc_host: nom})."""
+    plan, errors, machines = _bm_batch_prepare(prof, batch, secrets_, confirms)
+    if plan is None:
+        return None, errors, machines
+    return _bm_batch_launch(plan, batch["cluster_name"], concurrency), None, None
 
 
 def _bm_presence_batch_json(machines):
@@ -8286,6 +8343,31 @@ def api_bm_profile_batch(name):
         concurrency = int(data.get("concurrency") or _bmp.DEFAULT_CONCURRENCY)
     except (TypeError, ValueError):
         return _bm_errors_json([("concurrency", "not a number")], "invalid batch")
+    plan_name = data.get("plan")
+    if plan_name:
+        # 2.4.0 : la série devient la phase d'installation d'un plan. Garde 132
+        # et contrôles dans la requête, AVANT de créer l'action parente.
+        if not isinstance(plan_name, str) or not _dpl.NAME_RE.match(plan_name):
+            return jsonify({"error": "invalid plan name", "fields": ["plan"]}), 400
+        if _dpl.load_plan(_deploy_state(), plan_name) is None:
+            return jsonify({"error": "no such plan", "fields": ["plan"]}), 404
+        refused = _deploy_install_precheck(plan_name, data.get("plan_variables"), batch.get("cluster_name"),
+                                           batch.get("vip"))
+        if refused:
+            return refused
+        plan, errors, machines = _bm_batch_prepare(prof, batch, secrets_, _bm_batch_confirms(data))
+        if errors:
+            return _bm_errors_json(errors, "invalid batch")
+        if machines:
+            return _bm_presence_batch_json(machines)
+        record = _deploy_install_record(name, batch, [], concurrency)
+        body, status = _deploy_with_install(plan_name, data.get("plan_variables"), batch["cluster_name"],
+                                            batch["vip"], plan, "batch", record, concurrency,
+                                            user=current_user() or "")
+        if status != 202:
+            return jsonify(body), status
+        return jsonify({"action_id": body["action_id"], "cluster": batch["cluster_name"],
+                        "nodes": len(batch["rows"]), "plan": plan_name}), 202
     action_id, errors, machines = _bm_batch_start(prof, batch, secrets_, concurrency,
                                                   confirms=_bm_batch_confirms(data))
     if errors:
@@ -26858,8 +26940,111 @@ def _tf_decl_ws(decl, create=True):
 # ---------------------------------------------------------------------------
 # 2.3.0 : cible KVM d'une déclaration (hôte déclaré dans la console)
 # ---------------------------------------------------------------------------
-TF_KVM_RUNNING = set()          # déclarations KVM en cours d'exécution
-TF_KVM_RUNNING_LOCK = threading.Lock()
+# 2.4.0 (revue I4) : une seule exécution à la fois par déclaration, QUELLE
+# QUE SOIT sa cible (2.3.0 ne le faisait que pour KVM). Deux terraform sur le
+# même espace se marchaient dessus, et une chaîne de plan pouvait appliquer
+# un `tfplan` écrit par un autre déroulé que celui qu'elle avait relu.
+def _flock_try(path, note=""):
+    """Verrou exclusif (flock) d'un fichier, non bloquant : (descripteur,
+    None) s'il est pris, `note` écrite dedans ; (None, note du détenteur)
+    sinon. Libéré par la fermeture du descripteur ou la mort du processus,
+    même brutale : jamais de fichier périmé qui bloquerait. Deux
+    descripteurs du même processus s'excluent aussi (verrou par ouverture)."""
+    import fcntl
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            holder = os.pread(fd, 512, 0).decode(errors="replace").strip()
+        except OSError:
+            holder = ""
+        os.close(fd)
+        return None, holder
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, f"{note}\n".encode(), 0)
+    return fd, None
+
+
+def _flock_release(fd):
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+TF_DECL_RUNNING = set()         # déclarations dont une exécution tourne
+# Réservation d'une déclaration par un déroulé de plan (identifiant de
+# l'action deploy:) entre son plan et son apply : seul ce déroulé lance.
+TF_DECL_HELD = {}
+TF_DECL_RUNNING_LOCK = threading.Lock()
+# 2.4.0 (revue B2-I2) : la ligne de commande charge ce module dans un autre
+# processus ; réservation et exécution tiennent donc aussi un verrou de
+# fichier dans l'espace de la déclaration (`.run.lock`), un descripteur par
+# déclaration, gardé tant qu'elle tourne OU est réservée dans ce processus.
+TF_DECL_FDS = {}
+
+
+def _tf_decl_flock(decl_id, note):
+    """Descripteur du verrou de fichier de la déclaration, None s'il est tenu
+    ailleurs (ou si elle n'existe plus). À appeler sous TF_DECL_RUNNING_LOCK."""
+    d = TF_DECLS.get(decl_id)
+    if d is None:
+        return None
+    fd, _holder = _flock_try(_tf_decl_ws(d) / ".run.lock", note)
+    return fd
+
+
+def _tf_decl_wait_idle(decl_id, timeout=30, sleep=None):
+    """Attend que le fil d'une exécution finie ait rendu la déclaration :
+    son statut final est écrit AVANT son `finally` (TF_DECL_RUNNING), et un
+    apply lancé dans l'instant se heurtait à « already running »."""
+    sleep = sleep or time.sleep
+    end = time.time() + timeout
+    while time.time() < end:
+        with TF_DECL_RUNNING_LOCK:
+            if decl_id not in TF_DECL_RUNNING:
+                return True
+        sleep(0.02)
+    return False
+
+
+def _tf_decl_unlock_if_idle(decl_id):
+    """Rend le verrou de fichier quand la déclaration ne tourne plus et n'est
+    plus réservée dans ce processus. Sous TF_DECL_RUNNING_LOCK."""
+    if decl_id not in TF_DECL_RUNNING and decl_id not in TF_DECL_HELD:
+        _flock_release(TF_DECL_FDS.pop(decl_id, None))
+
+
+def _tf_decl_busy(decl_id, holder=None):
+    """Vrai si la déclaration tourne, ou si un autre déroulé la réserve.
+    À appeler sous TF_DECL_RUNNING_LOCK."""
+    held = TF_DECL_HELD.get(decl_id)
+    return decl_id in TF_DECL_RUNNING or (held is not None and held != holder)
+
+
+def _tf_decl_hold(decl_id, holder):
+    """Réserve la déclaration pour `holder` ; False si elle est occupée."""
+    with TF_DECL_RUNNING_LOCK:
+        if _tf_decl_busy(decl_id, holder):
+            return False
+        if decl_id not in TF_DECL_FDS:
+            fd = _tf_decl_flock(decl_id, f"held by {holder}")
+            if fd is None:
+                return False                     # un autre processus la tient
+            TF_DECL_FDS[decl_id] = fd
+        TF_DECL_HELD[decl_id] = holder
+        return True
+
+
+def _tf_decl_release(decl_id, holder):
+    with TF_DECL_RUNNING_LOCK:
+        if TF_DECL_HELD.get(decl_id) == holder:
+            del TF_DECL_HELD[decl_id]
+            _tf_decl_unlock_if_idle(decl_id)
 
 
 def _tf_kvm_host(host):
@@ -27694,7 +27879,7 @@ def api_terraform_sidecar(cluster, safe):
 def api_terraform_apply(cluster):
     """Apply a Harvester resource definition via Terraform.
 
-    Body: { kind: "vm" | "image" | "ssh_key" | "raw", spec: {...}, dry_run: bool }
+    Body: { kind: "vm" | "image" | "ssh_key" | "network" | "storageclass" | "ippool" | "raw", spec: {...}, dry_run: bool }
     For `kind="raw"`, `spec.tf` is the literal .tf file content (advanced)."""
     kc = _kubectl_for_cluster(cluster)
     if not kc:
@@ -27703,12 +27888,16 @@ def api_terraform_apply(cluster):
     kind = data.get("kind", "")
     spec = data.get("spec") or {}
     dry_run = bool(data.get("dry_run", False))
-    if kind == "raw" and not _tf_is_admin():
-        return _tf_raw_refused()
-    tf_content = _render_tf_for_kind(kind, spec)
+    denied = _tf_role_refusal([{"kind": kind, "spec": spec}], current_role())
+    if denied:
+        return jsonify(denied), 403
+    try:
+        tf_content = _render_tf_for_kind(kind, spec)
+    except _tfk.SpecError as e:
+        return jsonify({"error": str(e), "kind": kind}), 400
     if not tf_content:
         return jsonify({"error": f"unsupported kind: {kind}",
-                        "supported": ["vm", "image", "ssh_key", "raw"]}), 400
+                        "supported": list(_tfs.KINDS_OF["harvester"])}), 400
     bad = _tf_guard_rendered([(re.sub(r"[^a-z0-9_]+", "_", str(spec.get("name") or "resource").lower()),
                                kind, spec, tf_content)])
     if bad:
@@ -27757,16 +27946,62 @@ def _tf_has_raw(resources):
     return any(isinstance(r, dict) and r.get("kind") == "raw" for r in (resources or []))
 
 
-def _tf_is_admin():
-    return ROLE_RANK.get(current_role(), 0) >= ROLE_RANK["admin"]
+def _tf_raw_payload(role=None):
+    return {"error": "free Terraform code needs the 'admin' role", "code": "raw-admin-only",
+            "role": role, "required": "admin",
+            "hint": "free Terraform code runs on the console host: creating, editing, "
+                    "planning, applying or destroying it needs the 'admin' role"}
 
 
-def _tf_raw_refused():
-    return jsonify({"error": "free Terraform code needs the 'admin' role", "code": "raw-admin-only",
-                    "role": current_role(),
-                    "required": "admin",
-                    "hint": "free Terraform code runs on the console host: creating, editing, "
-                            "planning, applying or destroying it needs the 'admin' role"}), 403
+# 2.4.0 (décision 160) : ce que la console réserve ailleurs à l'admin
+# (_OBJ_ADMIN_KINDS, préfixes /api/net-admin/, /api/hv-settings/,
+# /api/devices/ de ADMIN_ONLY_PREFIXES) l'est aussi par Terraform : genres de
+# formulaire, et types de ressource écrits dans un code libre (celui d'un
+# modèle de plan, que lance un opérateur, décision 161).
+_TF_ADMIN_KINDS = ("network", "storageclass", "ippool")
+_TF_ADMIN_TYPES = frozenset({
+    "harvester_network", "harvester_storageclass", "harvester_ippool",       # _OBJ_ADMIN_KINDS, net-admin
+    "harvester_clusternetwork", "harvester_vlanconfig", "harvester_loadbalancer",  # /api/net-admin/
+    "harvester_setting",                                                    # /api/hv-settings/
+    "harvester_pcidevice", "harvester_sriov_network_device",               # /api/devices/
+})
+
+
+def _tf_admin_kinds(resources):
+    """Genres (ou types du code libre) de `resources` réservés à l'admin,
+    triés ; vide = permis à l'opérateur."""
+    out = set()
+    for r in resources or []:
+        if not isinstance(r, dict):
+            continue
+        kind = r.get("kind")
+        if kind in _TF_ADMIN_KINDS:
+            out.add(kind)
+        elif kind == "raw":
+            spec = r.get("spec")
+            tf = spec.get("tf") if isinstance(spec, dict) else None
+            out |= set(_tfg.resource_types(tf if isinstance(tf, str) else "")) & _TF_ADMIN_TYPES
+    return sorted(out)
+
+
+def _tf_role_refusal(resources, role, via_plan=False):
+    """Corps du refus (403) pour lancer, créer ou modifier ces ressources
+    au rôle `role`, None si permis. `role` None : appelant local (ligne de
+    commande, qui a l'état de la console entre les mains). `via_plan` :
+    déclaration produite par un plan et lancée par sa chaîne ; le code libre
+    d'un modèle (écrit par un admin, valeurs neutralisées) est alors permis à
+    l'opérateur (décision 161), jamais les genres réservés (décision 160)."""
+    if role is None or ROLE_RANK.get(role, 0) >= ROLE_RANK["admin"]:
+        return None
+    kinds = _tf_admin_kinds(resources)
+    if kinds:
+        return {"error": "these resources need the 'admin' role: " + ", ".join(kinds),
+                "code": "admin-kind", "kinds": kinds, "role": role, "required": "admin",
+                "hint": "VM networks, storage classes, IP pools and other cluster-wide objects "
+                        "are managed by administrators, in Terraform as elsewhere in the console"}
+    if _tf_has_raw(resources) and not via_plan:
+        return _tf_raw_payload(role)
+    return None
 
 
 @functools.lru_cache(maxsize=512)
@@ -27795,12 +28030,16 @@ def _tf_guard_rendered(rendered, target_kind="harvester"):
     return out
 
 
+def _tf_guard_payload(violations):
+    return {"error": "refused: " + violations[0]["error"], "code": "forbidden-construct",
+            "violations": violations[:20],
+            "hint": "a declaration may only hold resources and data sources of the embedded "
+                    "providers: no provisioner, external data, module, backend, provider "
+                    "block, nor function reading files of the console host"}
+
+
 def _tf_guard_refused(violations):
-    return jsonify({"error": "refused: " + violations[0]["error"], "code": "forbidden-construct",
-                    "violations": violations[:20],
-                    "hint": "a declaration may only hold resources and data sources of the embedded "
-                            "providers: no provisioner, external data, module, backend, provider "
-                            "block, nor function reading files of the console host"}), 422
+    return jsonify(_tf_guard_payload(violations)), 422
 
 
 def _tf_decl_startup_audit():
@@ -27834,19 +28073,29 @@ _TF_HIDDEN_FOR_VIEWERS = ("user_data", "network_data")
 
 
 def _tf_decl_for_role(view):
+    """Une déclaration, ou un modèle de plan (2.4.0 : mêmes ressources, même
+    cloud-init), telle qu'un lecteur peut la voir."""
     if view is None or ROLE_RANK.get(current_role(), 0) >= ROLE_RANK["operator"]:
         return view
     out = dict(view)
     res = []
+    def hide(block):
+        return {k: ("(hidden)" if k in _TF_HIDDEN_FOR_VIEWERS and v else v) for k, v in block.items()}
+
     for r in view.get("resources") or []:
-        spec = dict(r.get("spec") or {})
-        for key in _TF_HIDDEN_FOR_VIEWERS:
-            if spec.get(key):
-                spec[key] = "(hidden)"
-        for blk in ("cloudinit",):
-            if isinstance(spec.get(blk), list):
-                spec[blk] = [{k: ("(hidden)" if k in _TF_HIDDEN_FOR_VIEWERS and v else v)
-                              for k, v in (b or {}).items()} for b in spec[blk]]
+        if not isinstance(r, dict):
+            continue
+        spec = hide(dict(r.get("spec") or {}))
+        # le bloc cloud-init s'écrit en liste (formulaire) ou en objet seul
+        ci = spec.get("cloudinit")
+        if isinstance(ci, list):
+            spec["cloudinit"] = [hide(b) if isinstance(b, dict) else b for b in ci]
+        elif isinstance(ci, dict):
+            spec["cloudinit"] = hide(ci)
+        # code libre : s'il écrit un cloud-init, il se lit en opérateur, comme /code
+        if r.get("kind") == "raw" and isinstance(spec.get("tf"), str) and \
+                any(k in spec["tf"] for k in _TF_HIDDEN_FOR_VIEWERS):
+            spec["tf"] = "(hidden)"
         res.append(dict(r, spec=spec))
     out["resources"] = res
     return out
@@ -27883,8 +28132,10 @@ def api_tf_declaration_create():
             return jsonify({"error": err[0]}), err[1]
     elif not _kubectl_for_cluster(cluster):
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    if _tf_has_raw(data.get("resources")) and not _tf_is_admin():
-        return _tf_raw_refused()
+    denied = _tf_role_refusal(data.get("resources") if isinstance(data.get("resources"), list) else [],
+                              current_role())
+    if denied:
+        return jsonify(denied), 403
     decl_id = str(data.get("id") or uuid.uuid4().hex[:12])
     try:
         d = TF_DECLS.create(decl_id, cluster, data.get("name"), data.get("description") or "",
@@ -27914,9 +28165,12 @@ def api_tf_declaration_update(decl_id):
         return jsonify({"error": "invalid declaration id"}), 400
     data = request.get_json(force=True, silent=True) or {}
     cur = TF_DECLS.get(decl_id)
-    if (_tf_has_raw(data.get("resources")) or _tf_has_raw((cur or {}).get("resources"))) \
-            and not _tf_is_admin():
-        return _tf_raw_refused()
+    # le contenu écrit ET celui qu'il remplace (un opérateur ne retire pas
+    # le code libre ou le réseau d'une déclaration d'admin)
+    new = data.get("resources") if isinstance(data.get("resources"), list) else []
+    denied = _tf_role_refusal(new + list((cur or {}).get("resources") or []), current_role())
+    if denied:
+        return jsonify(denied), 403
     try:
         d = TF_DECLS.update(decl_id, data.get("revision"), user=current_user() or "",
                             name=data.get("name"), description=data.get("description"),
@@ -27998,19 +28252,23 @@ def api_tf_declaration_delete(decl_id):
     d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
     if d is None:
         return jsonify({"error": "declaration not found"}), 404
-    with TF_KVM_RUNNING_LOCK:
-        if decl_id in TF_KVM_RUNNING:
+    with TF_DECL_RUNNING_LOCK:
+        fd = None if _tf_decl_busy(decl_id) or decl_id in TF_DECL_FDS else _tf_decl_flock(decl_id, "delete")
+        if fd is None:
             return jsonify({"error": "this declaration is running", "code": "running",
                             "hint": "wait for the current plan, apply or destroy to end"}), 409
-    ws = _tf_decl_ws(d, create=False)
-    deployed = _tfst.addresses(ws) if ws.exists() else []
-    if deployed:
-        return jsonify({"error": "declaration still has deployed resources",
-                        "code": "deployed", "deployed": deployed}), 409
-    TF_DECLS.delete(decl_id)
-    if ws.exists():
-        import shutil as _shutil
-        _shutil.rmtree(ws, ignore_errors=True)
+    try:
+        ws = _tf_decl_ws(d, create=False)
+        deployed = _tfst.addresses(ws) if ws.exists() else []
+        if deployed:
+            return jsonify({"error": "declaration still has deployed resources",
+                            "code": "deployed", "deployed": deployed}), 409
+        TF_DECLS.delete(decl_id)
+        if ws.exists():
+            import shutil as _shutil
+            _shutil.rmtree(ws, ignore_errors=True)
+    finally:
+        _flock_release(fd)
     return jsonify({"deleted": decl_id})
 
 
@@ -28050,15 +28308,16 @@ def api_terraform_apply_declaration(cluster):
                               plan_hash=data.get("plan_hash"))
     if not isinstance(resources, list) or not resources:
         return jsonify({"error": "declaration.resources must be a non-empty list"}), 400
-    if _tf_has_raw(resources) and not _tf_is_admin():
-        return _tf_raw_refused()
+    denied = _tf_role_refusal(resources, current_role())
+    if denied:
+        return jsonify(denied), 403
     rendered, errors = _tf_render_resources(resources)
 
     if errors:
         return jsonify({
             "error": "one or more resources are incomplete",
             "errors": errors,
-            "supported": ["vm", "image", "ssh_key", "raw"],
+            "supported": list(_tfs.KINDS_OF["harvester"]),
         }), 400
     bad = _tf_guard_rendered(rendered)
     if bad:
@@ -28081,6 +28340,9 @@ _KIND_TO_TF_TYPE = {
     "vm": "harvester_virtualmachine",
     "image": "harvester_image",
     "ssh_key": "harvester_ssh_key",
+    "network": "harvester_network",
+    "storageclass": "harvester_storageclass",
+    "ippool": "harvester_ippool",
 }
 
 
@@ -28125,7 +28387,11 @@ def _tf_render_resources(resources, target_kind="harvester"):
                            "error": f"a {kind} resource does not go to a {target_kind} target"})
             continue
         kvm_kind = kind in _tfs.KVM_KINDS
-        hcl = "" if kvm_kind else _render_tf_for_kind(kind, spec)
+        try:
+            hcl = "" if kvm_kind else _render_tf_for_kind(kind, spec)
+        except _tfk.SpecError as e:
+            errors.append({"index": i, "kind": kind, "name": spec.get("name"), "error": str(e)})
+            continue
         if not kvm_kind and not hcl:
             errors.append({"index": i, "kind": kind, "name": spec.get("name"),
                            "error": "missing required fields"})
@@ -28340,6 +28606,8 @@ def _tf_decl_view(decl):
     d["incomplete"] = [e["index"] for e in errors]
     # 2.3.1 : code libre (réservé à l'admin) et constructions refusées
     d["raw"] = _tf_has_raw(decl.get("resources"))
+    # 2.4.0 (décision 160) : genres réservés à l'admin, l'écran les bride
+    d["admin_kinds"] = _tf_admin_kinds(decl.get("resources"))
     d["blocked"] = _tf_guard_rendered(rendered, d["target_kind"])
     ws = None
     try:
@@ -28364,55 +28632,86 @@ def _tf_decl_view(decl):
     return d
 
 
-def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harvester"):
+class TfLaunchError(Exception):
+    """Refus de lancer une déclaration : statut HTTP et corps de la réponse
+    (2.4.0, pour les appelants hors requête comme la chaîne d'un plan)."""
+
+    def __init__(self, status, payload):
+        super().__init__(payload.get("error") or "refused")
+        self.status = status
+        self.payload = payload
+
+
+def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster_user=None,
+                    target_kind="harvester", holder=None, role=None):
     """Lance plan, apply ou destroy d'une déclaration gardée par la console,
-    en action suivie. `mode` : plan | apply | destroy | destroy-plan.
-    2.3.0 : `target_kind` kvm pour un hôte KVM (`cluster` = l'hôte, pas de
-    kubeconfig) ; une seule exécution à la fois par déclaration KVM."""
+    en action suivie ; rend (identifiant de l'action, empreinte du contenu).
+    `mode` : plan | apply | destroy | destroy-plan. 2.3.0 : `target_kind`
+    kvm pour un hôte KVM (`cluster` = l'hôte, pas de kubeconfig) ; une seule
+    exécution à la fois par déclaration (2.4.0 : toute cible) ; `holder` :
+    identifiant du déroulé de plan qui la réserve (_tf_decl_hold).
+
+    2.4.0 : ne lit ni la requête ni la session (`user` et `cluster_user`
+    sont passés par l'appelant, figés au déclenchement) : la chaîne d'un
+    plan l'appelle depuis son fil. Refus : TfLaunchError(statut, corps).
+    `role` : rôle de qui a déclenché (figé comme `user`) ; les routes et la
+    chaîne le passent toujours, None = appelant local (_tf_role_refusal).
+    Rôle et tf_guard sont contrôlés ICI : la chaîne d'un plan y passe aussi."""
     decl = TF_DECLS.get(decl_id)
     if decl is None:
-        return jsonify({"error": "declaration not found", "id": decl_id}), 404
+        raise TfLaunchError(404, {"error": "declaration not found", "id": decl_id})
     if (decl.get("target_kind") or "harvester") != target_kind:
-        return jsonify({"error": f"declaration targets a {decl.get('target_kind')} "
-                                 f"host, not a {target_kind} one"}), 400
+        raise TfLaunchError(400, {"error": f"declaration targets a {decl.get('target_kind')} "
+                                           f"host, not a {target_kind} one"})
     if decl["cluster"] != cluster:
-        return jsonify({"error": "declaration belongs to another cluster",
-                        "cluster": decl["cluster"]}), 400
-    if _tf_has_raw(decl["resources"]) and not _tf_is_admin():
-        return _tf_raw_refused()
+        raise TfLaunchError(400, {"error": "declaration belongs to another cluster",
+                                  "cluster": decl["cluster"]})
+    denied = _tf_role_refusal(decl["resources"], role, via_plan=holder is not None
+                              and bool((decl.get("origin") or {}).get("plan")))
+    if denied:
+        raise TfLaunchError(403, denied)
     rendered, errors = _tf_render_resources(decl["resources"], target_kind)
     if errors:
-        return jsonify({"error": "one or more resources are incomplete", "errors": errors,
-                        "supported": ["vm", "image", "ssh_key", "raw"]}), 400
-    # destroy aussi : il évalue le code (un provisioner `when = destroy` s'y lance)
+        raise TfLaunchError(400, {"error": "one or more resources are incomplete", "errors": errors,
+                                  "supported": list(_tfs.KINDS_OF[target_kind or "harvester"])})
+    # 2.3.1 : destroy aussi (il évalue le code : un provisioner `when =
+    # destroy` s'y lance). 2.4.0 : ici et non dans la route, pour que la
+    # chaîne d'un plan passe par le même contrôle.
     bad = _tf_guard_rendered(rendered, target_kind)
     if bad:
-        return _tf_guard_refused(bad)
+        raise TfLaunchError(422, _tf_guard_payload(bad))
     if mode in ("plan", "apply") and not rendered:
-        return jsonify({"error": "declaration.resources must be a non-empty list"}), 400
+        raise TfLaunchError(400, {"error": "declaration.resources must be a non-empty list"})
     missing = [r[0] for r in rendered if not r[4]]
     if missing:
-        return jsonify({"error": "cannot compute Terraform address", "resources": missing}), 400
+        raise TfLaunchError(400, {"error": "cannot compute Terraform address", "resources": missing})
     h = _tf_decl_hash(rendered)
     if mode == "apply" and plan_hash and plan_hash != h:
-        return jsonify({"error": "plan outdated",
-                        "hint": "the declaration changed since this plan; plan again"}), 409
+        raise TfLaunchError(409, {"error": "plan outdated",
+                                  "hint": "the declaration changed since this plan; plan again"})
     label = {"plan": "tf-plan-decl", "apply": "tf-apply-decl",
              "destroy": "tf-destroy-decl", "destroy-plan": "tf-destroy-decl"}[mode]
-    if target_kind == "kvm":
-        if not _tf_libvirt_binary() or not _tf_libvirt_version():
-            return jsonify({"error": "the libvirt Terraform provider is not installed",
-                            "hint": "it ships with the harvester-ops package; see the Installation tab"}), 503
-        with TF_KVM_RUNNING_LOCK:
-            if decl["id"] in TF_KVM_RUNNING:
-                return jsonify({"error": "this declaration is already running",
-                                "hint": "wait for the current plan, apply or destroy to end"}), 409
-            TF_KVM_RUNNING.add(decl["id"])
+    if target_kind == "kvm" and (not _tf_libvirt_binary() or not _tf_libvirt_version()):
+        raise TfLaunchError(503, {"error": "the libvirt Terraform provider is not installed",
+                                  "hint": "it ships with the harvester-ops package; see the Installation tab"})
+    with TF_DECL_RUNNING_LOCK:
+        if _tf_decl_busy(decl["id"], holder):
+            raise TfLaunchError(409, {"error": "this declaration is already running",
+                                      "code": "running",
+                                      "hint": "wait for the current plan, apply or destroy to end"})
+        if decl["id"] not in TF_DECL_FDS:
+            fd = _tf_decl_flock(decl["id"], f"run {mode}")
+            if fd is None:
+                raise TfLaunchError(409, {"error": "this declaration is running in another process",
+                                          "code": "running",
+                                          "hint": "wait for the current plan, apply or destroy to end"})
+            TF_DECL_FDS[decl["id"]] = fd
+        TF_DECL_RUNNING.add(decl["id"])
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, f"{label}:{decl['name']}:{len(rendered)}", cluster, [],
                     dry_run=mode in ("plan", "destroy-plan"))
-    run.cluster_user = (current_cluster_identity() or {}).get("user")
-    user = current_user() or ""
+    run.cluster_user = cluster_user
+    user = user or ""
     # v1.55.0 : l'historique d'une déclaration retrouve ses actions par là.
     run.result = {"declaration_id": decl["id"], "by": user, "mode": mode}
     with ACTIONS_LOCK:
@@ -28420,13 +28719,26 @@ def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harv
     threading.Thread(target=_tf_decl_runner,
                      args=(run, cluster, kc, decl, rendered, mode, h, bool(plan_hash), user),
                      daemon=True).start()
+    return run_id, h
+
+
+def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harvester"):
+    """Enveloppe de route de _tf_decl_launch : l'identité vient de la
+    session, le refus devient la réponse HTTP."""
+    try:
+        run_id, h = _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=plan_hash,
+                                    user=current_user() or "",
+                                    cluster_user=(current_cluster_identity() or {}).get("user"),
+                                    target_kind=target_kind, role=current_role())
+    except TfLaunchError as e:
+        return jsonify(e.payload), e.status
     return jsonify({"action_id": run_id, "plan_hash": h}), 201
 
 
 def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_saved_plan, user):
     """Exécute la déclaration ; pour une cible KVM, retire la clé et
-    l'empreinte copiées dans l'espace QUOI QU'IL ARRIVE, et libère la
-    déclaration."""
+    l'empreinte copiées dans l'espace QUOI QU'IL ARRIVE ; libère la
+    déclaration (toute cible)."""
     kvm = (decl.get("target_kind") or "harvester") == "kvm"
     try:
         return _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash,
@@ -28451,8 +28763,9 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
                     os.chmod(f, 0o600)       # l'état garde le cloud-init, jeton compris
             except (OSError, ValueError) as e:
                 log_tf.warning("KVM declaration cleanup: %s", e)
-            with TF_KVM_RUNNING_LOCK:
-                TF_KVM_RUNNING.discard(decl["id"])
+        with TF_DECL_RUNNING_LOCK:
+            TF_DECL_RUNNING.discard(decl["id"])
+            _tf_decl_unlock_if_idle(decl["id"])
 
 
 def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, use_saved_plan, user):
@@ -28672,14 +28985,15 @@ provider "harvester" {
 
 
 def _hcl_str(s):
-    """Quote a string for HCL; newlines become heredoc.
+    """Quote a string for HCL; newlines become a heredoc.
 
-    2.3.1 : une valeur de formulaire ne peut plus devenir du code. Les
-    séquences de gabarit `${` et `%{` sont neutralisées (`$${`, `%%{` :
-    un `${file("/etc/shadow")}` dans une description lisait un fichier de la
-    console), et le marqueur du heredoc est choisi absent de la valeur (une
+    2.3.1 : une valeur de formulaire ne devient jamais du code. Les
+    séquences de gabarit `${` et `%{` sont neutralisées (`$${`, `%%{` : un
+    `${file("/etc/shadow")}` dans une description lisait un fichier de la
+    console), dans une chaîne (`tf_kvm.hcl_string`) comme dans un heredoc, et
+    le marqueur du heredoc est choisi absent de toute ligne de la valeur (une
     ligne `EOT` dans un cloud-init fermait le heredoc et la suite était lue
-    comme du code, provisioner compris)."""
+    comme du code)."""
     if s is None:
         return '""'
     s = str(s)
@@ -28793,12 +29107,272 @@ def _legacy_vm_to_nested(spec):
     return nested
 
 
+# ---------------------------------------------------------------------------
+# 2.4.0 : réseau de VM, classe de stockage, pool d'adresses. Champs et noms
+# exactement ceux du provider Harvester 1.9.0 (`terraform providers schema`,
+# constats du plan 2026-11-03). Une valeur refusée lève tf_kvm.SpecError,
+# message destiné à l'opérateur, comme les ressources KVM.
+# ---------------------------------------------------------------------------
+TF_NETWORK_ROUTE_MODES = ("auto", "manual")
+TF_SC_RECLAIM_POLICIES = ("Delete", "Retain")
+TF_SC_BINDING_MODES = ("Immediate", "WaitForFirstConsumer")
+
+
+def _tf_text(spec, field):
+    v = spec.get(field)
+    return "" if v is None else str(v).strip()
+
+
+def _tf_name(spec, field="name", required=True, pattern=None):
+    v = _tf_text(spec, field)
+    if not v:
+        if required:
+            raise _tfk.SpecError(f"{field} is required")
+        return ""
+    if not (pattern or _K8S_NAME_RE).match(v):
+        raise _tfk.SpecError(f"{field} {v!r} is not a valid Kubernetes name")
+    return v
+
+
+def _tf_int(spec, field, lo, hi, required=False):
+    v = spec.get(field)
+    if v is None or v == "":
+        if required:
+            raise _tfk.SpecError(f"{field} is required")
+        return None
+    if isinstance(v, bool) or not re.fullmatch(r"-?\d+", str(v).strip()):
+        raise _tfk.SpecError(f"{field} must be a whole number")
+    n = int(str(v).strip())
+    if not lo <= n <= hi:
+        raise _tfk.SpecError(f"{field} must be between {lo} and {hi}")
+    return n
+
+
+def _tf_bool(spec, field):
+    """Booléen du formulaire, ou "true"/"false" d'un modèle ; None si absent."""
+    v = spec.get(field)
+    if v is None or v == "":
+        return None
+    if isinstance(v, bool):
+        return v
+    if str(v).lower() in ("true", "false"):
+        return str(v).lower() == "true"
+    raise _tfk.SpecError(f"{field} must be true or false")
+
+
+def _tf_enum(spec, field, allowed):
+    v = _tf_text(spec, field)
+    if v and v not in allowed:
+        raise _tfk.SpecError(f"{field} must be one of {', '.join(allowed)}")
+    return v
+
+
+def _tf_ip(value, field):
+    import ipaddress
+    try:
+        return ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        raise _tfk.SpecError(f"{field} {value!r} is not an IP address") from None
+
+
+def _tf_subnet(value, field):
+    """Sous-réseau écrit tel qu'il est lu : bits d'hôte refusés (revue m5 :
+    `10.0.0.5/24` passait et le webhook de Harvester le refusait à l'apply)."""
+    import ipaddress
+    try:
+        net = ipaddress.ip_network(str(value).strip(), strict=False)
+    except ValueError:
+        raise _tfk.SpecError(f"{field} {value!r} is not a subnet (address/prefix)") from None
+    if net.network_address != ipaddress.ip_interface(str(value).strip()).ip:
+        raise _tfk.SpecError(f"{field} {value!r} has host bits set: write {net}")
+    return net
+
+
+def _tf_items(spec, field):
+    """Bloc répété du formulaire : liste d'objets (un objet seul accepté,
+    comme `cloudinit`)."""
+    v = spec.get(field)
+    if v in (None, "", []):
+        return []
+    if isinstance(v, dict):
+        return [v]
+    if not isinstance(v, list) or not all(isinstance(x, dict) for x in v):
+        raise _tfk.SpecError(f"{field} must be a list of blocks")
+    return v
+
+
+# clé d'étiquette Kubernetes : préfixe DNS facultatif, nom de 63 caractères
+_K8S_LABEL_KEY_RE = re.compile(
+    r"^(?:(?=.{1,253}/)[a-z0-9]([-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?"
+    r"(?=.{1,63}$)[A-Za-z0-9](?:[-A-Za-z0-9_.]*[A-Za-z0-9])?$")
+
+
+def _tf_kv_pairs(spec, field):
+    """Carte Terraform (`parameters`, `labels`) : un objet clé -> valeur, ce
+    que le champ `map` du formulaire envoie ; clé vide refusée. Revue m5 :
+    les clés de `labels` suivent la syntaxe des étiquettes Kubernetes."""
+    v = spec.get(field)
+    if v in (None, ""):
+        return {}
+    if not isinstance(v, dict):
+        raise _tfk.SpecError(f"{field} must be a map of keys to values")
+    out = {}
+    for k, val in v.items():
+        k = str(k).strip()
+        if not k or any(ord(c) < 32 for c in k):
+            raise _tfk.SpecError(f"{field}: every entry needs a key")
+        if field == "labels" and not _K8S_LABEL_KEY_RE.match(k):
+            raise _tfk.SpecError(f"labels: {k!r} is not a Kubernetes label key")
+        out[k] = "" if val is None else (str(val).lower() if isinstance(val, bool) else str(val))
+    return out
+
+
+def _hcl_map(name, pairs, indent="  "):
+    rows = "".join(f"{indent}  {_hcl_str(k)} = {_hcl_str(v)}\n" for k, v in pairs.items())
+    return f"{indent}{name} = {{\n{rows}{indent}}}"
+
+
+def _render_tf_network(spec):
+    name = _tf_name(spec)
+    ns = _tf_name(spec, "namespace", required=False) or "default"
+    cnet = _tf_name(spec, "cluster_network_name")
+    vlan = _tf_int(spec, "vlan_id", 0, 4094, required=True)
+    mode = _tf_enum(spec, "route_mode", TF_NETWORK_ROUTE_MODES)
+    cidr = _tf_text(spec, "route_cidr")
+    gw = _tf_text(spec, "route_gateway")
+    dhcp = _tf_text(spec, "route_dhcp_server_ip")
+    if mode == "manual" and not (cidr and gw):
+        raise _tfk.SpecError("a manual route needs route_cidr and route_gateway")
+    # ConflictsWith du provider (vu par `terraform validate`)
+    if dhcp and (cidr or gw):
+        raise _tfk.SpecError("route_dhcp_server_ip cannot go with route_cidr or route_gateway")
+    net = _tf_subnet(cidr, "route_cidr") if cidr else None
+    if gw and net is not None and _tf_ip(gw, "route_gateway") not in net:
+        raise _tfk.SpecError(f"route_gateway {gw} is not inside route_cidr {cidr}")
+    if gw and net is None:
+        _tf_ip(gw, "route_gateway")
+    if dhcp:
+        _tf_ip(dhcp, "route_dhcp_server_ip")
+    config = _tf_text(spec, "config")
+    if config:
+        try:
+            if not isinstance(json.loads(config), dict):
+                raise ValueError
+        except ValueError:
+            raise _tfk.SpecError("config must be a JSON object") from None
+    labels = _tf_kv_pairs(spec, "labels")
+    body = [
+        f"  name                 = {_hcl_str(name)}",
+        f"  namespace            = {_hcl_str(ns)}",
+        f"  cluster_network_name = {_hcl_str(cnet)}",
+        f"  vlan_id              = {vlan}",
+    ]
+    for field, value in (("description", _tf_text(spec, "description")), ("route_mode", mode),
+                         ("route_cidr", cidr), ("route_gateway", gw),
+                         ("route_dhcp_server_ip", dhcp), ("config", config)):
+        if value:
+            body.append(f"  {field} = {_hcl_str(value)}")
+    if labels:
+        body.append(_hcl_map("labels", labels))
+    return _TF_HEADER + f'resource "harvester_network" "{_hcl_id(name)}" {{\n' + "\n".join(body) + "\n}\n"
+
+
+def _render_tf_storageclass(spec):
+    name = _tf_name(spec)
+    params = _tf_kv_pairs(spec, "parameters")
+    if not params:
+        raise _tfk.SpecError("parameters needs at least one entry")
+    body = [f"  name = {_hcl_str(name)}"]
+    for field, value in (("volume_provisioner", _tf_text(spec, "volume_provisioner")),
+                         ("reclaim_policy", _tf_enum(spec, "reclaim_policy", TF_SC_RECLAIM_POLICIES)),
+                         ("volume_binding_mode", _tf_enum(spec, "volume_binding_mode", TF_SC_BINDING_MODES))):
+        if value:
+            body.append(f"  {field} = {_hcl_str(value)}")
+    for field in ("allow_volume_expansion", "is_default"):
+        b = _tf_bool(spec, field)
+        if b is not None:
+            body.append(f"  {field} = {'true' if b else 'false'}")
+    body.append(_hcl_map("parameters", params))
+    # `allowed_topologies` (au plus un bloc) : le formulaire en donne les
+    # `match_label_expressions`, un bloc chacune
+    exprs = []
+    for i, e in enumerate(_tf_items(spec, "match_label_expressions")):
+        key = _tf_text(e, "key")
+        values = e.get("values")
+        if isinstance(values, str):
+            values = [x.strip() for x in values.split(",")]
+        values = [str(x).strip() for x in (values or []) if str(x).strip()]
+        if not key or not values:
+            raise _tfk.SpecError(f"match_label_expressions #{i + 1} needs a key and at least one value")
+        exprs.append("    match_label_expressions {\n"
+                     f"      key    = {_hcl_str(key)}\n"
+                     f"      values = [{', '.join(_hcl_str(x) for x in values)}]\n"
+                     "    }")
+    if exprs:
+        body.append("  allowed_topologies {\n" + "\n".join(exprs) + "\n  }")
+    return _TF_HEADER + f'resource "harvester_storageclass" "{_hcl_id(name)}" {{\n' + "\n".join(body) + "\n}\n"
+
+
+def _render_tf_ippool(spec):
+    name = _tf_name(spec)
+    ranges = _tf_items(spec, "range")
+    if not ranges:
+        raise _tfk.SpecError("an IP pool needs at least one range")
+    body = [f"  name = {_hcl_str(name)}"]
+    for i, r in enumerate(ranges):
+        where = f"range #{i + 1}"
+        vals = {}
+        for f in ("start", "end", "subnet", "gateway"):
+            vals[f] = _tf_text(r, f)
+            if not vals[f]:
+                raise _tfk.SpecError(f"{where}: {f} is required")
+        net = _tf_subnet(vals["subnet"], f"{where} subnet")
+        start, end, gw = (_tf_ip(vals[f], f"{where} {f}") for f in ("start", "end", "gateway"))
+        for f, ip in (("start", start), ("end", end), ("gateway", gw)):
+            if ip not in net:
+                raise _tfk.SpecError(f"{where}: {f} {ip} is not inside subnet {vals['subnet']}")
+        if start > end:
+            raise _tfk.SpecError(f"{where}: start {start} comes after end {end}")
+        body.append("  range {\n" + "".join(f"    {f:<7} = {_hcl_str(vals[f])}\n"
+                                           for f in ("start", "end", "subnet", "gateway")) + "  }")
+    selectors = _tf_items(spec, "selector")
+    if len(selectors) > 1:
+        raise _tfk.SpecError("an IP pool takes at most one selector")
+    sel = selectors[0] if selectors else {}
+    inner = []
+    network = _tf_name(sel, "network", required=False, pattern=_K8S_NAMESPACED_RE)
+    if network:
+        inner.append(f"    network  = {_hcl_str(network)}")
+    priority = _tf_int(sel, "priority", 0, 2 ** 31 - 1)
+    if priority is not None:
+        inner.append(f"    priority = {priority}")
+    for i, sc in enumerate(_tf_items(spec, "scope")):
+        rows = [f"      {f} = {_hcl_str(_tf_text(sc, f))}"
+                for f in ("guest_cluster", "namespace", "project") if _tf_text(sc, f)]
+        if not rows:
+            raise _tfk.SpecError(f"scope #{i + 1} needs a guest cluster, a namespace or a project")
+        inner.append("    scope {\n" + "\n".join(rows) + "\n    }")
+    if inner:
+        body.append("  selector {\n" + "\n".join(inner) + "\n  }")
+    return _TF_HEADER + f'resource "harvester_ippool" "{_hcl_id(name)}" {{\n' + "\n".join(body) + "\n}\n"
+
+
 def _render_tf_for_kind(kind, spec):
     """Generate a .tf snippet from a structured spec. Accepts both the
     pre-1.4.36 flat shape and the v1.4.36 nested shape produced by
-    tf-schema.js."""
+    tf-schema.js. 2.4.0 : `network`, `storageclass` et `ippool` lèvent
+    tf_kvm.SpecError sur une valeur refusée (le message dit laquelle)."""
     if kind == "raw":
         return spec.get("tf") or ""
+
+    if kind == "network":
+        return _render_tf_network(spec)
+
+    if kind == "storageclass":
+        return _render_tf_storageclass(spec)
+
+    if kind == "ippool":
+        return _render_tf_ippool(spec)
 
     if kind == "vm":
         spec = _legacy_vm_to_nested(spec)
@@ -31222,22 +31796,13 @@ def _replication_follow_lock(path):
     console : (descripteur, None) s'il est pris, (None, pid du détenteur)
     si une autre console le tient déjà. Libéré par le noyau à la sortie,
     même brutale : jamais de fichier périmé qui bloquerait."""
-    import fcntl
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fd, note = _flock_try(path, str(os.getpid()))
+    if fd is not None:
+        return fd, None
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        try:
-            holder = int(os.pread(fd, 32, 0).decode().strip() or 0)
-        except (OSError, ValueError):
-            holder = 0
-        os.close(fd)
-        return None, holder
-    os.ftruncate(fd, 0)
-    os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
-    return fd, None
+        return None, int((note or "").split()[0] if (note or "").split() else 0)
+    except ValueError:
+        return None, 0
 
 
 def _start_replication_follower():
@@ -31413,6 +31978,1232 @@ def _console_sigterm(signum, frame):
 # Entry point
 # -----------------------------------------------------------------------------
 _MODULE_READY.set()
+
+
+
+# =============================================================================
+# 2.4.0 : plans de déploiement (routes, action deploy:<cluster>)
+# =============================================================================
+#
+# Un plan s'applique à un cluster déclaré (`/api/deploy/<cluster>`, rôle
+# opérateur) ou s'enchaîne après une installation bare-metal (routes de
+# `/api/baremetal/`, administrateur). Le moteur (bin/lib/deploy_chain.py)
+# tourne dans le fil d'une action suivie `deploy:<cluster>` ; la ligne de
+# commande bin/harvester-plans.py charge ce module et appelle les mêmes
+# fonctions (décision 146). Les phases appellent les mécanismes existants :
+# série d'installations, déclarations Terraform, prechecks de hv_upgrade.
+import deploy_chain as _dch  # noqa: E402
+import deploy_plans as _dpl  # noqa: E402
+import deploy_ready as _drd  # noqa: E402
+import secret_store as _sst  # noqa: E402
+
+DEPLOY_PREFIX = "deploy:"
+DEPLOY_POLL = float(os.environ.get("HARVESTER_OPS_DEPLOY_POLL", _dch.POLL_SECONDS))
+DEPLOY_CHILD_POLL = float(os.environ.get("HARVESTER_OPS_DEPLOY_CHILD_POLL", 2))
+_DEPLOY_LAUNCH_LOCK = threading.Lock()
+# Champs non textuels des genres de ressource des modèles : une chaîne qui
+# n'est qu'une variable y prend ce type au rendu (chemin pointé, un élément de
+# bloc répété garde le chemin de son bloc : `selector.priority`).
+TF_TEMPLATE_FIELD_TYPES = {
+    "vm": {"cpu": "int", "efi": "bool", "secure_boot": "bool"},
+    "network": {"vlan_id": "int"},
+    "storageclass": {"allow_volume_expansion": "bool", "is_default": "bool"},
+    "ippool": {"selector.priority": "int"},
+}
+# Constats : niveau de chacun (bloquant = rien ne se lance)
+DEPLOY_FINDING_LEVELS = {
+    "plan-invalid": "blocking", "phase-not-available": "blocking", "template-missing": "blocking",
+    "var-missing": "blocking", "var-invalid": "blocking", "decl-name-taken": "blocking",
+    "tf-missing": "blocking", "cluster-unreachable": "blocking",
+    "admin-kind": "blocking", "forbidden-construct": "blocking",
+    "template-newer": "warning", "decl-differs": "warning", "plan-changed": "warning",
+    "decl-exists": "info", "readiness-later": "info",
+}
+
+
+def _tf_template_field_type(kind, path):
+    return (TF_TEMPLATE_FIELD_TYPES.get(kind) or {}).get(path)
+
+
+def _deploy_state():
+    return _bm_profiles_state()
+
+
+def _deploy_finding(code, phase, detail):
+    return {"code": code, "level": DEPLOY_FINDING_LEVELS[code], "phase": phase, "detail": detail}
+
+
+def _deploy_cluster_entry(cluster):
+    return next((c for c in (load_config_ro().get("clusters") or []) if c.get("name") == cluster), None)
+
+
+def _deploy_console_kc(cluster):
+    """Kubeconfig de la console pour un cluster (celui créé par une
+    installation enchaînée : identité de la console, comme la série)."""
+    c = _deploy_cluster_entry(cluster)
+    return c.get("kubeconfig") if c else None
+
+
+def _deploy_vip_of(kc):
+    """Variable intégrée `vip` d'un cluster existant (décision 156) : l'hôte
+    de `server` du kubeconfig s'il s'agit d'une adresse, sans résolution
+    DNS ; vide sinon."""
+    import ipaddress
+    ep = _cluster_api_endpoint(kc) if kc else None
+    if not ep:
+        return ""
+    try:
+        ipaddress.ip_address(ep[0])
+    except ValueError:
+        return ""
+    return ep[0]
+
+
+def _deploy_busy(cluster):
+    """Déroulé de plan en cours sur ce cluster, essais compris, ou None."""
+    with ACTIONS_LOCK:
+        return next((r for r in ACTIONS.values()
+                     if r.action == f"{DEPLOY_PREFIX}{cluster}"
+                     and r.status in ("starting", "running")), None)
+
+
+# 2.4.0 (revue B2-I2) : un déroulé à la fois par cluster ENTRE PROCESSUS (la
+# ligne de commande charge ce module à côté de la console) : verrou de
+# fichier `<état>/deploy.d/<cluster>.lock`, pris au lancement sous
+# _DEPLOY_LAUNCH_LOCK et tenu par le fil du déroulé jusqu'à sa fin. Il porte
+# {"run", "plan"} ; un verrou libre dit aussi que personne ne fait plus
+# tourner une ligne restée `running` dans actions.db (revue B2-I1).
+_DEPLOY_LOCK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+
+
+def _deploy_lock_path(cluster):
+    if not isinstance(cluster, str) or not _DEPLOY_LOCK_NAME_RE.match(cluster) or ".." in cluster:
+        raise ValueError("invalid cluster name for a lock")
+    return _bmp._private_dir(Path(_deploy_state()) / "deploy.d") / f"{cluster}.lock"
+
+
+def _deploy_cluster_lock(cluster, run_id, plan_name):
+    """(descripteur, None) si le verrou du cluster est pris pour ce déroulé,
+    (None, {"run", "plan"} du détenteur) sinon."""
+    fd, note = _flock_try(_deploy_lock_path(cluster), json.dumps({"run": run_id, "plan": plan_name}))
+    if fd is not None:
+        return fd, None
+    try:
+        holder = json.loads(note or "{}")
+    except ValueError:
+        holder = {}
+    return None, holder if isinstance(holder, dict) else {}
+
+
+def _deploy_lock_holder(cluster):
+    """{"run", "plan"} du déroulé qui tient le cluster (ce processus ou un
+    autre), None si personne."""
+    try:
+        fd, holder = _deploy_cluster_lock(cluster, "", "")
+    except (ValueError, OSError):
+        return None
+    _flock_release(fd)
+    return holder
+
+
+def _deploy_run_ended_here(run_id):
+    """Vrai si ce déroulé est connu de ce processus avec un statut final
+    (son fil rend le verrou du cluster juste après l'avoir écrit)."""
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(run_id or "")
+    return run is not None and run.status in ("done", "error", "cancelled")
+
+
+def _deploy_plan_running(plan_name):
+    """Identifiant d'un déroulé en cours de ce plan (ce processus ou un
+    autre), ou None."""
+    with ACTIONS_LOCK:
+        run = next((r for r in ACTIONS.values()
+                    if str(r.action).startswith(DEPLOY_PREFIX)
+                    and r.status in ("starting", "running")
+                    and (r.result or {}).get("plan") == plan_name), None)
+    if run is not None:
+        return run.id
+    d = Path(_deploy_state()) / "deploy.d"
+    for f in sorted(d.glob("*.lock")) if d.is_dir() else []:
+        holder = _deploy_lock_holder(f.stem)
+        if holder and holder.get("plan") == plan_name:
+            return holder.get("run") or "?"
+    return None
+
+
+def _deploy_mark_orphans():
+    """Lignes `deploy:` restées `running` dans actions.db alors que plus
+    personne ne tient le verrou de leur cluster (console redémarrée, ligne
+    de commande tuée) : passées `interrupted`, donc reprenables (revue
+    B2-I1) ; les déclarations d'essai d'un dry-run interrompu sont retirées
+    comme à sa fin. Sans effet sur un déroulé vivant d'un autre processus."""
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB), timeout=10)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT id, action, result FROM actions WHERE action LIKE 'deploy:%' "
+                            "AND status IN ('starting', 'running')").fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        log_actions.warning("deploy orphans: %s", e)
+        return []
+    marked = []
+    now = time.time()
+    for row in rows:
+        cluster = row["action"][len(DEPLOY_PREFIX):]
+        if (_deploy_lock_holder(cluster) or {}).get("run") == row["id"]:
+            continue
+        try:
+            conn = sqlite3.connect(str(ACTIONS_DB), timeout=10)
+            conn.execute("UPDATE actions SET status = 'interrupted', exit_code = -1, ended_at = ? "
+                         "WHERE id = ? AND status IN ('starting', 'running')", (now, row["id"]))
+            conn.commit()
+            conn.close()
+        except sqlite3.Error as e:
+            log_actions.warning("deploy orphan %s: %s", row["id"], e)
+            continue
+        with ACTIONS_LOCK:
+            run = ACTIONS.get(row["id"])
+            if run is not None and run.status in ("starting", "running", "interrupted"):
+                run.status, run.exit_code, run.ended_at = "interrupted", -1, now
+        trial = (_row_result(row["result"]) or {}).get("trial_declarations") or []
+        try:
+            _deploy_cleanup_dry([t for t in trial if isinstance(t, str)])
+        except Exception as e:                 # noqa: BLE001
+            log_actions.warning("deploy orphan %s cleanup: %s", row["id"], type(e).__name__)
+        marked.append(row["id"])
+    return marked
+
+
+def _deploy_tf_tools_missing():
+    """OpenTofu/Terraform ou le provider Harvester absents (mêmes lectures
+    que la bannière de Terraform)."""
+    missing = []
+    if not (os.path.isfile(TF_BIN) and os.access(TF_BIN, os.X_OK)):
+        missing.append("OpenTofu or Terraform")
+    if not _tf_provider_binary():
+        missing.append("the Harvester Terraform provider")
+    return missing
+
+
+def _deploy_values(plan, variables, cluster, vip):
+    """(valeurs du rendu, refus [(où, raison)]) : variables déclarées du
+    plan seulement, intégrées fournies par la console."""
+    errors = []
+    values = {}
+    if variables is None:
+        variables = {}
+    if not isinstance(variables, dict):
+        return {}, [("variables", "not a mapping")]
+    for k, v in variables.items():
+        if k in _dpl.BUILTIN_VARS:
+            errors.append((f"variables.{k}", "built-in variable, set by the console"))
+        elif k not in plan["variables"]:
+            errors.append((f"variables.{k}", "not a variable of the plan"))
+        else:
+            values[k] = v if isinstance(v, str) else str(v) if isinstance(v, (int, float)) else v
+    values["cluster"] = cluster
+    if vip:
+        values["vip"] = vip
+    return values, errors
+
+
+def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=False, update_differing=False,
+                    role=None):
+    """Contrôles d'un lancement, lecture seule. Rend (constats, résumé,
+    contexte) ; le contexte porte de quoi lancer : plan, modèles, valeurs,
+    ressources rendues. `install` : le cluster sera créé par la chaîne (ni
+    joignabilité ni déclarations à lire). `role` : rôle de qui lance (None :
+    ligne de commande locale) ; décision 160, un genre réservé à l'admin
+    bloque un opérateur, ici comme au lancement de chaque déclaration."""
+    state = _deploy_state()
+    findings = []
+    plan = _dpl.load_plan(state, plan_name)
+    if plan is None:
+        path = _dpl.plan_path(state, plan_name)
+        if path is None or not path.is_file():
+            return None, None, None
+        try:
+            _dpl.check_plan(_dpl._read(path) or {})
+            why = [("plan", "unreadable")]
+        except _dpl.ProfileError as e:
+            why = e.errors
+        for where, reason in why:
+            code = "phase-not-available" if str(reason).startswith(_dpl.COMING) else "plan-invalid"
+            findings.append(_deploy_finding(code, "plan", f"{where}: {reason}"))
+        return findings, {"declarations": [], "estimate_minutes": 0}, None
+    phases = plan["phases"]
+    tf_on = (phases.get("terraform") or {}).get("enabled") and _dpl.plan_templates(plan)
+    templates = {}
+    for entry in _dpl.plan_templates(plan) if tf_on else []:
+        t = _dpl.load_template(state, entry["template"])
+        if t is None:
+            findings.append(_deploy_finding("template-missing", "terraform", entry["template"]))
+        else:
+            templates[entry["template"]] = t
+    if vip is None:
+        vip = _deploy_vip_of(kc)
+    values, errors = _deploy_values(plan, variables, cluster, vip)
+    for where, why in errors:
+        findings.append(_deploy_finding("var-invalid", "plan", f"{where}: {why}"))
+    rendered = {}
+    if tf_on and not any(f["code"] == "template-missing" for f in findings):
+        try:
+            out = _dpl.render_templates(plan, templates, values, _tf_template_field_type)
+            rendered = dict(out)
+        except _dpl.ProfileError as e:
+            for where, why in e.errors:
+                code = "var-missing" if why == "missing variable" else "var-invalid"
+                findings.append(_deploy_finding(code, "terraform", f"{where}: {why}"))
+        for tname, res in rendered.items():
+            # mêmes contrôles qu'au lancement de la déclaration (_tf_decl_launch),
+            # montrés avant de lancer : rôle (160) et constructions (tf_guard)
+            denied = _tf_role_refusal(res, role, via_plan=True)
+            if denied:
+                findings.append(_deploy_finding(
+                    "admin-kind", "terraform", f"{tname}: the 'admin' role is needed for "
+                    f"{', '.join(denied.get('kinds') or [])}"))
+            tf_rendered, _errs = _tf_render_resources(res)
+            for v in _tf_guard_rendered(tf_rendered)[:3]:
+                findings.append(_deploy_finding("forbidden-construct", "terraform", f"{tname}: {v['error']}"))
+        if _deploy_tf_tools_missing():
+            findings.append(_deploy_finding("tf-missing", "terraform",
+                                            ", ".join(_deploy_tf_tools_missing()) + " not found"))
+    if not install and kc and _cluster_reachable(kc) is False:
+        findings.append(_deploy_finding("cluster-unreachable", "plan", f"{cluster}: API not reachable"))
+    decls = []
+    for entry in _dpl.plan_templates(plan) if tf_on else []:
+        tname = entry["template"]
+        try:
+            dname = _dpl.declaration_name(plan["name"], tname)
+        except _dpl.ProfileError as e:
+            findings.append(_deploy_finding("plan-invalid", "terraform", e.errors[0][1]))
+            continue
+        d = None if install else TF_DECLS.find_by_name(cluster, dname)
+        origin = (d or {}).get("origin") or {}
+        match = bool(d) and origin.get("plan") == plan["name"] and origin.get("template") == tname
+        decls.append({"name": dname, "template": tname, "exists": bool(d), "origin_match": match})
+        if d and not match:
+            findings.append(_deploy_finding("decl-name-taken", "terraform",
+                                            f"{dname} exists and was not made by this plan and template"))
+        elif d:
+            findings.append(_deploy_finding("decl-exists", "terraform",
+                                            f"{dname} exists: it is only planned and applied"))
+            # revue B2-I6 : d'autres valeurs que celles de la déclaration ne
+            # passent jamais sous silence (« rien à changer » mensonger)
+            if tname in rendered and _deploy_resources_differ(rendered[tname], d.get("resources")):
+                findings.append(_deploy_finding(
+                    "decl-differs", "terraform",
+                    f"{dname} differs from what these values give: it is updated only if you ask for it"
+                    if not update_differing else f"{dname} differs from what these values give: it is updated"))
+            t = templates.get(tname)
+            if t and origin.get("template_revision") != t["revision"]:
+                findings.append(_deploy_finding(
+                    "template-newer", "terraform",
+                    f"template {tname} changed since {dname} was made (revision "
+                    f"{origin.get('template_revision')} -> {t['revision']}); the declaration is not rewritten"))
+    if (phases.get("readiness") or {}).get("enabled"):
+        findings.append(_deploy_finding("readiness-later", "readiness",
+                                        "readiness is checked again when the phase starts"))
+    estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) + (30 if install else 0)
+    summary = {"declarations": decls, "estimate_minutes": estimate}
+    ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
+           "update_differing": bool(update_differing)}
+    return findings, summary, ctx
+
+
+def _deploy_resources_differ(rendered, existing):
+    """Vrai si les ressources rendues pour ce lancement diffèrent de celles
+    de la déclaration reprise (genre et contenu ; identifiants ignorés)."""
+    def shape(rs):
+        return [(r.get("kind"), r.get("spec") or {}) for r in rs or [] if isinstance(r, dict)]
+    return shape(rendered) != shape(existing)
+
+
+def _deploy_blocking(findings):
+    return [f for f in findings or [] if f["level"] == "blocking"]
+
+
+# --- déroulé -----------------------------------------------------------------
+
+class _DeployCtx:
+    """Contexte attendu par deploy_chain.run, sur une ActionRun."""
+
+    def __init__(self, run, base):
+        self.run, self.run_id, self.base = run, run.id, base
+
+    def emit_step(self, sid, status, msg):
+        self.run.emit({"type": "step", "step_id": sid, "status": status,
+                       "message": str(msg or "")[:300], "ts": time.time()})
+
+    def set_result(self, r):
+        self.run.result = dict(self.base, **{k: v for k, v in r.items() if k != "status"},
+                               status=r.get("status"))
+        # consigné à chaque avancée (revue M2) : une console arrêtée en pleine
+        # phase laisse un résultat que la reprise sait relire
+        try:
+            _actions_persist(self.run)
+        except Exception:                      # noqa: BLE001
+            pass
+
+    def cancelled(self):
+        return bool(getattr(self.run, "_cancel", False))
+
+
+def _deploy_wait_child(action_id, parent=None, forward_cancel=False, sleep=None):
+    """État final d'une action fille. `forward_cancel` : un arrêt demandé sur
+    la chaîne est transmis (installation) ; sinon l'action va à son terme
+    (Terraform)."""
+    sleep = sleep or time.sleep
+    while True:
+        with ACTIONS_LOCK:
+            child = ACTIONS.get(action_id)
+        if child is None:
+            return "error", None
+        if forward_cancel and parent is not None and getattr(parent, "_cancel", False) \
+                and child.status in ("starting", "running"):
+            child._cancel = True
+        if child.status in ("done", "error", "cancelled", "interrupted"):
+            return child.status, child
+        sleep(DEPLOY_CHILD_POLL)
+
+
+def _deploy_read_cluster(kc, cluster):
+    """Lectures de la disponibilité, en parallèle ; None pour une lecture en
+    échec (jamais prise pour « prêt »)."""
+    def version():
+        try:
+            r = _kubectl_run(["kubectl", "--kubeconfig", kc, "get", "--raw", "/version"],
+                             capture_output=True, text=True, timeout=15)
+            return json.loads(r.stdout) if r.returncode == 0 else None
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            return None
+
+    def items(*args):
+        d = _kubectl_json(kc, "get", *args, timeout=30, cluster=cluster)
+        return None if d is None else (d.get("items") or [])
+    jobs = {"version": version,
+            "nodes": lambda: items("nodes"),
+            "charts": lambda: items("managedcharts.management.cattle.io", "-n", "fleet-local"),
+            "lh_nodes": lambda: items("nodes.longhorn.io", "-n", "longhorn-system"),
+            "storageclasses": lambda: items("storageclasses")}
+    if not kc:
+        return {k: None for k in jobs}
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futs = {k: pool.submit(f) for k, f in jobs.items()}
+        return {k: f.result() for k, f in futs.items()}
+
+
+def _deploy_install_verify(cluster, expected):
+    """Installation revérifiée : cluster déclaré, joignable, nœuds attendus
+    présents. (vrai, nœuds lus)."""
+    kc = _deploy_console_kc(cluster)
+    if not kc or _cluster_reachable(kc) is False:
+        return False, []
+    d = _kubectl_json(kc, "get", "nodes", timeout=20, cluster=cluster)
+    if d is None:
+        return False, []
+    names = [(n.get("metadata") or {}).get("name") for n in d.get("items") or []]
+    return all(h in names for h in expected or []), names
+
+
+def _deploy_install_secrets_put(store, run_id, rows):
+    """Retire les secrets des lignes préparées et les garde dans le magasin
+    du déroulé (décision 129) ; les lignes ne portent plus aucun secret."""
+    for i, o in enumerate(rows):
+        for k in ("bmc_password", "token", "password"):
+            v = o.pop(k, None)
+            if v:
+                path = f"{run_id}/bmc/{i}" if k == "bmc_password" else f"{run_id}/install/{i}"
+                store.put(_dch.SECRET_CLASS, path, k, str(v))
+
+
+def _deploy_install_secrets_get(store, run_id, rows):
+    out = []
+    for i, o in enumerate(rows):
+        o = dict(o)
+        for k in ("bmc_password", "token", "password"):
+            path = f"{run_id}/bmc/{i}" if k == "bmc_password" else f"{run_id}/install/{i}"
+            try:
+                o[k] = store.get(_sst.make_ref(_dch.SECRET_CLASS, path, k))
+            except (_sst.SecretMissing, ValueError):
+                pass
+        out.append(o)
+    return out
+
+
+def _deploy_install_phase(run, spec, store):
+    """Phase d'installation : la série préparée dans la requête (garde 132
+    faite) est lancée en action fille, secrets relus dans le magasin du
+    déroulé, arrêt transmis. `spec` : {"kind": "batch" | "single", "rows":
+    lignes préparées sans secret, "cluster", "concurrency", "hostnames":
+    nœuds attendus (série complète)}."""
+    def execute(ctx, state):
+        rows = spec.get("rows") or []
+        if not rows:
+            # reprise : rien à relancer, les nœuds de la série sont là
+            ok, _names = _deploy_install_verify(spec["cluster"], spec["hostnames"])
+            return _dch.PhaseOutcome("done" if ok else "error",
+                                     message="nodes present" if ok else "nodes missing",
+                                     data={"actions": [], "nodes": spec["hostnames"]})
+        prepared = _deploy_install_secrets_get(store, ctx.run_id, rows)
+        if spec["kind"] == "batch":
+            child = _bm_batch_launch(prepared, spec["cluster"], spec.get("concurrency"))
+        else:
+            with app.app_context():
+                child, busy = _bm_track(f"baremetal-install:{prepared[0]['hostname']}",
+                                        prepared[0]["bmc_host"], _baremetal_install_runner, prepared[0])
+            if busy:
+                return _dch.PhaseOutcome("error", message=f"BMC {prepared[0]['bmc_host']} is busy",
+                                         data={"actions": [], "nodes": spec["hostnames"]})
+        prepared = None                         # secrets : plus rien dans ce fil
+        ctx.emit_step("phase-install", "running", f"installation {child}")
+        status, _c = _deploy_wait_child(child, run, forward_cancel=True)
+        data = {"actions": [child], "nodes": spec["hostnames"]}
+        if status == "done":
+            return _dch.PhaseOutcome("done", message=f"installed ({child})", data=data)
+        if status == "cancelled":
+            return _dch.PhaseOutcome("cancelled", message=f"installation cancelled ({child})", data=data)
+        return _dch.PhaseOutcome("error", message=f"installation failed (action {child})", data=data)
+
+    def verify(ctx, state):
+        return _deploy_install_verify(spec["cluster"], spec["hostnames"])[0]
+    return _dch.Phase("install", execute=execute, verify=verify)
+
+
+def _deploy_readiness_phase(cluster, kc_ref, plan, expected=None):
+    seen = {}
+
+    def evaluate():
+        kc = kc_ref()
+        return _drd.evaluate(_deploy_read_cluster(kc, cluster), expected_nodes=expected)
+
+    def execute(ctx, state):
+        ev = evaluate()
+        codes = {u["code"]: u["detail"] for u in ev["unmet"]}
+        for code, detail in codes.items():
+            if seen.get(code) != detail:
+                ctx.emit_step(f"ready-{code}", "running", detail)
+                seen[code] = detail
+        for code in [c for c in seen if c not in codes]:
+            ctx.emit_step(f"ready-{code}", "done", "")
+            del seen[code]
+        if ev["ready"]:
+            return _dch.PhaseOutcome("done", message="cluster ready", data={"unmet": []})
+        return _dch.PhaseOutcome("retry", message=", ".join(codes), data={"unmet": ev["unmet"]})
+
+    def verify(ctx, state):
+        return evaluate()["ready"]
+    timeout = int((plan["phases"].get("readiness") or {}).get("timeout_minutes") or _dpl.TIMEOUT_DEFAULT)
+    return _dch.Phase("readiness", execute=execute, verify=verify, timeout=timeout * 60, poll=DEPLOY_POLL)
+
+
+def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, created):
+    plan = dctx["plan"]
+    templates, rendered = dctx["templates"], dctx["rendered"]
+    dry = bool(run.dry_run)
+
+    def run_item(ctx, state, item):
+        out = _run_item(ctx, state, item)
+        if out.status != "done" and out.data.get("updated"):
+            # revue m2 : la déclaration a déjà pris les nouvelles valeurs ;
+            # qui l'ouvre dans Terraform doit savoir qu'elles ne sont pas appliquées
+            out.message = f"{out.message}; declaration updated, not applied"
+        return out
+
+    def _run_item(ctx, state, item):
+        tname = item.id
+        t = templates[tname]
+        dname = _dpl.declaration_name(plan["name"], tname)
+        data = {"declaration": dname, "template_by": t.get("updated_by") or ""}
+        decl = TF_DECLS.find_by_name(cluster, dname)
+        if decl is None:
+            origin = {"plan": plan["name"], "template": tname,
+                      "template_revision": t["revision"], "plan_revision": plan["revision"],
+                      "template_by": t.get("updated_by") or ""}
+            decl = TF_DECLS.create(uuid.uuid4().hex[:12], cluster, dname,
+                                   description=f"plan {plan['name']}, template {tname}",
+                                   resources=rendered[tname], user=user, origin=origin)
+            if dry:
+                created.append(decl["id"])
+        else:
+            o = decl.get("origin") or {}
+            if o.get("plan") != plan["name"] or o.get("template") != tname:
+                return _dch.ItemOutcome("error", "decl-name-taken", data=data)
+        data["declaration_id"] = decl["id"]
+        if not _tf_decl_hold(decl["id"], run.id):
+            return _dch.ItemOutcome("error", "declaration-busy", data=data)
+        # revue B2-I6 : valeurs différentes de la déclaration reprise. Mise à
+        # jour seulement si le lancement l'a demandé (la déclaration a pu être
+        # retouchée dans Terraform, décision 149) ; sinon gardée et DIT.
+        differs = _deploy_resources_differ(rendered[tname], decl.get("resources"))
+        if differs:
+            data["differs"] = True
+            if dctx.get("update_differing") and not dry:
+                try:
+                    decl = TF_DECLS.update(decl["id"], decl["revision"], user=user, resources=rendered[tname])
+                except _tfs.StoreError as e:
+                    _tf_decl_release(decl["id"], run.id)
+                    return _dch.ItemOutcome("error", f"update refused ({e.code})", data=data)
+                data["updated"] = True
+        actions = []
+        data["actions"] = actions
+        try:
+            kc = kc_ref()
+            pid, h = _tf_decl_launch(cluster, kc, decl["id"], "plan", user=user,
+                                     cluster_user=cluster_user, holder=run.id, role=run.launch_role)
+            actions.append(pid)
+            status, child = _deploy_wait_child(pid)
+            if not _tf_decl_wait_idle(decl["id"]):
+                # revue m3 : le fil du plan n'a pas rendu la déclaration à temps
+                return _dch.ItemOutcome("error", "declaration-busy", data=data)
+            if status != "done":
+                return _dch.ItemOutcome("error", f"plan failed (action {pid})", data=data)
+            # le résumé de CE plan, dans le résultat de son action (revue I4)
+            summary = (child.result or {}).get("plan")
+            counts = (summary or {}).get("counts")
+            if not isinstance(counts, dict):
+                return _dch.ItemOutcome("error", "plan-unreadable", data=data)
+            data["counts"] = {k: counts.get(k, 0) for k in ("create", "update", "replace", "delete")}
+            if counts.get("delete") or counts.get("replace"):
+                # jamais de destruction par la chaîne : la déclaration est à revoir
+                return _dch.ItemOutcome("error", "plan-destroys", data=data)
+            kept = differs and not data.get("updated")
+            if dry:
+                return _dch.ItemOutcome("done", "planned (dry run)" + (", values differ" if differs else ""),
+                                        data=data)
+            if not (counts.get("create") or counts.get("update")):
+                if decl.get("last_applied_status") != "done":
+                    TF_DECLS.mark_applied(decl["id"], "done", user)
+                data["revision_applied"] = decl["revision"]
+                return _dch.ItemOutcome("done", "kept: values differ from the declaration" if kept
+                                        else "nothing to change", data=data)
+            aid, _h = _tf_decl_launch(cluster, kc, decl["id"], "apply", plan_hash=h, user=user,
+                                      cluster_user=cluster_user, holder=run.id, role=run.launch_role)
+            actions.append(aid)
+            status, _child = _deploy_wait_child(aid)
+            if not _tf_decl_wait_idle(decl["id"]):
+                return _dch.ItemOutcome("error", "declaration-busy", data=data)
+            if status != "done":
+                return _dch.ItemOutcome("error", f"apply failed (action {aid})", data=data)
+            data["revision_applied"] = (TF_DECLS.get(decl["id"]) or decl)["revision"]
+            return _dch.ItemOutcome("done", "applied, values differ from the declaration (kept)" if kept
+                                    else "applied", data=data)
+        except TfLaunchError as e:
+            return _dch.ItemOutcome("error", str(e.payload.get("code") or e.payload.get("error") or "refused")[:120],
+                                    data=data)
+        finally:
+            _tf_decl_release(decl["id"], run.id)
+
+    def verify_item(ctx, state, prev):
+        d = TF_DECLS.get(prev.get("declaration_id") or "")
+        return bool(d) and d.get("last_applied_status") == "done" \
+            and d.get("revision") == prev.get("revision_applied")
+    items = [_dch.Item(e["template"], tuple(e.get("depends_on") or ())) for e in _dpl.plan_templates(plan)]
+    return _dch.Phase("terraform", items=items, run_item=run_item, verify_item=verify_item,
+                      item_key="template", item_step="tf-")
+
+
+def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=None, store=None):
+    """Phases du déroulé, branchées sur les mécanismes existants."""
+    plan = dctx["plan"]
+    phases_cfg = plan["phases"]
+    # kubeconfig : celui figé au déclenchement ; pour un cluster créé par la
+    # chaîne, celui de la console, lu une fois le cluster déclaré
+    kc_ref = (lambda: kc) if kc else (lambda: _deploy_console_kc(cluster))
+    phases = []
+    if install:
+        phases.append(_deploy_install_phase(run, install, store))
+    for pid in _dpl.PHASES:
+        cfg = phases_cfg.get(pid)
+        if cfg is None:
+            continue
+        if pid in _dch.COMING or not cfg.get("enabled"):
+            phases.append(_dch.Phase(pid, enabled=False))
+        elif pid == "readiness":
+            phases.append(_deploy_readiness_phase(cluster, kc_ref, plan,
+                                                  expected=(install or {}).get("hostnames")))
+        elif pid == "terraform":
+            phases.append(_deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, created))
+    return phases
+
+
+def _deploy_cleanup_dry(created):
+    """Essai : les déclarations créées pour lui sont supprimées avec leur
+    espace (rien n'a été appliqué, il n'y a pas d'état à détruire)."""
+    import shutil as _shutil
+    for decl_id in created:
+        d = TF_DECLS.get(decl_id)
+        if d is None:
+            continue
+        ws = _tf_decl_ws(d, create=False)
+        if ws.exists() and _tfst.addresses(ws):
+            continue                            # jamais : un essai n'applique rien
+        TF_DECLS.delete(decl_id)
+        _shutil.rmtree(ws, ignore_errors=True)
+
+
+def _deploy_runner(run, cluster, kc, dctx, user, cluster_user, previous, install, store, lock_fd=None):
+    try:
+        _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, install, store)
+    finally:
+        # rendu APRÈS l'écriture du statut final : une ligne `running` dans
+        # actions.db a toujours son verrou tenu (revue B2-I1)
+        _flock_release(lock_fd)
+
+
+def _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, install, store):
+    created = []
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    base = dict(run.result or {})
+    if run.dry_run:
+        # consignées en cours de route : une console arrêtée en plein essai
+        # les retire au redémarrage (_deploy_mark_orphans)
+        base["trial_declarations"] = created
+    ctx = _DeployCtx(run, base)
+    res = None
+    try:
+        phases = _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install, store)
+        res = _dch.run(ctx, phases, previous=previous, secrets=store)
+    except BaseException as e:
+        log.exception("deploy %s", run.id)
+        res = dict(run.result or {}, status="error", error_summary=type(e).__name__)
+        try:
+            store.delete_tree(_dch.SECRET_CLASS, run.id)
+        except Exception:                      # noqa: BLE001
+            pass
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        if created:
+            try:
+                _deploy_cleanup_dry(created)
+                ctx.emit_step("cleanup", "done", f"{len(created)} trial declaration(s) removed")
+            except Exception as e:             # noqa: BLE001
+                ctx.emit_step("cleanup", "error", type(e).__name__)
+            created[:] = [i for i in created if TF_DECLS.get(i)]
+        final = (res or {}).get("status") or "error"
+        run.result = dict(base, **{k: v for k, v in (res or {}).items() if k != "status"}, status=final)
+        if ctx.cancelled() and final != "cancelled":
+            # revue m2 : arrêt arrivé pendant le dernier élément, qui est allé
+            # à son terme ; le statut reste vrai, la demande est consignée
+            run.result["cancel_requested"] = True
+        run.error_summary = (res or {}).get("error_summary") or None
+        run.exit_code = _dch.EXIT_CODES.get(final, 1)
+        run.status = {"done": "done", "cancelled": "cancelled"}.get(final, "error")
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
+        run.close()
+
+
+def _deploy_start(cluster, kc, dctx, dry_run=False, user="", cluster_user=None, previous=None,
+                  resumes=None, install=None, run_id=None, store=None, required_role="operator",
+                  lock_fd=None, role=None):
+    """Crée l'action `deploy:<cluster>` et lance son fil ; rend son
+    identifiant. L'appelant a fait les contrôles (constats bloquants,
+    occupation, garde 132) dans la requête."""
+    run_id = run_id or uuid.uuid4().hex[:12]
+    store = store if store is not None else _sst.store()
+    run = ActionRun(run_id, f"{DEPLOY_PREFIX}{cluster}", cluster, [], dry_run=bool(dry_run))
+    run.cluster_user = cluster_user
+    run.required_role = required_role
+    run.launch_role = role                 # figé : chaque déclaration lancée par la chaîne le reprend
+    plan = dctx["plan"]
+    run.result = {"plan": plan["name"], "plan_revision": plan["revision"], "cluster": cluster,
+                  "resumes": resumes, "dry_run": bool(dry_run), "by": user or "",
+                  "variables": {k: v for k, v in dctx["values"].items() if k not in _dpl.BUILTIN_VARS},
+                  "update_differing": bool(dctx.get("update_differing")), "phases": []}
+    if install:
+        run.result["install"] = install.get("record")
+    with ACTIONS_LOCK:
+        ACTIONS[run_id] = run
+    READ_SHARE.invalidate("_activity")
+    threading.Thread(target=_deploy_runner,
+                     args=(run, cluster, kc, dctx, user, cluster_user, previous, install, store, lock_fd),
+                     daemon=True, name=f"deploy-{run_id}").start()
+    return run_id
+
+
+def _deploy_previous(action_id):
+    """(action reprise {action, cluster, status, dry_run, result}, None) ou
+    (None, (corps, statut))."""
+    if not isinstance(action_id, str) or not _dch.RUN_ID_RE.match(action_id):
+        return None, ({"error": "invalid action_id", "fields": ["action_id"]}, 400)
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(action_id)
+    if run is not None:
+        prev = {"action": run.action, "cluster": run.cluster, "status": run.status,
+                "dry_run": run.dry_run, "result": dict(run.result or {})}
+    else:
+        d, _ev = _actions_db_get(action_id)
+        if not d:
+            return None, ({"error": "action not found", "fields": ["action_id"]}, 404)
+        prev = {k: d.get(k) for k in ("action", "cluster", "status", "dry_run")}
+        prev["result"] = d.get("result") if isinstance(d.get("result"), dict) else {}
+    if not str(prev["action"] or "").startswith(DEPLOY_PREFIX):
+        return None, ({"error": "not a deployment run", "fields": ["action_id"]}, 400)
+    # revue B2-I1/I2 : vivant = son verrou de cluster est tenu par lui (ici ou
+    # dans un autre processus) ; une ligne `running` sans détenteur a été
+    # interrompue (console redémarrée, ligne de commande tuée)
+    if prev["status"] in ("starting", "running", "interrupted"):
+        holder = _deploy_lock_holder(str(prev["action"])[len(DEPLOY_PREFIX):]) or {}
+        if holder.get("run") == action_id and not _deploy_run_ended_here(action_id):
+            prev["status"] = "running"
+        elif prev["status"] != "interrupted":
+            prev["status"] = "interrupted"
+    return prev, None
+
+
+def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, cluster_user,
+                           previous=None, resumes=None, install=None, vip=None, run_id=None,
+                           store=None, required_role="operator", update_differing=False, role=None):
+    """Contrôles puis lancement, sous le verrou de lancement : (corps,
+    statut). Partagé par les routes et la ligne de commande. `role` : rôle
+    de qui lance, figé pour toute la chaîne (None : ligne de commande)."""
+    findings, summary, dctx = _deploy_prepare(cluster, plan_name, variables, kc=kc, vip=vip,
+                                              install=bool(install), update_differing=update_differing,
+                                              role=role)
+    if findings is None:
+        return {"error": "no such plan", "fields": ["plan"]}, 404
+    if previous is not None and dctx is not None \
+            and previous.get("plan_revision") not in (None, dctx["plan"]["revision"]):
+        # revue m1 : le plan a changé depuis le déroulé repris ; modèles
+        # ajoutés appliqués, retirés laissés tels quels
+        findings.append(_deploy_finding(
+            "plan-changed", "plan", f"plan {plan_name} changed since this run (revision "
+            f"{previous.get('plan_revision')} -> {dctx['plan']['revision']})"))
+    blocking = _deploy_blocking(findings)
+    if blocking or dctx is None:
+        return {"error": "the plan cannot start", "code": "blocking-findings",
+                "findings": findings, "summary": summary}, 400
+    with _DEPLOY_LAUNCH_LOCK:
+        busy = _deploy_busy(cluster)
+        if busy:
+            return {"error": "a deployment is already running on this cluster", "code": "deploy-running",
+                    "running": busy.id}, 409
+        with ACTIONS_LOCK:
+            seq = _transfer_busy([cluster], "", None)
+        if seq is not None and seq.action in CLUSTER_SEQUENCES:
+            return {"error": f"{seq.action} of this cluster is running", "code": "cluster-busy",
+                    "running": seq.id}, 409
+        run_id = run_id or uuid.uuid4().hex[:12]
+        lock_fd, holder = _deploy_cluster_lock(cluster, run_id, dctx["plan"]["name"])
+        end = time.time() + 3
+        while lock_fd is None and time.time() < end and _deploy_run_ended_here(holder.get("run")):
+            # le déroulé précédent de ce processus a écrit son statut final et
+            # rend son verrou dans l'instant (reprise cliquée aussitôt)
+            time.sleep(0.05)
+            lock_fd, holder = _deploy_cluster_lock(cluster, run_id, dctx["plan"]["name"])
+        end = time.time() + 0.5
+        while lock_fd is None and not holder.get("run") and time.time() < end:
+            # revue m1 : verrou pris un instant par une sonde (_deploy_lock_holder,
+            # qui l'écrit sans déroulé) ; il est rendu aussitôt
+            time.sleep(0.02)
+            lock_fd, holder = _deploy_cluster_lock(cluster, run_id, dctx["plan"]["name"])
+        if lock_fd is None:
+            # un déroulé de l'autre processus (console ou ligne de commande)
+            return {"error": "a deployment is already running on this cluster", "code": "deploy-running",
+                    "running": holder.get("run") or ""}, 409
+        try:
+            action_id = _deploy_start(cluster, kc, dctx, dry_run=dry_run, user=user,
+                                      cluster_user=cluster_user, previous=previous, resumes=resumes,
+                                      install=install, run_id=run_id, store=store,
+                                      required_role=required_role, lock_fd=lock_fd, role=role)
+        except BaseException:
+            _flock_release(lock_fd)
+            raise
+    return {"action_id": action_id, **({"resumes": resumes} if resumes else {}),
+            "findings": findings}, 202
+
+
+# --- routes : plans et modèles -----------------------------------------------
+
+def _deploy_name_ok(name):
+    return isinstance(name, str) and bool(_dpl.NAME_RE.match(name))
+
+
+def _deploy_doc(data):
+    """Corps d'écriture sans la révision ; une clé inconnue est refusée par
+    le contrôle du plan ou du modèle, jamais ignorée."""
+    return {k: v for k, v in data.items() if k != "revision"}
+
+
+def _deploy_revision(data):
+    rev = data.get("revision")
+    if rev is None:
+        return None, None
+    if isinstance(rev, bool) or not isinstance(rev, int) or rev < 0:
+        return None, _bm_errors_json([("revision", "not a revision number")], "invalid revision")
+    return rev, None
+
+
+@app.route("/api/baremetal/plans", methods=["GET"])
+@requires_auth
+def api_deploy_plans_list():
+    return jsonify({"plans": _dpl.list_plans(_deploy_state()), "builtins": list(_dpl.BUILTIN_VARS),
+                    "phases": list(_dpl.PHASES), "available": list(_dpl.AVAILABLE)})
+
+
+@app.route("/api/baremetal/plans/<name>", methods=["GET"])
+@requires_auth
+def api_deploy_plan_get(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)"}), 400
+    plan = _dpl.load_plan(_deploy_state(), name)
+    if plan is None:
+        path = _dpl.plan_path(_deploy_state(), name)
+        if path is not None and path.is_file():
+            return jsonify({"name": name, "invalid": True}), 200
+        return jsonify({"error": "no such plan"}), 404
+    return jsonify(plan)
+
+
+@app.route("/api/baremetal/plans/<name>", methods=["PUT"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_deploy_plan_put(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)", "fields": ["name"]}), 400
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return _bm_errors_json([("plan", "not a mapping")], "invalid plan")
+    rev, err = _deploy_revision(data)
+    if err:
+        return err
+    try:
+        out = _dpl.save_plan(_deploy_state(), name, _deploy_doc(data), rev)
+    except _dpl.PlanConflict as e:
+        return jsonify({"error": "the plan changed in the meantime", "code": "conflict",
+                        "current_revision": e.current_revision}), 409
+    except _dpl.ProfileError as e:
+        return _bm_errors_json(e.errors, "invalid plan")
+    return jsonify(out), 201 if out["revision"] == 1 else 200
+
+
+@app.route("/api/baremetal/plans/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_deploy_plan_delete(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)"}), 400
+    busy = _deploy_plan_running(name)
+    if busy:
+        return jsonify({"error": "a run of this plan is in progress", "code": "deploy-running",
+                        "running": busy}), 409
+    if not _dpl.delete_plan(_deploy_state(), name):
+        return jsonify({"error": "no such plan"}), 404
+    return "", 204
+
+
+@app.route("/api/baremetal/tf-templates", methods=["GET"])
+@requires_auth
+def api_deploy_templates_list():
+    return jsonify({"templates": _dpl.list_templates(_deploy_state()),
+                    "kinds": list(_tfs.KINDS_OF["harvester"])})
+
+
+@app.route("/api/baremetal/tf-templates/<name>", methods=["GET"])
+@requires_auth
+def api_deploy_template_get(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)"}), 400
+    t = _dpl.load_template(_deploy_state(), name)
+    if t is None:
+        path = _dpl.template_path(_deploy_state(), name)
+        if path is not None and path.is_file():
+            return jsonify({"name": name, "invalid": True}), 200
+        return jsonify({"error": "no such template"}), 404
+    # le cloud-init d'un modèle se masque pour un lecteur comme celui d'une
+    # déclaration (2.3.0) : il peut porter des mots de passe
+    return jsonify(_tf_decl_for_role(t))
+
+
+def _deploy_template_save(name, doc, rev):
+    try:
+        out, removed = _dpl.save_template(_deploy_state(), name, doc, rev, by=current_user() or "")
+    except _dpl.PlanConflict as e:
+        return jsonify({"error": "the template changed in the meantime", "code": "conflict",
+                        "current_revision": e.current_revision}), 409
+    except _dpl.ProfileError as e:
+        return _bm_errors_json(e.errors, "invalid template")
+    return jsonify(dict(out, removed=removed)), 201 if out["revision"] == 1 else 200
+
+
+@app.route("/api/baremetal/tf-templates/<name>", methods=["PUT"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_deploy_template_put(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)", "fields": ["name"]}), 400
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return _bm_errors_json([("template", "not a mapping")], "invalid template")
+    rev, err = _deploy_revision(data)
+    if err:
+        return err
+    return _deploy_template_save(name, _deploy_doc(data), rev)
+
+
+@app.route("/api/baremetal/tf-templates/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_deploy_template_delete(name):
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)"}), 400
+    if not _dpl.delete_template(_deploy_state(), name):
+        return jsonify({"error": "no such template"}), 404
+    return "", 204
+
+
+@app.route("/api/baremetal/tf-templates/from-declaration", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_deploy_template_from_declaration():
+    """Modèle tiré d'une déclaration Harvester : mêmes retraits et refus
+    qu'un modèle écrit (aucun secret n'y entre)."""
+    data = request.get_json(force=True, silent=True) or {}
+    name = data.get("name")
+    if not _deploy_name_ok(name):
+        return jsonify({"error": "invalid name (RFC 1123)", "fields": ["name"]}), 400
+    decl_id = data.get("declaration_id")
+    d = TF_DECLS.get(decl_id) if isinstance(decl_id, str) else None
+    if d is None:
+        return jsonify({"error": "declaration not found", "fields": ["declaration_id"]}), 404
+    if (d.get("target_kind") or "harvester") != "harvester":
+        return jsonify({"error": "only a Harvester declaration makes a template",
+                        "fields": ["declaration_id"]}), 400
+    doc = {"description": (d.get("description") or f"from declaration {d['name']}")[:_dpl.MAX_DESCRIPTION],
+           "resources": d.get("resources") or []}
+    return _deploy_template_save(name, doc, None)
+
+
+# --- routes : appliquer un plan à un cluster ---------------------------------
+
+def _deploy_body():
+    data = request.get_json(force=True, silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def _deploy_route_cluster(cluster):
+    """(kubeconfig résolu dans la requête, None) ou (None, réponse)."""
+    if _deploy_cluster_entry(cluster) is None:
+        return None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
+    return kc, None
+
+
+@app.route("/api/deploy/<cluster>/check", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_deploy_check(cluster):
+    """Constats d'un lancement, lecture seule."""
+    kc, err = _deploy_route_cluster(cluster)
+    if err:
+        return err
+    data = _deploy_body()
+    if not _deploy_name_ok(data.get("plan")):
+        return jsonify({"error": "invalid plan name", "fields": ["plan"]}), 400
+    findings, summary, _ctx = _deploy_prepare(cluster, data["plan"], data.get("variables"), kc=kc,
+                                              update_differing=data.get("update_differing") is True,
+                                              role=current_role())
+    if findings is None:
+        return jsonify({"error": "no such plan", "fields": ["plan"]}), 404
+    return jsonify({"findings": findings, "summary": summary,
+                    "blocking": bool(_deploy_blocking(findings))})
+
+
+@app.route("/api/deploy/<cluster>", methods=["POST"])
+@requires_auth
+@_rate_limit("6/minute")
+def api_deploy_start(cluster):
+    """Applique un plan à un cluster déclaré : action `deploy:<cluster>`."""
+    kc, err = _deploy_route_cluster(cluster)
+    if err:
+        return err
+    data = _deploy_body()
+    if not _deploy_name_ok(data.get("plan")):
+        return jsonify({"error": "invalid plan name", "fields": ["plan"]}), 400
+    body, status = _deploy_launch_checked(
+        cluster, kc, data["plan"], data.get("variables"), bool(data.get("dry_run")),
+        current_user() or "", (current_cluster_identity() or {}).get("user"),
+        update_differing=data.get("update_differing") is True, role=current_role())
+    return jsonify(body), status
+
+
+@app.route("/api/deploy/<cluster>/stop", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_deploy_stop(cluster):
+    """Arrête le déroulé en cours (comme le bouton du dock) : l'installation
+    en cours est arrêtée, une exécution Terraform va à son terme."""
+    data = _deploy_body()
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(str(data.get("action_id") or ""))
+    if run is None or run.action != f"{DEPLOY_PREFIX}{cluster}":
+        return jsonify({"error": "no such deployment run on this cluster", "fields": ["action_id"]}), 404
+    need = run.required_role or "admin"
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK.get(need, 2):
+        return jsonify({"error": "forbidden", "role": current_role(), "required": need}), 403
+    if run.status not in ("starting", "running"):
+        return jsonify({"error": "this run has ended", "status": run.status}), 409
+    _action_request_cancel(run)
+    return jsonify({"action_id": run.id, "cancel_requested": True}), 202
+
+
+def _deploy_resume_install(prev_result, cluster, secrets_, confirms):
+    """Phase d'installation d'une reprise (décision 157) : rien si les nœuds
+    de la série sont là, QUEL QUE SOIT l'état consigné de la phase (revue
+    B2-I3 : console redémarrée pendant l'installation, arrêt arrivé trop
+    tard) ; sinon, seules les lignes dont le nom d'hôte n'est pas un nœud,
+    jonctions si le cluster existe, garde 132 et secrets redemandés.
+    (spécification, None) ou (None, (corps, statut))."""
+    rec = (prev_result or {}).get("install") or {}
+    hostnames = [n for n in (rec.get("hostnames") or []) if isinstance(n, str)]
+    ok, names = _deploy_install_verify(cluster, hostnames)
+    if ok and hostnames:
+        return {"kind": rec.get("kind") or "batch", "rows": [], "cluster": cluster,
+                "hostnames": hostnames, "record": rec}, None
+    if rec.get("kind") != "batch":
+        return None, ({"error": "a single-machine installation is not resumed: start it again with the plan",
+                       "code": "install-not-resumable"}, 400)
+    if not (secrets_.get("token") and (secrets_.get("bmc_password") or secrets_.get("bmc_passwords"))):
+        return None, ({"error": "the installation phase is not done: its secrets are asked again",
+                       "code": "secrets-required", "fields": ["token", "bmc_password"]}, 400)
+    prof = _bmp.load_profile(_bm_profiles_state(), rec.get("profile") or "")
+    if prof is None:
+        return None, ({"error": "the profile of this installation no longer exists",
+                       "code": "profile-missing"}, 400)
+    batch = dict(rec.get("batch") or {})
+    per_host = secrets_.get("bmc_passwords") or {}
+    rows, keep = [], []
+    for i, r in enumerate(batch.get("rows") or []):
+        if i < len(hostnames) and hostnames[i] in names:
+            continue
+        r = dict(r)
+        if per_host.get(r.get("bmc_host")):
+            r["bmc_password"] = str(per_host[r["bmc_host"]])
+        rows.append(r)
+        keep.append(hostnames[i] if i < len(hostnames) else "")
+    join_all = bool(names) and _deploy_cluster_entry(cluster) is not None
+    batch["rows"] = rows
+    plan, errors, machines = _bm_batch_prepare(prof, batch, {k: secrets_.get(k) or "" for k in
+                                                            ("token", "password", "bmc_password")},
+                                               confirms, join_all=join_all)
+    if errors:
+        return None, ({"error": "invalid batch", "errors": [[w, r] for w, r in errors],
+                       "fields": [w for w, _ in errors]}, 400)
+    if machines:
+        refused = [m["bmc_host"] for m in machines if not m.get("confirmed")]
+        return None, ({"error": "a system seems present on some machines: type each name to resume",
+                       "fields": ["system_confirm"], "refused": refused, "machines": machines}, 409)
+    return {"kind": "batch", "rows": plan, "cluster": cluster, "hostnames": hostnames,
+            "concurrency": rec.get("concurrency"), "record": rec}, None
+
+
+@app.route("/api/deploy/<cluster>/resume", methods=["POST"])
+@requires_auth
+@_rate_limit("6/minute")
+def api_deploy_resume(cluster):
+    """Reprend un déroulé : nouvelle action `deploy:<cluster>`, résultat
+    `resumes = <id>` ; les phases faites sont revérifiées."""
+    data = _deploy_body()
+    prev, err = _deploy_previous(data.get("action_id"))
+    if err:
+        return jsonify(err[0]), err[1]
+    if prev["action"] != f"{DEPLOY_PREFIX}{cluster}":
+        return jsonify({"error": "this run belongs to another cluster", "fields": ["action_id"]}), 400
+    if prev["status"] in ("starting", "running"):
+        return jsonify({"error": "this run is still in progress", "code": "deploy-running"}), 409
+    if prev["dry_run"]:
+        return jsonify({"error": "a dry run is not resumed: start it again", "code": "dry-run"}), 400
+    result = prev["result"] or {}
+    install, store, run_id = None, None, None
+    kc = None
+    if result.get("install"):
+        if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+            return jsonify({"error": "forbidden", "role": current_role(), "required": "admin",
+                            "hint": "a run with an installation is resumed by an administrator"}), 403
+        secrets_ = data.get("secrets") if isinstance(data.get("secrets"), dict) else {}
+        confirms = data.get("system_confirm") if isinstance(data.get("system_confirm"), dict) else {}
+        install, ierr = _deploy_resume_install(result, cluster, secrets_, confirms)
+        if ierr:
+            return jsonify(ierr[0]), ierr[1]
+        vip = ((result.get("install") or {}).get("batch") or {}).get("vip") or ""
+        store = _sst.store()
+        run_id = uuid.uuid4().hex[:12]
+        _deploy_install_secrets_put(store, run_id, install["rows"])
+        required = "admin"
+        cluster_user = None
+    else:
+        kc, rerr = _deploy_route_cluster(cluster)
+        if rerr:
+            return rerr
+        vip = None
+        required = "operator"
+        cluster_user = (current_cluster_identity() or {}).get("user")
+    body, status = _deploy_launch_checked(
+        cluster, kc, result.get("plan") or "", result.get("variables") or {}, False,
+        current_user() or "", cluster_user, previous=result, resumes=data["action_id"],
+        install=install, vip=vip, run_id=run_id, store=store, required_role=required,
+        update_differing=result.get("update_differing") is True, role=current_role())
+    if status != 202 and store is not None:
+        store.delete_tree(_dch.SECRET_CLASS, run_id)
+    return jsonify(body), status
+
+
+def _deploy_install_record(prof_name, batch, hostnames, concurrency, kind="batch"):
+    """Ce que la reprise relit d'une installation enchaînée : noms et
+    valeurs, jamais un mot de passe ni un nom tapé."""
+    rows = [{k: r.get(k) for k in ("bmc_host", "bmc_user", "values")} for r in batch.get("rows") or []
+            if isinstance(r, dict)]
+    return {"kind": kind, "profile": prof_name, "concurrency": concurrency, "hostnames": hostnames,
+            "batch": {"cluster_name": batch.get("cluster_name"), "vip": batch.get("vip"),
+                      "iso": batch.get("iso"), "rows": rows}}
+
+
+def _deploy_install_precheck(plan_name, plan_variables, cluster, vip):
+    """Constats bloquants d'un plan enchaîné à une installation, AVANT toute
+    lecture de BMC (revue m5 : c'est bon marché, une lecture de BMC ne l'est
+    pas) : réponse 400, ou None."""
+    if not isinstance(cluster, str) or not cluster:
+        return None                             # refusé ensuite par les contrôles de la série
+    findings, summary, _ctx = _deploy_prepare(cluster, plan_name, plan_variables, vip=vip or "", install=True,
+                                              role=current_role())
+    if findings and _deploy_blocking(findings):
+        return jsonify({"error": "the plan cannot start", "code": "blocking-findings",
+                        "findings": findings, "summary": summary}), 400
+    return None
+
+
+def _deploy_with_install(plan_name, plan_variables, cluster, vip, rows, kind, record, concurrency=None,
+                         user=""):
+    """Chaîne avec installation : lignes déjà préparées dans la requête
+    (garde 132 faite) ; secrets retirés des lignes et gardés par le magasin
+    du déroulé. (corps, statut)."""
+    store = _sst.store()
+    run_id = uuid.uuid4().hex[:12]
+    hostnames = [o.get("hostname") for o in rows]
+    _deploy_install_secrets_put(store, run_id, rows)
+    record = dict(record, hostnames=hostnames)
+    install = {"kind": kind, "rows": rows, "cluster": cluster, "hostnames": hostnames,
+               "concurrency": concurrency, "record": record}
+    body, status = _deploy_launch_checked(cluster, None, plan_name, plan_variables, False,
+                                          user, None, install=install, vip=vip,
+                                          run_id=run_id, store=store, required_role="admin",
+                                          role=current_role())
+    if status != 202:
+        store.delete_tree(_dch.SECRET_CLASS, run_id)
+        rows.clear()
+    return body, status
+
+
+# revue B2-I1 : au chargement (console comme ligne de commande, sans risque
+# pour un déroulé vivant : son verrou est tenu)
+_deploy_mark_orphans()
 
 
 if __name__ == "__main__":

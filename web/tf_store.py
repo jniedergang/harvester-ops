@@ -17,18 +17,25 @@ valent `harvester`). Le champ `cluster` garde le nom de la cible. Les
 ressources d'une famille ne vont pas dans une déclaration de l'autre ; le
 code libre (`raw`) ne va que sur Harvester.
 
+2.4.0 : une déclaration produite par un plan de déploiement porte son
+ORIGINE (`origin`, JSON {plan, template, template_revision, plan_revision,
+template_by facultatif}, NULL pour les autres) : écrite à la création, jamais modifiée ensuite.
+
 Ce module ne connaît ni Flask ni Terraform : il est essayé seul.
 """
 
 import json
+import logging
 import re
 import sqlite3
 import threading
 import time
 
 ID_RE = re.compile(r"^[0-9a-f]{12}$")
+# nom de plan ou de modèle (RFC 1123, celui de bin/lib/bm_profiles.NAME_RE)
+NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 TARGET_KINDS = ("harvester", "kvm")
-HARVESTER_KINDS = ("vm", "image", "ssh_key")
+HARVESTER_KINDS = ("vm", "image", "ssh_key", "network", "storageclass", "ippool")
 KVM_KINDS = ("kvm_vm", "kvm_volume", "kvm_network", "kvm_rke2")
 KINDS = HARVESTER_KINDS + KVM_KINDS + ("raw",)
 # Pas de code libre sur un hôte KVM : l'espace d'une déclaration KVM porte,
@@ -104,6 +111,37 @@ def clean_resources(resources, target_kind="harvester"):
     return out
 
 
+ORIGIN_KEYS = ("plan", "template", "template_revision", "plan_revision")
+# 2.4.0 (décision 161) : qui a écrit la révision du modèle (un admin : les
+# modèles s'écrivent sous /api/baremetal/), facultatif pour les lignes d'avant
+ORIGIN_OPTIONAL = ("template_by",)
+
+
+def clean_origin(origin):
+    """Origine d'une déclaration produite par un plan, ou None."""
+    if origin is None:
+        return None
+    if not isinstance(origin, dict) or not set(ORIGIN_KEYS) <= set(origin) \
+            or set(origin) - set(ORIGIN_KEYS) - set(ORIGIN_OPTIONAL):
+        raise StoreError("invalid-origin", "origin needs plan, template, template_revision and plan_revision")
+    out = {}
+    by = origin.get("template_by")
+    if by is not None:
+        if not isinstance(by, str) or len(by) > 128 or any(ord(c) < 32 or ord(c) == 127 for c in by):
+            raise StoreError("invalid-origin", "origin template_by is not a user name")
+        if by:
+            out["template_by"] = by
+    for k in ORIGIN_KEYS:
+        v = origin[k]
+        if k.endswith("_revision"):
+            if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+                raise StoreError("invalid-origin", f"origin {k} is not a revision number")
+        elif not isinstance(v, str) or not NAME_RE.match(v):
+            raise StoreError("invalid-origin", f"origin {k} is not a name")
+        out[k] = v
+    return out
+
+
 class DeclStore:
     def __init__(self, path):
         self.path = str(path)
@@ -130,6 +168,19 @@ class DeclStore:
             cols = {r["name"] for r in c.execute("PRAGMA table_info(tf_declarations)")}
             if "target_kind" not in cols:
                 c.execute("ALTER TABLE tf_declarations ADD COLUMN target_kind TEXT NOT NULL DEFAULT 'harvester'")
+            # 2.4.0 : migration additive, les lignes d'avant n'ont pas d'origine
+            if "origin" not in cols:
+                c.execute("ALTER TABLE tf_declarations ADD COLUMN origin TEXT")
+            # 2.4.0 (revue B2-I2) : unicité du nom garantie par la base, la
+            # console et la ligne de commande écrivant le même fichier. Une base
+            # qui porte déjà un doublon garde son état (journalisé) : la
+            # vérification applicative reste en place.
+            try:
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS tf_decl_name_unique "
+                          "ON tf_declarations(cluster, target_kind, lower(name))")
+            except sqlite3.IntegrityError as e:
+                logging.getLogger("harvester-ops.tf").warning(
+                    "tf_declarations: duplicate names, unique index not created (%s)", e)
 
     def _conn(self):
         c = sqlite3.connect(self.path, timeout=10)
@@ -143,6 +194,10 @@ class DeclStore:
             return None
         d = dict(r)
         d["resources"] = json.loads(d["resources"] or "[]")
+        try:
+            d["origin"] = json.loads(d["origin"]) if d.get("origin") else None
+        except ValueError:
+            d["origin"] = None
         return d
 
     # -- lecture -------------------------------------------------------------
@@ -163,6 +218,14 @@ class DeclStore:
             rows = c.execute(sql + " ORDER BY target_kind, cluster, lower(name)", args).fetchall()
         return [self._row(r) for r in rows]
 
+    def find_by_name(self, cluster, name, target_kind="harvester"):
+        """La déclaration de ce nom sur cette cible (casse ignorée, comme la
+        règle d'unicité), ou None."""
+        with self._conn() as c:
+            return self._row(c.execute(
+                "SELECT * FROM tf_declarations WHERE cluster = ? AND target_kind = ? "
+                "AND lower(name) = lower(?)", (cluster, target_kind, str(name or ""))).fetchone())
+
     def get(self, decl_id):
         if not ID_RE.match(str(decl_id or "")):
             return None
@@ -177,7 +240,7 @@ class DeclStore:
         return row is not None and row["id"] != but
 
     def create(self, decl_id, cluster, name, description="", resources=None, user="",
-               target_kind="harvester"):
+               target_kind="harvester", origin=None):
         if not ID_RE.match(str(decl_id or "")):
             raise StoreError("invalid-id", "invalid declaration id")
         if not cluster:
@@ -186,22 +249,29 @@ class DeclStore:
         name = clean_name(name)
         description = str(description or "")[:MAX_DESCRIPTION]
         resources = clean_resources(resources, target_kind)
+        origin = clean_origin(origin)
         now = _now()
         with self._lock, self._conn() as c:
             if c.execute("SELECT 1 FROM tf_declarations WHERE id = ?", (decl_id,)).fetchone():
                 raise StoreError("id-taken", "a declaration with this id already exists", id=decl_id)
             if self._name_taken(c, cluster, name, target_kind=target_kind):
                 raise StoreError("name-taken", f"a declaration named {name!r} already exists", name=name)
-            c.execute("INSERT INTO tf_declarations (id, cluster, name, description, resources, revision, "
-                      "created_at, created_by, updated_at, updated_by, target_kind) "
-                      "VALUES (?,?,?,?,?,1,?,?,?,?,?)",
-                      (decl_id, cluster, name, description, json.dumps(resources), now, user, now, user,
-                       target_kind))
+            try:
+                c.execute("INSERT INTO tf_declarations (id, cluster, name, description, resources, revision, "
+                          "created_at, created_by, updated_at, updated_by, target_kind, origin) "
+                          "VALUES (?,?,?,?,?,1,?,?,?,?,?,?)",
+                          (decl_id, cluster, name, description, json.dumps(resources), now, user, now, user,
+                           target_kind, json.dumps(origin) if origin else None))
+            except sqlite3.IntegrityError:
+                # un autre processus a créé ce nom entre la lecture et l'écriture
+                raise StoreError("name-taken", f"a declaration named {name!r} already exists",
+                                 name=name) from None
         return self.get(decl_id)
 
     def update(self, decl_id, revision, user="", name=None, description=None, resources=None):
         """Mise à jour à révision attendue : `Conflict` si quelqu'un est
-        passé entre-temps (la version courante est dans `facts`)."""
+        passé entre-temps (la version courante est dans `facts`). L'origine
+        n'est jamais touchée ; sans aucun champ à changer, la révision reste."""
         with self._lock, self._conn() as c:
             cur = self._row(c.execute("SELECT * FROM tf_declarations WHERE id = ?", (decl_id,)).fetchone())
             if cur is None:
@@ -218,9 +288,15 @@ class DeclStore:
                 fields["description"] = str(description)[:MAX_DESCRIPTION]
             if resources is not None:
                 fields["resources"] = json.dumps(clean_resources(resources, cur["target_kind"]))
+            if not fields:
+                return cur
             fields.update(revision=cur["revision"] + 1, updated_at=_now(), updated_by=user)
             sets = ", ".join(f"{k} = ?" for k in fields)
-            c.execute(f"UPDATE tf_declarations SET {sets} WHERE id = ?", (*fields.values(), decl_id))
+            try:
+                c.execute(f"UPDATE tf_declarations SET {sets} WHERE id = ?", (*fields.values(), decl_id))
+            except sqlite3.IntegrityError:
+                raise StoreError("name-taken", f"a declaration named {fields.get('name')!r} already exists",
+                                 name=fields.get("name")) from None
         return self.get(decl_id)
 
     def mark_applied(self, decl_id, status, user=""):

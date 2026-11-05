@@ -14,7 +14,7 @@ n’installent pas de chart CSI et ne configurent pas les identifiants des baies
 
 ---
 
-## L'écran : quatre onglets (2.1.0)
+## L'écran : cinq onglets (2.1.0, Plans en 2.4.0)
 
 Automatisation > Bare-metal s'ouvre sur **Machines** ; les autres onglets
 sont à côté, chacun avec son adresse :
@@ -23,6 +23,7 @@ sont à côté, chacun avec son adresse :
 |---|---|---|
 | **Machines** (par défaut) | `#automation/pxe/machines` (et `#automation/pxe`) | Les machines de la dernière découverte, une ligne chacune : matériel, état d'alimentation, disques, cartes réseau, et les gestes **Installer** (ou **Joindre à** *cluster* pendant une jonction), allumer, arrêt propre, arrêt forcé, redémarrer. **Découvrir...** ouvre la fenêtre de découverte ; **Relire** relit les mêmes BMC. Le bandeau de jonction et le bandeau « aucun ISO » sont au-dessus. |
 | **Profils** | `#automation/pxe/profiles` | Les profils d'installation multi-nœuds et le lancement d'une série. |
+| **Plans** (2.4.0) | `#automation/pxe/plans` | Plans de déploiement et modèles de déclaration : le contenu Terraform appliqué après une installation ou à un cluster existant (voir plus bas). |
 | **Images** | `#automation/pxe/images` | Le magasin d'ISO. |
 | **Historique** | `#automation/pxe/history` | Les actions bare-metal de l'Activité, en cours et passées, chacune avec un lien vers son journal. |
 
@@ -519,6 +520,178 @@ tient sur une ligne, 512 caractères au plus, sans caractère de contrôle.
   sur `HD.Emb.5.2`) et le nom `USE6236S00`, node4 avec `elemental-shim` et
   `sles-secureboot` et le nom `USE6236RY3` ; un nom faux a été signalé et la
   série n'est pas partie. La série n'a jamais été envoyée.
+
+### Plans de déploiement : le contenu Terraform après l'installation (2.4.0)
+
+Un **plan de déploiement** est une liste de phases nommée et réutilisable,
+que la console déroule en une seule action suivie, `deploy:<cluster>`. On
+l'applique à un cluster Harvester déjà déclaré, ou on l'enchaîne après une
+installation bare-metal. En 2.4.0, les phases sont :
+
+| Phase | Ce qu'elle fait |
+|---|---|
+| **install** | Seulement quand le plan part de Bare-metal : l'installation d'une machine ou la série, avec la même lecture des BMC (garde 132) que sans plan. |
+| **readiness** (disponibilité) | Attend que le cluster soit utilisable : nœuds Ready, objets `ManagedChart` prêts, nœuds et volumes Longhorn sains, une classe de stockage par défaut. Relue toutes les 15 s, 20 minutes par défaut (`phases.readiness.timeout_minutes`, de 1 à 180). |
+| **terraform** | Fait de chaque **modèle de déclaration** du plan une déclaration Terraform ordinaire, `<plan>-<modèle>`, puis la planifie et l'applique. |
+| capi, clusters, registry, artefacts | Présentes dans le modèle, grisées avec « à venir (2.5+) ». Un fichier de plan qui en active une est refusé. |
+
+**Où.** L'onglet **Plans** (`#automation/pxe/plans`, entre Profils et
+Images) liste les plans à gauche et en ouvre un à droite : une carte par
+phase avec son interrupteur, les modèles de la phase Terraform choisis dans
+une liste (jamais retapés), leur ordre (boutons monter et descendre) et une
+dépendance facultative par modèle. La partie **Modèles de déclaration** de
+l'onglet édite les modèles avec les formulaires Terraform (VM, image, clé
+SSH, réseau, classe de stockage, pool d'adresses, code libre). Les fichiers
+sont gardés dans `<état>/plans.d/<nom>.yaml` et
+`<état>/tf-templates.d/<nom>.yaml`, en 0600, écrits par remplacement
+atomique, avec une révision : un enregistrement sur une révision périmée
+reçoit 409 et garde la saisie. **Enregistrer comme modèle**, dans Terraform >
+Déclarations, fait d'une déclaration Harvester un modèle.
+
+**Variables.** Un modèle écrit `{{nom}}` là où une valeur change d'un
+cluster à l'autre ; le plan liste les variables qu'il demande. `cluster` et
+`vip` sont intégrées (la `vip` d'un cluster existant est l'adresse de son
+kubeconfig, si c'en est une). Une valeur tient sur une ligne de 512
+caractères au plus, sans caractère de contrôle. Une chaîne qui n'est qu'une
+variable prend le type du champ du formulaire (un VLAN devient un nombre).
+Dans le code libre, une valeur est placée selon sa place : dans une chaîne
+ou un heredoc, elle est échappée et arrive comme du texte ; hors chaîne,
+seuls un nombre et `true`/`false` passent ; puis le résultat est relu : une
+valeur qui changerait la structure du modèle (marqueur de heredoc, `$` ou
+`%` suivi du `{` de la valeur suivante) est refusée avec son nom.
+
+**Aucun secret dans un modèle.** Tout ce qui passe à Terraform finit dans
+son état. L'enregistrement d'un modèle retire les valeurs des clés au nom de
+secret (et dit quels chemins il a retirés), garde les clés publiques et les
+*noms* de Secrets Kubernetes (`user_data_secret_name`), retire un cloud-init
+qui parle de mot de passe, et refuse le code libre qui affecte un secret,
+des identifiants dans une adresse ou une fonction qui cache une valeur
+(`base64decode`, `sensitive`). Le même contrôle est rejoué sur le modèle
+rendu : une valeur qui ressemble à un secret est refusée elle aussi. Ce
+contrôle est lexical (noms de clés de secret, lignes de mot de passe dans
+`user_data`, identifiants dans une adresse) : un jeton donné comme valeur
+d'une variable au nom neutre, par exemple `echo {{x}}` dans `user_data`,
+n'est pas détecté. Les valeurs d'un plan ne sont pas faites pour les
+secrets, car elles sont gardées dans le résultat du déroulé. Garder le
+secret dans un Secret Kubernetes et le désigner par les champs
+`*_secret_name`.
+
+**Fenêtre Déployer.** **Appliquer un plan** sur la page d'un hôte
+Harvester, ou **Déployer** dans l'onglet Plans, ouvre une fenêtre à trois
+onglets : **Paramètres** (cluster, plan, variables), **Vérifications**
+(constats regroupés par phase, bloquants d'abord) et **Résumé**
+(déclarations créées ou reprises, durée estimée). **Lancer** reste grisé
+tant qu'un constat bloque, avec la raison dans sa bulle. **Essai à blanc**
+déroule la même chaîne mais ne fait que planifier : il crée les
+déclarations, les planifie puis les supprime ; rien n'est écrit sur le
+cluster.
+
+La fenêtre d'installation d'une machine et la fenêtre de série d'un profil
+ont un champ **Plan** facultatif, prérempli par le `plan` du profil, avec
+les variables de ce plan ; avec un plan, l'action ouverte est `deploy:` et
+l'installation en est la première phase.
+
+Constats : `plan-invalid`, `phase-not-available`, `template-missing`,
+`var-missing`, `var-invalid`, `decl-name-taken`, `tf-missing`,
+`cluster-unreachable`, `admin-kind`, `forbidden-construct` (bloquants) ;
+`template-newer`, `decl-differs`, `plan-changed` (avertissements) ;
+`decl-exists`, `readiness-later` (informations).
+
+**Suivre un déroulé.** L'action montre une étape par phase
+(`phase-<id>`), des sous-étapes de disponibilité (`ready-<code>`) et une
+étape par modèle (`tf-<modèle>`), chacune avec l'identifiant de son action
+fille (l'installation, le plan et l'apply Terraform) en lien. États : fait,
+erreur, partiel (un modèle a échoué, les indépendants ont continué), arrêté.
+Un modèle est indépendant sauf s'il vient après un modèle en échec qu'il
+désigne dans sa dépendance.
+
+**Jamais de destruction.** Si le plan Terraform d'un modèle compte une
+suppression ou un remplacement, il n'est pas appliqué : le modèle finit en
+erreur avec `plan-destroys` et un lien vers la déclaration à revoir. Une
+déclaration qui existe déjà, faite par le même plan et le même modèle, est
+seulement planifiée et appliquée. Si son contenu diffère de ce que donnent
+les valeurs, elle est gardée et le déroulé le dit (`kept: values differ from
+the declaration`), sauf si **Mettre à jour les déclarations dont les valeurs
+diffèrent** a été coché au lancement.
+
+**Arrêter et reprendre.** **Arrêter** (ou le dock) arrête le déroulé : une
+installation en cours est arrêtée, une exécution Terraform va à son terme,
+les modèles non commencés sont sautés (`cancelled`). Un arrêt pendant le
+dernier modèle n'a plus rien à sauter : le déroulé finit `done`, avec
+`cancel_requested` dans son résultat. **Reprendre** (onglet Historique, sur
+un déroulé en erreur, partiel, arrêté ou interrompu) lance une nouvelle
+action `deploy:` qui relit le résultat de la première, revérifie à peu de
+frais chaque phase terminée (cluster déclaré et nœuds présents,
+disponibilité rejouée, déclaration présente à la révision appliquée) et
+repart de la première phase non terminée. Un déroulé dont la console a
+redémarré est marqué interrompu et se reprend. Une série dont tous les
+nœuds ont rejoint n'est pas réinstallée ; sinon seules les lignes dont le
+nom d'hôte n'est pas un nœud sont réinstallées, avec la lecture des BMC et
+les secrets redemandés. Une installation d'une seule machine ne se reprend
+pas : la relancer.
+
+**Secrets.** En 2.4.0, seule la phase d'installation emploie des secrets
+(jeton du cluster, mot de passe de l'OS, mots de passe des BMC). Ils sont
+saisis au lancement, gardés en mémoire le temps du déroulé, effacés à la fin
+quelle qu'en soit l'issue, et redemandés à la reprise. Ils n'apparaissent
+jamais dans le libellé de l'action, ses étapes, son résultat, ni dans les
+fichiers de plans et de modèles. Un plan appliqué à un cluster existant ne
+demande aucun secret.
+
+**Rôles.**
+
+| Geste | Rôle |
+|---|---|
+| Lire les plans et les modèles (un lecteur voit `(hidden)` à la place du cloud-init) | lecteur |
+| Écrire ou supprimer un plan ou un modèle | admin |
+| Appliquer un plan à un cluster existant, l'arrêter, le reprendre | opérateur |
+| Une chaîne avec installation, ou sa reprise | admin |
+| Un plan dont les modèles créent des réseaux de VM, des classes de stockage, des pools d'adresses (ou, en code libre, des réseaux de cluster, des configurations VLAN, des équilibreurs, des réglages, des périphériques PCI ou SR-IOV) | admin |
+
+Un opérateur peut lancer un plan dont les modèles portent du code libre : ce
+code a été écrit par un admin, l'opérateur ne donne que des valeurs, qui
+sont neutralisées. La déclaration produite consigne qui a écrit la révision
+du modèle (`origin.template_by`). Hors de la chaîne, cette déclaration reste
+du code libre et seul un admin la planifie, l'applique ou la détruit depuis
+Terraform > Déclarations. Le serveur décide ; la fenêtre montre le constat
+`admin-kind` et garde Lancer grisé.
+
+**Un cluster à la fois.** Une seule action `deploy:` par cluster (409
+`deploy-running`) ; un arrêt ou un démarrage du cluster la bloque, et un
+plan en cours bloque un arrêt. Le verrou est un fichier
+(`<état>/deploy.d/<cluster>.lock`) partagé par la console et la ligne de
+commande.
+
+**Vu en réel (2.4.0).** Sur harvlab : modèles de réseau, de classe de
+stockage et de pool d'adresses, un échec laissé `partial`, une correction
+dans Terraform > Déclarations, une reprise qui a sauté les modèles faits, un
+arrêt et sa reprise, un essai à blanc sans rien écrire, les rôles opérateur
+et admin. Sur un banc Redfish (sushy-tools sur une machine KVM) : un
+Harvester d'un nœud installé par un plan, puis la disponibilité et un
+modèle, 36 minutes en tout (installation 35 min, disponibilité 76 s,
+Terraform 4 s). Pas encore vu : une série avec plan, la garde des BMC dans
+un plan, la reprise d'une phase d'installation.
+
+**Ligne de commande.** `bin/harvester-plans.py` charge la console et déroule
+la même chaîne : `plan list|show|save|delete`,
+`template list|show|save|delete`, `check --cluster C [--vars FICHIER] PLAN`,
+`apply --cluster C [--vars FICHIER] [--dry-run] [--update-declarations]
+PLAN`, `resume [--secrets-file F | --secrets-stdin] [--confirm-system
+HÔTE=NOM] ACTION`, et `install --profile P --nodes FICHIER --cluster-name N
+--vip IP PLAN` pour une série avec plan. `--json` écrit un document à chaque
+sortie. Codes de sortie : 0 fait, 1 erreur ou partiel, 3 arrêté. La ligne de
+commande a les droits du répertoire d'état (elle ne contrôle pas les rôles).
+
+**Revenir à une 2.3.x.** La mise à jour vers la 2.4.0 est additive et
+laisse les déclarations existantes telles quelles. Un retour à une 2.3.x
+(onglet Mise à jour) se fait sans plantage, avec trois limites : la 2.3.x
+liste les déclarations de réseau de VM, de classe de stockage et de pool
+d'adresses mais ne sait ni les planifier, ni les appliquer, ni les détruire
+(leurs objets restent sur le cluster, sans gestion) ; un profil enregistré
+en 2.3.x perd son champ `plan` ; les plans, les modèles et les déroulés
+sont ignorés jusqu'au retour de la 2.4.0. Avant de revenir en arrière,
+détruire les déclarations de ces trois genres, ou les accepter sans
+gestion.
 
 ### Historique des actions bare-metal (2.1.0)
 

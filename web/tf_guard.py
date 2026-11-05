@@ -146,6 +146,9 @@ class _Lexer:
     def __init__(self, text):
         self.s, self.i, self.line = text, 0, 1
         self.streams = []
+        # 2.4.0 : (début, fin, genre) des commentaires, chaînes, corps de
+        # heredoc et séquences de gabarit, pour char_kinds
+        self.marks = []
 
     def err(self, msg):
         raise _Syntax(self.line, msg)
@@ -173,7 +176,9 @@ class _Lexer:
                 self.line += 1
             elif ch == "#" or s.startswith("//", self.i):
                 j = s.find("\n", self.i)
-                self.i = len(s) if j < 0 else j
+                j = len(s) if j < 0 else j
+                self.marks.append((self.i, j, COMMENT))
+                self.i = j
             elif s.startswith("/*", self.i):
                 j = s.find("*/", self.i + 2)
                 if j < 0:
@@ -181,6 +186,7 @@ class _Lexer:
                 n = s.count("\n", self.i, j)
                 start = self.i
                 self.i = j + 2
+                self.marks.append((start, self.i, COMMENT))
                 if n:
                     # un commentaire sur plusieurs lignes coupe l'expression
                     # (lecture prudente : il ne peut rien cacher dedans)
@@ -218,8 +224,10 @@ class _Lexer:
 
     def _template_seq(self):
         """`${` ou `%{` à self.i : relit l'expression jusqu'à son accolade."""
+        start = self.i
         self.i += 2
         inner = self.tokens(close=True)
+        self.marks.append((start, self.i, CODE))
         inner.append(_Tok("eof", None, self.line, self.i, self.i))
         self.streams.append(inner)
 
@@ -233,6 +241,7 @@ class _Lexer:
             ch = s[self.i]
             if ch == '"':
                 self.i += 1
+                self.marks.append((start, self.i, STRING))
                 return _Tok("str", None if tmpl else "".join(buf), line, start, self.i, tmpl=tmpl)
             if ch == "\n":
                 self.err("newline in a quoted string")
@@ -287,6 +296,7 @@ class _Lexer:
         else:
             self.err("a heredoc marker must end its line")
         self.i = k
+        body = k
         self.line += 1
         tmpl = False
         at_line_start = True
@@ -300,6 +310,7 @@ class _Lexer:
                 # marqueur) : la lecture ne peut pas croire « dans la chaîne »
                 # ce qu'OpenTofu lirait comme du code
                 if s[self.i:e].strip() == delim:
+                    self.marks.append((body, self.i, HEREDOC))
                     self.i = e
                     return _Tok("str", None, line, start, self.i, tmpl=True)
                 at_line_start = False
@@ -396,6 +407,31 @@ def _body(toks, pos, depth, into):
         nxt = toks[pos]
         if not (nxt.kind in ("nl", "eof") or nxt.is_p("}")):
             raise _Syntax(nxt.line, "a newline is expected after an attribute or a block")
+
+
+CODE, STRING, HEREDOC, COMMENT = "c", "s", "h", "m"
+
+
+def char_kinds(text):
+    """(genre de chaque caractère, chaînes [(début, fin, interpolée)]) selon
+    la lecture de ce module, ou None si le texte est illisible. Genres :
+    CODE (y compris l'intérieur d'un `${...}`), STRING (guillemets compris),
+    HEREDOC (corps), COMMENT. Sert aux modèles de plan (bin/lib/hcl_guard) :
+    placer une valeur selon sa place, et vérifier qu'après substitution
+    chaque caractère garde son genre (une valeur ne change pas la structure)."""
+    lx = _Lexer(text or "")
+    try:
+        lx.tokens()
+    except _Syntax:
+        return None
+    kinds = [CODE] * len(text or "")
+    strings = []
+    # intervalles imbriqués : le plus extérieur d'abord, l'intérieur repeint
+    for start, end, kind in sorted(lx.marks, key=lambda m: (m[0], -m[1])):
+        kinds[start:end] = [kind] * (end - start)
+        if kind == STRING:
+            strings.append((start, end, any(m[2] == CODE and start < m[0] < end for m in lx.marks)))
+    return kinds, sorted(strings)
 
 
 def _parse(text):
@@ -543,6 +579,17 @@ def check_resources(text, target_kind="harvester", file=""):
     out += _keywords(streams, file)
     out += _functions(streams, file)
     return _dedup(out)
+
+
+def resource_types(text):
+    """Types des blocs `resource` du code (2.4.0 : rôle exigé par ce qu'un
+    code libre crée) ; vide si le code est illisible (check_resources le
+    refuse alors)."""
+    try:
+        root, _streams = _parse(text or "")
+    except _Syntax:
+        return []
+    return sorted({b.labels[0] for b in root.blocks if b.type == "resource" and b.labels})
 
 
 def check_header(text, file=HEADER_FILE):

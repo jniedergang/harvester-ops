@@ -82,3 +82,111 @@ def test_marks_and_drops_do_not_need_the_revision(store):
     d = store.drop_resources(A, [VM["id"]])
     assert [r["kind"] for r in d["resources"]] == ["ssh_key"] and d["revision"] == 2
     assert store.delete(A) and not store.delete(A)
+
+
+# ---------------------------------------------------------------------------
+# 2.4.0 : origine d'une déclaration produite par un plan de déploiement
+# ---------------------------------------------------------------------------
+ORIGIN = {"plan": "site-standard", "template": "reseaux-site", "template_revision": 2, "plan_revision": 4}
+
+
+def test_origin_written_at_creation_and_never_updated(store):
+    d = store.create(A, "harv1", "site-standard-reseaux-site", resources=[VM], origin=ORIGIN)
+    assert d["origin"] == ORIGIN
+    assert store.create(B, "harv1", "hand-made")["origin"] is None
+    d2 = store.update(A, 1, description="edited by hand")
+    assert d2["origin"] == ORIGIN and d2["revision"] == 2
+
+
+def test_update_without_any_field_keeps_the_revision(store):
+    store.create(A, "harv1", "web")
+    assert store.update(A, 1)["revision"] == 1
+    with pytest.raises(ts.Conflict):
+        store.update(A, 7)                           # révision toujours contrôlée
+
+
+@pytest.mark.parametrize("origin,why", [
+    ("site", "origin needs"),
+    ({"plan": "p"}, "origin needs"),
+    (dict(ORIGIN, extra=1), "origin needs"),
+    (dict(ORIGIN, plan=""), "origin plan is not a name"),
+    (dict(ORIGIN, template=3), "origin template is not a name"),
+    (dict(ORIGIN, plan="p" * 64), "origin plan is not a name"),
+    (dict(ORIGIN, plan="Site"), "origin plan is not a name"),         # revue M7 : RFC 1123
+    (dict(ORIGIN, template="../x"), "origin template is not a name"),
+    (dict(ORIGIN, template="-a"), "origin template is not a name"),
+    (dict(ORIGIN, plan_revision="4"), "origin plan_revision is not a revision number"),
+    (dict(ORIGIN, template_revision=True), "origin template_revision is not a revision number"),
+    (dict(ORIGIN, template_revision=-1), "origin template_revision is not a revision number"),
+])
+def test_invalid_origins_are_refused(store, origin, why):
+    with pytest.raises(ts.StoreError) as e:
+        store.create(A, "harv1", "web", origin=origin)
+    assert e.value.code == "invalid-origin" and str(e.value).startswith(why)
+    assert store.get(A) is None
+
+
+def test_find_by_name(store):
+    store.create(A, "harv1", "Site-Web")
+    store.create(B, "harv2", "site-web")
+    store.create(C, "harv1", "site-web-kvm", target_kind="kvm")
+    assert store.find_by_name("harv1", "site-web")["id"] == A        # casse ignorée
+    assert store.find_by_name("harv2", "SITE-WEB")["id"] == B
+    assert store.find_by_name("harv1", "site-web-kvm") is None       # autre famille
+    assert store.find_by_name("harv1", "site-web-kvm", target_kind="kvm")["id"] == C
+    assert store.find_by_name("harv3", "site-web") is None
+
+
+def test_a_230_database_is_migrated_in_place(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    c = sqlite3.connect(path)
+    c.execute("""CREATE TABLE tf_declarations (
+      id TEXT PRIMARY KEY, cluster TEXT NOT NULL, name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '', resources TEXT NOT NULL DEFAULT '[]',
+      revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+      created_by TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+      updated_by TEXT NOT NULL DEFAULT '', last_applied_at TEXT, last_applied_status TEXT,
+      last_applied_by TEXT, target_kind TEXT NOT NULL DEFAULT 'harvester')""")
+    c.execute("INSERT INTO tf_declarations (id, cluster, name, resources, revision, created_at, updated_at, "
+              "last_applied_status) VALUES (?, 'harv1', 'old', '[]', 3, 'x', 'x', 'done')", (A,))
+    c.commit()
+    c.close()
+    store = ts.DeclStore(path)
+    d = store.get(A)
+    assert d["origin"] is None and d["revision"] == 3 and d["last_applied_status"] == "done"
+    ts.DeclStore(path)                                 # deuxième ouverture : rien à migrer
+    assert store.create(B, "harv1", "new", origin=ORIGIN)["origin"] == ORIGIN
+
+
+# 2.4.0 (revue B2-I2) : la console et la ligne de commande écrivent la même
+# base ; l'unicité du nom tient même quand la vérification applicative de
+# l'une ne voit pas encore l'écriture de l'autre.
+def test_name_unique_in_the_database_itself(store, monkeypatch):
+    store.create(A, "harv1", "Web")
+    # vérification applicative court-circuitée : seul l'index arrête le doublon
+    monkeypatch.setattr(store, "_name_taken", lambda *a, **k: False)
+    with pytest.raises(ts.StoreError) as e:
+        store.create(B, "harv1", "web")
+    assert e.value.code == "name-taken"
+    store.create(B, "harv2", "web")                       # autre cluster : permis
+    store.create(C, "harv1", "web", target_kind="kvm")    # autre famille : permis
+    d = store.create("d" * 12, "harv1", "other")
+    with pytest.raises(ts.StoreError) as e:
+        store.update(d["id"], 1, name="WEB")
+    assert e.value.code == "name-taken"
+
+
+def test_existing_duplicates_keep_the_database_usable(tmp_path):
+    import sqlite3
+    db = tmp_path / "tf.db"
+    ts.DeclStore(db)
+    c = sqlite3.connect(db)
+    c.execute("DROP INDEX tf_decl_name_unique")
+    for i in (A, B):
+        c.execute("INSERT INTO tf_declarations (id, cluster, name, created_at, updated_at) "
+                  "VALUES (?, 'harv1', 'dup', 'x', 'x')", (i,))
+    c.commit()
+    c.close()
+    s = ts.DeclStore(db)                                  # ne lève pas
+    assert len(s.list("harv1")) == 2
