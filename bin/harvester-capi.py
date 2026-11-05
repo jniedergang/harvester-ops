@@ -10,6 +10,7 @@
     harvester-capi create    --cluster C --spec FICHIER [--components DIR] [--timeout S]
                              [--identity restricted|console] [--origin plan=P,template=M,run=ID]
     harvester-capi delete    --cluster C --name ns/nom [--timeout S]
+    harvester-capi state     --cluster C --name ns/nom [--json]
 
 Le cluster Harvester sert lui-même de cluster de gestion : Harvester 1.9
 embarque Rancher Turtles et son cœur Cluster API. `install` y déclare les
@@ -27,6 +28,10 @@ nomme un cluster de la configuration (`HARVESTER_OPS_CONFIG`), ou
 avant les manifestes et retirée APRÈS le cluster à la suppression (CAPHV en
 a besoin pour supprimer VMs, volumes, répartiteur et pool). `console` garde
 le kubeconfig de la console, pour un diagnostic.
+
+`state` (2.5.0) lit un Cluster en une requête : présence, origine posée
+par `create --origin`, état (capi_cluster.cluster_state, compteurs du
+statut v1beta2). Code 1 s'il est absent, avec `{"present": false}`.
 
 Progression sur stderr au format STEP_EVENT|<étape>|<statut>|<message>, lue
 par la console. Codes de sortie : 0 succès, 1 échec, 2 refus du contrôle
@@ -874,6 +879,36 @@ def cmd_delete(args):
     return remove_cluster(kube, ns, name, args.timeout)
 
 
+def cluster_brief(kube, ns, name):
+    """Un Cluster en une lecture : {present, namespace, name, origin,
+    state} (état sans liste de machines : compteurs du statut)."""
+    cl = kube.get(cs.K_CLUSTER, ns, name)
+    out = {"present": cl is not None, "namespace": ns, "name": name}
+    if cl is not None:
+        out["origin"] = cc.origin_of(cl)
+        out["state"] = cc.cluster_state(cl)
+    return out
+
+
+def cmd_state(args):
+    kube, _, _ = kube_from(args)
+    ns, _, name = args.name.partition("/")
+    if not cc.NS_NAME_RE.match(args.name or ""):
+        raise ValueError("--name expects namespace/name")
+    out = cluster_brief(kube, ns, name)
+    if args.json:
+        print(json.dumps(out))
+    elif out["present"]:
+        st = out["state"]
+        print(f"{ns}/{name}: {'ready' if st['ready'] else 'failed' if st['failed'] else st['phase']}, "
+              f"control plane {st['cp'][0]}/{st['cp'][1]}, workers {st['workers'][0]}/{st['workers'][1]}"
+              + (f"; plan {out['origin'].get('plan')}, template {out['origin'].get('template')}"
+                 if out["origin"] else ""))
+    else:
+        print(f"{ns}/{name}: not found")
+    return EXIT_OK if out["present"] else EXIT_FAIL
+
+
 # ---------------------------------------------------------------------------
 # v1.52.0 (B2) : services sur les clusters créés (CAAPH, HelmChartProxy)
 # ---------------------------------------------------------------------------
@@ -1033,7 +1068,8 @@ def cmd_service_remove(args):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="harvester-capi", description=__doc__.split("\n\n")[0])
+    ap = argparse.ArgumentParser(prog="harvester-capi", allow_abbrev=False,
+                                 description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(sp):
@@ -1050,11 +1086,12 @@ def main(argv=None):
             ("render", cmd_render, ("spec", "secrets")),
             ("create", cmd_create, ("spec", "components", "json", "dry", "timeout", "identity")),
             ("delete", cmd_delete, ("name", "timeout")),
+            ("state", cmd_state, ("name", "json")),
             ("services", cmd_services, ("json",)),
             ("service-check", cmd_service_check, ("sspec",)),
             ("service-deploy", cmd_service_deploy, ("sspec", "timeout")),
             ("service-remove", cmd_service_remove, ("sname", "timeout"))):
-        sp = sub.add_parser(name)
+        sp = sub.add_parser(name, allow_abbrev=False)
         common(sp)
         sp.set_defaults(fn=fn)
         if "components" in extra:

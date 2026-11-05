@@ -137,3 +137,85 @@ def test_only_tested_versions_escape_the_warning(cli):
     assert cli.facts_from(inv)["versions"] == ["v1.31.14"]
     inv.update(versions=["v1.34.11"], version_names=["v1.34.11"])   # ancien format
     assert cli.facts_from(inv)["versions"] == ["v1.34.11"]
+
+
+# --- 2.5.0 (tâche 7) : state, analyse des options ------------------------------
+
+def _cluster_obj(cli, origin=None, ready=True, phase="Provisioned"):
+    labels = {cli.cc.ORIGIN_LABELS[k]: v for k, v in (origin or {}).items() if k in cli.cc.ORIGIN_LABELS}
+    ann = {cli.cc.ORIGIN_ANNOTATIONS[k]: v for k, v in (origin or {}).items() if k in cli.cc.ORIGIN_ANNOTATIONS}
+    return {"metadata": {"name": "apps", "namespace": "apps", "labels": labels, "annotations": ann},
+            "spec": {"topology": {"controlPlane": {"replicas": 1},
+                                  "workers": {"machineDeployments": [{"replicas": 1}]}}},
+            "status": {"phase": phase, "controlPlane": {"desiredReplicas": 1, "availableReplicas": 1 if ready else 0},
+                       "workers": {"desiredReplicas": 1, "availableReplicas": 1 if ready else 0},
+                       "conditions": [{"type": "Available", "status": "True" if ready else "False"}]}}
+
+
+class OneCluster:
+    def __init__(self, obj):
+        self.obj, self.calls = obj, []
+
+    def get(self, kind, ns, name):
+        self.calls.append(("get", kind, ns, name))
+        return self.obj if (ns, name) == ("apps", "apps") else None
+
+    def list(self, *a, **kw):
+        self.calls.append(("list",) + a)
+        return []
+
+
+@pytest.mark.parametrize("obj,code,expect", [
+    ("origin", 0, {"present": True, "origin": {"plan": "site", "template": "rke2-petit", "run": "a1b2c3d4e5f6"},
+                   "ready": True}),
+    ("plain", 0, {"present": True, "origin": {}, "ready": True}),
+    ("pending", 0, {"present": True, "origin": {}, "ready": False}),
+    ("failed", 0, {"present": True, "origin": {}, "ready": False, "failed": True}),
+    (None, 1, {"present": False}),
+])
+def test_state_one_read_json(cli, monkeypatch, capsys, obj, code, expect):
+    import json
+    built = {"origin": _cluster_obj(cli, {"plan": "site", "template": "rke2-petit", "run": "a1b2c3d4e5f6"}),
+             "plain": _cluster_obj(cli), "pending": _cluster_obj(cli, ready=False, phase="Provisioning"),
+             "failed": _cluster_obj(cli, ready=False, phase="Failed"), None: None}[obj]
+    kube = OneCluster(built)
+    monkeypatch.setattr(cli, "kube_from", lambda a: (kube, None, None))
+    rc = cli.main(["state", "--cluster", "h", "--name", "apps/apps", "--json"])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == code and out["present"] is expect["present"] and out["namespace"] == "apps"
+    if expect["present"]:
+        assert out["origin"] == expect["origin"] and out["state"]["ready"] is expect["ready"]
+        assert out["state"]["failed"] is expect.get("failed", False)
+    else:
+        assert set(out) == {"present", "namespace", "name"}
+    assert kube.calls == [("get", cli.cs.K_CLUSTER, "apps", "apps")]           # une seule lecture
+
+
+@pytest.mark.parametrize("argv,why", [
+    (["state", "--cluster", "h", "--name", "apps"], "--name expects namespace/name"),
+    (["state", "--cluster", "h", "--name", "Apps/apps"], "--name expects namespace/name"),
+    (["create", "--cluster", "h", "--spec", "-", "--origin", "owner=me"], "--origin: unknown key 'owner'"),
+    (["create", "--cluster", "h", "--spec", "-", "--origin", "plan=Site"], "--origin: invalid value for 'plan'"),
+    (["create", "--cluster", "h", "--spec", "-", "--origin", "plan=a_b"], "--origin: invalid value for 'plan'"),
+    (["create", "--cluster", "h", "--spec", "-", "--origin", "run=xyz"], "--origin: invalid value for 'run'"),
+    (["create", "--cluster", "h", "--spec", "-", "--origin", "plan=a,plan=b"], "--origin: 'plan' given twice"),
+])
+def test_refused_values_exit_2_before_any_write(cli, monkeypatch, capsys, argv, why):
+    kube = OneCluster(None)
+    monkeypatch.setattr(cli, "kube_from", lambda a: (kube, None, None))
+    assert cli.main(argv) == cli.EXIT_BLOCKED
+    assert why in capsys.readouterr().err
+    assert not [c for c in kube.calls if c[0] not in ("get", "list")]
+
+
+@pytest.mark.parametrize("argv", [
+    ["create", "--cluster", "h", "--spec", "-", "--identity", "admin"],
+    ["check", "--cluster", "h", "--spec", "-", "--identity", "full"],
+    ["state", "--cluster", "h", "--nam", "apps/apps"],                 # abréviation refusée
+    ["create", "--cluster", "h", "--spec", "-", "--ident", "console"],
+    ["stat", "--cluster", "h", "--name", "apps/apps"],
+])
+def test_parser_refuses_unknown_and_abbreviated(cli, argv):
+    with pytest.raises(SystemExit) as e:
+        cli.main(argv)
+    assert e.value.code == 2

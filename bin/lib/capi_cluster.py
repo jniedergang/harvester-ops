@@ -358,6 +358,16 @@ def parse_origin(text):
     return out
 
 
+def origin_of(cluster):
+    """Origine lue sur un Cluster (inverse de `postprocess`) : {plan,
+    template, run}, clés absentes omises."""
+    meta = (cluster or {}).get("metadata") or {}
+    labels, ann = meta.get("labels") or {}, meta.get("annotations") or {}
+    out = {k: labels[v] for k, v in ORIGIN_LABELS.items() if labels.get(v)}
+    out.update({k: ann[v] for k, v in ORIGIN_ANNOTATIONS.items() if ann.get(v)})
+    return out
+
+
 def masked(docs):
     """Pour un aperçu : le secret d'identité porte le kubeconfig Harvester."""
     out = []
