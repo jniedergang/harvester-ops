@@ -34,6 +34,8 @@ const AutoHistory = (() => {
    *   box: () => Element            conteneur de l'onglet ;
    *   queries: ['tf-plan', ...]     valeurs du filtre `action` de l'Activité ;
    *   prefixes: [...]               verbes gardés (préfixes), `queries` par défaut ;
+   *   only: (action) => bool        2.5.0 : filtre de plus (une action lue
+   *                                 n'est gardée que s'il la retient) ;
    *   label: (action) => texte      libellé d'une action ;
    *   shown: () => bool             l'onglet est-il affiché ?
    *   cls: 'bm'                     préfixe des classes (bm-history-row...) ;
@@ -52,7 +54,7 @@ const AutoHistory = (() => {
     const prefixes = o.prefixes || o.queries;
     const cls = o.cls || 'auto';
     const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
-    const keep = (a) => prefixes.some(p => String(a.action || '').startsWith(p));
+    const keep = (a) => prefixes.some(p => String(a.action || '').startsWith(p)) && (!o.only || o.only(a));
 
     async function render() {
       const box = o.box();

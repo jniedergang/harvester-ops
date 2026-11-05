@@ -933,6 +933,9 @@ const CAPI = (() => {
             ${esc(tr('capi.v.details.ready'))} ${d.ready ? Icons.svg('ok', { size: 14 }) : '…'} ·
             ${esc(tr('capi.v.details.endpoint'))} <code>${esc(ep.host || '—')}:${esc(ep.port || '—')}</code>
           </div>
+          ${d.identity ? `<p class="capi-identity tip" data-identity="${esc(d.identity)}" data-tip="${esc(d.identity === 'restricted'
+            ? tr('capi.v.details.t.identityRestricted') : tr('capi.v.details.t.identityConsole'))}">${Icons.svg(d.identity === 'restricted' ? 'ok' : 'warn', { size: 13 })}
+            ${esc(d.identity === 'restricted' ? tr('capi.v.details.identityRestricted') : tr('capi.v.details.identityConsole'))}</p>` : ''}
           <h4 style="margin-top:14px;">${esc(tr('capi.v.details.conditions'))}</h4>
           <table class="data-table"><thead><tr><th>${esc(tr('capi.v.col.type'))}</th><th>${esc(tr('capi.v.col.status'))}</th><th>${esc(tr('capi.v.col.reason'))}</th><th>${esc(tr('capi.v.col.message'))}</th></tr></thead><tbody>${cond}</tbody></table>
           <h4>${esc(tr('capi.v.details.machines'))}</h4>
