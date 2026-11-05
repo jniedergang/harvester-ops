@@ -28771,7 +28771,7 @@ provider "harvester" {
 
 
 def _hcl_str(s):
-    """Quote a string for HCL — newlines become heredoc.
+    """Quote a string for HCL; newlines become a heredoc.
 
     2.4.0 (revue B2-I4) : la valeur arrive comme du TEXTE. `${` et `%{`
     sont échappés (`$${`, `%%{`) dans une chaîne comme dans un heredoc :
