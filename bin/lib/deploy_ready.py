@@ -69,12 +69,19 @@ class _ReadsKube:
         return []
 
 
+def harvester_too_old(ver):
+    """Vrai si la version lue est en dessous de v1.9 (décision 117) ; une
+    version illisible n'est pas jugée ici."""
+    parsed = hv_upgrade.parse_version(ver)
+    return isinstance(parsed, tuple) and parsed[:2] < MIN_HARVESTER
+
+
 def capi_unmet(reads):
     """Constats Cluster API de la disponibilité (voir l'en-tête)."""
     unmet = []
     ver = reads.get("server_version")
     parsed = hv_upgrade.parse_version(ver)
-    if isinstance(parsed, tuple) and parsed[:2] < MIN_HARVESTER:
+    if harvester_too_old(ver):
         unmet.append({"code": "harvester-too-old", "detail": f"Harvester {ver}: Cluster API needs v1.9 or later"})
     elif ver is None or parsed is None:
         unmet.append({"code": "read-failed", "detail": "server-version"})

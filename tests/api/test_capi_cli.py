@@ -186,9 +186,11 @@ def test_state_one_read_json(cli, monkeypatch, capsys, obj, code, expect):
     if expect["present"]:
         assert out["origin"] == expect["origin"] and out["state"]["ready"] is expect["ready"]
         assert out["state"]["failed"] is expect.get("failed", False)
+        assert kube.calls == [("get", cli.cs.K_CLUSTER, "apps", "apps")]       # une seule lecture
     else:
-        assert set(out) == {"present", "namespace", "name"}
-    assert kube.calls == [("get", cli.cs.K_CLUSTER, "apps", "apps")]           # une seule lecture
+        assert set(out) == {"present", "namespace", "name", "namespace_present"}
+        assert out["namespace_present"] is False
+        assert kube.calls == [("get", cli.cs.K_CLUSTER, "apps", "apps"), ("get", "namespaces", None, "apps")]
 
 
 @pytest.mark.parametrize("argv,why", [

@@ -881,12 +881,17 @@ def cmd_delete(args):
 
 def cluster_brief(kube, ns, name):
     """Un Cluster en une lecture : {present, namespace, name, origin,
-    state} (état sans liste de machines : compteurs du statut)."""
+    state} (état sans liste de machines : compteurs du statut) ; absent :
+    {present: false, namespace_present}."""
     cl = kube.get(cs.K_CLUSTER, ns, name)
     out = {"present": cl is not None, "namespace": ns, "name": name}
     if cl is not None:
         out["origin"] = cc.origin_of(cl)
         out["state"] = cc.cluster_state(cl)
+    else:
+        # absent : le namespace existe-t-il déjà (consigné par un plan, qui
+        # dit ainsi s'il l'a créé) ; seconde lecture, pour ce cas seulement
+        out["namespace_present"] = kube.get("namespaces", None, ns) is not None
     return out
 
 

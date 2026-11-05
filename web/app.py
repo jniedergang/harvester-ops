@@ -17066,6 +17066,8 @@ def api_capi_bundles_list():
     return jsonify({
         "bundles": items,
         "active": active_name or "",
+        # 2.5.0 : versions que déclarerait la phase capi d'un plan
+        "active_providers": _capi_provider_names(_capi_bundle_providers()),
         "bundle_dir": str(CAPI_BUNDLE_DIR),
         "total_used": total_used,
         "disk_free": disk["free_bytes"],
@@ -17325,6 +17327,7 @@ def api_capi_install(cluster):
 # -----------------------------------------------------------------------------
 import capi_cluster as _cc  # noqa: E402
 import capi_identity as _ci  # noqa: E402
+import capi_stack as _cs  # noqa: E402
 
 CAPI_SCRIPT = "harvester-capi.py"
 _CAPI_INVENTORY_CACHE = {}          # cluster -> (horodatage, réponse)
@@ -17387,14 +17390,40 @@ def _capi_components_dir():
     return dest
 
 
-def _capi_base(cluster, sub):
+def _capi_cmd(kc, sub):
+    """La commande de l'outil pour un kubeconfig, ou None s'il n'est pas
+    déployé. Seul endroit qui la construit (routes et chaîne d'un plan)."""
     script = _capi_script()
     if script is None:
+        return None
+    return [sys.executable, str(script), sub, "--kubeconfig", kc]
+
+
+def _capi_bundle_providers():
+    """Fournisseurs Turtles du paquet actif (turtles.json), [] sans paquet
+    ou sans fournisseurs."""
+    comp = _capi_components_dir()
+    if comp is None:
+        return []
+    try:
+        return _cs.load_components(comp).get("providers") or []
+    except (OSError, ValueError, KeyError):
+        return []
+
+
+def _capi_provider_names(providers):
+    """`type/nom version` de chaque fournisseur, pour l'affichage et le
+    résultat de la phase capi."""
+    return [f"{p.get('type')}/{p.get('name')} {p.get('version')}" for p in providers or []]
+
+
+def _capi_base(cluster, sub):
+    if _capi_script() is None:
         return None, (jsonify({"error": f"{CAPI_SCRIPT} not deployed"}), 503)
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
-    return [sys.executable, str(script), sub, "--kubeconfig", kc], None
+    return _capi_cmd(kc, sub), None
 
 
 def _capi_run_json(cmd, spec=None, timeout=180):
@@ -17519,9 +17548,12 @@ def api_capi_cluster_preview(cluster):
     return jsonify({"yaml": proc.stdout})
 
 
+_UNSET = object()
+
+
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
                 capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
-                setup=None, parent=None):
+                setup=None, parent=None, cluster_user=_UNSET):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
@@ -17537,7 +17569,9 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     soit visible et que son fil parte ; le contrôle d'occupation et l'ajout
     à ACTIONS se font sous le même verrou (deux gestes simultanés sur le
     même plan : un seul passe). 2.5.0 : `parent`, l'action parente (chaîne
-    d'un plan), posée avant que l'action soit visible."""
+    d'un plan), posée avant que l'action soit visible ; `cluster_user`
+    passé par un appelant hors requête (identité figée au déclenchement),
+    sinon lu dans la requête."""
     wd = _capi_work_dir()
     spec_file = None
     if spec is not None:
@@ -17554,7 +17588,8 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
                        and not a.partition("=")[2].startswith("/")
                        and a not in ("--kubeconfig", "--db")]
     run = ActionRun(run_id, label, cluster, public, dry_run=dry_run)
-    run.cluster_user = (current_cluster_identity() or {}).get("user")
+    run.cluster_user = ((current_cluster_identity() or {}).get("user") if cluster_user is _UNSET
+                        else cluster_user)
     if setup is not None:
         setup(run)
     with ACTIONS_LOCK:
@@ -17585,9 +17620,29 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     return run, None
 
 
-def _capi_action(cluster, label, cmd, spec=None, dry_run=False):
+def _capi_action(cluster, label, cmd, spec=None, dry_run=False, parent=None, cluster_user=_UNSET):
     return _cli_action(cluster, label, cmd, "harvester-capi", spec, dry_run,
-                       after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None))
+                       after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None),
+                       parent=parent, cluster_user=cluster_user)
+
+
+def _capi_launch(cluster, kc, sub, args, spec=None, parent=None, cluster_user=None, label=None,
+                 dry_run=False):
+    """Lancement hors requête (chaîne d'un plan, 2.5.0) : ne lit ni la
+    requête, ni la session, ni l'identité de la personne ; `kc` et
+    `cluster_user` sont figés au déclenchement. Même commande que les routes
+    (_capi_cmd), même action suivie (_capi_action). (action, None) ou
+    (None, {"error", ...})."""
+    cmd = _capi_cmd(kc, sub)
+    if cmd is None:
+        return None, {"error": f"{CAPI_SCRIPT} not deployed"}
+    with app.app_context():                    # réponse d'occupation (jsonify) hors requête
+        run, err = _capi_action(cluster, label or f"capi-{sub}:{cluster}", cmd + list(args), spec, dry_run,
+                                parent=parent, cluster_user=cluster_user)
+    if err:
+        body = err[0].get_json(silent=True) if hasattr(err[0], "get_json") else None
+        return None, body or {"error": "refused"}
+    return run, None
 
 
 # ---------------------------------------------------------------------------
@@ -32211,7 +32266,23 @@ DEPLOY_FINDING_LEVELS = {
     "admin-kind": "blocking", "forbidden-construct": "blocking",
     "template-newer": "warning", "decl-differs": "warning", "plan-changed": "warning",
     "decl-exists": "info", "readiness-later": "info",
+    # 2.5.0 : phases capi et clusters
+    "capi-bundle-missing": "blocking", "capi-bundle-no-turtles": "blocking",
+    "capi-needs-harvester-1.9": "blocking", "capi-version-differs": "blocking",
+    "capi-stack-missing": "blocking", "capi-template-missing": "blocking",
+    "cluster-var-missing": "blocking", "cluster-name-taken": "blocking", "capi-check-failed": "blocking",
+    "cluster-failed": "warning",
+    "capi-later": "info", "cluster-exists": "info", "refs-later": "info",
 }
+# Constats de `harvester-capi check --many` repris dans la phase clusters :
+# niveau de l'outil -> niveau d'un lancement
+DEPLOY_CHECK_LEVELS = {"block": "blocking", "warn": "warning", "ok": "info"}
+# Constats d'une référence absente, et les clés de la demande qu'ils visent :
+# désignée par une variable d'un modèle de cluster alors que la phase
+# Terraform est activée, elle peut être créée par elle (`refs-later`)
+DEPLOY_REF_KEYS = {"image-missing": ("image",), "keypair-missing": ("ssh_keypair",),
+                   "network-missing": ("network", "extra_networks"),
+                   "storage-class-missing": ("extra_disk_class",), "pool-missing": ("ip_pool", "ip_pool_refs")}
 
 
 def _tf_template_field_type(kind, path):
@@ -32498,11 +32569,183 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
     if (phases.get("readiness") or {}).get("enabled"):
         findings.append(_deploy_finding("readiness-later", "readiness",
                                         "readiness is checked again when the phase starts"))
-    estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) + (30 if install else 0)
-    summary = {"declarations": decls, "estimate_minutes": estimate}
+    capi = _deploy_capi_prepare(kc, plan, values, install, findings)
+    estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) \
+        + (30 if install else 0) + capi["estimate"]
+    summary = {"declarations": decls, "estimate_minutes": estimate, "capi": capi["capi"],
+               "clusters": capi["summary"]}
     ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
-           "update_differing": bool(update_differing)}
+           "update_differing": bool(update_differing), "clusters": capi["entries"]}
     return findings, summary, ctx
+
+
+def _deploy_capi_json(kc, sub, args, spec=None, timeout=180):
+    """Sous-commande en lecture de harvester-capi (même commande que les
+    routes) : (sortie JSON, code, None) ou (None, None, message d'erreur).
+    Hors requête comme dans la requête."""
+    cmd = _capi_cmd(kc, sub)
+    if cmd is None:
+        return None, None, f"{CAPI_SCRIPT} not deployed"
+    with app.app_context():
+        got, err = _capi_run_json(cmd + list(args), spec=spec, timeout=timeout)
+    if err:
+        body = err[0].get_json(silent=True) or {}
+        return None, None, str(body.get("error") or "failed")[:300]
+    return got[0], got[1], None
+
+
+def _deploy_capi_args():
+    comp = _capi_components_dir()
+    return ["--components", str(comp)] if comp else []
+
+
+def _deploy_stack(kc):
+    """(état de la pile Cluster API, None) ou (None, message)."""
+    out, _rc, err = _deploy_capi_json(kc, "status", _deploy_capi_args() + ["--json"], timeout=90)
+    return (out, None) if err is None and isinstance(out, dict) else (None, err or "unreadable")
+
+
+def _deploy_cluster_brief(kc, name):
+    """`harvester-capi state` d'un cluster enfant (namespace = nom), ou None
+    si la lecture échoue."""
+    out, _rc, err = _deploy_capi_json(kc, "state", ["--name", f"{name}/{name}", "--json"], timeout=60)
+    return out if err is None and isinstance(out, dict) else None
+
+
+def _deploy_cluster_is_ours(brief, plan_name, template):
+    """Vrai si le cluster lu porte l'origine de ce plan et de ce modèle
+    (seule règle de reprise, décision 176 ; contrôle et déroulé)."""
+    o = (brief or {}).get("origin") or {}
+    return o.get("plan") == plan_name and o.get("template") == template
+
+
+def _deploy_check_detail(f):
+    facts = f.get("facts") or {}
+    text = ", ".join(f"{k}={v}" for k, v in facts.items() if v not in (None, ""))
+    return (f"{f['cluster']}: " if f.get("cluster") else "") + (text or f.get("code", ""))
+
+
+def _deploy_check_many(kc, specs):
+    """`harvester-capi check --many` (identité restreinte) : (sortie, None)
+    ou (None, message)."""
+    out, _rc, err = _deploy_capi_json(kc, "check", _deploy_capi_args() + [
+        "--many", "--spec", "-", "--identity", "restricted", "--json"], spec=specs, timeout=180)
+    return (out, None) if err is None and isinstance(out, dict) else (None, err or "unreadable")
+
+
+def _deploy_capi_prepare(kc, plan, values, install, findings):
+    """Constats et contexte des phases capi et clusters (2.5.0), lecture
+    seule : paquet actif, version de Harvester et pile (décisions 117,
+    171), modèles et rendu de chaque entrée, clusters déjà présents (repris
+    ou nom pris), puis `check --many` pour ceux à créer (capacité, pools,
+    droits, identité). Rend {"capi", "summary", "entries", "estimate"}."""
+    phases = plan["phases"]
+    capi_on = bool((phases.get("capi") or {}).get("enabled"))
+    cl_on = bool((phases.get("clusters") or {}).get("enabled")) and bool(_dpl.plan_clusters(plan))
+    out = {"capi": None, "summary": [], "entries": [], "estimate": 0}
+    if not (capi_on or cl_on):
+        return out
+    providers = _capi_bundle_providers()
+    if _capi_bundle_active_path() is None:
+        findings.append(_deploy_finding("capi-bundle-missing", "capi", "no active Cluster API bundle"))
+    elif not providers:
+        findings.append(_deploy_finding("capi-bundle-no-turtles", "capi",
+                                        "the active bundle has no Turtles providers"))
+    stack = None
+    if install:
+        findings.append(_deploy_finding("capi-later", "capi", "the Harvester version and the Cluster API "
+                                                              "stack are checked when the phase starts"))
+    elif kc:
+        stack, err = _deploy_stack(kc)
+        if err:
+            findings.append(_deploy_finding("capi-check-failed", "capi", f"stack: {err}"))
+    if stack:
+        ver = stack.get("harvester_version")
+        if _drd.harvester_too_old(ver):
+            findings.append(_deploy_finding("capi-needs-harvester-1.9", "capi",
+                                            f"Harvester {ver}: Cluster API needs v1.9 or later"))
+        for d in stack.get("differs") or []:
+            findings.append(_deploy_finding(
+                "capi-version-differs", "capi", f"{d['provider']} {d['installed']} is installed, the bundle has "
+                f"{d['bundle']}: a plan never upgrades it (Cluster API > Installation)"))
+        if not stack.get("ready") and not stack.get("differs") and cl_on and not capi_on:
+            findings.append(_deploy_finding("capi-stack-missing", "clusters",
+                                            "missing: " + ", ".join(stack.get("missing") or [])))
+    if capi_on:
+        out["capi"] = {"providers": _capi_provider_names(providers), "ready": bool(stack and stack.get("ready")),
+                       "installed_version_differs": bool(stack and stack.get("differs"))}
+        if not (stack and stack.get("ready")):
+            out["estimate"] += 2
+    if not cl_on:
+        return out
+    state = _deploy_state()
+    tf_on = bool((phases.get("terraform") or {}).get("enabled") and _dpl.plan_templates(plan))
+    loaded, names = {}, {}
+    for e in _dpl.plan_clusters(plan):
+        if e["template"] not in loaded:
+            loaded[e["template"]] = _dpl.load_capi_template(state, e["template"])
+        t = loaded[e["template"]]
+        if t is None:
+            findings.append(_deploy_finding("capi-template-missing", "clusters",
+                                            f"{e['template']} (cluster {e['name']})"))
+            continue
+        try:
+            name = _dpl.render_cluster_name(e["name"], values)
+            spec = _dpl.render_capi_template(t, values, name)
+        except _dpl.ProfileError as ex:
+            for where, why in ex.errors:
+                code = "cluster-var-missing" if "missing variable" in why else "var-invalid"
+                findings.append(_deploy_finding(code, "clusters", f"{where}: {why}"))
+            continue
+        names[e["name"]] = name
+        out["entries"].append({"name": name, "template": t["name"], "template_revision": t["revision"],
+                               "spec": spec, "raw": t["spec"],
+                               "depends_on": [names.get(d, d) for d in e.get("depends_on") or []]})
+    absent = []
+    for e in out["entries"]:
+        vms = int(e["spec"].get("cp_replicas") or 0) + int(e["spec"].get("worker_replicas") or 0)
+        row = {"name": e["name"], "template": e["template"], "vms": vms, "exists": False}
+        b = None
+        if not install and kc:
+            b = _deploy_cluster_brief(kc, e["name"])
+            if b is None:
+                findings.append(_deploy_finding("capi-check-failed", "clusters", f"{e['name']}: state unreadable"))
+        if b and b.get("present"):
+            row["exists"] = True
+            if not _deploy_cluster_is_ours(b, plan["name"], e["template"]):
+                findings.append(_deploy_finding("cluster-name-taken", "clusters",
+                                                f"{e['name']} exists and was not made by this plan and template"))
+            elif (b.get("state") or {}).get("failed"):
+                findings.append(_deploy_finding("cluster-failed", "clusters", f"{e['name']} failed: delete it, "
+                                                "then resume (the plan never deletes a cluster)"))
+            else:
+                findings.append(_deploy_finding("cluster-exists", "clusters",
+                                                f"{e['name']} exists: it is adopted and waited for"))
+        else:
+            absent.append(e)
+            out["estimate"] += 5 + (10 if e["spec"].get("worker_replicas") else 0)
+        out["summary"].append(row)
+    if install or not kc or not absent or not providers:
+        return out
+    res, err = _deploy_check_many(kc, [e["spec"] for e in absent])
+    if err:
+        findings.append(_deploy_finding("capi-check-failed", "clusters", f"check: {err}"))
+        return out
+    by_ref = {f"{e['name']}/{e['name']}": e for e in absent}
+    for f in res.get("findings") or []:
+        if f.get("code") == "stack-not-ready":
+            continue                            # dit par la phase capi ou capi-stack-missing
+        if f.get("cluster") and f.get("level") == "ok":
+            continue                            # informations par cluster : le résumé de flotte suffit
+        level = DEPLOY_CHECK_LEVELS.get(f.get("level"), "blocking")
+        code = f.get("code") or "check"
+        e = by_ref.get(f.get("cluster") or "")
+        if tf_on and e and code in DEPLOY_REF_KEYS and any(
+                _bmp.variables_in(e["raw"].get(k)) for k in DEPLOY_REF_KEYS[code]):
+            code, level = "refs-later", "info"
+            f = dict(f, facts=dict(f.get("facts") or {}, check=f.get("code")))
+        findings.append({"code": code, "level": level, "phase": "clusters", "detail": _deploy_check_detail(f)})
+    return out
 
 
 def _deploy_resources_differ(rendered, existing):
@@ -32829,6 +33072,206 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
                       item_key="template", item_step="tf-")
 
 
+def _deploy_capi_phase(run, cluster, kc_ref, plan):
+    """Phase capi : pile Cluster API du paquet actif par le chemin déjà
+    livré (`harvester-capi install`, comme Cluster API > Installation),
+    Harvester 1.9 ou plus seulement (117), jamais de mise à niveau d'une
+    pile d'une autre version (171), CAAPH déclaré avec elle (172). Pile
+    prête aux versions du paquet : rien à faire, aucune action fille."""
+    timeout_s = int((plan["phases"].get("capi") or {}).get("timeout_minutes") or _dpl.CAPI_TIMEOUT[2]) * 60
+    dry = bool(run.dry_run)
+
+    def read():
+        providers = _capi_bundle_providers()
+        if _capi_bundle_active_path() is None:
+            return None, providers, "capi-bundle-missing"
+        if not providers:
+            return None, providers, "capi-bundle-no-turtles"
+        stack, err = _deploy_stack(kc_ref())
+        if err:
+            return None, providers, f"stack unreadable ({err})"[:200]
+        if _drd.harvester_too_old(stack.get("harvester_version")):
+            return stack, providers, "capi-needs-harvester-1.9"
+        if stack.get("differs"):
+            return stack, providers, "capi-version-differs"
+        return stack, providers, None
+
+    def execute(ctx, state):
+        stack, providers, why = read()
+        data = {"actions": [], "providers": _capi_provider_names(providers), "installed": False}
+        if why:
+            return _dch.PhaseOutcome("error", message=why, data=data)
+        if stack.get("ready"):
+            return _dch.PhaseOutcome("done", message="stack ready at the bundle versions", data=data)
+        missing = [m for m in stack.get("missing") or [] if m not in ("turtles", "core/cluster-api")]
+        if len(missing) != len(stack.get("missing") or []):
+            return _dch.PhaseOutcome("error", message="turtles-not-ready", data=data)
+        if dry:
+            return _dch.PhaseOutcome("done", message=f"would declare {len(missing)} provider(s)", data=data)
+        args = ["--cluster", cluster, "--components", str(_capi_bundle_active_path()),
+                "--timeout", str(timeout_s)]
+        if (_deploy_cluster_entry(cluster) or {}).get("nodes"):
+            args.append("--push-images")
+        child, err = _capi_launch(cluster, kc_ref(), "install", args, parent=run.id,
+                                  cluster_user=run.cluster_user, label=f"capi-install:{cluster}")
+        if err:
+            return _dch.PhaseOutcome("error", message=str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        status, _c = _deploy_wait_child(child.id)
+        if status != "done":
+            return _dch.PhaseOutcome("error", message=f"install failed (action {child.id})", data=data)
+        after, _p, why = read()
+        if why or not after.get("ready"):
+            return _dch.PhaseOutcome("error", message=f"stack not ready after the install (action {child.id})",
+                                     data=data)
+        data["installed"] = True
+        return _dch.PhaseOutcome("done", message=f"{len(missing)} provider(s) declared", data=data)
+
+    def verify(ctx, state):
+        stack, _p, why = read()
+        return why is None and bool(stack.get("ready"))
+    return _dch.Phase("capi", execute=execute, verify=verify)
+
+
+def _deploy_clusters_phase(run, cluster, kc_ref, dctx):
+    """Phase clusters : un élément par cluster enfant, créés l'un après
+    l'autre (170) par `harvester-capi create --identity restricted --origin`
+    en action fille. Au début de la phase, `check --many` rejoué pour ceux à
+    créer (capacité, pools, droits : les objets de la phase Terraform
+    existent maintenant) ; un constat bloquant l'arrête avant toute
+    écriture. Un cluster présent avec cette origine est repris et attendu,
+    en échec il reste en erreur (`cluster-failed`), jamais supprimé par la
+    chaîne (176) ; un arrêt laisse la création en cours aller à son terme
+    (175). Ce qu'une exécution a créé porte `undo` (Défaire, 2.7.0)."""
+    plan = dctx["plan"]
+    timeout_s = int((plan["phases"].get("clusters") or {}).get("timeout_minutes")
+                    or _dpl.CLUSTERS_TIMEOUT[2]) * 60
+    entries = {e["name"]: e for e in dctx.get("clusters") or []}
+    capi_on = bool((plan["phases"].get("capi") or {}).get("enabled"))
+    dry = bool(run.dry_run)
+
+    def ours(brief, e):
+        return _deploy_cluster_is_ours(brief, plan["name"], e["template"])
+
+    def before(ctx, state):
+        kc = kc_ref()
+        if _capi_bundle_active_path() is None or not _capi_bundle_providers():
+            return _dch.PhaseOutcome("error", message="capi-bundle-missing")
+        stack, err = _deploy_stack(kc)
+        if err:
+            return _dch.PhaseOutcome("error", message=f"stack unreadable ({err})"[:200])
+        if not stack.get("ready"):
+            if dry and capi_on:
+                # essai : la pile n'a pas été déclarée, les clusters ne se rendent pas
+                return _dch.PhaseOutcome("done", message="dry run: the clusters are checked once the stack "
+                                                         "is declared")
+            return _dch.PhaseOutcome("error", message="capi-stack-missing",
+                                     data={"missing": stack.get("missing") or []})
+        absent = []
+        for e in entries.values():
+            b = _deploy_cluster_brief(kc, e["name"])
+            if b is None:
+                return _dch.PhaseOutcome("error", message=f"state unreadable ({e['name']})")
+            if not b.get("present"):
+                absent.append(e["spec"])
+        if not absent:
+            return None
+        res, err = _deploy_check_many(kc, absent)
+        if err:
+            return _dch.PhaseOutcome("error", message=f"check failed ({err})"[:200])
+        blocking = [f for f in res.get("findings") or [] if f.get("level") == "block"]
+        if blocking:
+            codes = sorted({f.get("code") or "check" for f in blocking})
+            return _dch.PhaseOutcome("error", message="blocked by the pre-check: " + ", ".join(codes),
+                                     data={"blocked_by": [{"code": f.get("code"), "detail": _deploy_check_detail(f)}
+                                                          for f in blocking][:20]})
+        return None
+
+    def wait_adopted(ctx, kc, name):
+        end = time.time() + timeout_s
+        while True:
+            b = _deploy_cluster_brief(kc, name)
+            st = (b or {}).get("state") or {}
+            if b and b.get("present") and st.get("ready"):
+                return "done", "adopted, now available"
+            if b is not None and not b.get("present"):
+                return "error", "cluster disappeared while waited for"
+            if st.get("failed"):
+                return "error", "cluster-failed"
+            if time.time() > end:
+                return "error", "not available in time; left in place"
+            if ctx.cancelled():
+                return "error", "stopped while waiting for the cluster"
+            time.sleep(DEPLOY_POLL)
+
+    def run_item(ctx, state, item):
+        e = entries[item.id]
+        name = e["name"]
+        ref = f"{name}/{name}"
+        data = {"ref": ref, "template": e["template"], "template_revision": e["template_revision"],
+                "identity": "restricted", "created": False, "actions": []}
+        prev = next((it for it in ((state.get("previous") or {}).get("items") or [])
+                     if it.get("cluster") == item.id), {})
+        kc = kc_ref()
+        b = _deploy_cluster_brief(kc, name)
+        if b is None:
+            return _dch.ItemOutcome("error", "state unreadable", data=data)
+        if b.get("present"):
+            if not ours(b, e):
+                return _dch.ItemOutcome("error", "cluster-name-taken", data=data)
+            if prev.get("created"):
+                # créé par une exécution précédente de la même chaîne de reprises
+                data.update({k: prev[k] for k in ("created", "undo", "namespace_created") if k in prev})
+            st = b.get("state") or {}
+            if st.get("failed"):
+                return _dch.ItemOutcome("error", "cluster-failed", data=data)
+            if st.get("ready"):
+                return _dch.ItemOutcome("done", "already present, adopted", data=data)
+            if dry:
+                return _dch.ItemOutcome("done", "present, not available yet (dry run)", data=data)
+            status, msg = wait_adopted(ctx, kc, name)
+            return _dch.ItemOutcome(status, msg, data=data)
+        if not dry:
+            data["namespace_created"] = not b.get("namespace_present", False)
+        args = _deploy_capi_args() + ["--identity", "restricted", "--origin",
+                                      f"plan={plan['name']},template={e['template']},run={run.id}",
+                                      "--timeout", str(timeout_s)]
+        if dry:
+            args.append("--dry-run")
+        child, err = _capi_launch(cluster, kc, "create", args, spec=e["spec"], parent=run.id,
+                                  cluster_user=run.cluster_user, label=f"capi-cluster-create:{ref}",
+                                  dry_run=dry)
+        if err:
+            return _dch.ItemOutcome("error", str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        # décision 175 : un arrêt de la chaîne laisse la création aller à son
+        # terme ; annuler l'action fille elle-même supprime ce cluster
+        status, _c = _deploy_wait_child(child.id)
+        if dry:
+            return _dch.ItemOutcome("done" if status == "done" else "error",
+                                    "checked and rendered (dry run)" if status == "done"
+                                    else f"dry run refused (action {child.id})", data=data)
+        after = _deploy_cluster_brief(kc, name)
+        if after and after.get("present") and (after.get("origin") or {}).get("run") == run.id:
+            data["created"] = True
+            data["undo"] = {"kind": "capi-cluster", "ref": ref}
+        if status == "done" and after and after.get("present") and (after.get("state") or {}).get("ready"):
+            return _dch.ItemOutcome("done", "created", data=data)
+        if status == "cancelled":
+            return _dch.ItemOutcome("error", f"creation cancelled (action {child.id})", data=data)
+        return _dch.ItemOutcome("error", f"creation failed (action {child.id})", data=data)
+
+    def verify_item(ctx, state, prev):
+        e = entries.get(prev.get("cluster"))
+        if e is None:
+            return False
+        b = _deploy_cluster_brief(kc_ref(), e["name"])
+        return bool(b and b.get("present") and ours(b, e) and (b.get("state") or {}).get("ready"))
+    items = [_dch.Item(e["name"], tuple(d for d in e["depends_on"] if d in entries)) for e in entries.values()]
+    return _dch.Phase("clusters", items=items, run_item=run_item, verify_item=verify_item, before=before,
+                      item_key="cluster", item_step="k8s-")
+
+
 def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=None, store=None):
     """Phases du déroulé, branchées sur les mécanismes existants."""
     plan = dctx["plan"]
@@ -32850,6 +33293,10 @@ def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=
                                                   expected=(install or {}).get("hostnames")))
         elif pid == "terraform":
             phases.append(_deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, created))
+        elif pid == "capi":
+            phases.append(_deploy_capi_phase(run, cluster, kc_ref, plan))
+        elif pid == "clusters":
+            phases.append(_deploy_clusters_phase(run, cluster, kc_ref, dctx))
     return phases
 
 

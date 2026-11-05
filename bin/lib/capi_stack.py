@@ -108,6 +108,7 @@ def stack_status(kube, wanted=()):
     out["core"] = next((s for s in states if s["type"] == "core"), None)
     out["providers"] = [s for s in states if s["type"] != "core"]
     out["optional"] = []
+    out["differs"] = []
     for w in wanted or []:
         got = next((s for s in out["providers"]
                     if s["name"] == w["name"] and s["type"] == w["type"]), None)
@@ -116,6 +117,10 @@ def stack_status(kube, wanted=()):
             gap = f"{w['type']}/{w['name']}"
         elif w.get("version") and got["version"] != w["version"]:
             gap = f"{w['type']}/{w['name']} {w['version']} (installed {got['version']})"
+            # 2.5.0 (décision 171) : une autre version que le paquet, dite à
+            # part ; un plan ne la met jamais à niveau en silence
+            out["differs"].append({"provider": f"{w['type']}/{w['name']}",
+                                   "installed": got["version"], "bundle": w["version"]})
         if w.get("optional"):
             # v1.52.0 : un fournisseur facultatif (CAAPH, les services) ne
             # bloque pas la création de clusters ; il est dit à part.
