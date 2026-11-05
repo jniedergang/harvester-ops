@@ -147,7 +147,8 @@ install_scripts() {
     ln -sf "$PREFIX/harvester-bookings.py" "$PREFIX/harvester-bookings"
     ln -sf "$PREFIX/harvester-replication.py" "$PREFIX/harvester-replication"
     ln -sf "$PREFIX/harvester-folders.py" "$PREFIX/harvester-folders"
-    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer,forklift,capi,network,resources,baremetal,containers,kvm,gpus,bookings,replication,folders}"
+    ln -sf "$PREFIX/harvester-plans.py" "$PREFIX/harvester-plans"
+    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer,forklift,capi,network,resources,baremetal,containers,kvm,gpus,bookings,replication,folders,plans}"
 }
 
 # -----------------------------------------------------------------------------

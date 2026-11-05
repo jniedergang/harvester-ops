@@ -51,6 +51,7 @@ sys.path.insert(0, str(HERE / "lib"))
 import bm_discover  # noqa: E402
 import bm_profiles  # noqa: E402
 import cluster_decl  # noqa: E402
+import web_loader  # noqa: E402
 
 
 def _step(sid, status, msg=""):
@@ -59,13 +60,7 @@ def _step(sid, status, msg=""):
 
 def _load_web_module(name):
     """Le serveur d'artefacts et l'analyseur vivent avec la console (web/)."""
-    for d in (os.environ.get("HARVESTER_OPS_WEB_DIR"), HERE.parent / "web",
-              "/opt/harvester-ops/web"):
-        if d and (Path(d) / f"{name}.py").is_file():
-            if str(d) not in sys.path:
-                sys.path.insert(0, str(d))
-            return __import__(name)
-    return None
+    return web_loader.load(name)
 
 
 def _remaster(cmd, step):
@@ -170,24 +165,11 @@ def _profiles_state(args):
 
 def _read_secrets(args):
     """Secrets d'une série : fichier privé ou entrée standard, en YAML."""
-    import yaml
-    if args.secrets_stdin:
-        text = sys.stdin.read()
-    else:
-        path = Path(args.secrets_file)
-        if path.stat().st_mode & 0o077:
-            raise SystemExit("--secrets-file must not be readable by others (chmod 600)")
-        text = path.read_text()
     try:
-        doc = yaml.safe_load(text) or {}
-    except yaml.YAMLError:
-        raise SystemExit("secrets: invalid YAML") from None
-    if not isinstance(doc, dict):
-        raise SystemExit("secrets: expected a mapping (token, password, bmc_password, bmc_passwords)")
-    unknown = set(doc) - {"token", "password", "bmc_password", "bmc_passwords"}
-    if unknown:
-        raise SystemExit(f"secrets: unknown keys {sorted(unknown)}")
-    return doc
+        return web_loader.read_secrets(None if args.secrets_stdin else args.secrets_file,
+                                       sys.stdin if args.secrets_stdin else None)
+    except web_loader.SecretsError as e:
+        raise SystemExit(str(e).replace("the secrets file", "--secrets-file")) from None
 
 
 def cmd_profile(args):
@@ -219,18 +201,9 @@ def cmd_profile(args):
             r["bmc_password"] = str(per_host[r["bmc_host"]])
     if args.port:
         os.environ["HARVESTER_OPS_PXE_PORT"] = str(args.port)
-    # le cluster créé est déclaré dans le même répertoire d'état
-    os.environ.setdefault("HARVESTER_OPS_STATE_DIR", str(state))
-    # v1.83.2 : la commande ne surveille aucun cluster (elle chargeait la
-    # console et lançait la surveillance de chacun), et son historique va dans
-    # le même répertoire d'état (il retombait dans /tmp)
-    os.environ.setdefault("HARVESTER_OPS_WATCH", "0")
-    os.environ.setdefault("HARVESTER_OPS_READ_WORKERS", "0")
-    # v1.99.0 : jamais de suiveur de réplication depuis cette commande (la
-    # console ne le lance que de son point d'entrée ; seconde garde)
-    os.environ["HARVESTER_OPS_REPLICATION_FOLLOW"] = "0"
-    os.environ.setdefault("HARVESTER_OPS_ACTIONS_DB", str(Path(state) / "actions.db"))
-    os.environ.setdefault("HARVESTER_OPS_NOTES_DB", str(Path(state) / "notes.db"))
+    # le cluster créé est déclaré dans le même répertoire d'état ; ni
+    # surveillance ni suiveur de réplication depuis cette commande
+    web_loader.prepare_console_env(state)
     app = _load_web_module("app")
     if app is None:
         print("web/app.py not found (set HARVESTER_OPS_WEB_DIR)", file=sys.stderr)

@@ -7648,7 +7648,8 @@ def api_baremetal_install():
         vip = data.get("vip") if mode == "create" else \
             (re.match(r"https://\[?([^\]/:]+)", str(data.get("server_url") or "")) or [None, ""])[1]
         record = {"kind": "single", "profile": None, "concurrency": None, "batch": None}
-        body, status = _deploy_with_install(plan_name, plan_vars, cluster, vip, [data], "single", record)
+        body, status = _deploy_with_install(plan_name, plan_vars, cluster, vip, [data], "single", record,
+                                            user=current_user() or "")
         if status != 202:
             return jsonify(body), status
         return jsonify({"action_id": body["action_id"], "hostname": data["hostname"],
@@ -8342,7 +8343,8 @@ def api_bm_profile_batch(name):
             return _bm_presence_batch_json(machines)
         record = _deploy_install_record(name, batch, [], concurrency)
         body, status = _deploy_with_install(plan_name, data.get("plan_variables"), batch["cluster_name"],
-                                            batch["vip"], plan, "batch", record, concurrency)
+                                            batch["vip"], plan, "batch", record, concurrency,
+                                            user=current_user() or "")
         if status != 202:
             return jsonify(body), status
         return jsonify({"action_id": body["action_id"], "cluster": batch["cluster_name"],
@@ -32334,7 +32336,8 @@ def _deploy_install_record(prof_name, batch, hostnames, concurrency, kind="batch
                       "iso": batch.get("iso"), "rows": rows}}
 
 
-def _deploy_with_install(plan_name, plan_variables, cluster, vip, rows, kind, record, concurrency=None):
+def _deploy_with_install(plan_name, plan_variables, cluster, vip, rows, kind, record, concurrency=None,
+                         user=""):
     """Chaîne avec installation : lignes déjà préparées dans la requête
     (garde 132 faite) ; secrets retirés des lignes et gardés par le magasin
     du déroulé. (corps, statut)."""
@@ -32346,7 +32349,7 @@ def _deploy_with_install(plan_name, plan_variables, cluster, vip, rows, kind, re
     install = {"kind": kind, "rows": rows, "cluster": cluster, "hostnames": hostnames,
                "concurrency": concurrency, "record": record}
     body, status = _deploy_launch_checked(cluster, None, plan_name, plan_variables, False,
-                                          current_user() or "", None, install=install, vip=vip,
+                                          user, None, install=install, vip=vip,
                                           run_id=run_id, store=store, required_role="admin")
     if status != 202:
         store.delete_tree(_dch.SECRET_CLASS, run_id)
