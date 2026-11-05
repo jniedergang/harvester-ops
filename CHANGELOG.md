@@ -72,6 +72,21 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   ones; a stop while the run waits on a cluster it resumed ends that wait
   at once. A cluster in failure is never deleted by the plan
   (`cluster-failed`): delete it, then resume.
+- Installing the Cluster API stack from a plan needs the admin role, as the
+  Install button of Cluster API does. When the stack must be installed, an
+  operator gets the `capi-install-admin` finding and Launch stays disabled;
+  the capi phase checks the role again when it starts (resume, chain). A
+  plan whose capi phase finds the stack already installed at the bundle
+  versions stays open to operators. Role table in Bare metal (EN, FR).
+- The legacy **Uninstall** of Cluster API > Installation is refused on a
+  stack managed by Rancher Turtles (409 `turtles-stack`), and its button is
+  greyed with the reason: it deletes namespaces and images, not the
+  `CAPIProvider` objects. It stays available for a stack made by the
+  previous install.
+- New findings: `vm-namespace-too-long` blocks a namespace whose `-vms`
+  name would pass 63 characters; `fleet-storage-unknown` warns when an
+  image has no storage class yet (import in progress), since its root disks
+  cannot be counted in the Longhorn space.
 
 ### Fixed
 - Review of the branch: deleting a cluster listed the identity objects
@@ -93,6 +108,19 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `kube-system/rke2-traefik`; the Harvester address is now also read from
   `kube-system/ingress-expose` (status or kube-vip annotation), for the
   identity, the stack install and the readiness check.
+- Final review: a failed namespace listing made a namespace that existed
+  look new, and the undo of a creation that failed before its manifests
+  (token not issued, Harvester address unknown, render error) deleted it
+  with everything in it. Only a namespace created by the run is removed now.
+- Final review: deleting a cluster made before 2.5.0, as a person who may
+  not read roles and bindings outside the namespace, ended in error and
+  could not be resumed. When the identity account is absent there is
+  nothing to remove, so refused reads no longer stop the deletion, and the
+  generated secret that holds the console kubeconfig is removed. A
+  generated kind that cannot be listed no longer stops the others.
+- A DHCP VIP without a lease (`0.0.0.0`) is never taken as the Harvester
+  address of the identity. The capi phase counts the optional CAAPH in the
+  providers it declares.
 - `kubectl create -o json` of a List of `SelfSubjectAccessReview` answers
   one JSON document per object, not a List: rights were always reported
   "unchecked" before the fix found on harv1.
@@ -101,7 +129,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - The upgrade is additive: `actions.db` gains a `parent` column and an
   index; plans of 2.4.0 load as they are (a disabled capi or clusters phase
   with free keys is saved without them, and the save says so). Clusters
-  created before 2.5.0 keep the console identity and are deleted as before.
+  created before 2.5.0 keep the console identity; their deletion finds no
+  identity objects to remove and needs no right to read roles or bindings
+  outside their namespace.
 - **Rolling back to 2.4.x**: plans with a capi or clusters phase are
   refused by 2.4.x (`phase-not-available`), cluster templates are ignored,
   and child clusters made by 2.5.0 keep running; delete them from 2.5.0
@@ -157,22 +187,24 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   during a cluster creation and a partial multi-cluster run with its
   resume (covered by the tests); control planes of three nodes on distinct
   hosts; more than three child clusters; a stable CAPHV release that holds
-  #276. The legacy **Uninstall** of Cluster API > Installation predates
-  Turtles (it deletes namespaces but not the `CAPIProvider` objects): it
-  was not used, and the stacks declared on harvlab2 and harv4 were left
-  installed.
+  #276. The stacks declared on harvlab2 and harv4 were left installed (the
+  legacy Uninstall is now refused on a Turtles stack, see Changed).
 
 ### Tests
 - New: `test_action_parent_250.py`, `test_capi_identity_250.py`,
   `test_capi_templates_250.py`, `test_capi_fleet_250.py`,
   `test_deploy_plans_250.py`, `test_deploy_capi_250.py`,
-  `test_capi_ui_250.py`, e2e `test_activity_nested_250.py`,
+  `test_capi_ui_250.py`, `test_capi_uninstall_turtles_250.py`, e2e `test_activity_nested_250.py`,
   `test_bm_plans_capi_250.py`, `test_capi_template_250.py`; additions in
   `test_longhorn_room.py`, `test_capi_cli.py`,
   `test_harvester_plans_cli_240.py`. The rights rules are checked against a
   table written by hand from the source, and named mutations (rights
   removed or widened, deletion order, token in a step, teardown by
-  listing, VM namespace, Harvester address) are each caught.
+  listing, VM namespace, Harvester address) are each caught. The final
+  review added tests, each with its mutation, for a namespace that existed
+  surviving a failed listing, the deletion of an older cluster by a project
+  member, the admin rule of the capi phase (check, launch, inside the
+  phase), the refused legacy Uninstall, and the new findings.
 
 ## [2.4.0] - 2026-11-05 - Deployment plans: Terraform content after installation
 
