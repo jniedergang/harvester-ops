@@ -718,3 +718,7 @@ mentions d'outillage dans tout ce qui est publié.
 14. **Dry-run** : il crée puis supprime les déclarations qu'il a créées
     (rien n'est écrit sur le cluster). À confirmer, sinon le dry-run se
     limite aux constats de `check` et à la disponibilité.
+
+## Décisions (05/11/2026)
+
+Toutes les recommandations des points 1 à 14 sont retenues (décisions 146 à 159).
