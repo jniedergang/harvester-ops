@@ -830,3 +830,7 @@ publié.
      et pas en échec, il est repris et attendu ; en échec, l'élément reste en
      erreur (`cluster-failed`) et la personne le supprime puis reprend : la
      chaîne ne supprime jamais un cluster d'elle-même.
+
+## Décisions (05/11/2026)
+
+Les recommandations des points 163 à 176 sont retenues. Le point 162 (bancs) attend l'accord du propriétaire du produit pour harv4, harvlab2 à 32 Gio et un cluster sur harv1.
