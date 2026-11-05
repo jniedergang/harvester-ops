@@ -25,6 +25,7 @@ Ce module ne connaît ni Flask ni Terraform : il est essayé seul.
 """
 
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -160,6 +161,16 @@ class DeclStore:
             # 2.4.0 : migration additive, les lignes d'avant n'ont pas d'origine
             if "origin" not in cols:
                 c.execute("ALTER TABLE tf_declarations ADD COLUMN origin TEXT")
+            # 2.4.0 (revue B2-I2) : unicité du nom garantie par la base, la
+            # console et la ligne de commande écrivant le même fichier. Une base
+            # qui porte déjà un doublon garde son état (journalisé) : la
+            # vérification applicative reste en place.
+            try:
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS tf_decl_name_unique "
+                          "ON tf_declarations(cluster, target_kind, lower(name))")
+            except sqlite3.IntegrityError as e:
+                logging.getLogger("harvester-ops.tf").warning(
+                    "tf_declarations: duplicate names, unique index not created (%s)", e)
 
     def _conn(self):
         c = sqlite3.connect(self.path, timeout=10)
@@ -235,11 +246,16 @@ class DeclStore:
                 raise StoreError("id-taken", "a declaration with this id already exists", id=decl_id)
             if self._name_taken(c, cluster, name, target_kind=target_kind):
                 raise StoreError("name-taken", f"a declaration named {name!r} already exists", name=name)
-            c.execute("INSERT INTO tf_declarations (id, cluster, name, description, resources, revision, "
-                      "created_at, created_by, updated_at, updated_by, target_kind, origin) "
-                      "VALUES (?,?,?,?,?,1,?,?,?,?,?,?)",
-                      (decl_id, cluster, name, description, json.dumps(resources), now, user, now, user,
-                       target_kind, json.dumps(origin) if origin else None))
+            try:
+                c.execute("INSERT INTO tf_declarations (id, cluster, name, description, resources, revision, "
+                          "created_at, created_by, updated_at, updated_by, target_kind, origin) "
+                          "VALUES (?,?,?,?,?,1,?,?,?,?,?,?)",
+                          (decl_id, cluster, name, description, json.dumps(resources), now, user, now, user,
+                           target_kind, json.dumps(origin) if origin else None))
+            except sqlite3.IntegrityError:
+                # un autre processus a créé ce nom entre la lecture et l'écriture
+                raise StoreError("name-taken", f"a declaration named {name!r} already exists",
+                                 name=name) from None
         return self.get(decl_id)
 
     def update(self, decl_id, revision, user="", name=None, description=None, resources=None):
@@ -266,7 +282,11 @@ class DeclStore:
                 return cur
             fields.update(revision=cur["revision"] + 1, updated_at=_now(), updated_by=user)
             sets = ", ".join(f"{k} = ?" for k in fields)
-            c.execute(f"UPDATE tf_declarations SET {sets} WHERE id = ?", (*fields.values(), decl_id))
+            try:
+                c.execute(f"UPDATE tf_declarations SET {sets} WHERE id = ?", (*fields.values(), decl_id))
+            except sqlite3.IntegrityError:
+                raise StoreError("name-taken", f"a declaration named {fields.get('name')!r} already exists",
+                                 name=fields.get("name")) from None
         return self.get(decl_id)
 
     def mark_applied(self, decl_id, status, user=""):

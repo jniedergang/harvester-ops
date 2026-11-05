@@ -363,7 +363,12 @@ def test_resume_refusals(env, prev, status, code):
     run.result = {"plan": "site", "phases": []}
     with wapp.ACTIONS_LOCK:
         wapp.ACTIONS[run.id] = run
-    r = env["client"].post("/api/deploy/harvlab/resume", json={"action_id": run.id})
+    # un déroulé vivant tient le verrou de son cluster (revue B2-I2)
+    fd = wapp._deploy_cluster_lock("harvlab", run.id, "site")[0] if prev["status"] == "running" else None
+    try:
+        r = env["client"].post("/api/deploy/harvlab/resume", json={"action_id": run.id})
+    finally:
+        wapp._flock_release(fd)
     assert r.status_code == status and (code is None or r.get_json()["code"] == code), r.get_json()
     assert env["client"].post("/api/deploy/harvlab/resume", json={"action_id": "../x"}).status_code == 400
     assert env["client"].post("/api/deploy/harvlab/resume", json={"action_id": "9" * 12}).status_code == 404
@@ -444,3 +449,118 @@ def test_batch_with_unknown_plan(env):
     assert r.status_code == 404 and env["started"] == []
     r = env["client"].post("/api/baremetal/profiles/rack-a/batch", json=batch_body(plan="Bad"))
     assert r.status_code == 400
+
+
+# --- revues B2-I1 et B2-I2 : processus multiples, reprise après interruption ---
+
+_HOLDER = r"""
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+os.ftruncate(fd, 0)
+os.write(fd, sys.argv[2].encode())
+print("held", flush=True)
+sys.stdin.readline()
+"""
+
+
+@pytest.fixture
+def other_process():
+    import subprocess
+    procs = []
+
+    def hold(path, note):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        p = subprocess.Popen([sys.executable, "-c", _HOLDER, str(path), note], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, text=True)
+        assert p.stdout.readline().strip() == "held"
+        procs.append(p)
+        return p
+    yield hold
+    for p in procs:
+        if p.poll() is None:
+            p.communicate("\n", timeout=5)
+
+
+def _lock(env, cluster="harvlab"):
+    return env["state"] / "deploy.d" / f"{cluster}.lock"
+
+
+def test_cluster_locked_by_another_process(env, other_process):
+    """Un déroulé de la ligne de commande (autre processus) tient le cluster :
+    la console refuse un second lancement et la suppression du plan ; libéré,
+    le lancement passe. Mutation jouée : verrou de cluster non pris."""
+    c = env["client"]
+    seed(c)
+    p = other_process(_lock(env), '{"run": "c0c0c0c0c0c0", "plan": "site"}')
+    r = c.post("/api/deploy/harvlab", json={"plan": "site", "variables": {"equipe": "a"}})
+    assert r.status_code == 409 and r.get_json() == {
+        "error": "a deployment is already running on this cluster", "code": "deploy-running",
+        "running": "c0c0c0c0c0c0"}
+    assert env["started"] == []
+    r = c.delete("/api/baremetal/plans/site")
+    assert r.status_code == 409 and r.get_json()["running"] == "c0c0c0c0c0c0"
+    p.communicate("\n", timeout=5)
+    r = c.post("/api/deploy/harvlab", json={"plan": "site", "variables": {"equipe": "a"}})
+    assert r.status_code == 202
+    wapp._flock_release(env["started"][-1][1]["lock_fd"])
+
+
+def _persist_deploy_row(run_id, status="running", result=None, dry_run=False):
+    run = wapp.ActionRun(run_id, "deploy:harvlab", "harvlab", [], dry_run=dry_run)
+    run.status = status
+    run.result = dict({"plan": "site", "plan_revision": 1, "cluster": "harvlab", "variables": {"equipe": "a"},
+                       "phases": [{"id": "readiness", "status": "done"}]}, **(result or {}))
+    wapp._actions_persist(run)
+    return run
+
+
+@pytest.fixture
+def actions_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(wapp, "ACTIONS_DB", tmp_path / "actions.db")
+    wapp._actions_init_db()
+    return tmp_path / "actions.db"
+
+
+def test_interrupted_run_is_resumable_after_a_restart(env, actions_db, other_process):
+    """Revue B2-I1 : console redémarrée en plein déroulé, la ligne reste
+    `running` dans actions.db et n'est plus en mémoire. Verrou libre = plus
+    personne ne la fait tourner : reprise acceptée. Verrou tenu par elle dans
+    un autre processus : 409. Mutation jouée : statut de la base pris tel quel."""
+    c = env["client"]
+    seed(c)
+    _persist_deploy_row("e1e1e1e1e1e1")
+    p = other_process(_lock(env), '{"run": "e1e1e1e1e1e1", "plan": "site"}')
+    r = c.post("/api/deploy/harvlab/resume", json={"action_id": "e1e1e1e1e1e1"})
+    assert r.status_code == 409 and r.get_json()["code"] == "deploy-running"
+    p.communicate("\n", timeout=5)
+    r = c.post("/api/deploy/harvlab/resume", json={"action_id": "e1e1e1e1e1e1"})
+    assert r.status_code == 202 and r.get_json()["resumes"] == "e1e1e1e1e1e1", r.get_json()
+    wapp._flock_release(env["started"][-1][1]["lock_fd"])
+
+
+def test_orphan_rows_are_marked_interrupted(env, actions_db, other_process):
+    """Au chargement : les lignes `deploy:` orphelines passent `interrupted`
+    (ended_at posé : le ramasse-miettes les garde) ; celle d'un déroulé vivant
+    ailleurs ne bouge pas ; les déclarations d'essai d'un dry-run interrompu
+    sont retirées."""
+    store = env["store"]
+    trial = store.create("7" * 12, "harvlab", "site-cles", resources=[])
+    _persist_deploy_row("f1f1f1f1f1f1")
+    _persist_deploy_row("f2f2f2f2f2f2", dry_run=True, result={"trial_declarations": [trial["id"]]})
+    _persist_deploy_row("f3f3f3f3f3f3", status="done")
+    lock_other = env["state"] / "deploy.d" / "harvlab2.lock"
+    run = wapp.ActionRun("f4f4f4f4f4f4", "deploy:harvlab2", "harvlab2", [])
+    run.status, run.result = "running", {"plan": "site"}
+    wapp._actions_persist(run)
+    p = other_process(lock_other, '{"run": "f4f4f4f4f4f4", "plan": "site"}')
+    t0 = wapp.time.time()
+    assert sorted(wapp._deploy_mark_orphans()) == ["f1f1f1f1f1f1", "f2f2f2f2f2f2"]
+    for rid, want in (("f1f1f1f1f1f1", "interrupted"), ("f2f2f2f2f2f2", "interrupted"),
+                      ("f3f3f3f3f3f3", "done"), ("f4f4f4f4f4f4", "running")):
+        d, _ev = wapp._actions_db_get(rid)
+        assert d["status"] == want, (rid, d["status"])
+        if want == "interrupted":
+            assert d["ended_at"] >= t0
+    assert store.get(trial["id"]) is None
+    p.communicate("\n", timeout=5)

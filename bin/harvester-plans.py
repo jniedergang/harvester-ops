@@ -5,6 +5,7 @@
   harvester-plans [--state-dir D] [--json] template list | show NOM | save NOM --file m.yaml [--revision N] | delete NOM
   harvester-plans [--state-dir D] [--json] check  PLAN --cluster C [--vars vars.yaml]
   harvester-plans [--state-dir D] [--json] apply  PLAN --cluster C [--vars vars.yaml] [--dry-run]
+                  [--update-declarations]
   harvester-plans [--state-dir D] [--json] resume ACTION_ID [--secrets-file s.yaml | --secrets-stdin]
                   [--confirm-system HOST=NAME]...
   harvester-plans [--state-dir D] [--json] install PLAN --profile P --nodes nodes.csv --cluster-name C --vip V
@@ -89,7 +90,18 @@ def _vars(args):
     doc = _read_yaml(args.vars, "--vars") or {}
     if not isinstance(doc, dict):
         raise Refused("--vars: expected a mapping of variable values", "invalid-vars")
-    return {str(k): (v if isinstance(v, str) else str(v)) for k, v in doc.items()}
+    out = {}
+    for k, v in doc.items():
+        # revue m6 : comme la console, une valeur est une chaîne (un nombre
+        # ou un booléen YAML se lit comme son texte), jamais None, liste ou dict
+        if isinstance(v, bool):
+            v = "true" if v else "false"
+        elif isinstance(v, (int, float)):
+            v = str(v)
+        elif not isinstance(v, str):
+            raise Refused(f"--vars: {k}: not a string", "invalid-vars")
+        out[str(k)] = v
+    return out
 
 
 def _secrets(args):
@@ -208,7 +220,8 @@ def _launched(app, body, status):
 def cmd_check(args, state):
     app = _console(state)
     kc = _cluster_kc(app, args.cluster)
-    findings, summary, _ctx = app._deploy_prepare(args.cluster, args.plan, _vars(args), kc=kc)
+    findings, summary, _ctx = app._deploy_prepare(args.cluster, args.plan, _vars(args), kc=kc,
+                                                  update_differing=bool(args.update_declarations))
     if findings is None:
         raise Refused(f"no such plan: {args.plan}", "not-found")
     blocking = bool(app._deploy_blocking(findings))
@@ -222,7 +235,8 @@ def cmd_apply(args, state):
     app = _console(state)
     kc = _cluster_kc(app, args.cluster)
     body, status = app._deploy_launch_checked(args.cluster, kc, args.plan, _vars(args), bool(args.dry_run),
-                                              getpass.getuser(), None)
+                                              getpass.getuser(), None,
+                                              update_differing=bool(args.update_declarations))
     return _launched(app, body, status)
 
 
@@ -256,7 +270,8 @@ def cmd_resume(args, state):
     body, status = app._deploy_launch_checked(
         cluster, kc, result.get("plan") or "", result.get("variables") or {}, False, getpass.getuser(), None,
         previous=result, resumes=args.action_id, install=install, vip=vip, run_id=run_id, store=store,
-        required_role="admin" if install else "operator")
+        required_role="admin" if install else "operator",
+        update_differing=result.get("update_differing") is True)
     if status != 202 and store is not None:
         store.delete_tree("plan-run", run_id)
     return _launched(app, body, status)
@@ -328,6 +343,8 @@ def build_parser():
         sp.add_argument("plan")
         sp.add_argument("--cluster", required=True)
         sp.add_argument("--vars", help="YAML file of the plan variable values")
+        sp.add_argument("--update-declarations", action="store_true",
+                        help="update an existing declaration of the plan whose values differ")
         if verb == "apply":
             sp.add_argument("--dry-run", action="store_true", help="plan only; trial declarations removed")
 

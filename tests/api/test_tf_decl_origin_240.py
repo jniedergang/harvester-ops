@@ -222,3 +222,79 @@ def test_route_wrapper_answers_201_with_the_session_identity(world, monkeypatch)
     assert code == 201 and set(body) == {"action_id", "plan_hash"}
     run = _wait(body["action_id"])
     assert run.result["by"] == "alice" and run.cluster_user == "alice@harv1"
+
+
+# Revue B2-I2 : la ligne de commande charge ce même module dans un AUTRE
+# processus ; la réservation et l'exécution d'une déclaration passent donc
+# aussi par un verrou de fichier dans son espace (`.run.lock`). Un processus
+# fils qui le tient bloque réservation, lancement et suppression ; libéré, tout
+# repart. Mutation jouée : verrou de fichier non pris (les trois tombent).
+_HOLDER = r"""
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+os.write(fd, b"other process\n")
+print("held", flush=True)
+sys.stdin.readline()
+"""
+
+
+@pytest.fixture
+def other_process():
+    import subprocess
+    procs = []
+
+    def hold(path):
+        p = subprocess.Popen([sys.executable, "-c", _HOLDER, str(path)], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, text=True)
+        assert p.stdout.readline().strip() == "held"
+        procs.append(p)
+        return p
+    yield hold
+    for p in procs:
+        if p.poll() is None:
+            p.communicate("\n", timeout=5)
+
+
+def test_declaration_locked_by_another_process(world, other_process):
+    store, kc, _ = world
+    d = store.create("9" * 12, "harv1", "x", resources=[sshkey("7" * 12, "ops")])
+    p = other_process(wapp._tf_decl_ws(d) / ".run.lock")
+    assert not wapp._tf_decl_hold(d["id"], "aaaaaaaaaaaa")
+    with pytest.raises(wapp.TfLaunchError) as e:
+        wapp._tf_decl_launch("harv1", kc, d["id"], "plan")
+    assert e.value.status == 409 and e.value.payload["code"] == "running"
+    with wapp.app.test_client() as c:
+        r = c.delete(f"/api/tf-declarations/{d['id']}")
+    assert r.status_code == 409 and store.get(d["id"])
+    p.communicate("\n", timeout=5)
+    assert wapp._tf_decl_hold(d["id"], "aaaaaaaaaaaa")
+    wapp._tf_decl_release(d["id"], "aaaaaaaaaaaa")
+    run_id, _h = wapp._tf_decl_launch("harv1", kc, d["id"], "plan")
+    assert _wait(run_id).status == "done"
+
+
+def test_hold_and_run_keep_the_file_lock_until_released(world):
+    """Pendant la réservation (plan puis apply d'un déroulé), un autre
+    processus ne prend pas le verrou ; il le prend après la libération."""
+    import subprocess
+    store, kc, _ = world
+    d = store.create("6" * 12, "harv1", "x", resources=[sshkey("7" * 12, "ops")])
+    lock = wapp._tf_decl_ws(d) / ".run.lock"
+    probe = ("import fcntl, os, sys\nfd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT)\n"
+             "try:\n    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); print('free')\n"
+             "except OSError:\n    print('held')\n")
+
+    def state():
+        return subprocess.run([sys.executable, "-c", probe, str(lock)], capture_output=True,
+                              text=True).stdout.strip()
+    assert wapp._tf_decl_hold(d["id"], "aaaaaaaaaaaa")
+    assert state() == "held"
+    run_id, _h = wapp._tf_decl_launch("harv1", kc, d["id"], "plan", holder="aaaaaaaaaaaa")
+    assert _wait(run_id).status == "done"
+    assert state() == "held"                          # plan fini, réservation tenue
+    wapp._tf_decl_release(d["id"], "aaaaaaaaaaaa")
+    assert state() == "free"
+    run_id, _h = wapp._tf_decl_launch("harv1", kc, d["id"], "plan")
+    assert _wait(run_id).status == "done"
+    assert state() == "free"                          # exécution finie : libéré

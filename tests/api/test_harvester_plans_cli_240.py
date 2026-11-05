@@ -229,3 +229,36 @@ def test_install_sh_links_the_command():
     assert re.search(r'ln -sf "\$PREFIX/harvester-plans\.py" "\$PREFIX/harvester-plans"', text)
     said = re.search(r'Scripts installed: harvester-\{([^}]*)\}', text).group(1).split(",")
     assert "plans" in said
+
+
+@pytest.mark.parametrize("value,ok", [("ops", True), (12, True), (True, True),
+                                      (None, False), ([1], False), ({"a": 1}, False)])
+def test_vars_values_are_scalars_like_in_the_console(env, tmp_path, monkeypatch, capsys, value, ok):
+    """Revue m6 : None, liste et dictionnaire refusés (la console les refuse
+    en « not a string ») au lieu de devenir le texte "None"."""
+    tr.seed(env["client"])
+    st = _state(monkeypatch, env)
+    v = write(tmp_path / "v.yaml", {"equipe": value})
+    rc, out, _ = run(capsys, *st, "check", "site", "--cluster", "harvlab", "--vars", v)
+    if ok:
+        assert rc == 0, out
+    else:
+        assert rc == 2 and json.loads(out)["code"] == "invalid-vars"
+
+
+def test_apply_update_declarations_flag(world, tmp_path, monkeypatch, capsys):
+    """Revue B2-I6 : la ligne de commande demande la mise à jour d'une
+    déclaration dont les valeurs diffèrent, comme la fenêtre."""
+    tr.seed(world["client"])
+    st = _state(monkeypatch, world)
+    rc, _out, _err = run(capsys, *st, "apply", "site", "--cluster", "harvlab",
+                         "--vars", write(tmp_path / "v.yaml", {"equipe": "ops"}))
+    assert rc == 0
+    v2 = write(tmp_path / "v2.yaml", {"equipe": "dev"})
+    rc, out, err = run(capsys, *st, "check", "site", "--cluster", "harvlab", "--vars", v2)
+    assert rc == 0 and "decl-differs" in err
+    rc, out, err = run(capsys, *st, "apply", "site", "--cluster", "harvlab", "--vars", v2,
+                       "--update-declarations")
+    d = json.loads(out)
+    assert rc == 0 and d["result"]["phases"][1]["items"][0]["updated"] is True
+    assert world["store"].find_by_name("harvlab", "site-cles")["resources"][0]["spec"]["name"] == "dev-ops"

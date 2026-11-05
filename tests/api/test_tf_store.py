@@ -157,3 +157,36 @@ def test_a_230_database_is_migrated_in_place(tmp_path):
     assert d["origin"] is None and d["revision"] == 3 and d["last_applied_status"] == "done"
     ts.DeclStore(path)                                 # deuxième ouverture : rien à migrer
     assert store.create(B, "harv1", "new", origin=ORIGIN)["origin"] == ORIGIN
+
+
+# 2.4.0 (revue B2-I2) : la console et la ligne de commande écrivent la même
+# base ; l'unicité du nom tient même quand la vérification applicative de
+# l'une ne voit pas encore l'écriture de l'autre.
+def test_name_unique_in_the_database_itself(store, monkeypatch):
+    store.create(A, "harv1", "Web")
+    # vérification applicative court-circuitée : seul l'index arrête le doublon
+    monkeypatch.setattr(store, "_name_taken", lambda *a, **k: False)
+    with pytest.raises(ts.StoreError) as e:
+        store.create(B, "harv1", "web")
+    assert e.value.code == "name-taken"
+    store.create(B, "harv2", "web")                       # autre cluster : permis
+    store.create(C, "harv1", "web", target_kind="kvm")    # autre famille : permis
+    d = store.create("d" * 12, "harv1", "other")
+    with pytest.raises(ts.StoreError) as e:
+        store.update(d["id"], 1, name="WEB")
+    assert e.value.code == "name-taken"
+
+
+def test_existing_duplicates_keep_the_database_usable(tmp_path):
+    import sqlite3
+    db = tmp_path / "tf.db"
+    ts.DeclStore(db)
+    c = sqlite3.connect(db)
+    c.execute("DROP INDEX tf_decl_name_unique")
+    for i in (A, B):
+        c.execute("INSERT INTO tf_declarations (id, cluster, name, created_at, updated_at) "
+                  "VALUES (?, 'harv1', 'dup', 'x', 'x')", (i,))
+    c.commit()
+    c.close()
+    s = ts.DeclStore(db)                                  # ne lève pas
+    assert len(s.list("harv1")) == 2

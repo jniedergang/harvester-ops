@@ -26935,11 +26935,65 @@ def _tf_decl_ws(decl, create=True):
 # QUE SOIT sa cible (2.3.0 ne le faisait que pour KVM). Deux terraform sur le
 # même espace se marchaient dessus, et une chaîne de plan pouvait appliquer
 # un `tfplan` écrit par un autre déroulé que celui qu'elle avait relu.
+def _flock_try(path, note=""):
+    """Verrou exclusif (flock) d'un fichier, non bloquant : (descripteur,
+    None) s'il est pris, `note` écrite dedans ; (None, note du détenteur)
+    sinon. Libéré par la fermeture du descripteur ou la mort du processus,
+    même brutale : jamais de fichier périmé qui bloquerait. Deux
+    descripteurs du même processus s'excluent aussi (verrou par ouverture)."""
+    import fcntl
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            holder = os.pread(fd, 512, 0).decode(errors="replace").strip()
+        except OSError:
+            holder = ""
+        os.close(fd)
+        return None, holder
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, f"{note}\n".encode(), 0)
+    return fd, None
+
+
+def _flock_release(fd):
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 TF_DECL_RUNNING = set()         # déclarations dont une exécution tourne
 # Réservation d'une déclaration par un déroulé de plan (identifiant de
 # l'action deploy:) entre son plan et son apply : seul ce déroulé lance.
 TF_DECL_HELD = {}
 TF_DECL_RUNNING_LOCK = threading.Lock()
+# 2.4.0 (revue B2-I2) : la ligne de commande charge ce module dans un autre
+# processus ; réservation et exécution tiennent donc aussi un verrou de
+# fichier dans l'espace de la déclaration (`.run.lock`), un descripteur par
+# déclaration, gardé tant qu'elle tourne OU est réservée dans ce processus.
+TF_DECL_FDS = {}
+
+
+def _tf_decl_flock(decl_id, note):
+    """Descripteur du verrou de fichier de la déclaration, None s'il est tenu
+    ailleurs (ou si elle n'existe plus). À appeler sous TF_DECL_RUNNING_LOCK."""
+    d = TF_DECLS.get(decl_id)
+    if d is None:
+        return None
+    fd, _holder = _flock_try(_tf_decl_ws(d) / ".run.lock", note)
+    return fd
+
+
+def _tf_decl_unlock_if_idle(decl_id):
+    """Rend le verrou de fichier quand la déclaration ne tourne plus et n'est
+    plus réservée dans ce processus. Sous TF_DECL_RUNNING_LOCK."""
+    if decl_id not in TF_DECL_RUNNING and decl_id not in TF_DECL_HELD:
+        _flock_release(TF_DECL_FDS.pop(decl_id, None))
 
 
 def _tf_decl_busy(decl_id, holder=None):
@@ -26954,6 +27008,11 @@ def _tf_decl_hold(decl_id, holder):
     with TF_DECL_RUNNING_LOCK:
         if _tf_decl_busy(decl_id, holder):
             return False
+        if decl_id not in TF_DECL_FDS:
+            fd = _tf_decl_flock(decl_id, f"held by {holder}")
+            if fd is None:
+                return False                     # un autre processus la tient
+            TF_DECL_FDS[decl_id] = fd
         TF_DECL_HELD[decl_id] = holder
         return True
 
@@ -26962,6 +27021,7 @@ def _tf_decl_release(decl_id, holder):
     with TF_DECL_RUNNING_LOCK:
         if TF_DECL_HELD.get(decl_id) == holder:
             del TF_DECL_HELD[decl_id]
+            _tf_decl_unlock_if_idle(decl_id)
 
 
 def _tf_kvm_host(host):
@@ -27972,18 +28032,22 @@ def api_tf_declaration_delete(decl_id):
     if d is None:
         return jsonify({"error": "declaration not found"}), 404
     with TF_DECL_RUNNING_LOCK:
-        if _tf_decl_busy(decl_id):
+        fd = None if _tf_decl_busy(decl_id) or decl_id in TF_DECL_FDS else _tf_decl_flock(decl_id, "delete")
+        if fd is None:
             return jsonify({"error": "this declaration is running", "code": "running",
                             "hint": "wait for the current plan, apply or destroy to end"}), 409
-    ws = _tf_decl_ws(d, create=False)
-    deployed = _tfst.addresses(ws) if ws.exists() else []
-    if deployed:
-        return jsonify({"error": "declaration still has deployed resources",
-                        "code": "deployed", "deployed": deployed}), 409
-    TF_DECLS.delete(decl_id)
-    if ws.exists():
-        import shutil as _shutil
-        _shutil.rmtree(ws, ignore_errors=True)
+    try:
+        ws = _tf_decl_ws(d, create=False)
+        deployed = _tfst.addresses(ws) if ws.exists() else []
+        if deployed:
+            return jsonify({"error": "declaration still has deployed resources",
+                            "code": "deployed", "deployed": deployed}), 409
+        TF_DECLS.delete(decl_id)
+        if ws.exists():
+            import shutil as _shutil
+            _shutil.rmtree(ws, ignore_errors=True)
+    finally:
+        _flock_release(fd)
     return jsonify({"deleted": decl_id})
 
 
@@ -28381,6 +28445,13 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
             raise TfLaunchError(409, {"error": "this declaration is already running",
                                       "code": "running",
                                       "hint": "wait for the current plan, apply or destroy to end"})
+        if decl["id"] not in TF_DECL_FDS:
+            fd = _tf_decl_flock(decl["id"], f"run {mode}")
+            if fd is None:
+                raise TfLaunchError(409, {"error": "this declaration is running in another process",
+                                          "code": "running",
+                                          "hint": "wait for the current plan, apply or destroy to end"})
+            TF_DECL_FDS[decl["id"]] = fd
         TF_DECL_RUNNING.add(decl["id"])
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, f"{label}:{decl['name']}:{len(rendered)}", cluster, [],
@@ -28440,6 +28511,7 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
                 log_tf.warning("KVM declaration cleanup: %s", e)
         with TF_DECL_RUNNING_LOCK:
             TF_DECL_RUNNING.discard(decl["id"])
+            _tf_decl_unlock_if_idle(decl["id"])
 
 
 def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, use_saved_plan, user):
@@ -31204,22 +31276,13 @@ def _replication_follow_lock(path):
     console : (descripteur, None) s'il est pris, (None, pid du détenteur)
     si une autre console le tient déjà. Libéré par le noyau à la sortie,
     même brutale : jamais de fichier périmé qui bloquerait."""
-    import fcntl
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fd, note = _flock_try(path, str(os.getpid()))
+    if fd is not None:
+        return fd, None
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        try:
-            holder = int(os.pread(fd, 32, 0).decode().strip() or 0)
-        except (OSError, ValueError):
-            holder = 0
-        os.close(fd)
-        return None, holder
-    os.ftruncate(fd, 0)
-    os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
-    return fd, None
+        return None, int((note or "").split()[0] if (note or "").split() else 0)
+    except ValueError:
+        return None, 0
 
 
 def _start_replication_follower():
@@ -31427,7 +31490,8 @@ DEPLOY_FINDING_LEVELS = {
     "plan-invalid": "blocking", "phase-not-available": "blocking", "template-missing": "blocking",
     "var-missing": "blocking", "var-invalid": "blocking", "decl-name-taken": "blocking",
     "tf-missing": "blocking", "cluster-unreachable": "blocking",
-    "template-newer": "warning", "decl-exists": "info", "readiness-later": "info",
+    "template-newer": "warning", "decl-differs": "warning", "plan-changed": "warning",
+    "decl-exists": "info", "readiness-later": "info",
 }
 
 
@@ -31477,12 +31541,104 @@ def _deploy_busy(cluster):
                      and r.status in ("starting", "running")), None)
 
 
+# 2.4.0 (revue B2-I2) : un déroulé à la fois par cluster ENTRE PROCESSUS (la
+# ligne de commande charge ce module à côté de la console) : verrou de
+# fichier `<état>/deploy.d/<cluster>.lock`, pris au lancement sous
+# _DEPLOY_LAUNCH_LOCK et tenu par le fil du déroulé jusqu'à sa fin. Il porte
+# {"run", "plan"} ; un verrou libre dit aussi que personne ne fait plus
+# tourner une ligne restée `running` dans actions.db (revue B2-I1).
+_DEPLOY_LOCK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+
+
+def _deploy_lock_path(cluster):
+    if not isinstance(cluster, str) or not _DEPLOY_LOCK_NAME_RE.match(cluster) or ".." in cluster:
+        raise ValueError("invalid cluster name for a lock")
+    return _bmp._private_dir(Path(_deploy_state()) / "deploy.d") / f"{cluster}.lock"
+
+
+def _deploy_cluster_lock(cluster, run_id, plan_name):
+    """(descripteur, None) si le verrou du cluster est pris pour ce déroulé,
+    (None, {"run", "plan"} du détenteur) sinon."""
+    fd, note = _flock_try(_deploy_lock_path(cluster), json.dumps({"run": run_id, "plan": plan_name}))
+    if fd is not None:
+        return fd, None
+    try:
+        holder = json.loads(note or "{}")
+    except ValueError:
+        holder = {}
+    return None, holder if isinstance(holder, dict) else {}
+
+
+def _deploy_lock_holder(cluster):
+    """{"run", "plan"} du déroulé qui tient le cluster (ce processus ou un
+    autre), None si personne."""
+    try:
+        fd, holder = _deploy_cluster_lock(cluster, "", "")
+    except (ValueError, OSError):
+        return None
+    _flock_release(fd)
+    return holder
+
+
 def _deploy_plan_running(plan_name):
+    """Identifiant d'un déroulé en cours de ce plan (ce processus ou un
+    autre), ou None."""
     with ACTIONS_LOCK:
-        return next((r for r in ACTIONS.values()
-                     if str(r.action).startswith(DEPLOY_PREFIX)
-                     and r.status in ("starting", "running")
-                     and (r.result or {}).get("plan") == plan_name), None)
+        run = next((r for r in ACTIONS.values()
+                    if str(r.action).startswith(DEPLOY_PREFIX)
+                    and r.status in ("starting", "running")
+                    and (r.result or {}).get("plan") == plan_name), None)
+    if run is not None:
+        return run.id
+    d = Path(_deploy_state()) / "deploy.d"
+    for f in sorted(d.glob("*.lock")) if d.is_dir() else []:
+        holder = _deploy_lock_holder(f.stem)
+        if holder and holder.get("plan") == plan_name:
+            return holder.get("run") or "?"
+    return None
+
+
+def _deploy_mark_orphans():
+    """Lignes `deploy:` restées `running` dans actions.db alors que plus
+    personne ne tient le verrou de leur cluster (console redémarrée, ligne
+    de commande tuée) : passées `interrupted`, donc reprenables (revue
+    B2-I1) ; les déclarations d'essai d'un dry-run interrompu sont retirées
+    comme à sa fin. Sans effet sur un déroulé vivant d'un autre processus."""
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB), timeout=10)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT id, action, result FROM actions WHERE action LIKE 'deploy:%' "
+                            "AND status IN ('starting', 'running')").fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        log_actions.warning("deploy orphans: %s", e)
+        return []
+    marked = []
+    now = time.time()
+    for row in rows:
+        cluster = row["action"][len(DEPLOY_PREFIX):]
+        if (_deploy_lock_holder(cluster) or {}).get("run") == row["id"]:
+            continue
+        try:
+            conn = sqlite3.connect(str(ACTIONS_DB), timeout=10)
+            conn.execute("UPDATE actions SET status = 'interrupted', exit_code = -1, ended_at = ? "
+                         "WHERE id = ? AND status IN ('starting', 'running')", (now, row["id"]))
+            conn.commit()
+            conn.close()
+        except sqlite3.Error as e:
+            log_actions.warning("deploy orphan %s: %s", row["id"], e)
+            continue
+        with ACTIONS_LOCK:
+            run = ACTIONS.get(row["id"])
+            if run is not None and run.status in ("starting", "running", "interrupted"):
+                run.status, run.exit_code, run.ended_at = "interrupted", -1, now
+        trial = (_row_result(row["result"]) or {}).get("trial_declarations") or []
+        try:
+            _deploy_cleanup_dry([t for t in trial if isinstance(t, str)])
+        except Exception as e:                 # noqa: BLE001
+            log_actions.warning("deploy orphan %s cleanup: %s", row["id"], type(e).__name__)
+        marked.append(row["id"])
+    return marked
 
 
 def _deploy_tf_tools_missing():
@@ -31518,7 +31674,7 @@ def _deploy_values(plan, variables, cluster, vip):
     return values, errors
 
 
-def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=False):
+def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=False, update_differing=False):
     """Contrôles d'un lancement, lecture seule. Rend (constats, résumé,
     contexte) ; le contexte porte de quoi lancer : plan, modèles, valeurs,
     ressources rendues. `install` : le cluster sera créé par la chaîne (ni
@@ -31585,6 +31741,13 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
         elif d:
             findings.append(_deploy_finding("decl-exists", "terraform",
                                             f"{dname} exists: it is only planned and applied"))
+            # revue B2-I6 : d'autres valeurs que celles de la déclaration ne
+            # passent jamais sous silence (« rien à changer » mensonger)
+            if tname in rendered and _deploy_resources_differ(rendered[tname], d.get("resources")):
+                findings.append(_deploy_finding(
+                    "decl-differs", "terraform",
+                    f"{dname} differs from what these values give: it is updated only if you ask for it"
+                    if not update_differing else f"{dname} differs from what these values give: it is updated"))
             t = templates.get(tname)
             if t and origin.get("template_revision") != t["revision"]:
                 findings.append(_deploy_finding(
@@ -31596,8 +31759,17 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
                                         "readiness is checked again when the phase starts"))
     estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) + (30 if install else 0)
     summary = {"declarations": decls, "estimate_minutes": estimate}
-    ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install}
+    ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
+           "update_differing": bool(update_differing)}
     return findings, summary, ctx
+
+
+def _deploy_resources_differ(rendered, existing):
+    """Vrai si les ressources rendues pour ce lancement diffèrent de celles
+    de la déclaration reprise (genre et contenu ; identifiants ignorés)."""
+    def shape(rs):
+        return [(r.get("kind"), r.get("spec") or {}) for r in rs or [] if isinstance(r, dict)]
+    return shape(rendered) != shape(existing)
 
 
 def _deploy_blocking(findings):
@@ -31805,6 +31977,19 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
         data["declaration_id"] = decl["id"]
         if not _tf_decl_hold(decl["id"], run.id):
             return _dch.ItemOutcome("error", "declaration-busy", data=data)
+        # revue B2-I6 : valeurs différentes de la déclaration reprise. Mise à
+        # jour seulement si le lancement l'a demandé (la déclaration a pu être
+        # retouchée dans Terraform, décision 149) ; sinon gardée et DIT.
+        differs = _deploy_resources_differ(rendered[tname], decl.get("resources"))
+        if differs:
+            data["differs"] = True
+            if dctx.get("update_differing") and not dry:
+                try:
+                    decl = TF_DECLS.update(decl["id"], decl["revision"], user=user, resources=rendered[tname])
+                except _tfs.StoreError as e:
+                    _tf_decl_release(decl["id"], run.id)
+                    return _dch.ItemOutcome("error", f"update refused ({e.code})", data=data)
+                data["updated"] = True
         actions = []
         data["actions"] = actions
         try:
@@ -31824,13 +32009,16 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
             if counts.get("delete") or counts.get("replace"):
                 # jamais de destruction par la chaîne : la déclaration est à revoir
                 return _dch.ItemOutcome("error", "plan-destroys", data=data)
+            kept = differs and not data.get("updated")
             if dry:
-                return _dch.ItemOutcome("done", "planned (dry run)", data=data)
+                return _dch.ItemOutcome("done", "planned (dry run)" + (", values differ" if differs else ""),
+                                        data=data)
             if not (counts.get("create") or counts.get("update")):
                 if decl.get("last_applied_status") != "done":
                     TF_DECLS.mark_applied(decl["id"], "done", user)
                 data["revision_applied"] = decl["revision"]
-                return _dch.ItemOutcome("done", "nothing to change", data=data)
+                return _dch.ItemOutcome("done", "kept: values differ from the declaration" if kept
+                                        else "nothing to change", data=data)
             aid, _h = _tf_decl_launch(cluster, kc, decl["id"], "apply", plan_hash=h, user=user,
                                       cluster_user=cluster_user, holder=run.id)
             actions.append(aid)
@@ -31838,7 +32026,8 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
             if status != "done":
                 return _dch.ItemOutcome("error", f"apply failed (action {aid})", data=data)
             data["revision_applied"] = (TF_DECLS.get(decl["id"]) or decl)["revision"]
-            return _dch.ItemOutcome("done", "applied", data=data)
+            return _dch.ItemOutcome("done", "applied, values differ from the declaration (kept)" if kept
+                                    else "applied", data=data)
         except TfLaunchError as e:
             return _dch.ItemOutcome("error", str(e.payload.get("code") or e.payload.get("error") or "refused")[:120],
                                     data=data)
@@ -31893,11 +32082,24 @@ def _deploy_cleanup_dry(created):
         _shutil.rmtree(ws, ignore_errors=True)
 
 
-def _deploy_runner(run, cluster, kc, dctx, user, cluster_user, previous, install, store):
+def _deploy_runner(run, cluster, kc, dctx, user, cluster_user, previous, install, store, lock_fd=None):
+    try:
+        _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, install, store)
+    finally:
+        # rendu APRÈS l'écriture du statut final : une ligne `running` dans
+        # actions.db a toujours son verrou tenu (revue B2-I1)
+        _flock_release(lock_fd)
+
+
+def _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, install, store):
     created = []
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     base = dict(run.result or {})
+    if run.dry_run:
+        # consignées en cours de route : une console arrêtée en plein essai
+        # les retire au redémarrage (_deploy_mark_orphans)
+        base["trial_declarations"] = created
     ctx = _DeployCtx(run, base)
     res = None
     try:
@@ -31919,6 +32121,7 @@ def _deploy_runner(run, cluster, kc, dctx, user, cluster_user, previous, install
                 ctx.emit_step("cleanup", "done", f"{len(created)} trial declaration(s) removed")
             except Exception as e:             # noqa: BLE001
                 ctx.emit_step("cleanup", "error", type(e).__name__)
+            created[:] = [i for i in created if TF_DECLS.get(i)]
         final = (res or {}).get("status") or "error"
         run.result = dict(base, **{k: v for k, v in (res or {}).items() if k != "status"}, status=final)
         run.error_summary = (res or {}).get("error_summary") or None
@@ -31930,7 +32133,8 @@ def _deploy_runner(run, cluster, kc, dctx, user, cluster_user, previous, install
 
 
 def _deploy_start(cluster, kc, dctx, dry_run=False, user="", cluster_user=None, previous=None,
-                  resumes=None, install=None, run_id=None, store=None, required_role="operator"):
+                  resumes=None, install=None, run_id=None, store=None, required_role="operator",
+                  lock_fd=None):
     """Crée l'action `deploy:<cluster>` et lance son fil ; rend son
     identifiant. L'appelant a fait les contrôles (constats bloquants,
     occupation, garde 132) dans la requête."""
@@ -31943,14 +32147,14 @@ def _deploy_start(cluster, kc, dctx, dry_run=False, user="", cluster_user=None, 
     run.result = {"plan": plan["name"], "plan_revision": plan["revision"], "cluster": cluster,
                   "resumes": resumes, "dry_run": bool(dry_run), "by": user or "",
                   "variables": {k: v for k, v in dctx["values"].items() if k not in _dpl.BUILTIN_VARS},
-                  "phases": []}
+                  "update_differing": bool(dctx.get("update_differing")), "phases": []}
     if install:
         run.result["install"] = install.get("record")
     with ACTIONS_LOCK:
         ACTIONS[run_id] = run
     READ_SHARE.invalidate("_activity")
     threading.Thread(target=_deploy_runner,
-                     args=(run, cluster, kc, dctx, user, cluster_user, previous, install, store),
+                     args=(run, cluster, kc, dctx, user, cluster_user, previous, install, store, lock_fd),
                      daemon=True, name=f"deploy-{run_id}").start()
     return run_id
 
@@ -31973,18 +32177,34 @@ def _deploy_previous(action_id):
         prev["result"] = d.get("result") if isinstance(d.get("result"), dict) else {}
     if not str(prev["action"] or "").startswith(DEPLOY_PREFIX):
         return None, ({"error": "not a deployment run", "fields": ["action_id"]}, 400)
+    # revue B2-I1/I2 : vivant = son verrou de cluster est tenu par lui (ici ou
+    # dans un autre processus) ; une ligne `running` sans détenteur a été
+    # interrompue (console redémarrée, ligne de commande tuée)
+    if prev["status"] in ("starting", "running", "interrupted"):
+        holder = _deploy_lock_holder(str(prev["action"])[len(DEPLOY_PREFIX):]) or {}
+        if holder.get("run") == action_id:
+            prev["status"] = "running"
+        elif prev["status"] != "interrupted":
+            prev["status"] = "interrupted"
     return prev, None
 
 
 def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, cluster_user,
                            previous=None, resumes=None, install=None, vip=None, run_id=None,
-                           store=None, required_role="operator"):
+                           store=None, required_role="operator", update_differing=False):
     """Contrôles puis lancement, sous le verrou de lancement : (corps,
     statut). Partagé par les routes et la ligne de commande."""
     findings, summary, dctx = _deploy_prepare(cluster, plan_name, variables, kc=kc, vip=vip,
-                                              install=bool(install))
+                                              install=bool(install), update_differing=update_differing)
     if findings is None:
         return {"error": "no such plan", "fields": ["plan"]}, 404
+    if previous is not None and dctx is not None \
+            and previous.get("plan_revision") not in (None, dctx["plan"]["revision"]):
+        # revue m1 : le plan a changé depuis le déroulé repris ; modèles
+        # ajoutés appliqués, retirés laissés tels quels
+        findings.append(_deploy_finding(
+            "plan-changed", "plan", f"plan {plan_name} changed since this run (revision "
+            f"{previous.get('plan_revision')} -> {dctx['plan']['revision']})"))
     blocking = _deploy_blocking(findings)
     if blocking or dctx is None:
         return {"error": "the plan cannot start", "code": "blocking-findings",
@@ -31999,9 +32219,20 @@ def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, clu
         if seq is not None and seq.action in CLUSTER_SEQUENCES:
             return {"error": f"{seq.action} of this cluster is running", "code": "cluster-busy",
                     "running": seq.id}, 409
-        action_id = _deploy_start(cluster, kc, dctx, dry_run=dry_run, user=user, cluster_user=cluster_user,
-                                  previous=previous, resumes=resumes, install=install, run_id=run_id,
-                                  store=store, required_role=required_role)
+        run_id = run_id or uuid.uuid4().hex[:12]
+        lock_fd, holder = _deploy_cluster_lock(cluster, run_id, dctx["plan"]["name"])
+        if lock_fd is None:
+            # un déroulé de l'autre processus (console ou ligne de commande)
+            return {"error": "a deployment is already running on this cluster", "code": "deploy-running",
+                    "running": holder.get("run") or ""}, 409
+        try:
+            action_id = _deploy_start(cluster, kc, dctx, dry_run=dry_run, user=user,
+                                      cluster_user=cluster_user, previous=previous, resumes=resumes,
+                                      install=install, run_id=run_id, store=store,
+                                      required_role=required_role, lock_fd=lock_fd)
+        except BaseException:
+            _flock_release(lock_fd)
+            raise
     return {"action_id": action_id, **({"resumes": resumes} if resumes else {}),
             "findings": findings}, 202
 
@@ -32079,7 +32310,7 @@ def api_deploy_plan_delete(name):
     busy = _deploy_plan_running(name)
     if busy:
         return jsonify({"error": "a run of this plan is in progress", "code": "deploy-running",
-                        "running": busy.id}), 409
+                        "running": busy}), 409
     if not _dpl.delete_plan(_deploy_state(), name):
         return jsonify({"error": "no such plan"}), 404
     return "", 204
@@ -32193,7 +32424,8 @@ def api_deploy_check(cluster):
     data = _deploy_body()
     if not _deploy_name_ok(data.get("plan")):
         return jsonify({"error": "invalid plan name", "fields": ["plan"]}), 400
-    findings, summary, _ctx = _deploy_prepare(cluster, data["plan"], data.get("variables"), kc=kc)
+    findings, summary, _ctx = _deploy_prepare(cluster, data["plan"], data.get("variables"), kc=kc,
+                                              update_differing=data.get("update_differing") is True)
     if findings is None:
         return jsonify({"error": "no such plan", "fields": ["plan"]}), 404
     return jsonify({"findings": findings, "summary": summary,
@@ -32213,7 +32445,8 @@ def api_deploy_start(cluster):
         return jsonify({"error": "invalid plan name", "fields": ["plan"]}), 400
     body, status = _deploy_launch_checked(
         cluster, kc, data["plan"], data.get("variables"), bool(data.get("dry_run")),
-        current_user() or "", (current_cluster_identity() or {}).get("user"))
+        current_user() or "", (current_cluster_identity() or {}).get("user"),
+        update_differing=data.get("update_differing") is True)
     return jsonify(body), status
 
 
@@ -32238,15 +32471,16 @@ def api_deploy_stop(cluster):
 
 
 def _deploy_resume_install(prev_result, cluster, secrets_, confirms):
-    """Phase d'installation d'une reprise (décision 158) : rien si les nœuds
-    de la série sont là ; sinon, seules les lignes dont le nom d'hôte n'est
-    pas un nœud, jonctions si le cluster existe, garde 132 et secrets
-    redemandés. (spécification, None) ou (None, (corps, statut))."""
+    """Phase d'installation d'une reprise (décision 157) : rien si les nœuds
+    de la série sont là, QUEL QUE SOIT l'état consigné de la phase (revue
+    B2-I3 : console redémarrée pendant l'installation, arrêt arrivé trop
+    tard) ; sinon, seules les lignes dont le nom d'hôte n'est pas un nœud,
+    jonctions si le cluster existe, garde 132 et secrets redemandés.
+    (spécification, None) ou (None, (corps, statut))."""
     rec = (prev_result or {}).get("install") or {}
     hostnames = [n for n in (rec.get("hostnames") or []) if isinstance(n, str)]
-    ph = next((p for p in prev_result.get("phases") or [] if p.get("id") == "install"), None)
     ok, names = _deploy_install_verify(cluster, hostnames)
-    if ok and ph and ph.get("status") == "done":
+    if ok and hostnames:
         return {"kind": rec.get("kind") or "batch", "rows": [], "cluster": cluster,
                 "hostnames": hostnames, "record": rec}, None
     if rec.get("kind") != "batch":
@@ -32330,7 +32564,8 @@ def api_deploy_resume(cluster):
     body, status = _deploy_launch_checked(
         cluster, kc, result.get("plan") or "", result.get("variables") or {}, False,
         current_user() or "", cluster_user, previous=result, resumes=data["action_id"],
-        install=install, vip=vip, run_id=run_id, store=store, required_role=required)
+        install=install, vip=vip, run_id=run_id, store=store, required_role=required,
+        update_differing=result.get("update_differing") is True)
     if status != 202 and store is not None:
         store.delete_tree(_dch.SECRET_CLASS, run_id)
     return jsonify(body), status
@@ -32365,6 +32600,11 @@ def _deploy_with_install(plan_name, plan_variables, cluster, vip, rows, kind, re
         store.delete_tree(_dch.SECRET_CLASS, run_id)
         rows.clear()
     return body, status
+
+
+# revue B2-I1 : au chargement (console comme ligne de commande, sans risque
+# pour un déroulé vivant : son verrou est tenu)
+_deploy_mark_orphans()
 
 
 if __name__ == "__main__":

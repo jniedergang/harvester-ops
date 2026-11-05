@@ -151,6 +151,12 @@ def test_chain_readiness_then_terraform(world):
         children = [a for a in wapp.ACTIONS.values() if a.id in item["actions"]]
     assert sorted(a.action for a in children) == ["tf-apply-decl:site-cles:1", "tf-plan-decl:site-cles:1"]
     assert d["id"] not in wapp.TF_DECL_HELD and d["id"] not in wapp.TF_DECL_RUNNING
+    # verrous de fichier rendus (revue B2-I2) : cluster et déclaration
+    end = time.time() + 3
+    while wapp._deploy_lock_holder("harvlab") is not None and time.time() < end:
+        time.sleep(0.02)
+    assert wapp._deploy_lock_holder("harvlab") is None
+    assert d["id"] not in wapp.TF_DECL_FDS
 
 
 @pytest.mark.parametrize("action", ["delete", "replace"])
@@ -374,3 +380,83 @@ def test_resume_install_relaunches_only_missing_rows(world, monkeypatch):
     assert [row["hostname"] for row in seen[0]] == ["node2"]
     assert seen[0][0]["mode"] == "join"
     assert _store_empty(run2.id)
+
+
+# Revue B2-I3 : une installation dont tous les nœuds ont rejoint le cluster
+# est faite, quel que soit l'état de sa phase dans le résultat repris (console
+# redémarrée pendant l'installation : phase absente ; arrêt arrivé trop tard
+# ou étape après l'installation en échec : phase `error`). La reprise ne
+# demande alors aucun secret et termine la chaîne.
+@pytest.mark.parametrize("phase", [None, "error", "cancelled"])
+def test_resume_install_whose_nodes_all_joined(world, monkeypatch, phase):
+    rid, _ = _install(world, monkeypatch, status="error")
+    run = wait(rid)
+    res = dict(run.result)
+    res["phases"] = [p for p in res["phases"] if p["id"] != "install"]
+    if phase:
+        res["phases"].insert(0, {"id": "install", "status": phase, "actions": []})
+    run.result = res
+    launched = []
+    monkeypatch.setattr(wapp, "_bm_batch_launch", lambda *a, **k: launched.append(a) or "x")
+    monkeypatch.setattr(wapp, "_deploy_install_verify", lambda cluster, expected: (True, list(expected)))
+    monkeypatch.setattr(wapp, "_deploy_cluster_entry", lambda c: {"name": c, "kubeconfig": world["kc"]})
+    r = world["client"].post("/api/deploy/rack-a/resume", json={"action_id": run.id})
+    assert r.status_code == 202, r.get_json()
+    run2 = wait(r.get_json()["action_id"])
+    assert run2.status == "done", run2.result
+    install = run2.result["phases"][0]
+    assert install["id"] == "install" and install["status"] in ("done", "skipped") and launched == []
+
+
+# Revue B2-I6 : relancer le plan avec d'autres valeurs que celles de la
+# déclaration reprise ne dit jamais « rien à changer ». Sans demande, la
+# déclaration est gardée (elle a pu être retouchée dans Terraform, décision
+# 149) et le résultat le DIT ; avec `update_differing`, elle est mise à jour
+# puis planifiée et appliquée. Mutations jouées : comparaison retirée (le cas
+# gardé redevient « nothing to change »), mise à jour ignorée.
+def test_rerun_with_other_values_is_never_silent(world):
+    c = world["client"]
+    tr.seed(c)
+    assert start(world, variables={"equipe": "ops"}).status == "done"
+    d = world["store"].find_by_name("harvlab", "site-cles")
+    world["fake"].actions["ops-ops"] = "noop"
+    world["fake"].actions["dev-ops"] = "noop"
+    r = c.post("/api/deploy/harvlab/check", json={"plan": "site", "variables": {"equipe": "dev"}})
+    codes = {f["code"]: f for f in r.get_json()["findings"]}
+    assert codes["decl-differs"]["level"] == "warning" and "only if you ask" in codes["decl-differs"]["detail"]
+    run = start(world, variables={"equipe": "dev"})
+    item = run.result["phases"][1]["items"][0]
+    assert item["message"] == "kept: values differ from the declaration" and item["differs"] is True
+    assert world["store"].get(d["id"])["resources"][0]["spec"]["name"] == "ops-ops"
+    # même valeurs : rien ne diffère, rien n'est dit
+    run = start(world, variables={"equipe": "ops"})
+    item = run.result["phases"][1]["items"][0]
+    assert item["message"] == "nothing to change" and "differs" not in item
+    # mise à jour demandée
+    world["fake"].actions.pop("dev-ops")
+    r = c.post("/api/deploy/harvlab", json={"plan": "site", "variables": {"equipe": "dev"},
+                                            "update_differing": True})
+    assert r.status_code == 202
+    run = wait(r.get_json()["action_id"])
+    item = run.result["phases"][1]["items"][0]
+    assert run.status == "done" and item["updated"] is True and item["message"] == "applied"
+    d2 = world["store"].get(d["id"])
+    assert d2["resources"][0]["spec"]["name"] == "dev-ops" and d2["revision"] == 2
+    assert item["revision_applied"] == 2 and run.result["update_differing"] is True
+
+
+def test_resume_after_a_plan_change_says_so(world):
+    """Revue m1 : le plan a changé depuis le déroulé repris : constat
+    `plan-changed` (avertissement) dans la réponse de reprise."""
+    two_templates(world)
+    run = start(world)
+    assert run.result["status"] == "partial"
+    world["fake"].fail.clear()
+    c = world["client"]
+    body = tr.plan_body(templates=("cles", "reseau"), description="changé")
+    assert c.put("/api/baremetal/plans/site", json=dict(body, revision=1)).status_code == 200
+    r = c.post("/api/deploy/harvlab/resume", json={"action_id": run.id})
+    assert r.status_code == 202
+    [f] = [f for f in r.get_json()["findings"] if f["code"] == "plan-changed"]
+    assert f["level"] == "warning" and "1 -> 2" in f["detail"]
+    assert wait(r.get_json()["action_id"]).status == "done"
