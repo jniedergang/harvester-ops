@@ -389,8 +389,12 @@ retries forever and the cluster never disappears. The restricted identity
 holds this right; it is missing only if someone edited the ClusterRole
 `harvester-ops-caphv-<namespace>`. Compare it with
 `kubectl auth can-i --list --as=system:serviceaccount:<ns>:caphv-identity`
-and the table of Capabilities, section 4, put the rule back, and the
-deletion goes on by itself.
+and the table of Capabilities, section 4, and put the rule back. The
+deletion goes on by itself at the next attempt of CAPHV, which spaces its
+attempts out after repeated errors: on the bench it came 8 minutes after
+the fix (up to about 17 minutes). Seen for real: with the right removed,
+the `Cluster` stayed `Deleting` for 10 minutes with
+`cannot delete resource "ippools"` in the CAPHV log.
 
 ### "the Harvester address is unknown" when creating a cluster (2.5.0)
 

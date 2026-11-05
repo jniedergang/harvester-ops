@@ -4,6 +4,176 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.5.0] - 2026-11-05 - Deployment plans: Cluster API and child clusters
+
+### Added
+- **Cluster API phases in deployment plans** (decisions 162 to 176). The
+  **capi** phase declares the Cluster API stack (RKE2 bootstrap and control
+  plane, CAPHV, CAAPH) from the active bundle, with the same command as the
+  Install button, on Harvester 1.9 or later only; a stack already ready at
+  the bundle versions is left as it is. The **clusters** phase creates up
+  to 16 child RKE2 clusters one after another (order, "depends on", stop
+  between clusters, partial result and resume, as for Terraform
+  templates), with one child action `capi-cluster-create:<ns>/<name>` per
+  cluster. Timeouts: stack 10 minutes (1 to 60), cluster 30 minutes (5 to
+  180). Registry and artefacts stay greyed, "coming in 2.6+".
+- **Cluster templates**: a cluster request of the creation form without
+  name nor namespaces, with `{{variables}}`, kept in
+  `<state>/capi-templates.d` (0600, revisions, 409 on a stale revision,
+  409 `template-in-use` on delete). Edited in Plans > Cluster templates
+  with the creation form in template mode (**Variable...** in each
+  reference field); **Save as template** in the creation window. Routes
+  `/api/baremetal/capi-templates[/<name>]` (read: viewer, write: admin);
+  `harvester-plans capi-template list|show|save|delete`.
+- **Several clusters from one template** in a plan: `template`, `count`
+  and a `name_pattern` holding `{{n}}`, expanded into the list at save.
+- **A restricted CAPHV identity per child cluster** (decisions 126, 164 to
+  168), for the creation window and plans: a service account with only the
+  rights CAPHV v0.10.1 uses, read call by call in its source at the tag,
+  each rule with its source line (`bin/lib/capi_identity.py`). No `*`, no
+  `bind`, no cluster-wide secrets; the cloud provider account and its
+  binding to `harvesterhci.io:cloudprovider` are created beforehand by the
+  console; the token is a service account token Secret deleted with the
+  cluster; a CAPHV version whose source was not read is refused
+  (`identity-rules-unknown`). The details of a cluster say
+  "Identity: restricted" or "Identity: console (all rights)" (clusters made
+  before 2.5.0 keep the console identity).
+- **Checks for N clusters together**, in one read of the cluster: free CPU
+  and memory, Longhorn space for every disk with replicas on distinct nodes,
+  free addresses per IP pool, the rights of the person in one batch of
+  `SelfSubjectAccessReview`, Harvester and stack versions, and the rules of
+  the creation window for each cluster. A shortage blocks a plan (it runs
+  unattended) and stays a warning in the creation window.
+- **Readiness findings for Cluster API** when a plan enables the capi or
+  clusters phase: `harvester-too-old`, `rke2-traefik-no-address`,
+  `turtles-not-ready`.
+- **Child actions nested under their parent** (decision 158, 174): a
+  `parent` column in `actions.db` (additive), Activity lists the top level
+  with an unfold button and loads children on demand, the dock shows the
+  parent and its current child, a filtered search lists flat with a link
+  to the parent, retention counts top-level actions only.
+- **Command line**: `harvester-capi create --identity restricted|console`
+  (restricted by default), `--origin plan=P,template=M,run=ID`,
+  `check --many`, `state --name ns/name`; `harvester-plans` check and apply
+  cover the two phases.
+
+### Changed
+- The VMs of a cluster with a restricted identity go to a namespace of
+  their own, `<namespace>-vms`, created and deleted with the identity
+  (decision 164, revised on the bench: see Fixed). A request or template
+  that sets another VM namespace is refused (`target-namespace-forced`).
+- The pre-check of the creation window checks the rights of the person
+  too (`rights-missing`, `rights-unchecked`), and the preview renders like
+  the creation (VM namespace forced, trial kubeconfig).
+- A plan never upgrades a Cluster API stack: a stack present in another
+  version blocks the launch (`capi-version-differs`), even for a plan with
+  the clusters phase only.
+- A stop lets the cluster being created go to its end and skips the next
+  ones; a stop while the run waits on a cluster it resumed ends that wait
+  at once. A cluster in failure is never deleted by the plan
+  (`cluster-failed`): delete it, then resume.
+
+### Fixed
+- Review of the branch: deleting a cluster listed the identity objects
+  across all namespaces and reported success when the list was refused,
+  leaving roles, bindings and a live token. Each object is now read and
+  deleted by name, an object of another owner is left alone, a kept object
+  ends the deletion in error with the namespace and identity account kept,
+  and a new delete resumes. The rights check covers get, patch and delete
+  of each identity object and one review per pool. Cluster names that
+  would collide with the identity objects, and namespaces ending in `-vms`,
+  are refused (`identity-name-reserved`); an empty `resourceNames` list is
+  never written. A storage class that cannot place its replicas raises one
+  finding instead of two.
+- Seen on the bench: with the VMs in the cluster namespace, CAPHV named the
+  cloud provider token `<cluster>-token`, the name of the RKE2 bootstrap
+  token in that namespace, read the wrong secret, and the API load balancer
+  of the child cluster was never made. Hence the VM namespace above.
+- Seen on the bench: a Harvester 1.9 upgraded from 1.8 has no
+  `kube-system/rke2-traefik`; the Harvester address is now also read from
+  `kube-system/ingress-expose` (status or kube-vip annotation), for the
+  identity, the stack install and the readiness check.
+- `kubectl create -o json` of a List of `SelfSubjectAccessReview` answers
+  one JSON document per object, not a List: rights were always reported
+  "unchecked" before the fix found on harv1.
+
+### Upgrade and rollback
+- The upgrade is additive: `actions.db` gains a `parent` column and an
+  index; plans of 2.4.0 load as they are (a disabled capi or clusters phase
+  with free keys is saved without them, and the save says so). Clusters
+  created before 2.5.0 keep the console identity and are deleted as before.
+- **Rolling back to 2.4.x**: plans with a capi or clusters phase are
+  refused by 2.4.x (`phase-not-available`), cluster templates are ignored,
+  and child clusters made by 2.5.0 keep running; delete them from 2.5.0
+  first if 2.4.x must manage them (2.4.x does not know their identity and
+  would leave it behind). Child actions show as top-level actions.
+
+### Verified for real
+- **harvlab2** (nested on node2, Harvester v1.9.0 upgraded from 1.8, VM
+  raised from 24 to 32 GiB, Longhorn disk of 48 GiB): the capi phase
+  declared RKE2 v0.25.2, CAPHV v0.10.1 and CAAPH v0.6.4 from the embedded
+  bundle, images imported on the node, in 65 s. The first cluster attempt
+  found the two bench defects above (no `rke2-traefik`: the creation
+  stopped before rendering and its identity and namespace were removed;
+  VM namespace: control plane node up, cluster never ready). After the
+  fixes, a plan run with the stack already ready and one 1+1 cluster from
+  the template `rke2-banc` (8 GiB disks, one-replica image class): 8 min
+  50 s, nodes Ready through the kubeconfig of the console. VMs, volumes
+  from `volumeClaimTemplates` and the attachment to a network of
+  `default` were created by the restricted identity through the Harvester
+  webhooks; no `forbidden` in the CAPHV log during creation and deletion;
+  `kubectl auth can-i --list` of the identity equal to the table (16
+  rules), and `no` for VMs in `default`, ClusterRoleBinding creation,
+  `bind` on the cloud provider role and secrets of all namespaces. One
+  batch of 100 `SelfSubjectAccessReview` returned 100 answers (0 refused
+  with the console kubeconfig, 93 when impersonating the identity).
+  Deletion from Cluster API > Clusters: 2 min 46 s, the 15 identity
+  objects, both namespaces, VMs, volumes and load balancer gone, pool
+  allocations released. **Real mutation**: with `delete ippools` removed
+  from the ClusterRole, the `Cluster` stayed `Deleting` for 10 min 12 s
+  (`cannot delete resource "ippools"` in the CAPHV log); with the right
+  back, CAPHV retried 8 minutes later (its error backoff) and the
+  deletion finished. The resume of the failed run checked the stack again
+  and skipped it.
+- **harv4** (node4, bare metal, fresh Harvester v1.9.0, 20 threads,
+  128 GiB): one plan with the capi phase (59 s, the `ingress-expose`
+  compatibility service restored on this fresh install) and three 1+1
+  clusters from the `count` shortcut, created one after another in
+  7 min 39 s, 7 min 25 s and 7 min 27 s (23 min 46 s in all); every node
+  Ready, Harvester cloud provider, CSI and kube-vip running in each child,
+  VMs in `h4c<n>-vms`, addresses from the pool. A check with five clusters
+  blocked on `fleet-pool-short` (15 addresses for 12) before anything
+  started. The three clusters deleted together from Cluster API > Clusters
+  (3 min 38 s to 5 min 44 s), nothing left (identity objects, namespaces,
+  VMs, volumes, load balancers, pool allocations).
+- The deploy action showed its children nested in Activity (unfold) and
+  the current child in the dock data, live on both benches.
+- **harv1** (read only): its Cluster API stack lacks the `ingress-expose`
+  compatibility service needed by CAPHV v0.10.1; it was not repaired. A
+  plan with the capi phase there would restore it.
+- **Not verified for real**: a person acting with a restricted Harvester
+  identity through Rancher SSO (all runs used the console kubeconfig; the
+  rights check was exercised against the server by impersonation); a stop
+  during a cluster creation and a partial multi-cluster run with its
+  resume (covered by the tests); control planes of three nodes on distinct
+  hosts; more than three child clusters; a stable CAPHV release that holds
+  #276. The legacy **Uninstall** of Cluster API > Installation predates
+  Turtles (it deletes namespaces but not the `CAPIProvider` objects): it
+  was not used, and the stacks declared on harvlab2 and harv4 were left
+  installed.
+
+### Tests
+- New: `test_action_parent_250.py`, `test_capi_identity_250.py`,
+  `test_capi_templates_250.py`, `test_capi_fleet_250.py`,
+  `test_deploy_plans_250.py`, `test_deploy_capi_250.py`,
+  `test_capi_ui_250.py`, e2e `test_activity_nested_250.py`,
+  `test_bm_plans_capi_250.py`, `test_capi_template_250.py`; additions in
+  `test_longhorn_room.py`, `test_capi_cli.py`,
+  `test_harvester_plans_cli_240.py`. The rights rules are checked against a
+  table written by hand from the source, and named mutations (rights
+  removed or widened, deletion order, token in a step, teardown by
+  listing, VM namespace, Harvester address) are each caught.
+
 ## [2.4.0] - 2026-11-05 - Deployment plans: Terraform content after installation
 
 ### Added

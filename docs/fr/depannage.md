@@ -403,8 +403,12 @@ recommence sans fin et le cluster ne disparaît jamais. L'identité
 restreinte détient ce droit ; il ne manque que si quelqu'un a modifié le
 ClusterRole `harvester-ops-caphv-<namespace>`. Comparez-le avec `kubectl
 auth can-i --list --as=system:serviceaccount:<ns>:caphv-identity` et le
-tableau de Capacités, section 4, remettez la règle, et la suppression
-reprend d'elle-même.
+tableau de Capacités, section 4, et remettez la règle. La suppression
+reprend d'elle-même à la tentative suivante de CAPHV, qui espace ses
+tentatives après des erreurs répétées : sur le banc, elle est venue 8
+minutes après la correction (jusqu'à 17 minutes environ). Vu en réel :
+droit retiré, le `Cluster` est resté `Deleting` 10 minutes, avec `cannot
+delete resource "ippools"` dans le journal de CAPHV.
 
 ### « the Harvester address is unknown » à la création d'un cluster (2.5.0)
 
