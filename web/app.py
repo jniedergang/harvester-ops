@@ -32251,8 +32251,8 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
             denied = _tf_role_refusal(res, role, via_plan=True)
             if denied:
                 findings.append(_deploy_finding(
-                    "admin-kind", "terraform", f"{tname}: {', '.join(denied.get('kinds') or [])} "
-                    "need the 'admin' role"))
+                    "admin-kind", "terraform", f"{tname}: the 'admin' role is needed for "
+                    f"{', '.join(denied.get('kinds') or [])}"))
             tf_rendered, _errs = _tf_render_resources(res)
             for v in _tf_guard_rendered(tf_rendered)[:3]:
                 findings.append(_deploy_finding("forbidden-construct", "terraform", f"{tname}: {v['error']}"))
