@@ -136,6 +136,8 @@ const BMProfiles = (() => {
                      value="${esc((prof.variables || []).join(', '))}"></label>
             <p class="form-hint" style="grid-column:1/-1;">${esc(tr('bmp.builtins'))}
               ${['hostname', 'ip', 'mgmt_mac', 'vip'].map(v => `<code>{{${v}}}</code>`).join(' ')}</p>
+            <!-- 2.4.0 : plan de déploiement enchaîné après l'installation -->
+            <div class="bmp-plan-pick" style="grid-column:1/-1;"></div>
           </fieldset>
           <fieldset>
             <legend>${esc(tr('bmp.fs.fields'))}</legend>
@@ -155,6 +157,7 @@ const BMProfiles = (() => {
     });
     const form = panel.el.querySelector('.bmp-form');
     const msg = panel.el.querySelector('.bmp-msg');
+    const planPick = window.BMPlans ? BMPlans.mountPicker(form.querySelector('.bmp-plan-pick'), prof.plan || '', false) : null;
     // .value, jamais innerHTML : le YAML reste du texte
     form.fields_yaml.value = prof.fields_yaml || '';
     form.advanced_yaml.value = prof.advanced_yaml || '';
@@ -177,6 +180,7 @@ const BMProfiles = (() => {
         name: form.name.value.trim(), description: form.description.value,
         variables: form.variables.value, fields_yaml: form.fields_yaml.value,
         advanced_yaml: form.advanced_yaml.value,
+        plan: (planPick && planPick.value() ? planPick.value().plan : ''),
       };
       const r = name
         ? await api('PUT', `/api/baremetal/profiles/${encodeURIComponent(name)}`, body)
@@ -223,6 +227,11 @@ const BMProfiles = (() => {
               <select name="iso">${isoOpts}</select></label>
             <label ${tip(tr('bmp.tip.concurrency'))}>${esc(tr('bmp.f.concurrency'))}
               <input name="concurrency" type="number" min="1" max="4" value="2"></label>
+          </fieldset>
+          <fieldset class="bmp-plan-fs">
+            <legend>${esc(tr('bmpl.pick.legend'))}</legend>
+            <!-- 2.4.0 : plan enchaîné (prérempli par le profil) et ses variables -->
+            <div class="bmp-plan-pick" style="grid-column:1/-1;"></div>
           </fieldset>
           <fieldset>
             <legend>${esc(tr('bmp.fs.secrets'))}</legend>
@@ -285,6 +294,9 @@ const BMProfiles = (() => {
     const form = panel.el.querySelector('.bmp-batch-form');
     const tbody = panel.el.querySelector('.bmp-nodes tbody');
     const msg = panel.el.querySelector('.bmp-msg');
+    if (form.dataset.bound) return;
+    form.dataset.bound = '1';
+    const planPick = window.BMPlans ? BMPlans.mountPicker(form.querySelector('.bmp-plan-pick'), prof.plan || '', true) : null;
     let importId = null;
     let previews = [];
 
@@ -453,6 +465,9 @@ const BMProfiles = (() => {
         token: form.token.value, password: form.password.value, bmc_password: form.bmc_password.value,
       };
       if (importId) body.import_id = importId;
+      // 2.4.0 : avec un plan, l'action suivie est le déroulé `deploy:`
+      const pv = planPick && planPick.value();
+      if (pv) Object.assign(body, pv);
       // 2.2.1 : chaque machine lue avant le départ (relue si le tableau a changé)
       if (!sysState || sysState.sig !== sysSig()) {
         res.textContent = '…';
@@ -473,8 +488,16 @@ const BMProfiles = (() => {
       res.textContent = '…';
       const r2 = await api('POST', `/api/baremetal/profiles/${encodeURIComponent(name)}/batch`, body);
       if (r2.ok) {
-        res.innerHTML = `<span style="color:var(--accent)">${icon('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${esc(r2.d.action_id)}</span>`;
+        res.innerHTML = `<span style="color:var(--accent)">${icon('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${r2.d.plan && window.BMPlans
+          ? BMPlans.actionLink(r2.d.action_id) : esc(r2.d.action_id)}</span>`;
         msg.innerHTML = '';
+        if (r2.d.plan && typeof Dock !== 'undefined' && Dock.poll) Dock.poll();
+      } else if (r2.d.code === 'blocking-findings' && window.BMPlans) {
+        // le plan ne peut pas partir : les constats de la console, bloquants d'abord
+        res.innerHTML = '';
+        msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('dpw.refusedFindings'))}</div>`
+          + BMPlans.findingsHtml(r2.d.findings);
+        msg.scrollIntoView({ block: 'nearest' });
       } else if (r2.status === 409 && Array.isArray(r2.d.machines)) {
         // la console a relu chaque BMC et refuse : la fenêtre montre sa lecture
         sysState = { sig: sysSig(), machines: r2.d.machines };

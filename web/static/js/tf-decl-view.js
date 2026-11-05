@@ -306,6 +306,7 @@ const TFDeclView = (() => {
                 data-tip="${esc(applyTip)}">${Icons.svg('play', { size: 14 })} ${esc(tr('tfd.apply'))}</button>
         <span class="tfd-hint">${esc(plan ? tr('tfd.planReady', { when: when(plan.at), n: planChanges }) : tr('tfd.applyHint'))}</span>
         <button type="button" class="btn btn-sm tfd-export tip" data-tip="${esc(tr('tfd.t.export'))}">${Icons.svg('download', { size: 14 })} ${esc(tr('tfd.export'))}</button>
+        ${familyOf(d) === 'harvester' ? `<button type="button" class="btn btn-sm tfd-save-template tip needs-admin" data-tip="${esc(tr('tfd.t.saveTemplate'))}">${Icons.svg('copy', { size: 14 })} ${esc(tr('tfd.saveTemplate'))}</button>` : ''}
         <button type="button" class="btn btn-sm btn-danger tfd-destroy tip" ${deployed ? '' : 'disabled'}
                 data-tip="${esc(tr('tfd.t.destroy'))}">${Icons.svg('destroy', { size: 14 })} ${esc(tr('tfd.destroy'))}</button>
         <button type="button" class="btn btn-sm tfd-delete tip" ${deployed ? 'disabled' : ''}
@@ -815,6 +816,21 @@ const TFDeclView = (() => {
     input.addEventListener('blur', () => finish(true));
   }
 
+  // 2.4.0 : la déclaration devient un modèle des plans de déploiement ;
+  // la console retire les secrets et le dit, chemin par chemin
+  async function saveAsTemplate(d) {
+    const guess = String(d.name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63);
+    const name = prompt(tr('tfd.saveTemplateAsk'), guess);
+    if (!name) return;
+    try {
+      const out = await TFDecl.saveAsTemplate(d.id, name.trim());
+      alert(out.removed.length ? tr('tfd.saveTemplateRemoved', { name: name.trim(), paths: out.removed.join(', ') })
+        : tr('tfd.saveTemplateDone', { name: name.trim() }));
+    } catch (e) {
+      alert(tr('tfd.saveTemplateFailed', { error: e.message }));
+    }
+  }
+
   async function removeDecl(d) {
     if (!confirm(tr('tf.confirmDeleteDecl', { name: d.name }))) return;
     try {
@@ -867,6 +883,7 @@ const TFDeclView = (() => {
       if (e.target.closest('.tfd-plan')) { runPlan(d); return; }
       if (e.target.closest('.tfd-apply')) { reviewLastPlan(d); return; }
       if (e.target.closest('.tfd-export')) { exportCode(d); return; }
+      if (e.target.closest('.tfd-save-template')) { saveAsTemplate(d); return; }
       if (e.target.closest('.tfd-destroy')) { runDestroy(d); return; }
       if (e.target.closest('.tfd-delete')) { removeDecl(d); return; }
     });

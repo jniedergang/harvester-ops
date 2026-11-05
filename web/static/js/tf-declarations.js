@@ -30,6 +30,7 @@
  *   updateResource / replaceResourceSpec / removeResource
  *   refresh(id)                         → Promise (relit une déclaration : déployé, dernier plan)
  *   flush(id)                           → Promise (attend l'enregistrement)
+ *   saveAsTemplate(id, name)            -> Promise ({template, removed}, 2.4.0)
  *   onChange(cb) / onError(cb)          → unsub fn
  */
 
@@ -383,6 +384,15 @@ const TFDecl = (() => {
     });
   }
 
+  /** 2.4.0 : modèle de déclaration (plans de déploiement) tiré d'une
+   *  déclaration Harvester. Promise<{template, removed}> : `removed` liste
+   *  les chemins de secrets que la console a retirés. */
+  async function saveAsTemplate(declId, name) {
+    const d = await api('POST', '/api/baremetal/tf-templates/from-declaration',
+                        { declaration_id: declId, name });
+    return { template: d, removed: d.removed || [] };
+  }
+
   /** Le résultat d'un apply est enregistré par la console : on relit. */
   function markApplied(declId) {
     refresh(declId);
@@ -410,7 +420,7 @@ const TFDecl = (() => {
     setActive, getActive,
     addResource, addResourceWithSpec,
     updateResource, replaceResourceSpec, removeResource,
-    markApplied, onChange, onError,
+    markApplied, onChange, onError, saveAsTemplate,
     LEGACY_KEY,
   };
 })();

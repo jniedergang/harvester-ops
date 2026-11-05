@@ -81,6 +81,9 @@ SCREENS = [
      '#bmc-body [data-bm-pane="machines"]:not([hidden])', ()),
     ("Bare-metal > installation profiles", "#automation/pxe/profiles", "automation",
      '#bmc-body [data-bm-pane="profiles"]:not([hidden])', ()),
+    # 2.4.0 : plans de déploiement et modèles de déclaration
+    ("Bare-metal > deployment plans", "#automation/pxe/plans", "automation",
+     '#bmc-body [data-bm-pane="plans"]:not([hidden])', ()),
     ("Bare-metal > ISO store", "#automation/pxe/images", "automation",
      '#bmc-body [data-bm-pane="images"]:not([hidden])', ()),
     ("(new) Bare-metal > history", "#automation/pxe/history", "automation",
