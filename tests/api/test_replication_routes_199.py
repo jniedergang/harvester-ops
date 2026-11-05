@@ -1111,8 +1111,15 @@ def test_the_follower_starts_only_from_the_server_entry_point():
     assert "_start_replication_follower()" in main[1]
     calls = [ln for ln in main[0].splitlines() if ln.strip() == "_start_replication_follower()"]
     assert calls == []                                       # aucun appel au niveau du module
+    # 2.4.0 : la garde des commandes qui chargent la console est partagée
+    # (bin/lib/web_loader.prepare_console_env), posée avant le chargement
+    wl = (ROOT / "bin" / "lib" / "web_loader.py").read_text()
+    assert 'os.environ["HARVESTER_OPS_REPLICATION_FOLLOW"] = "0"' in wl.split("def prepare_console_env", 1)[1]
     bm = (ROOT / "bin" / "harvester-baremetal.py").read_text()
-    assert bm.index('os.environ["HARVESTER_OPS_REPLICATION_FOLLOW"] = "0"') < bm.index('_load_web_module("app")\n')
+    assert bm.index("web_loader.prepare_console_env(state)") < bm.index('_load_web_module("app")\n')
+    plans = (ROOT / "bin" / "harvester-plans.py").read_text()
+    body = plans.split("def _console(state):", 1)[1]
+    assert body.index("web_loader.prepare_console_env(state)") < body.index('web_loader.load("app")')
 
 
 HOLD_LOCK = """
