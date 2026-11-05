@@ -30,6 +30,7 @@ FINDING_CODES = ["plan-invalid", "phase-not-available", "template-missing", "var
                  "capi-bundle-missing", "capi-bundle-no-turtles", "capi-needs-harvester-1.9", "capi-later",
                  "capi-version-differs", "capi-stack-missing", "capi-template-missing", "cluster-var-missing",
                  "cluster-name-taken", "cluster-exists", "identity-rules-unknown", "refs-later",
+                 "cluster-failed", "capi-check-failed",
                  "fleet-name-twice", "fleet-cpu-short", "fleet-memory-short", "fleet-storage-short",
                  "fleet-replicas-nodes", "fleet-pool-short", "fleet-dhcp-leases", "fleet-sizes",
                  "rights-missing", "rights-unchecked"]

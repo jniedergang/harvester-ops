@@ -83,6 +83,8 @@ const BMPlans = (() => {
     'cluster-exists': () => tr('dpw.f.clusterExists'),
     'identity-rules-unknown': () => tr('dpw.f.identityRulesUnknown'),
     'refs-later': () => tr('dpw.f.refsLater'),
+    'cluster-failed': () => tr('dpw.f.clusterFailed'),
+    'capi-check-failed': () => tr('dpw.f.capiCheckFailed'),
     'fleet-name-twice': () => tr('dpw.f.fleetNameTwice'),
     'fleet-cpu-short': () => tr('dpw.f.fleetCpuShort'),
     'fleet-memory-short': () => tr('dpw.f.fleetMemoryShort'),
