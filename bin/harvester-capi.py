@@ -5,9 +5,10 @@
     harvester-capi install   --cluster C --components DIR [--push-images]
     harvester-capi cleanup-legacy --cluster C [--dry-run]
     harvester-capi inventory --cluster C [--components DIR] --json
-    harvester-capi check     --cluster C --spec FICHIER [--components DIR] [--json]
+    harvester-capi check     --cluster C --spec FICHIER [--components DIR] [--identity I] [--json]
     harvester-capi render    --cluster C --spec FICHIER [--show-secrets]
     harvester-capi create    --cluster C --spec FICHIER [--components DIR] [--timeout S]
+                             [--identity restricted|console] [--origin plan=P,template=M,run=ID]
     harvester-capi delete    --cluster C --name ns/nom [--timeout S]
 
 Le cluster Harvester sert lui-même de cluster de gestion : Harvester 1.9
@@ -21,6 +22,12 @@ de bin/lib/capi_cluster.py ; les manifestes sont produits par
 nomme un cluster de la configuration (`HARVESTER_OPS_CONFIG`), ou
 `--kubeconfig` un fichier.
 
+2.5.0 : chaque nouveau cluster reçoit sa propre identité CAPHV restreinte
+(`--identity restricted`, par défaut ; bin/lib/capi_identity.py), créée
+avant les manifestes et retirée APRÈS le cluster à la suppression (CAPHV en
+a besoin pour supprimer VMs, volumes, répartiteur et pool). `console` garde
+le kubeconfig de la console, pour un diagnostic.
+
 Progression sur stderr au format STEP_EVENT|<étape>|<statut>|<message>, lue
 par la console. Codes de sortie : 0 succès, 1 échec, 2 refus du contrôle
 préalable, 3 annulation.
@@ -32,6 +39,7 @@ Voir docs/design/2026-09-25-creation-cluster-capi.md.
 """
 
 import argparse
+import base64
 import json
 import os
 import signal
@@ -45,6 +53,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 import capi_cluster as cc  # noqa: E402
+import capi_identity as ci  # noqa: E402
 import capi_stack as cs  # noqa: E402
 import capi_services as sv  # noqa: E402
 from kube import Kube, KubeError, cluster_config  # noqa: E402
@@ -332,7 +341,7 @@ def amount(spec, overcommit=None):
 # Manifestes
 # ---------------------------------------------------------------------------
 
-def render(spec, identity_kubeconfig):
+def render(spec, identity_kubeconfig, origin=None):
     """Les documents du cluster, corrigés (liste de dict)."""
     argv = ["bash", str(GENERATOR)] + cc.to_argv(spec, identity_kubeconfig)
     p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
@@ -344,7 +353,7 @@ def render(spec, identity_kubeconfig):
     if y.returncode != 0:
         raise RuntimeError("cannot parse the generated manifests: " + y.stderr.strip()[:200])
     docs = [json.loads(line) for line in y.stdout.splitlines() if line.strip() not in ("", "null")]
-    out = cc.postprocess(docs, spec)
+    out = cc.postprocess(docs, spec, origin)
     for d in out:
         if d.get("kind") == "Namespace":
             d.setdefault("metadata", {}).setdefault("labels", {})[cs.MANAGED] = "true"
@@ -485,26 +494,40 @@ def cmd_inventory(args):
     return EXIT_OK
 
 
-def _check(kube, spec, desc):
+def _cloud_provider_bindings(kube, name):
+    """{nom: étiquettes} de la ClusterRoleBinding au nom du cluster, si elle
+    existe (ci.findings : nom déjà pris par un cluster voisin)."""
+    try:
+        b = kube.get("clusterrolebindings.rbac.authorization.k8s.io", None, name)
+    except KubeError:
+        return {}
+    return {name: (b.get("metadata") or {}).get("labels") or {}} if b else {}
+
+
+def _check(kube, spec, desc, identity="console"):
     inv = inventory(kube, desc)
     if inv.get("unreachable"):
         findings = [cc.finding("cluster-unreachable", "block")]
         return {"findings": findings, "blocked": True, "amount": amount(spec), "spec": spec}
     findings = cc.check(spec, facts_from(inv))
+    version = ci.caphv_version(inv.get("stack"), desc)
+    if identity == "restricted":
+        findings += ci.findings(spec, version, identity, _cloud_provider_bindings(kube, spec["name"]))
     return {"findings": findings, "blocked": bool(cc.blocking(findings)),
-            "amount": amount(spec, inv["overcommit"]), "spec": spec}
+            "amount": amount(spec, inv["overcommit"]), "spec": spec,
+            "identity": identity, "caphv_version": version}
 
 
 def cmd_check(args):
     kube, _, _ = kube_from(args)
     try:
-        spec = spec_from(args.spec)
+        spec = ci.force_target_namespace(spec_from(args.spec), args.identity)
     except ValueError as e:
         out = {"findings": [cc.finding("invalid", "block", option="-", message=str(e))],
                "blocked": True}
         print(json.dumps(out) if args.json else str(e))
         return EXIT_BLOCKED
-    out = _check(kube, spec, components_from(args.components))
+    out = _check(kube, spec, components_from(args.components), args.identity)
     if args.json:
         print(json.dumps(out))
     else:
@@ -526,11 +549,89 @@ def cmd_render(args):
     return EXIT_OK
 
 
+# Kubeconfig donné au générateur pour un essai (`--dry-run`) avec l'identité
+# restreinte : rien n'est créé, l'aperçu montre la forme sans aucun jeton.
+DRY_RUN_KUBECONFIG = ci.kubeconfig("https://harvester.invalid:6443",
+                                   base64.b64encode(b"dry-run").decode(), "dry-run-no-token")
+TOKEN_WAIT = 30
+
+
+def _work_file(content):
+    """Fichier 0600 de l'espace de travail (HARVESTER_OPS_WORK_DIR) ; le
+    chemin n'est jamais écrit sur stdout, stderr ni dans une étape."""
+    fd, path = tempfile.mkstemp(prefix="hops-caphv-", suffix=".kubeconfig",
+                                dir=os.environ.get("HARVESTER_OPS_WORK_DIR"))
+    with os.fdopen(fd, "w") as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.write(content)
+    return path
+
+
+def _ensure_namespace(kube, ns):
+    """Crée le namespace du cluster s'il manque (étiqueté comme ceux que
+    rend la console) ; rend True s'il a été créé ici."""
+    if kube.get("namespaces", None, ns) is not None:
+        return False
+    kube.apply([{"apiVersion": "v1", "kind": "Namespace",
+                 "metadata": {"name": ns, "labels": {cs.MANAGED: "true"}}}], timeout=60)
+    return True
+
+
+def identity_up(kube, spec, version, now=None, sleep=None):
+    """Pose l'identité restreinte, attend son jeton, rend le chemin d'un
+    kubeconfig 0600 à effacer par l'appelant."""
+    now, sleep = now or time.time, sleep or time.sleep
+    docs = ci.docs(spec, version)
+    kube.apply(docs, timeout=120)
+    ns = spec["namespace"]
+    deadline = now() + TOKEN_WAIT
+    data = {}
+    while True:
+        data = (kube.get("secrets", ns, ci.TOKEN_SECRET) or {}).get("data") or {}
+        if data.get("token") and data.get("ca.crt"):
+            break
+        if now() > deadline:
+            raise RuntimeError(f"the token of {ns}/{ci.IDENTITY} was not issued within {TOKEN_WAIT} s")
+        sleep(1)
+    vip = cs.harvester_vip(kube)
+    if not vip:
+        raise RuntimeError("the Harvester address is unknown (kube-system/rke2-traefik has no address)")
+    token = base64.b64decode(data["token"]).decode()
+    path = _work_file(ci.kubeconfig(f"https://{vip}:6443", data["ca.crt"], token))
+    rules = sum(len(d.get("rules") or []) for d in docs)
+    step("identity", "done", f"restricted identity {ns}/{ci.IDENTITY}: {rules} rule(s) "
+                             f"for CAPHV {version}")
+    return path
+
+
+def identity_down(kube, ns, name):
+    """Retire les objets de l'identité d'un cluster (sélecteur, portée
+    cluster comprise) ; rend le nombre d'objets retirés."""
+    gone = 0
+    sel = ci.selector(name, ns)
+    for kind, namespaced in ci.KINDS:
+        try:
+            objs = kube.list(kind, None, selector=sel)
+        except KubeError as e:
+            step("identity", "running", f"{kind} not listed: {str(e)[:120]}")
+            continue
+        for o in objs:
+            md = o.get("metadata") or {}
+            try:
+                kube.delete(kind, md.get("namespace") if namespaced else None, md["name"])
+                gone += 1
+            except KubeError as e:
+                step("identity", "running", f"{kind} {md.get('name')} kept: {str(e)[:120]}")
+    return gone
+
+
 def cmd_create(args):
     kube, kc, _ = kube_from(args)
-    spec = spec_from(args.spec)
+    origin = cc.parse_origin(args.origin)
+    restricted = args.identity == "restricted"
+    spec = ci.force_target_namespace(spec_from(args.spec), args.identity)
     desc = components_from(args.components)
-    out = _check(kube, spec, desc)
+    out = _check(kube, spec, desc, args.identity)
     blockers = cc.blocking(out["findings"])
     if blockers:
         step("check", "error", "the pre-check refuses: " + ", ".join(f["code"] for f in blockers))
@@ -539,16 +640,36 @@ def cmd_create(args):
         return EXIT_BLOCKED
     step("check", "done", f"{out['amount']['vms']} VM(s), {out['amount']['addresses']} address(es)")
     ns, name = spec["namespace"], spec["name"]
-    ns_existed = ns in inventory_namespaces(kube)
-    docs = render(spec, kc)
-    step("render", "done", f"{len(docs)} object(s) for {ns}/{name}")
     if args.dry_run:
+        dry_kc = _work_file(DRY_RUN_KUBECONFIG) if restricted else kc
+        try:
+            docs = render(spec, dry_kc, origin)
+        finally:
+            if restricted:
+                Path(dry_kc).unlink(missing_ok=True)
+        step("render", "done", f"{len(docs)} object(s) for {ns}/{name}")
+        if restricted:
+            step("identity", "done", f"would create the restricted identity {ns}/{ci.IDENTITY} "
+                                     f"({len(ci.docs(spec, out['caphv_version']))} object(s))")
         print(as_yaml(cc.masked(docs)))
         return EXIT_OK
+    ns_existed = ns in inventory_namespaces(kube)
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
+    applied = False
     try:
+        ident = None
+        try:
+            if restricted:
+                _ensure_namespace(kube, ns)
+                ident = identity_up(kube, spec, out["caphv_version"])
+            docs = render(spec, ident or kc, origin)
+        finally:
+            if ident:
+                Path(ident).unlink(missing_ok=True)
+        step("render", "done", f"{len(docs)} object(s) for {ns}/{name}")
         kube.apply(docs, timeout=120)
+        applied = True
         step("apply", "done", f"cluster {ns}/{name} declared on the management cluster")
         if args.no_wait:
             return EXIT_OK
@@ -559,14 +680,17 @@ def cmd_create(args):
         return EXIT_OK
     except Cancelled:
         step("cancel", "error", "cancelled, the cluster is being deleted")
-        _undo(kube, ns, name, ns_existed)
+        _undo(kube, ns, name, ns_existed, applied, args.timeout)
         return EXIT_CANCELLED
     except TimeoutError as e:
         step("provision", "error", f"not available in time ({str(e)[:200]}); "
                                    "the cluster is left in place for inspection")
         return EXIT_FAIL
-    except (RuntimeError, KubeError) as e:
-        step("provision", "error", str(e)[:300])
+    except (RuntimeError, KubeError, ValueError) as e:
+        step("provision" if applied else "prepare", "error", str(e)[:300])
+        if not applied:
+            # rien n'a été déclaré : l'identité et le namespace créé partent
+            _undo(kube, ns, name, ns_existed, False, args.timeout)
         return EXIT_FAIL
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
@@ -580,38 +704,45 @@ def inventory_namespaces(kube):
         return set()
 
 
-def _undo(kube, ns, name, ns_existed):
+def _undo(kube, ns, name, ns_existed, applied, timeout=2400):
+    """Défait une création interrompue. Manifestes appliqués : la suppression
+    complète (le cluster d'abord, son identité ensuite) ; sinon l'identité et
+    le namespace créé pour lui."""
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
-        kube.delete(cs.K_CLUSTER, ns, name)
+        if applied:
+            remove_cluster(kube, ns, name, timeout)
+            return
+        identity_down(kube, ns, name)
         if not ns_existed:
             kube.delete("namespaces", None, ns)
     except KubeError as e:
         step("cancel", "error", f"could not delete {ns}/{name}: {str(e)[:200]}")
 
 
-def cmd_delete(args):
-    kube, _, _ = kube_from(args)
-    ns, _, name = args.name.partition("/")
-    if not ns or not name:
-        raise SystemExit("--name expects namespace/name")
-    cl = kube.get(cs.K_CLUSTER, ns, name)
-    if cl is None:
-        step("delete", "error", f"cluster {ns}/{name} not found")
-        return EXIT_FAIL
+def remove_cluster(kube, ns, name, timeout, sleep=None, now=None):
+    """Ordre imposé : le Cluster, attente de sa disparition (CAPHV a besoin
+    de son identité pour supprimer VMs, volumes, répartiteur et pool), puis
+    l'identité, puis ce que la console a rendu et le namespace qu'elle a
+    créé. Rend un code de sortie."""
+    now, sleep = now or time.time, sleep or time.sleep
     kube.delete(cs.K_CLUSTER, ns, name)
     step("delete", "running", f"{ns}/{name}: machines and VMs being removed")
-    deadline = time.time() + args.timeout
+    deadline = now() + timeout
     while kube.get(cs.K_CLUSTER, ns, name) is not None:
-        if time.time() > deadline:
-            step("delete", "error", f"{ns}/{name} still deleting after {args.timeout} s")
+        if now() > deadline:
+            step("delete", "error", f"{ns}/{name} still deleting after {timeout} s; "
+                                    "its identity is kept, CAPHV still needs it")
             return EXIT_FAIL
         left = len([m for m in kube.list("machines.cluster.x-k8s.io", ns)
                     if ((m.get("metadata") or {}).get("labels") or {})
                     .get("cluster.x-k8s.io/cluster-name") == name])
         step("delete", "running", f"{ns}/{name}: {left} machine(s) left")
-        time.sleep(10)
+        sleep(10)
+    gone = identity_down(kube, ns, name)
+    if gone:
+        step("delete", "running", f"identity of {ns}/{name} removed ({gone} object(s))")
     nsobj = kube.get("namespaces", None, ns) or {}
     others = [c for c in kube.list(cs.K_CLUSTER, ns)]
     if not others:
@@ -632,6 +763,18 @@ def cmd_delete(args):
             step("delete", "running", f"namespace {ns} removed (created by the console)")
     step("delete", "done", f"{ns}/{name} deleted")
     return EXIT_OK
+
+
+def cmd_delete(args):
+    kube, _, _ = kube_from(args)
+    ns, _, name = args.name.partition("/")
+    if not ns or not name:
+        raise SystemExit("--name expects namespace/name")
+    cl = kube.get(cs.K_CLUSTER, ns, name)
+    if cl is None:
+        step("delete", "error", f"cluster {ns}/{name} not found")
+        return EXIT_FAIL
+    return remove_cluster(kube, ns, name, args.timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -806,9 +949,9 @@ def main(argv=None):
             ("install", cmd_install, ("components", "install")),
             ("cleanup-legacy", cmd_cleanup, ("dry",)),
             ("inventory", cmd_inventory, ("components", "json")),
-            ("check", cmd_check, ("spec", "components", "json")),
+            ("check", cmd_check, ("spec", "components", "json", "identity")),
             ("render", cmd_render, ("spec", "secrets")),
-            ("create", cmd_create, ("spec", "components", "json", "dry", "timeout")),
+            ("create", cmd_create, ("spec", "components", "json", "dry", "timeout", "identity")),
             ("delete", cmd_delete, ("name", "timeout")),
             ("services", cmd_services, ("json",)),
             ("service-check", cmd_service_check, ("sspec",)),
@@ -844,6 +987,13 @@ def main(argv=None):
             sp.add_argument("--name", required=True, help="namespace/name of the service")
         if "sspec" in extra:
             sp.add_argument("--spec", required=True, help="JSON service request, '-' for stdin")
+        if "identity" in extra:
+            sp.add_argument("--identity", choices=ci.IDENTITIES, default="restricted",
+                            help="restricted: a CAPHV identity of its own for the cluster (default); "
+                                 "console: the console kubeconfig, for a diagnosis")
+            if name == "create":
+                sp.add_argument("--origin", default="",
+                                help="plan=P,template=M,run=ID: origin labels set on the Cluster")
     args = ap.parse_args(argv)
     try:
         return args.fn(args)

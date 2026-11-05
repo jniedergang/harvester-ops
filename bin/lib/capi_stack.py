@@ -187,6 +187,14 @@ def contract_state(kube, wanted=()):
 SHIM_NS, SHIM_NAME = "kube-system", "ingress-expose"
 
 
+def harvester_vip(kube):
+    """L'adresse de Harvester (VIP) : celle que porte le statut du service
+    `kube-system/rke2-traefik` sur Harvester 1.9, ou None."""
+    traefik = kube.get("services", SHIM_NS, "rke2-traefik") or {}
+    ing = ((traefik.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
+    return ing[0].get("ip") if ing else None
+
+
 def shim_state(kube, wanted=()):
     """CAPHV <= v0.10.1 lit l'adresse de Harvester dans l'annotation
     `kube-vip.io/loadbalancerIPs` du service `kube-system/ingress-expose`.
@@ -196,11 +204,7 @@ def shim_state(kube, wanted=()):
     harv1 le 25/09/2026)."""
     needed_by = [w for w in wanted or [] if "ingress-expose" in (w.get("workarounds") or [])]
     svc = kube.get("services", SHIM_NS, SHIM_NAME)
-    vip = None
-    if svc is None:
-        traefik = kube.get("services", SHIM_NS, "rke2-traefik") or {}
-        ing = ((traefik.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
-        vip = ing[0].get("ip") if ing else None
+    vip = harvester_vip(kube) if svc is None else None
     present = svc is not None
     ours = present and _labels(svc).get(SHIM_LABEL) == "caphv-ingress-expose"
     return {"needed": bool(needed_by) and (not present or ours),

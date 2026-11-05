@@ -243,6 +243,17 @@ def kube_vip_docs(namespace):
     ]
 
 
+# 2.5.0 : le HarvesterCluster porte le nom du cluster (et non
+# `<cluster>-<aléa>`, gabarit par défaut du cœur, exp/topology/desiredstate,
+# CAPI v1.13) : CAPHV supprime à la fin le pool `<ns>-<nom du
+# HarvesterCluster>-ippool`, que l'identité restreinte doit pouvoir nommer
+# d'avance (capi_identity.generated_pool).
+INFRA_NAMING = {"template": "{{ .cluster.name }}"}
+# 2.5.0 : origine d'un cluster créé par la chaîne d'un plan (reprise, refus
+# d'un nom déjà pris par autre chose)
+ORIGIN_LABELS = {"plan": "harvester-ops.io/plan", "template": "harvester-ops.io/plan-template"}
+ORIGIN_ANNOTATIONS = {"run": "harvester-ops.io/plan-run"}
+
 INFRA_OLD = "infrastructure.cluster.x-k8s.io/v1alpha1"
 INFRA_NEW = "infrastructure.cluster.x-k8s.io/v1beta1"
 
@@ -261,7 +272,7 @@ def _retarget_refs(node):
             _retarget_refs(v)
 
 
-def postprocess(docs, spec):
+def postprocess(docs, spec, origin=None):
     """Corrige les documents produits par le générateur ; rend une copie.
 
     - **v1alpha1 -> v1beta1 pour les objets Harvester.** Le générateur écrit
@@ -279,6 +290,10 @@ def postprocess(docs, spec):
       le Cluster, pour que la suppression n'oublie rien.
     - **kube-vip** (v1.52.0), sans quoi aucun service LoadBalancer du
       cluster n'obtient d'adresse.
+    - **Nom du HarvesterCluster** = nom du cluster (2.5.0, INFRA_NAMING).
+    - **Origine** (2.5.0) : étiquettes et annotation d'un cluster créé par un
+      plan, passées par `origin` ({plan, template, run}), jamais par la
+      demande, qui reste une liste blanche.
     """
     out = []
     for d in docs:
@@ -289,8 +304,16 @@ def postprocess(docs, spec):
         if d.get("kind") not in ("Namespace", "Cluster"):
             meta = d.setdefault("metadata", {})
             meta["labels"] = dict(meta.get("labels") or {}, **{GENERATED: "true"})
+        if d.get("kind") == "ClusterClass":
+            d.setdefault("spec", {})["infrastructureNamingStrategy"] = dict(INFRA_NAMING)
         if d.get("kind") == "Cluster":
             labels = d.setdefault("metadata", {}).setdefault("labels", {})
+            for k, label in ORIGIN_LABELS.items():
+                if (origin or {}).get(k):
+                    labels[label] = origin[k]
+            for k, ann in ORIGIN_ANNOTATIONS.items():
+                if (origin or {}).get(k):
+                    d["metadata"].setdefault("annotations", {})[ann] = origin[k]
             if spec.get("rancher_import"):
                 labels[AUTO_IMPORT] = "true"
             else:
@@ -311,6 +334,24 @@ def postprocess(docs, spec):
     have = {(d.get("kind"), (d.get("metadata") or {}).get("name")) for d in out}
     if cluster and ("ClusterResourceSet", KUBE_VIP_CRS) not in have:
         out.extend(kube_vip_docs(cluster["metadata"].get("namespace") or "default"))
+    return out
+
+
+def parse_origin(text):
+    """`plan=<p>,template=<m>,run=<id>` -> dict. Clés connues seulement ;
+    `plan` et `template` sont des noms RFC 1123 (valeurs d'étiquette), `run`
+    un identifiant d'action (12 hexadécimaux). ValueError sinon."""
+    out = {}
+    for part in [x for x in str(text or "").split(",") if x.strip()]:
+        k, sep, v = part.strip().partition("=")
+        if not sep or k not in ORIGIN_LABELS and k not in ORIGIN_ANNOTATIONS:
+            raise ValueError(f"--origin: unknown key '{k}' (plan, template, run)")
+        if k in out:
+            raise ValueError(f"--origin: '{k}' given twice")
+        ok = re.match(r"^[0-9a-f]{12}$", v) if k == "run" else K8S_NAME_RE.match(v)
+        if not ok:
+            raise ValueError(f"--origin: invalid value for '{k}'")
+        out[k] = v
     return out
 
 

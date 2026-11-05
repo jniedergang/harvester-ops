@@ -17324,6 +17324,7 @@ def api_capi_install(cluster):
 # suppression. Voir docs/design/2026-09-25-creation-cluster-capi.md.
 # -----------------------------------------------------------------------------
 import capi_cluster as _cc  # noqa: E402
+import capi_identity as _ci  # noqa: E402
 
 CAPI_SCRIPT = "harvester-capi.py"
 _CAPI_INVENTORY_CACHE = {}          # cluster -> (horodatage, réponse)
@@ -21868,9 +21869,21 @@ def api_capi_cluster_details(cluster, namespace, name):
                 })
         except Exception:
             pass
+    # 2.5.0 (décision 168) : identité restreinte (compte étiqueté pour ce
+    # cluster) ou kubeconfig de la console (clusters d'avant la 2.5.0)
+    rc3, sa_out, _ = kc_run("-n", namespace, "get", "serviceaccount", _ci.IDENTITY, "-o", "json")
+    identity = "console"
+    if rc3 == 0:
+        try:
+            lab = json.loads(sa_out).get("metadata", {}).get("labels") or {}
+            if lab.get(_ci.L_CLUSTER) == name and lab.get(_ci.L_NAMESPACE) == namespace:
+                identity = "restricted"
+        except ValueError:
+            pass
     return jsonify({
         "name": name,
         "namespace": namespace,
+        "identity": identity,
         "phase": cl.get("status", {}).get("phase", ""),
         # v1.48.0 : le cœur de Turtles répond en v1beta2 (plus de
         # `status.controlPlaneReady`)
