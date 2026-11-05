@@ -268,6 +268,30 @@ def test_stop_during_terraform_lets_the_running_template_finish(world, monkeypat
     assert run.status == "cancelled" and run.exit_code == 3
     items = {i["template"]: i for i in run.result["phases"][1]["items"]}
     assert items["cles"]["status"] == "done" and items["reseau"]["status"] == "skipped"
+    assert "cancel_requested" not in run.result               # le statut le dit déjà
+
+
+def test_stop_during_the_last_template_is_recorded(world, monkeypatch):
+    """Revue m2 : un arrêt arrivé pendant le DERNIER modèle le laisse finir ;
+    le statut reste vrai (fait), le résultat garde `cancel_requested`."""
+    tr.seed(world["client"])
+    gate = threading.Event()
+    fake = world["fake"]
+
+    def slow(ws, kc, args, timeout=180, **kw):
+        if args[0] == "apply":
+            gate.wait(5)
+        return fake(ws, kc, args, timeout, **kw)
+    monkeypatch.setattr(wapp, "_tf_run_cmd", slow)
+    r = world["client"].post("/api/deploy/harvlab", json={"plan": "site", "variables": {"equipe": "ops"}})
+    rid = r.get_json()["action_id"]
+    end = time.time() + 10
+    while fake.count("show") < 1 and time.time() < end:
+        time.sleep(0.02)
+    assert world["client"].post("/api/deploy/harvlab/stop", json={"action_id": rid}).status_code == 202
+    gate.set()
+    run = wait(rid)
+    assert run.status == "done" and run.result["cancel_requested"] is True
 
 
 def test_secrets_never_in_steps_result_or_db(world):

@@ -451,6 +451,22 @@ def test_batch_with_unknown_plan(env):
     assert r.status_code == 400
 
 
+@pytest.mark.real_presence
+def test_plan_findings_come_before_any_bmc_read(env, monkeypatch):
+    """Revue m5 : un plan qui ne peut pas démarrer (variable manquante) est
+    refusé AVANT de lire les BMC de la série ou de la machine."""
+    reads = []
+    monkeypatch.setattr(wapp, "_bm_system_presence", lambda *a, **k: reads.append(a) or {"state": "absent"})
+    c = env["client"]
+    seed(c)
+    t180.create(c)
+    r = c.post("/api/baremetal/profiles/rack-a/batch", json=batch_body(plan_variables={}))
+    d = r.get_json()
+    assert r.status_code == 400 and d["code"] == "blocking-findings", d
+    assert [f["code"] for f in d["findings"] if f["level"] == "blocking"] == ["var-missing"]
+    assert reads == [] and env["started"] == []
+
+
 # --- revues B2-I1 et B2-I2 : processus multiples, reprise après interruption ---
 
 _HOLDER = r"""

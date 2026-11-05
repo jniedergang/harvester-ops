@@ -138,3 +138,26 @@ def test_a_dry_run_script_does_not_take_the_lock(tmp_path):
     finally:
         holder.kill()
         holder.wait()
+
+
+def test_a_shutdown_is_refused_while_a_plan_deploys(registry, tmp_path, monkeypatch):
+    """2.4.0 (revue m10) : un déroulé de plan sur le cluster bloque l'arrêt,
+    qu'il tourne dans la console ou dans la ligne de commande (verrou du
+    cluster) ; son essai (dry-run) ne bloque rien."""
+    monkeypatch.setattr(wapp, "_bm_profiles_state", lambda: tmp_path)
+    run = _running("deploy:c1", "c1")
+    with pytest.raises(wapp.ActionBusy) as e:
+        wapp.start_action("shutdown", "c1")
+    assert e.value.run.id == run.id
+    registry.clear()
+    _running("deploy:c1", "c1", dry_run=True)
+    assert wapp.start_action("shutdown", "c1").action == "shutdown"
+    registry.clear()
+    fd, _h = wapp._deploy_cluster_lock("c1", "cccccccccccc", "site")
+    try:
+        with pytest.raises(wapp.ActionBusy) as e:
+            wapp.start_action("startup", "c1")
+        assert e.value.run.id == "cccccccccccc" and e.value.run.action == "deploy:c1"
+    finally:
+        wapp._flock_release(fd)
+    assert wapp.start_action("startup", "c1").action == "startup"

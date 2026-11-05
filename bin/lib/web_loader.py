@@ -8,7 +8,9 @@ code, deux appelants. `prepare_console_env` pose ce qu'il faut pour qu'elle
 ne surveille aucun cluster et range son historique dans l'état.
 """
 
+import errno
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -51,10 +53,23 @@ def read_secrets(path=None, stdin=None):
     if stdin is not None:
         text = stdin.read()
     else:
-        p = Path(path)
-        if p.stat().st_mode & 0o077:
-            raise SecretsError("the secrets file must not be readable by others (chmod 600)")
-        text = p.read_text()
+        # revue m7 : un seul descripteur (ni lien symbolique suivi, ni fichier
+        # échangé entre le contrôle et la lecture), à soi et privé
+        try:
+            fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                raise SecretsError("the secrets file must not be a symbolic link") from None
+            raise
+        with os.fdopen(fd, encoding="utf-8") as f:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise SecretsError("the secrets file must be a regular file")
+            if st.st_uid != os.geteuid():
+                raise SecretsError("the secrets file must belong to the user running the command")
+            if st.st_mode & 0o077:
+                raise SecretsError("the secrets file must not be readable by others (chmod 600)")
+            text = f.read()
     try:
         doc = yaml.safe_load(text) or {}
     except yaml.YAMLError:

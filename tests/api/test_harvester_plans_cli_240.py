@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT / "bin" / "lib"))
 import app as wapp  # noqa: E402
 import test_deploy_routes_240 as tr  # noqa: E402
 import test_deploy_runner_240 as trun  # noqa: E402
+import web_loader  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location("harvester_plans", ROOT / "bin" / "harvester-plans.py")
 cli = importlib.util.module_from_spec(SPEC)
@@ -262,3 +263,21 @@ def test_apply_update_declarations_flag(world, tmp_path, monkeypatch, capsys):
     d = json.loads(out)
     assert rc == 0 and d["result"]["phases"][1]["items"][0]["updated"] is True
     assert world["store"].find_by_name("harvlab", "site-cles")["resources"][0]["spec"]["name"] == "dev-ops"
+
+
+def test_secrets_file_read_through_one_descriptor(tmp_path):
+    """Revue m7 : lien symbolique refusé (même vers un fichier 0600), fichier
+    lu par le descripteur contrôlé ; répertoire refusé."""
+    real = tmp_path / "real.yaml"
+    real.write_text("token: T\n")
+    real.chmod(0o600)
+    assert web_loader.read_secrets(str(real)) == {"token": "T"}
+    link = tmp_path / "link.yaml"
+    link.symlink_to(real)
+    with pytest.raises(web_loader.SecretsError) as e:
+        web_loader.read_secrets(str(link))
+    assert "symbolic link" in str(e.value)
+    d = tmp_path / "dir"
+    d.mkdir(mode=0o700)
+    with pytest.raises((web_loader.SecretsError, OSError)):
+        web_loader.read_secrets(str(d))

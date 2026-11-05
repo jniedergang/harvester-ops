@@ -2141,10 +2141,18 @@ def start_action(action, cluster, dry_run=False, interactive=False,
         # Contrôle et inscription sous le même verrou : deux requêtes
         # simultanées ne peuvent pas passer toutes les deux.
         if action in CLUSTER_SEQUENCES and not dry_run:
+            # 2.4.0 (revue m10) : un déroulé de plan en cours sur ce cluster
+            # bloque aussi l'arrêt (l'inverse l'était déjà), qu'il tourne ici
+            # ou dans la ligne de commande (verrou du cluster)
             busy = next((r for r in ACTIONS.values()
-                         if r.cluster == cluster and r.action in CLUSTER_SEQUENCES
-                         and not r.dry_run and r.status in ("starting", "running")),
+                         if r.cluster == cluster and not r.dry_run and r.status in ("starting", "running")
+                         and (r.action in CLUSTER_SEQUENCES or r.action == f"deploy:{cluster}")),
                         None)
+            if busy is None:
+                holder = _deploy_lock_holder(cluster)
+                if holder:
+                    busy = types.SimpleNamespace(id=holder.get("run") or "", action=f"deploy:{cluster}",
+                                                 cluster=cluster)
             if busy:
                 raise ActionBusy(busy)
         ACTIONS[run_id] = run
@@ -7632,6 +7640,13 @@ def api_baremetal_install():
     data, err = _bm_prepare_install(data)
     if err:
         return err
+    if plan_name:
+        cluster = data.get("cluster_name") if mode == "create" else data.get("cluster")
+        vip = data.get("vip") if mode == "create" else \
+            (re.match(r"https://\[?([^\]/:]+)", str(data.get("server_url") or "")) or [None, ""])[1]
+        refused = _deploy_install_precheck(plan_name, plan_vars, cluster, vip)
+        if refused:
+            return refused
     # 2.2.0 : une machine qui semble porter un système ne s'installe que si
     # son nom (série, sinon adresse du BMC) a été tapé ; contrôlé ici, sur
     # une lecture du BMC faite par la console, jamais sur ce que dit la page.
@@ -7644,9 +7659,6 @@ def api_baremetal_install():
         if busy:
             return jsonify({"error": f"{busy.action} is already driving the BMC {data['bmc_host']}",
                             "running": busy.id, "running_action": busy.action}), 409
-        cluster = data.get("cluster_name") if mode == "create" else data.get("cluster")
-        vip = data.get("vip") if mode == "create" else \
-            (re.match(r"https://\[?([^\]/:]+)", str(data.get("server_url") or "")) or [None, ""])[1]
         record = {"kind": "single", "profile": None, "concurrency": None, "batch": None}
         body, status = _deploy_with_install(plan_name, plan_vars, cluster, vip, [data], "single", record,
                                             user=current_user() or "")
@@ -8336,6 +8348,10 @@ def api_bm_profile_batch(name):
             return jsonify({"error": "invalid plan name", "fields": ["plan"]}), 400
         if _dpl.load_plan(_deploy_state(), plan_name) is None:
             return jsonify({"error": "no such plan", "fields": ["plan"]}), 404
+        refused = _deploy_install_precheck(plan_name, data.get("plan_variables"), batch.get("cluster_name"),
+                                           batch.get("vip"))
+        if refused:
+            return refused
         plan, errors, machines = _bm_batch_prepare(prof, batch, secrets_, _bm_batch_confirms(data))
         if errors:
             return _bm_errors_json(errors, "invalid batch")
@@ -31580,6 +31596,14 @@ def _deploy_lock_holder(cluster):
     return holder
 
 
+def _deploy_run_ended_here(run_id):
+    """Vrai si ce déroulé est connu de ce processus avec un statut final
+    (son fil rend le verrou du cluster juste après l'avoir écrit)."""
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(run_id or "")
+    return run is not None and run.status in ("done", "error", "cancelled")
+
+
 def _deploy_plan_running(plan_name):
     """Identifiant d'un déroulé en cours de ce plan (ce processus ou un
     autre), ou None."""
@@ -32124,6 +32148,10 @@ def _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, in
             created[:] = [i for i in created if TF_DECLS.get(i)]
         final = (res or {}).get("status") or "error"
         run.result = dict(base, **{k: v for k, v in (res or {}).items() if k != "status"}, status=final)
+        if ctx.cancelled() and final != "cancelled":
+            # revue m2 : arrêt arrivé pendant le dernier élément, qui est allé
+            # à son terme ; le statut reste vrai, la demande est consignée
+            run.result["cancel_requested"] = True
         run.error_summary = (res or {}).get("error_summary") or None
         run.exit_code = _dch.EXIT_CODES.get(final, 1)
         run.status = {"done": "done", "cancelled": "cancelled"}.get(final, "error")
@@ -32182,7 +32210,7 @@ def _deploy_previous(action_id):
     # interrompue (console redémarrée, ligne de commande tuée)
     if prev["status"] in ("starting", "running", "interrupted"):
         holder = _deploy_lock_holder(str(prev["action"])[len(DEPLOY_PREFIX):]) or {}
-        if holder.get("run") == action_id:
+        if holder.get("run") == action_id and not _deploy_run_ended_here(action_id):
             prev["status"] = "running"
         elif prev["status"] != "interrupted":
             prev["status"] = "interrupted"
@@ -32221,6 +32249,12 @@ def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, clu
                     "running": seq.id}, 409
         run_id = run_id or uuid.uuid4().hex[:12]
         lock_fd, holder = _deploy_cluster_lock(cluster, run_id, dctx["plan"]["name"])
+        end = time.time() + 3
+        while lock_fd is None and time.time() < end and _deploy_run_ended_here(holder.get("run")):
+            # le déroulé précédent de ce processus a écrit son statut final et
+            # rend son verrou dans l'instant (reprise cliquée aussitôt)
+            time.sleep(0.05)
+            lock_fd, holder = _deploy_cluster_lock(cluster, run_id, dctx["plan"]["name"])
         if lock_fd is None:
             # un déroulé de l'autre processus (console ou ligne de commande)
             return {"error": "a deployment is already running on this cluster", "code": "deploy-running",
@@ -32579,6 +32613,19 @@ def _deploy_install_record(prof_name, batch, hostnames, concurrency, kind="batch
     return {"kind": kind, "profile": prof_name, "concurrency": concurrency, "hostnames": hostnames,
             "batch": {"cluster_name": batch.get("cluster_name"), "vip": batch.get("vip"),
                       "iso": batch.get("iso"), "rows": rows}}
+
+
+def _deploy_install_precheck(plan_name, plan_variables, cluster, vip):
+    """Constats bloquants d'un plan enchaîné à une installation, AVANT toute
+    lecture de BMC (revue m5 : c'est bon marché, une lecture de BMC ne l'est
+    pas) : réponse 400, ou None."""
+    if not isinstance(cluster, str) or not cluster:
+        return None                             # refusé ensuite par les contrôles de la série
+    findings, summary, _ctx = _deploy_prepare(cluster, plan_name, plan_variables, vip=vip or "", install=True)
+    if findings and _deploy_blocking(findings):
+        return jsonify({"error": "the plan cannot start", "code": "blocking-findings",
+                        "findings": findings, "summary": summary}), 400
+    return None
 
 
 def _deploy_with_install(plan_name, plan_variables, cluster, vip, rows, kind, record, concurrency=None,
