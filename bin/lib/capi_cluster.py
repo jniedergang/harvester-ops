@@ -669,12 +669,17 @@ def check_many(specs, facts, extra_addresses=None):
     if lh is not None:
         nodes = _lr.storage_room(lh.get("nodes") or [], [], lh.get("over", 200.0),
                                  lh.get("minimal", 25.0))["schedulable_nodes"]
+        unplaceable = set()
         for klass in sorted({v["class"] for v in volumes}):
             want = next(v["replicas"] for v in volumes if v["class"] == klass)
             if want > nodes:
+                unplaceable.add(klass)
                 out.append(finding("fleet-replicas-nodes", "block", storage_class=klass,
                                    replicas=want, nodes=nodes))
-        room = _lr.fits(lh.get("nodes") or [], lh.get("over", 200.0), lh.get("minimal", 25.0), volumes)
+        # une classe déjà signalée ne se place nulle part : la compter encore
+        # dans la place ferait un second constat pour la même cause
+        room = _lr.fits(lh.get("nodes") or [], lh.get("over", 200.0), lh.get("minimal", 25.0),
+                        [v for v in volumes if v["class"] not in unplaceable])
         if not room["fits"]:
             first = room["short"][0]
             out.append(finding("fleet-storage-short", "block", volumes=len(room["short"]),

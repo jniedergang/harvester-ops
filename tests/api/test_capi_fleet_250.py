@@ -100,9 +100,12 @@ ONE_CPU, ONE_MEM = cc.requests_needed(demand("x"), {"cpu": 1600, "memory": 150})
     ("storage, two nodes enough", three(), facts(nodes=[lh_node("n1", 130), lh_node("n2", 130)]), []),
     ("three replicas, three nodes, one closed", [demand("c1")],
      facts(nodes=[lh_node("n1"), lh_node("n2"), lh_node("n3", schedulable=False)], replicas=3),
-     ["fleet-replicas-nodes", "fleet-storage-short"]),
-    ("three replicas on one node", [demand("c1")], facts(replicas=3),
-     ["fleet-replicas-nodes", "fleet-storage-short"]),
+     ["fleet-replicas-nodes"]),
+    # une seule cause, un seul constat (vu sur harvlab2 le 05/11/2026)
+    ("three replicas on one node", [demand("c1")], facts(replicas=3), ["fleet-replicas-nodes"]),
+    # classe impossible ET place qui manque pour l'autre classe : les deux
+    ("three replicas, and the other class short", three(extra_disk_size="10Gi", extra_disk_class="longhorn"),
+     facts(nodes=[lh_node("n1", 200)]), ["fleet-replicas-nodes", "fleet-storage-short"]),
     # un 1+1 demande 3 adresses : 2 clusters = 6 > 5 ; un seul passe
     ("two exceed the pool together", [demand("c1"), demand("c2")], facts(pools=[pool(size=5)]),
      ["fleet-pool-short"]),
@@ -175,7 +178,11 @@ def test_rights_unreadable_is_a_warning(denied, code):
 def test_extra_disk_counts_with_its_own_class():
     specs = [demand("c1", extra_disk_size="100Gi", extra_disk_class="longhorn")]
     got = cc.check_many(specs, facts(nodes=[lh_node("n1"), lh_node("n2")]))
-    assert fleet_codes(got) == ["fleet-replicas-nodes", "fleet-storage-short"]
+    assert fleet_codes(got) == ["fleet-replicas-nodes"]
+    flagged = next(x for x in got if x["code"] == "fleet-replicas-nodes")
+    assert flagged["facts"]["storage_class"] == "longhorn"
+    # avec trois nœuds trop petits pour 100 Gio, c'est la place qui manque
+    got = cc.check_many(specs, facts(nodes=[lh_node("n1", 60), lh_node("n2", 60), lh_node("n3", 60)]))
     short = next(x for x in got if x["code"] == "fleet-storage-short")
     assert short["facts"]["storage_class"] == "longhorn"
 
