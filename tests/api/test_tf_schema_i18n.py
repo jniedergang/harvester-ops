@@ -44,10 +44,11 @@ def texts(schema):
 
 def test_every_label_and_help_exists_in_five_languages(schema):
     missing = []
+    # un en-tête de bloc imbriqué n'a pas de bulle (ses champs en ont une)
+    blocks = {f"{k}.{n}" for k, sch in schema.items() for n in (sch.get("nested") or {})}
     for where, label, desc in texts(schema):
         for what, obj in (("label", label), ("description", desc)):
-            if what == "description" and ("#" in where or where.count(".") == 1 and where.split(".")[1] in
-                                          ("disk", "network_interface", "cloudinit")):
+            if what == "description" and ("#" in where or where in blocks):
                 continue
             if not obj or any(not obj.get(l) for l in LANGS):
                 missing.append(f"{where} {what}")
@@ -57,3 +58,24 @@ def test_every_label_and_help_exists_in_five_languages(schema):
 def test_no_em_dash_or_unicode_arrow_in_the_texts(schema):
     blob = json.dumps(schema, ensure_ascii=False)
     assert "—" not in blob and "→" not in blob
+
+
+NEW_240 = ("network", "storageclass", "ippool")
+
+
+def test_the_240_kinds_have_a_label_and_a_help_on_every_control(schema):
+    """2.4.0 : chaque contrôle des trois formulaires a sa bulle d'aide, une
+    phrase, dans les cinq langues (mutation : retirer la description italienne
+    de `ippool.range.gateway` fait échouer ce test et le précédent)."""
+    seen = 0
+    for where, label, desc in texts(schema):
+        if where.split(".")[0].split("#")[0] not in NEW_240 or "#" in where:
+            continue
+        if where.count(".") == 1 and where.split(".")[1] in schema[where.split(".")[0]].get("nested", {}):
+            continue
+        seen += 1
+        for lang in LANGS:
+            assert label and label.get(lang), (where, lang)
+            assert desc and desc.get(lang), (where, lang)
+            assert desc[lang].rstrip().endswith("."), (where, lang)
+    assert seen == 3 + 11 + 7 + 2 + 1 + 4 + 2 + 3   # genres, réseau, classe (+ topologie), pool (+ blocs)

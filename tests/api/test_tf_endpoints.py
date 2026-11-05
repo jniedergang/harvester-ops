@@ -119,7 +119,7 @@ def test_apply_unknown_kind_returns_400_with_supported_list(api):
     )
     assert status == 400
     assert "totally_bogus" in (payload.get("error") or "")
-    assert payload.get("supported") == ["vm", "image", "ssh_key", "raw"]
+    assert payload.get("supported") == ["vm", "image", "ssh_key", "network", "storageclass", "ippool", "raw"]
 
 
 def test_apply_missing_required_fields_returns_400(api):

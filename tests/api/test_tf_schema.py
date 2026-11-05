@@ -175,3 +175,93 @@ def test_every_ref_url_has_flask_route():
     for url in urls:
         assert "{target}" in url
         assert f'@app.route("{url.replace("{target}", "<host>")}")' in app, url
+
+
+# ---------------------------------------------------------------------------
+# 2.4.0 : réseau de VM, classe de stockage, pool d'adresses. Champs = ceux du
+# provider Harvester 1.9.0 (`terraform providers schema -json`, constats du
+# plan 2026-11-03), noms identiques ; rien d'autre.
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+import subprocess  # noqa: E402
+
+import pytest  # noqa: E402
+
+PROVIDER_240 = {
+    "network": ({"name", "namespace", "cluster_network_name", "vlan_id", "description", "route_mode",
+                 "route_cidr", "route_gateway", "route_dhcp_server_ip", "config", "labels"}, {}),
+    # `match_label_expressions` : contenu du bloc `allowed_topologies` (au plus un)
+    "storageclass": ({"name", "parameters", "volume_provisioner", "reclaim_policy", "volume_binding_mode",
+                      "allow_volume_expansion", "is_default"},
+                     {"match_label_expressions": {"key", "values"}}),
+    # `scope` : sous-bloc de `selector`, à plat dans le formulaire (un niveau de bloc)
+    "ippool": ({"name"}, {"range": {"start", "end", "subnet", "gateway"},
+                          "selector": {"network", "priority"},
+                          "scope": {"guest_cluster", "namespace", "project"}}),
+}
+
+
+@pytest.fixture(scope="module")
+def schema_json():
+    js = """
+      global.window = global;
+      require('./web/static/js/tf-schema.js');
+      console.log(JSON.stringify(window.TF_SCHEMA, (k, v) => v instanceof RegExp ? String(v) : v));"""
+    r = subprocess.run(["node", "-e", js], capture_output=True, text=True, cwd=str(ROOT))
+    if r.returncode != 0:
+        pytest.skip("node unavailable: " + r.stderr[:200])
+    return json.loads(r.stdout)
+
+
+@pytest.mark.parametrize("kind", sorted(PROVIDER_240))
+def test_240_forms_carry_exactly_the_provider_fields(schema_json, kind):
+    args, nested = PROVIDER_240[kind]
+    sch = schema_json[kind]
+    assert sch["family"] == "harvester"
+    assert {a["name"] for a in sch["args"]} == args
+    assert {k: {a["name"] for a in v["args"]} for k, v in (sch.get("nested") or {}).items()} == nested
+    shown = {a for s in sch["sections"] for a in s.get("args", [])} | {s["nested"] for s in sch["sections"]
+                                                                       if s.get("nested")}
+    assert shown == args | set(nested), "every field sits in a section"
+
+
+@pytest.mark.parametrize("kind, arg, want", [
+    ("network", "vlan_id", {"type": "int", "required": True, "min": 0, "max": 4094}),
+    ("network", "labels", {"type": "map"}),
+    ("network", "route_mode", {"type": "enum", "enum_values": ["auto", "manual"]}),
+    ("network", "route_cidr", {"required_when": {"field": "route_mode", "equals": "manual"}}),
+    ("network", "route_gateway", {"required_when": {"field": "route_mode", "equals": "manual"}}),
+    ("storageclass", "parameters", {"type": "map", "required": True}),
+    ("storageclass", "is_default", {"type": "bool", "default": False}),
+    ("storageclass", "allow_volume_expansion", {"type": "bool", "default": True}),
+    ("storageclass", "reclaim_policy", {"enum_values": ["Delete", "Retain"]}),
+    ("storageclass", "volume_binding_mode", {"enum_values": ["Immediate", "WaitForFirstConsumer"]}),
+])
+def test_240_field_settings(schema_json, kind, arg, want):
+    a = next(x for x in schema_json[kind]["args"] if x["name"] == arg)
+    assert {k: a.get(k) for k in want} == want
+
+
+def test_storage_class_proposes_migratable_true(schema_json):
+    p = next(x for x in schema_json["storageclass"]["args"] if x["name"] == "parameters")
+    assert p["default"]["migratable"] == "true"
+
+
+def test_ippool_blocks_bounds(schema_json):
+    n = schema_json["ippool"]["nested"]
+    assert (n["range"]["min"], n["selector"]["max"]) == (1, 1)
+    assert all(a.get("required") for a in n["range"]["args"])
+
+
+def test_the_declaration_view_offers_the_240_kinds():
+    js = (ROOT / "web" / "static" / "js" / "tf-decl-view.js").read_text()
+    assert "harvester: ['vm', 'image', 'ssh_key', 'network', 'storageclass', 'ippool', 'raw']" in js
+
+
+def test_tf_form_renders_and_reads_a_map_field():
+    """Le champ `map` (paires clé-valeur) : rendu de l'objet par défaut,
+    lecture en objet, ligne vide ignorée, valeurs échappées."""
+    js = TF_JS.read_text()
+    assert "case 'map':" in js and "if (arg.type === 'map')" in js
+    assert "Object.keys(v).length > 0" in js        # un objet vide n'est pas « rempli »
+    assert 'value="${esc(key)}"' in js and 'value="${esc(value)}"' in js
