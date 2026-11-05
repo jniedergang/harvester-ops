@@ -28659,12 +28659,22 @@ provider "harvester" {
 
 
 def _hcl_str(s):
-    """Quote a string for HCL — newlines become heredoc."""
+    """Quote a string for HCL — newlines become heredoc.
+
+    2.4.0 (revue B2-I4) : la valeur arrive comme du TEXTE. `${` et `%{`
+    sont échappés (`$${`, `%%{`) dans une chaîne comme dans un heredoc :
+    sinon Terraform évalue `${file("...")}` et lit un fichier de la console.
+    Le délimiteur du heredoc n'apparaît sur aucune ligne de la valeur."""
     if s is None:
         return '""'
-    s = str(s)
+    s = str(s).replace("${", "$${").replace("%{", "%%{")
     if "\n" in s:
-        return f"<<-EOT\n{s}\nEOT"
+        lines = {ln.strip() for ln in s.split("\n")}
+        term, n = "EOT", 0
+        while term in lines:
+            n += 1
+            term = f"EOT{n}"
+        return f"<<-{term}\n{s}\n{term}"
     return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 

@@ -46,6 +46,7 @@ from pathlib import Path
 import yaml
 
 import bm_profiles as _bmp
+import hcl_guard as _hcl
 import kvm_templates as _kvt
 
 ProfileError = _bmp.ProfileError
@@ -73,14 +74,15 @@ _SECRET_NAME_RE = re.compile(r"secret[_-]name(space)?$", re.I)
 # cloud-init retiré entier s'il parle de mot de passe (décision 152)
 _TEXT_FIELDS = frozenset(("user_data",))
 _PASSWORD_TEXT_RE = re.compile(r"password|passwd|chpasswd", re.I)
-# HCL brut (`raw`, champ `tf`) : jamais retiré en silence, REFUSÉ s'il parle
-# de mot de passe ou affecte un attribut au nom de secret (`token = ...`,
-# `"api-secret" = ...`). `key` seul n'en est pas un en HCL (étiquettes,
-# `public_key`) : il reste à la règle des clés des autres genres.
-_HCL_SECRET_NAME_RE = re.compile(r"password|passwd|secret|token|credential|private", re.I)
-_HCL_ASSIGN_RE = re.compile(r'"([^"\n]{1,200})"\s*=(?![=>])|\b([A-Za-z_][\w-]*)\s*=(?![=>])')
+# HCL brut (`raw`, champ `tf`) : jamais retiré en silence, REFUSÉ par la
+# garde de hcl_guard (garde contre les accidents : secrets, fichiers de
+# l'hôte, blocs qui exécutent) ; ses valeurs de variables y sont échappées.
 # identifiants dans une adresse (`https://user:pass@hôte/...`)
 _URL_USERINFO_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s@]+@")
+# ... ou dans sa requête (`?token=...`, signature d'une adresse présignée)
+_URL_QUERY_SECRET_RE = re.compile(
+    r"://\S*[?&][\w.-]*(password|passwd|secret|token|credential|signature|api[_-]?key|access[_-]?key)"
+    r"[\w.-]*=", re.I)
 SECRET_REFUSED = "secret-looking value"
 
 _LOCK = threading.Lock()
@@ -411,19 +413,6 @@ def delete_plan(state, name):
 
 # --- modèles de déclaration ---------------------------------------------------
 
-def _hcl_secret(text):
-    """Vrai si le HCL brut parle de mot de passe ou affecte un attribut au
-    nom de secret (noms de Secrets et clés publiques exemptés)."""
-    if _PASSWORD_TEXT_RE.search(text):
-        return True
-    for m in _HCL_ASSIGN_RE.finditer(text):
-        name = m.group(1) or m.group(2)
-        if (_HCL_SECRET_NAME_RE.search(name) and name not in _PUBLIC_KEYS
-                and not _SECRET_NAME_RE.search(name)):
-            return True
-    return False
-
-
 def secret_refusals(resources, base="resources"):
     """[(chemin, raison)] de ce qui ne se retire pas sans changer le sens et
     se refuse donc : HCL brut qui porte un secret, identifiants dans une
@@ -435,14 +424,16 @@ def secret_refusals(resources, base="resources"):
         if isinstance(value, dict):
             for k, v in value.items():
                 here = f"{where}.{k}"
-                if k == "tf" and isinstance(v, str) and _hcl_secret(v):
-                    out.append((here, SECRET_REFUSED))
+                why = _hcl.refusal(v) if k == "tf" and isinstance(v, str) else None
+                if why:
+                    out.append((here, why))
                     continue
                 walk(v, here)
         elif isinstance(value, list):
             for i, v in enumerate(value):
                 walk(v, f"{where}[{i}]")
-        elif isinstance(value, str) and _URL_USERINFO_RE.search(value):
+        elif isinstance(value, str) and (_URL_USERINFO_RE.search(value)
+                                         or _URL_QUERY_SECRET_RE.search(value)):
             out.append((where, "credentials in a URL"))
     for i, r in enumerate(resources):
         walk(r, f"{base}[{i}]")
@@ -635,8 +626,18 @@ def render_templates(plan, templates, values, field_type=None):
             ft = (lambda p, _k=kind: field_type(_k, p)) if field_type else None
             spec = r.get("spec") or {}
             try:
-                text = yaml.safe_dump(spec, sort_keys=False, allow_unicode=True, width=1 << 20)
-                spec_out = _bmp.render_advanced(text, values or {}, ft) or {}
+                if kind == "raw" and isinstance(spec.get("tf"), str):
+                    # revue B2-I4 : la valeur est placée selon sa place dans le
+                    # HCL (échappée dans une chaîne, nombre ou booléen hors
+                    # chaîne) ; elle ne change jamais la structure relue
+                    tf_out, refused = _hcl.render(spec["tf"], values or {})
+                    if refused:
+                        errors.extend((f"{where}.tf", f"variable {n}: {why}") for n, why in refused)
+                        continue
+                    spec_out = dict(spec, tf=tf_out)
+                else:
+                    text = yaml.safe_dump(spec, sort_keys=False, allow_unicode=True, width=1 << 20)
+                    spec_out = _bmp.render_advanced(text, values or {}, ft) or {}
             except KeyError as e:
                 errors.append((_var_path(spec, e.args[0], where) or where, "missing variable"))
                 continue

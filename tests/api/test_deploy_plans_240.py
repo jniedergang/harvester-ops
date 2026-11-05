@@ -318,7 +318,35 @@ def _raw(tf):
      '  "csi.storage.k8s.io/provisioner-secret-name" = "enc"\n'
      '  "csi.storage.k8s.io/provisioner-secret-namespace" = "default" } }', False),
     ('resource "x" "y" { labels = { key = "v" } }', False),
-    ('locals { ok = var.token_count >= 1 }', False),
+    ('resource "x" "y" { count = var.token_count >= 1 ? 1 : 0 }', False),
+    # une chaîne ordinaire qui parle d'un jeton n'est pas une affectation
+    ('resource "x" "y" { description = "token: rotated weekly" }', False),
+    # revue B2-I5 : contournements du premier contrôle, tous refusés
+    ('resource "x" "y" { data = { token: "abc" } }', True),
+    ('resource "x" "y" {\n  user_data = <<EOF\nk3s_token: abc\nEOF\n}', True),
+    ('resource "x" "y" {\n  user_data = <<-EOF\n  export K3S_TOKEN=abc\n  EOF\n}', True),
+    ('resource "x" "y" { data = { "to\\u006ben" = "abc" } }', True),
+    ('resource "x" "y" { data = { "\\"token\\"" = "abc" } }', True),
+    ('resource "x" "y" { provisioner "local-exec" { command = "id" } }', True),
+    ('resource "x" "y" { data = { ("tok${"en"}") = "abc" } }', True),
+    ('resource "x" "y" { data = { "tok${""}en" = "abc" } }', True),
+    ('resource "harvester_cloudinit_secret" "c" { user_data_base64 = "I2Nsb3Vk" }', True),
+    ('resource "x" "y" { description = file("/home/ju/.kube/harvester.yaml") }', True),
+    ('resource "x" "y" { description = "${file("/etc/hosts")}" }', True),
+    ('resource "x" "y" { description = base64decode("aGk=") }', True),
+    ('resource "x" "y" { description = sensitive("abc") }', True),
+    ('variable "x" {\n  default = "abc"\n  sensitive = true\n}', True),
+    ('resource "x" "y" { pwd = "abc" }', True),
+    ('resource "x" "y" { apikey = "abc" }', True),
+    ('resource "x" "y" { API_KEY = "abc" }', True),
+    ('resource "x" "y" { authorization = "Bearer abc" }', True),
+    ('resource "x" "y" { headers = { h = "Bearer abc" } }', True),
+    ('resource "x" "y" {\n  provisioner "local-exec" { command = "id" }\n}', True),
+    ('data "external" "e" { program = ["id"] }', True),
+    ('module "m" { source = "./m" }', True),
+    ('terraform { backend "local" {} }', True),
+    ('provider "harvester" { kubeconfig = "/k" }', True),
+    ('resource "harvester_image" "i" { url = "https://h/x.img?X-Amz-Signature=abc" }', True),
 ])
 def test_raw_hcl_secret_refused(tf, refused):
     if refused:
@@ -450,8 +478,50 @@ def test_render_refuses_secret_brought_by_a_value(kind, spec, value, where):
     assert [w for w, _ in e.value.errors] == [where]
     assert "hunter2" not in str(e.value.errors)
     # la même valeur sans secret passe
-    out = dp.render_templates(plan, {"t": t}, {"extra": "plain"})
+    # (hors chaîne HCL, la valeur sans secret est un nombre : revue B2-I4)
+    out = dp.render_templates(plan, {"t": t}, {"extra": "1" if "{ {{extra}} }" in str(spec) else "plain"})
     assert out[0][0] == "t"
+
+
+# Revue B2-I4 : une valeur de variable ne change pas ce que fait un modèle
+# relu. Dans une chaîne HCL du `raw`, elle est échappée (guillemet, barre
+# oblique inverse, interpolation `${`, directive `%{`) et arrive comme texte ;
+# hors chaîne, seuls un nombre et true/false passent.
+@pytest.mark.parametrize("tf,value,expected", [
+    ('resource "x" "y" { name = "{{extra}}" }', 'a"b', 'resource "x" "y" { name = "a\\"b" }'),
+    ('resource "x" "y" { name = "{{extra}}" }', 'a\\b', 'resource "x" "y" { name = "a\\\\b" }'),
+    ('resource "x" "y" { name = "{{extra}}" }', '${var.k}', 'resource "x" "y" { name = "$${var.k}" }'),
+    ('resource "x" "y" { name = "{{extra}}" }', '%{if true}x%{endif}',
+     'resource "x" "y" { name = "%%{if true}x%%{endif}" }'),
+    ('resource "x" "y" {\n  user_data = <<EOF\nhost: {{extra}}\nEOF\n}', 'a"${b}',
+     'resource "x" "y" {\n  user_data = <<EOF\nhost: a"$${b}\nEOF\n}'),
+    ('resource "x" "y" { vlan_id = {{extra}} }', '42', 'resource "x" "y" { vlan_id = 42 }'),
+    ('resource "x" "y" { on = {{extra}} }', 'true', 'resource "x" "y" { on = true }'),
+    # la sonde de la revue : lue comme texte, jamais évaluée par Terraform
+    ('resource "x" "y" { name = "{{extra}}" }', '${file("/home/ju/.kube/harvester.yaml")}',
+     'resource "x" "y" { name = "$${file(\\"/home/ju/.kube/harvester.yaml\\")}" }'),
+])
+def test_render_raw_values_neutralized(tf, value, expected):
+    t, _ = dp.check_template({"variables": ["extra"],
+                              "resources": [{"id": RID[0], "kind": "raw", "spec": {"tf": tf}}]})
+    plan = dict(dp.check_plan(tf_templates(["t"])), name="p")
+    out = dp.render_templates(plan, {"t": t}, {"extra": value})
+    assert out[0][1][0]["spec"]["tf"] == expected
+
+
+@pytest.mark.parametrize("tf,value", [
+    ('resource "x" "y" { vlan_id = {{extra}} }', '1 } resource "z" "w" { a = 1'),
+    ('resource "x" "y" { vlan_id = {{extra}} }', 'var.k'),
+    ('resource "x" "y" { name = "${ {{extra}} }" }', 'file("/etc/hosts")'),
+    ('resource "x" "y" { vlan_id = 1 # {{extra}}\n}', 'x'),
+])
+def test_render_raw_values_refused(tf, value):
+    t, _ = dp.check_template({"variables": ["extra"],
+                              "resources": [{"id": RID[0], "kind": "raw", "spec": {"tf": tf}}]})
+    plan = dict(dp.check_plan(tf_templates(["t"])), name="p")
+    with pytest.raises(dp.ProfileError) as e:
+        dp.render_templates(plan, {"t": t}, {"extra": value})
+    assert [w for w, _ in e.value.errors] == ["templates[t].resources[0].spec.tf"]
 
 
 def test_render_refuses_long_declaration_name():
