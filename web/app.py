@@ -27840,7 +27840,7 @@ def api_terraform_sidecar(cluster, safe):
 def api_terraform_apply(cluster):
     """Apply a Harvester resource definition via Terraform.
 
-    Body: { kind: "vm" | "image" | "ssh_key" | "raw", spec: {...}, dry_run: bool }
+    Body: { kind: "vm" | "image" | "ssh_key" | "network" | "storageclass" | "ippool" | "raw", spec: {...}, dry_run: bool }
     For `kind="raw"`, `spec.tf` is the literal .tf file content (advanced)."""
     kc = _kubectl_for_cluster(cluster)
     if not kc:
@@ -27849,10 +27849,13 @@ def api_terraform_apply(cluster):
     kind = data.get("kind", "")
     spec = data.get("spec") or {}
     dry_run = bool(data.get("dry_run", False))
-    tf_content = _render_tf_for_kind(kind, spec)
+    try:
+        tf_content = _render_tf_for_kind(kind, spec)
+    except _tfk.SpecError as e:
+        return jsonify({"error": str(e), "kind": kind}), 400
     if not tf_content:
         return jsonify({"error": f"unsupported kind: {kind}",
-                        "supported": ["vm", "image", "ssh_key", "raw"]}), 400
+                        "supported": list(_tfs.KINDS_OF["harvester"])}), 400
 
     run_id = uuid.uuid4().hex[:12]
     label = f"tf-apply:{kind}:{spec.get('name', '?')}"
@@ -28109,7 +28112,7 @@ def api_terraform_apply_declaration(cluster):
         return jsonify({
             "error": "one or more resources are incomplete",
             "errors": errors,
-            "supported": ["vm", "image", "ssh_key", "raw"],
+            "supported": list(_tfs.KINDS_OF["harvester"]),
         }), 400
 
     run_id = uuid.uuid4().hex[:12]
@@ -28129,6 +28132,9 @@ _KIND_TO_TF_TYPE = {
     "vm": "harvester_virtualmachine",
     "image": "harvester_image",
     "ssh_key": "harvester_ssh_key",
+    "network": "harvester_network",
+    "storageclass": "harvester_storageclass",
+    "ippool": "harvester_ippool",
 }
 
 
@@ -28171,7 +28177,11 @@ def _tf_render_resources(resources, target_kind="harvester"):
                            "error": f"a {kind} resource does not go to a {target_kind} target"})
             continue
         kvm_kind = kind in _tfs.KVM_KINDS
-        hcl = "" if kvm_kind else _render_tf_for_kind(kind, spec)
+        try:
+            hcl = "" if kvm_kind else _render_tf_for_kind(kind, spec)
+        except _tfk.SpecError as e:
+            errors.append({"index": i, "kind": kind, "name": spec.get("name"), "error": str(e)})
+            continue
         if not kvm_kind and not hcl:
             errors.append({"index": i, "kind": kind, "name": spec.get("name"),
                            "error": "missing required fields"})
@@ -28441,7 +28451,7 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
     rendered, errors = _tf_render_resources(decl["resources"], target_kind)
     if errors:
         raise TfLaunchError(400, {"error": "one or more resources are incomplete", "errors": errors,
-                                  "supported": ["vm", "image", "ssh_key", "raw"]})
+                                  "supported": list(_tfs.KINDS_OF["harvester"])})
     if mode in ("plan", "apply") and not rendered:
         raise TfLaunchError(400, {"error": "declaration.resources must be a non-empty list"})
     missing = [r[0] for r in rendered if not r[4]]
@@ -28863,12 +28873,258 @@ def _legacy_vm_to_nested(spec):
     return nested
 
 
+# ---------------------------------------------------------------------------
+# 2.4.0 : réseau de VM, classe de stockage, pool d'adresses. Champs et noms
+# exactement ceux du provider Harvester 1.9.0 (`terraform providers schema`,
+# constats du plan 2026-11-03). Une valeur refusée lève tf_kvm.SpecError,
+# message destiné à l'opérateur, comme les ressources KVM.
+# ---------------------------------------------------------------------------
+TF_NETWORK_ROUTE_MODES = ("auto", "manual")
+TF_SC_RECLAIM_POLICIES = ("Delete", "Retain")
+TF_SC_BINDING_MODES = ("Immediate", "WaitForFirstConsumer")
+
+
+def _tf_text(spec, field):
+    v = spec.get(field)
+    return "" if v is None else str(v).strip()
+
+
+def _tf_name(spec, field="name", required=True, pattern=None):
+    v = _tf_text(spec, field)
+    if not v:
+        if required:
+            raise _tfk.SpecError(f"{field} is required")
+        return ""
+    if not (pattern or _K8S_NAME_RE).match(v):
+        raise _tfk.SpecError(f"{field} {v!r} is not a valid Kubernetes name")
+    return v
+
+
+def _tf_int(spec, field, lo, hi, required=False):
+    v = spec.get(field)
+    if v is None or v == "":
+        if required:
+            raise _tfk.SpecError(f"{field} is required")
+        return None
+    if isinstance(v, bool) or not re.fullmatch(r"-?\d+", str(v).strip()):
+        raise _tfk.SpecError(f"{field} must be a whole number")
+    n = int(str(v).strip())
+    if not lo <= n <= hi:
+        raise _tfk.SpecError(f"{field} must be between {lo} and {hi}")
+    return n
+
+
+def _tf_bool(spec, field):
+    """Booléen du formulaire, ou "true"/"false" d'un modèle ; None si absent."""
+    v = spec.get(field)
+    if v is None or v == "":
+        return None
+    if isinstance(v, bool):
+        return v
+    if str(v).lower() in ("true", "false"):
+        return str(v).lower() == "true"
+    raise _tfk.SpecError(f"{field} must be true or false")
+
+
+def _tf_enum(spec, field, allowed):
+    v = _tf_text(spec, field)
+    if v and v not in allowed:
+        raise _tfk.SpecError(f"{field} must be one of {', '.join(allowed)}")
+    return v
+
+
+def _tf_ip(value, field):
+    import ipaddress
+    try:
+        return ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        raise _tfk.SpecError(f"{field} {value!r} is not an IP address") from None
+
+
+def _tf_subnet(value, field):
+    import ipaddress
+    try:
+        return ipaddress.ip_network(str(value).strip(), strict=False)
+    except ValueError:
+        raise _tfk.SpecError(f"{field} {value!r} is not a subnet (address/prefix)") from None
+
+
+def _tf_items(spec, field):
+    """Bloc répété du formulaire : liste d'objets (un objet seul accepté,
+    comme `cloudinit`)."""
+    v = spec.get(field)
+    if v in (None, "", []):
+        return []
+    if isinstance(v, dict):
+        return [v]
+    if not isinstance(v, list) or not all(isinstance(x, dict) for x in v):
+        raise _tfk.SpecError(f"{field} must be a list of blocks")
+    return v
+
+
+def _tf_kv_pairs(spec, field):
+    """Carte Terraform (`parameters`, `labels`) : un objet clé -> valeur, ce
+    que le champ `map` du formulaire envoie ; clé vide refusée."""
+    v = spec.get(field)
+    if v in (None, ""):
+        return {}
+    if not isinstance(v, dict):
+        raise _tfk.SpecError(f"{field} must be a map of keys to values")
+    out = {}
+    for k, val in v.items():
+        k = str(k).strip()
+        if not k or any(ord(c) < 32 for c in k):
+            raise _tfk.SpecError(f"{field}: every entry needs a key")
+        out[k] = "" if val is None else (str(val).lower() if isinstance(val, bool) else str(val))
+    return out
+
+
+def _hcl_map(name, pairs, indent="  "):
+    rows = "".join(f"{indent}  {_hcl_str(k)} = {_hcl_str(v)}\n" for k, v in pairs.items())
+    return f"{indent}{name} = {{\n{rows}{indent}}}"
+
+
+def _render_tf_network(spec):
+    name = _tf_name(spec)
+    ns = _tf_name(spec, "namespace", required=False) or "default"
+    cnet = _tf_name(spec, "cluster_network_name")
+    vlan = _tf_int(spec, "vlan_id", 0, 4094, required=True)
+    mode = _tf_enum(spec, "route_mode", TF_NETWORK_ROUTE_MODES)
+    cidr = _tf_text(spec, "route_cidr")
+    gw = _tf_text(spec, "route_gateway")
+    dhcp = _tf_text(spec, "route_dhcp_server_ip")
+    if mode == "manual" and not (cidr and gw):
+        raise _tfk.SpecError("a manual route needs route_cidr and route_gateway")
+    # ConflictsWith du provider (vu par `terraform validate`)
+    if dhcp and (cidr or gw):
+        raise _tfk.SpecError("route_dhcp_server_ip cannot go with route_cidr or route_gateway")
+    net = _tf_subnet(cidr, "route_cidr") if cidr else None
+    if gw and net is not None and _tf_ip(gw, "route_gateway") not in net:
+        raise _tfk.SpecError(f"route_gateway {gw} is not inside route_cidr {cidr}")
+    if gw and net is None:
+        _tf_ip(gw, "route_gateway")
+    if dhcp:
+        _tf_ip(dhcp, "route_dhcp_server_ip")
+    config = _tf_text(spec, "config")
+    if config:
+        try:
+            if not isinstance(json.loads(config), dict):
+                raise ValueError
+        except ValueError:
+            raise _tfk.SpecError("config must be a JSON object") from None
+    labels = _tf_kv_pairs(spec, "labels")
+    body = [
+        f"  name                 = {_hcl_str(name)}",
+        f"  namespace            = {_hcl_str(ns)}",
+        f"  cluster_network_name = {_hcl_str(cnet)}",
+        f"  vlan_id              = {vlan}",
+    ]
+    for field, value in (("description", _tf_text(spec, "description")), ("route_mode", mode),
+                         ("route_cidr", cidr), ("route_gateway", gw),
+                         ("route_dhcp_server_ip", dhcp), ("config", config)):
+        if value:
+            body.append(f"  {field} = {_hcl_str(value)}")
+    if labels:
+        body.append(_hcl_map("labels", labels))
+    return _TF_HEADER + f'resource "harvester_network" "{_hcl_id(name)}" {{\n' + "\n".join(body) + "\n}\n"
+
+
+def _render_tf_storageclass(spec):
+    name = _tf_name(spec)
+    params = _tf_kv_pairs(spec, "parameters")
+    if not params:
+        raise _tfk.SpecError("parameters needs at least one entry")
+    body = [f"  name = {_hcl_str(name)}"]
+    for field, value in (("volume_provisioner", _tf_text(spec, "volume_provisioner")),
+                         ("reclaim_policy", _tf_enum(spec, "reclaim_policy", TF_SC_RECLAIM_POLICIES)),
+                         ("volume_binding_mode", _tf_enum(spec, "volume_binding_mode", TF_SC_BINDING_MODES))):
+        if value:
+            body.append(f"  {field} = {_hcl_str(value)}")
+    for field in ("allow_volume_expansion", "is_default"):
+        b = _tf_bool(spec, field)
+        if b is not None:
+            body.append(f"  {field} = {'true' if b else 'false'}")
+    body.append(_hcl_map("parameters", params))
+    # `allowed_topologies` (au plus un bloc) : le formulaire en donne les
+    # `match_label_expressions`, un bloc chacune
+    exprs = []
+    for i, e in enumerate(_tf_items(spec, "match_label_expressions")):
+        key = _tf_text(e, "key")
+        values = e.get("values")
+        if isinstance(values, str):
+            values = [x.strip() for x in values.split(",")]
+        values = [str(x).strip() for x in (values or []) if str(x).strip()]
+        if not key or not values:
+            raise _tfk.SpecError(f"match_label_expressions #{i + 1} needs a key and at least one value")
+        exprs.append("    match_label_expressions {\n"
+                     f"      key    = {_hcl_str(key)}\n"
+                     f"      values = [{', '.join(_hcl_str(x) for x in values)}]\n"
+                     "    }")
+    if exprs:
+        body.append("  allowed_topologies {\n" + "\n".join(exprs) + "\n  }")
+    return _TF_HEADER + f'resource "harvester_storageclass" "{_hcl_id(name)}" {{\n' + "\n".join(body) + "\n}\n"
+
+
+def _render_tf_ippool(spec):
+    name = _tf_name(spec)
+    ranges = _tf_items(spec, "range")
+    if not ranges:
+        raise _tfk.SpecError("an IP pool needs at least one range")
+    body = [f"  name = {_hcl_str(name)}"]
+    for i, r in enumerate(ranges):
+        where = f"range #{i + 1}"
+        vals = {}
+        for f in ("start", "end", "subnet", "gateway"):
+            vals[f] = _tf_text(r, f)
+            if not vals[f]:
+                raise _tfk.SpecError(f"{where}: {f} is required")
+        net = _tf_subnet(vals["subnet"], f"{where} subnet")
+        start, end, gw = (_tf_ip(vals[f], f"{where} {f}") for f in ("start", "end", "gateway"))
+        for f, ip in (("start", start), ("end", end), ("gateway", gw)):
+            if ip not in net:
+                raise _tfk.SpecError(f"{where}: {f} {ip} is not inside subnet {vals['subnet']}")
+        if start > end:
+            raise _tfk.SpecError(f"{where}: start {start} comes after end {end}")
+        body.append("  range {\n" + "".join(f"    {f:<7} = {_hcl_str(vals[f])}\n"
+                                           for f in ("start", "end", "subnet", "gateway")) + "  }")
+    selectors = _tf_items(spec, "selector")
+    if len(selectors) > 1:
+        raise _tfk.SpecError("an IP pool takes at most one selector")
+    sel = selectors[0] if selectors else {}
+    inner = []
+    network = _tf_name(sel, "network", required=False, pattern=_K8S_NAMESPACED_RE)
+    if network:
+        inner.append(f"    network  = {_hcl_str(network)}")
+    priority = _tf_int(sel, "priority", 0, 2 ** 31 - 1)
+    if priority is not None:
+        inner.append(f"    priority = {priority}")
+    for i, sc in enumerate(_tf_items(spec, "scope")):
+        rows = [f"      {f} = {_hcl_str(_tf_text(sc, f))}"
+                for f in ("guest_cluster", "namespace", "project") if _tf_text(sc, f)]
+        if not rows:
+            raise _tfk.SpecError(f"scope #{i + 1} needs a guest cluster, a namespace or a project")
+        inner.append("    scope {\n" + "\n".join(rows) + "\n    }")
+    if inner:
+        body.append("  selector {\n" + "\n".join(inner) + "\n  }")
+    return _TF_HEADER + f'resource "harvester_ippool" "{_hcl_id(name)}" {{\n' + "\n".join(body) + "\n}\n"
+
+
 def _render_tf_for_kind(kind, spec):
     """Generate a .tf snippet from a structured spec. Accepts both the
     pre-1.4.36 flat shape and the v1.4.36 nested shape produced by
-    tf-schema.js."""
+    tf-schema.js. 2.4.0 : `network`, `storageclass` et `ippool` lèvent
+    tf_kvm.SpecError sur une valeur refusée (le message dit laquelle)."""
     if kind == "raw":
         return spec.get("tf") or ""
+
+    if kind == "network":
+        return _render_tf_network(spec)
+
+    if kind == "storageclass":
+        return _render_tf_storageclass(spec)
+
+    if kind == "ippool":
+        return _render_tf_ippool(spec)
 
     if kind == "vm":
         spec = _legacy_vm_to_nested(spec)
@@ -31498,9 +31754,14 @@ DEPLOY_POLL = float(os.environ.get("HARVESTER_OPS_DEPLOY_POLL", _dch.POLL_SECOND
 DEPLOY_CHILD_POLL = float(os.environ.get("HARVESTER_OPS_DEPLOY_CHILD_POLL", 2))
 _DEPLOY_LAUNCH_LOCK = threading.Lock()
 # Champs non textuels des genres de ressource des modèles : une chaîne qui
-# n'est qu'une variable y prend ce type au rendu (tâche 8 : réseau, classe de
-# stockage, pool d'adresses y ajoutent les leurs).
-TF_TEMPLATE_FIELD_TYPES = {"vm": {"cpu": "int", "efi": "bool", "secure_boot": "bool"}}
+# n'est qu'une variable y prend ce type au rendu (chemin pointé, un élément de
+# bloc répété garde le chemin de son bloc : `selector.priority`).
+TF_TEMPLATE_FIELD_TYPES = {
+    "vm": {"cpu": "int", "efi": "bool", "secure_boot": "bool"},
+    "network": {"vlan_id": "int"},
+    "storageclass": {"allow_volume_expansion": "bool", "is_default": "bool"},
+    "ippool": {"selector.priority": "int"},
+}
 # Constats : niveau de chacun (bloquant = rien ne se lance)
 DEPLOY_FINDING_LEVELS = {
     "plan-invalid": "blocking", "phase-not-available": "blocking", "template-missing": "blocking",

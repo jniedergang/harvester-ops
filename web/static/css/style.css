@@ -2291,6 +2291,13 @@ a.bundle-inspect:hover { text-decoration: underline; }
   position: absolute; top: 4px; right: 6px; padding: 1px 6px;
 }
 .tf-block-add { margin-top: 8px; }
+/* 2.4.0 : champ `map` (paires clé-valeur), même allure que .tf-ref-wrap */
+.tf-field.tf-type-map { grid-column: 1 / -1; }
+.tf-map-rows { display: flex; flex-direction: column; gap: 4px; }
+.tf-map-row { display: flex; gap: 4px; align-items: stretch; }
+.tf-map-row input { flex: 1; min-width: 0; }
+.tf-map-remove { padding: 0 8px; flex: 0 0 auto; }
+.tf-map-add { margin-top: 4px; align-self: flex-start; }
 .tf-error {
   padding: 12px; color: var(--danger);
   border: 1px solid var(--danger); border-radius: 4px;

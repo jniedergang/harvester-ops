@@ -747,7 +747,7 @@ def test_terraform_add_kind_selector_lists_every_schema_entry(page):
     page.wait_for_selector('.tfd-add-kind', timeout=5000)
     schema_kinds = page.evaluate(
         "Object.keys(window.TF_SCHEMA || {}).filter(k => window.TF_SCHEMA[k].family === 'harvester')")
-    assert len(schema_kinds) == 4
+    assert len(schema_kinds) == 7          # 2.4.0 : + network, storageclass, ippool
     offered = page.evaluate("Array.from(document.querySelectorAll('.tfd-add-kind')).map(b => b.dataset.kind)")
     assert sorted(schema_kinds) == sorted(offered), (schema_kinds, offered)
 

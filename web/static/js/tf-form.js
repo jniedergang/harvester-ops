@@ -92,7 +92,7 @@ const TFForm = (() => {
         control = `<input type="text" id="${id}" name="${name}"
                           value="${esc(v)}"
                           ${dlId ? `list="${dlId}" autocomplete="off"` : ''}
-                          ${arg.required ? 'required' : ''}
+                          ${arg.required ? 'required' : ''}${rwAttr}
                           ${arg.validate ? `pattern="${esc(arg.validate.source)}"` : ''}>${dl}`;
         break;
       }
@@ -153,11 +153,37 @@ const TFForm = (() => {
         control = `<textarea id="${id}" name="${name}" rows="${arg.rows || 6}"
                              ${arg.required ? 'required' : ''}>${esc(v)}</textarea>`;
         break;
+      case 'map': {
+        // 2.4.0 : carte Terraform (`parameters`, `labels`), une paire
+        // clé-valeur par ligne ; la valeur par défaut est un objet.
+        const obj = (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+        control = `<div class="tf-map" id="${id}" data-map="${name}">
+             <div class="tf-map-rows">${Object.entries(obj).map(([k, val]) => mapRow(k, val)).join('')}</div>
+             <button type="button" class="btn btn-sm tf-map-add tip"
+                     data-tip="${esc(window.i18n ? i18n.t('tf.t.map.add') : '')}">+ ${esc(window.i18n ? i18n.t('tf.map.add') : 'Add')}</button>
+           </div>`;
+        break;
+      }
       default:
         control = `<em>unsupported type: ${esc(arg.type)}</em>`;
     }
 
     return `<div class="tf-field tf-type-${esc(arg.type)}">${labelHtml}${control}</div>`;
+  }
+
+  /** Une ligne d'un champ `map` : clé, valeur, bouton de retrait. */
+  function mapRow(key, value) {
+    const tipKey = window.i18n ? i18n.t('tf.t.map.key') : '';
+    const tipVal = window.i18n ? i18n.t('tf.t.map.value') : '';
+    const tipRm = window.i18n ? i18n.t('tf.t.map.remove') : '';
+    return `<div class="tf-map-row">
+        <input type="text" class="tf-map-key tip" value="${esc(key)}" data-tip="${esc(tipKey)}"
+               placeholder="${esc(window.i18n ? i18n.t('tf.map.key') : 'key')}" aria-label="${esc(tipKey)}">
+        <input type="text" class="tf-map-val tip" value="${esc(value)}" data-tip="${esc(tipVal)}"
+               placeholder="${esc(window.i18n ? i18n.t('tf.map.value') : 'value')}" aria-label="${esc(tipVal)}">
+        <button type="button" class="btn btn-sm btn-secondary tf-map-remove tip"
+                data-tip="${esc(tipRm)}" aria-label="${esc(tipRm)}">−</button>
+      </div>`;
   }
 
   /**
@@ -351,6 +377,21 @@ const TFForm = (() => {
       });
     });
 
+    // 2.4.0 : lignes des champs `map`. Délégué, et marqué sur l'événement :
+    // wire() repasse sur chaque bloc ajouté, un clic ne doit agir qu'une fois.
+    rootEl.addEventListener('click', (e) => {
+      if (e.tfMapHandled) return;
+      const add = e.target.closest('.tf-map-add');
+      const rm = e.target.closest('.tf-map-remove');
+      if (!add && !rm) return;
+      e.tfMapHandled = true;
+      e.preventDefault();
+      if (rm) { rm.closest('.tf-map-row').remove(); return; }
+      const rows = add.closest('.tf-map').querySelector('.tf-map-rows');
+      rows.insertAdjacentHTML('beforeend', mapRow('', ''));
+      rows.lastElementChild.querySelector('.tf-map-key').focus();
+    });
+
     rootEl.addEventListener('click', (e) => {
       const rem = e.target.closest('.tf-block-remove');
       if (!rem) return;
@@ -396,7 +437,9 @@ const TFForm = (() => {
       const syncConditional = (scope) => {
         (scope || rootEl).querySelectorAll('[data-required-field]').forEach(el => {
           const item = el.closest('.tf-block-item') || rootEl;
-          const ctl = item.querySelector(`[name$=".${el.dataset.requiredField}"]`);
+          // champ d'un bloc (`bloc[0].type`) ou du premier niveau (`route_mode`)
+          const f = el.dataset.requiredField;
+          const ctl = item.querySelector(`[name$=".${f}"]`) || item.querySelector(`[name="${f}"]`);
           const on = !!ctl && ctl.value === el.dataset.requiredEquals;
           el.required = on;
           const label = item.querySelector(`label[for="${el.id}"] .tf-required`);
@@ -524,7 +567,8 @@ const TFForm = (() => {
     opts = opts || {};
     const spec = {};
     (schema.args || []).forEach(arg => {
-      const el = rootEl.querySelector(`[name="${cssEscape(arg.name)}"]`);
+      const el = rootEl.querySelector(arg.type === 'map'
+        ? `.tf-map[data-map="${cssEscape(arg.name)}"]` : `[name="${cssEscape(arg.name)}"]`);
       if (!el) return;
       const v = readControl(el, arg);
       if (v !== undefined && v !== '') spec[arg.name] = v;
@@ -564,6 +608,18 @@ const TFForm = (() => {
     if (arg.type === 'ref' && arg.multiple) {
       return Array.from(el.selectedOptions).map(o => o.value).filter(Boolean);
     }
+    if (arg.type === 'map') {
+      // ligne entièrement vide ignorée ; une valeur sans clé part telle
+      // quelle, le serveur la refuse en le disant. Objet vide rendu tel quel :
+      // la dernière ligne retirée doit vider la carte enregistrée.
+      const out = {};
+      $$(el, '.tf-map-row').forEach(row => {
+        const k = row.querySelector('.tf-map-key').value.trim();
+        const val = row.querySelector('.tf-map-val').value;
+        if (k || val.trim()) out[k] = val;
+      });
+      return out;
+    }
     return el.value;
   }
 
@@ -588,6 +644,7 @@ const TFForm = (() => {
     if (Array.isArray(v)) return v.length > 0;
     if (typeof v === 'boolean') return true; // a checkbox is always "answered"
     if (typeof v === 'number')  return true;
+    if (typeof v === 'object')  return Object.keys(v).length > 0;   // champ `map`
     return String(v).trim() !== '';
   }
 

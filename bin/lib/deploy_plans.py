@@ -67,7 +67,9 @@ COMING = "coming in 2.5+"
 # secret : la clé publique d'une ressource ssh_key, les clés d'une VM
 # désignées par nom, le Secret qui porte le cloud-init (décision 150 : un
 # secret de VM passe par `user_data_secret_name` vers un Secret existant).
-_PUBLIC_KEYS = frozenset(("public_key", "ssh_keys"))
+# `key` seul : la clé d'étiquette des `match_label_expressions` d'une classe
+# de stockage (2.4.0), jamais une valeur secrète (`api_key` reste retiré).
+_PUBLIC_KEYS = frozenset(("public_key", "ssh_keys", "key"))
 # nom (ou espace de noms) d'un Secret : `user_data_secret_name`, et les
 # paramètres d'une classe chiffrée `csi.storage.k8s.io/...-secret-name`
 _SECRET_NAME_RE = re.compile(r"secret[_-]name(space)?$", re.I)

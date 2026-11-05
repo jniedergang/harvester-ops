@@ -42,7 +42,7 @@ const TFDeclView = (() => {
   };
   // types de ressource proposés par famille de cible ; pas de code libre sur
   // un hôte KVM (l'espace porte la clé de l'hôte le temps d'une exécution)
-  const ADD_KINDS = { harvester: ['vm', 'image', 'ssh_key', 'raw'],
+  const ADD_KINDS = { harvester: ['vm', 'image', 'ssh_key', 'network', 'storageclass', 'ippool', 'raw'],
                       kvm: ['kvm_vm', 'kvm_volume', 'kvm_network', 'kvm_rke2'] };
 
   // Un appel littéral par texte : le contrôle de parité des traductions ne
@@ -128,6 +128,18 @@ const TFDeclView = (() => {
     if (r.kind === 'ssh_key') {
       const parts = String(s.public_key || '').trim().split(/\s+/);
       return parts.length > 1 ? `${parts[0]} …${parts[1].slice(-10)}${parts[2] ? ' ' + parts[2] : ''}` : '';
+    }
+    if (r.kind === 'network') {
+      return [s.cluster_network_name, s.vlan_id !== undefined && s.vlan_id !== '' ? `VLAN ${s.vlan_id}` : '',
+              s.route_cidr].filter(Boolean).join(' · ');
+    }
+    if (r.kind === 'storageclass') {
+      const p = s.parameters || {};
+      return [s.volume_provisioner, p.numberOfReplicas ? `${p.numberOfReplicas}x` : '',
+              s.is_default === true ? tr('tfd.sum.default') : ''].filter(Boolean).join(' · ');
+    }
+    if (r.kind === 'ippool') {
+      return (s.range || []).map(x => `${x.start || '?'}-${x.end || '?'}`).join(', ');
     }
     if (r.kind === 'raw') return r.address || '';
     if (r.kind === 'kvm_vm') {

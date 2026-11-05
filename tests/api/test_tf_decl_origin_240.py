@@ -185,7 +185,7 @@ def _cases(store, monkeypatch):
         (bad["id"], "harv1", "plan", None, "harvester", 400,
          {"error": "one or more resources are incomplete",
           "errors": [{"index": 0, "kind": "vm", "name": None, "error": "missing required fields"}],
-          "supported": ["vm", "image", "ssh_key", "raw"]}),
+          "supported": ["vm", "image", "ssh_key", "network", "storageclass", "ippool", "raw"]}),
         (ok["id"], "harv1", "apply", "stale", "harvester", 409,
          {"error": "plan outdated", "hint": "the declaration changed since this plan; plan again"}),
         (kvm["id"], "host1", "destroy", None, "kvm", 503,
