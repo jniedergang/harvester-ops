@@ -304,44 +304,54 @@ def _raw(tf):
 # porte un secret. Mot de passe, attribut au nom de secret (nu ou entre
 # guillemets, dans une map), identifiants dans une adresse.
 @pytest.mark.parametrize("tf,refused", [
-    ('resource "x" "y" { password = "p" }', True),
-    ('resource "x" "y" {\n  user_data = <<EOF\nchpasswd: {expire: false}\nEOF\n}', True),
-    ('resource "x" "y" { data = { token = "abc123" } }', True),
-    ('resource "x" "y" { data = { "api-secret" = "abc" } }', True),
-    ('resource "x" "y" { client_credentials = "c" }', True),
-    ('resource "x" "y" { private_key_pem = "PEM" }', True),
+    ('resource "harvester_ssh_key" "y" { password = "p" }', True),
+    ('resource "harvester_ssh_key" "y" {\n  user_data = <<EOF\nchpasswd: {expire: false}\nEOF\n}', True),
+    ('resource "harvester_ssh_key" "y" { data = { token = "abc123" } }', True),
+    ('resource "harvester_ssh_key" "y" { data = { "api-secret" = "abc" } }', True),
+    ('resource "harvester_ssh_key" "y" { client_credentials = "c" }', True),
+    ('resource "harvester_ssh_key" "y" { private_key_pem = "PEM" }', True),
     ('resource "harvester_image" "i" { url = "https://u:pw@h/x.img" }', True),
     # gardés : clé publique, noms de Secrets, `key` seul, comparaisons
     ('resource "harvester_ssh_key" "k" { name = "k"\n public_key = "ssh-ed25519 A" }', False),
-    ('resource "x" "y" { user_data_secret_name = "vm1-ci" }', False),
+    ('resource "harvester_ssh_key" "y" { user_data_secret_name = "vm1-ci" }', False),
     ('resource "harvester_storageclass" "s" { parameters = {\n'
      '  "csi.storage.k8s.io/provisioner-secret-name" = "enc"\n'
      '  "csi.storage.k8s.io/provisioner-secret-namespace" = "default" } }', False),
-    ('resource "x" "y" { labels = { key = "v" } }', False),
-    ('resource "x" "y" { count = var.token_count >= 1 ? 1 : 0 }', False),
+    ('resource "harvester_ssh_key" "y" { labels = { key = "v" } }', False),
+    ('resource "harvester_ssh_key" "y" { count = var.token_count >= 1 ? 1 : 0 }', False),
     # une chaîne ordinaire qui parle d'un jeton n'est pas une affectation
-    ('resource "x" "y" { description = "token: rotated weekly" }', False),
+    ('resource "harvester_ssh_key" "y" { description = "token: rotated weekly" }', False),
     # revue B2-I5 : contournements du premier contrôle, tous refusés
-    ('resource "x" "y" { data = { token: "abc" } }', True),
-    ('resource "x" "y" {\n  user_data = <<EOF\nk3s_token: abc\nEOF\n}', True),
-    ('resource "x" "y" {\n  user_data = <<-EOF\n  export K3S_TOKEN=abc\n  EOF\n}', True),
-    ('resource "x" "y" { data = { "to\\u006ben" = "abc" } }', True),
-    ('resource "x" "y" { data = { "\\"token\\"" = "abc" } }', True),
-    ('resource "x" "y" { provisioner "local-exec" { command = "id" } }', True),
-    ('resource "x" "y" { data = { ("tok${"en"}") = "abc" } }', True),
-    ('resource "x" "y" { data = { "tok${""}en" = "abc" } }', True),
+    ('resource "harvester_ssh_key" "y" { data = { token: "abc" } }', True),
+    ('resource "harvester_ssh_key" "y" {\n  user_data = <<EOF\nk3s_token: abc\nEOF\n}', True),
+    ('resource "harvester_ssh_key" "y" {\n  user_data = <<-EOF\n  export K3S_TOKEN=abc\n  EOF\n}', True),
+    ('resource "harvester_ssh_key" "y" { data = { "to\\u006ben" = "abc" } }', True),
+    ('resource "harvester_ssh_key" "y" { data = { "\\"token\\"" = "abc" } }', True),
+    ('resource "harvester_ssh_key" "y" { provisioner "local-exec" { command = "id" } }', True),
+    ('resource "harvester_ssh_key" "y" { data = { ("tok${"en"}") = "abc" } }', True),
+    ('resource "harvester_ssh_key" "y" { data = { "tok${""}en" = "abc" } }', True),
     ('resource "harvester_cloudinit_secret" "c" { user_data_base64 = "I2Nsb3Vk" }', True),
-    ('resource "x" "y" { description = file("/home/ju/.kube/harvester.yaml") }', True),
-    ('resource "x" "y" { description = "${file("/etc/hosts")}" }', True),
-    ('resource "x" "y" { description = base64decode("aGk=") }', True),
-    ('resource "x" "y" { description = sensitive("abc") }', True),
-    ('variable "x" {\n  default = "abc"\n  sensitive = true\n}', True),
-    ('resource "x" "y" { pwd = "abc" }', True),
-    ('resource "x" "y" { apikey = "abc" }', True),
-    ('resource "x" "y" { API_KEY = "abc" }', True),
-    ('resource "x" "y" { authorization = "Bearer abc" }', True),
-    ('resource "x" "y" { headers = { h = "Bearer abc" } }', True),
-    ('resource "x" "y" {\n  provisioner "local-exec" { command = "id" }\n}', True),
+    ('resource "harvester_ssh_key" "y" { description = file("/home/ju/.kube/harvester.yaml") }', True),
+    ('resource "harvester_ssh_key" "y" { description = "${file("/etc/hosts")}" }', True),
+    ('resource "harvester_ssh_key" "y" { description = base64decode("aGk=") }', True),
+    ('resource "harvester_ssh_key" "y" { description = sensitive("abc") }', True),
+    # revue B3-I3 : la structure suit la règle de toute déclaration
+    # (web/tf_guard.py, 2.3.1) : un bloc variable y est permis ; une fonction
+    # qui cache une valeur reste refusée dans un modèle (hcl_guard)
+    ('variable "x" {\n  default = "abc"\n}', False),
+    ('resource "harvester_ssh_key" "y" { description = nonsensitive(var.x) }', True),
+    ('resource "harvester_ssh_key" "y" { name = templatestring("a", {}) }', True),
+    ('resource "harvester_ssh_key" "y" { name = pathexpand("~") }', True),
+    ('resource "harvester_ssh_key" "y" { name = provider::x::y("a") }', True),
+    ('resource "harvester_bootstrap" "b" { api_url = "x" }', True),
+    ('resource "harvester_image" "i" {\n name = "i"\n file_path = "/home/ju/.kube/harvester.yaml"\n}', True),
+    ('resource "null_resource" "x" {}', True),
+    ('resource "harvester_ssh_key" "y" { pwd = "abc" }', True),
+    ('resource "harvester_ssh_key" "y" { apikey = "abc" }', True),
+    ('resource "harvester_ssh_key" "y" { API_KEY = "abc" }', True),
+    ('resource "harvester_ssh_key" "y" { authorization = "Bearer abc" }', True),
+    ('resource "harvester_ssh_key" "y" { headers = { h = "Bearer abc" } }', True),
+    ('resource "harvester_ssh_key" "y" {\n  provisioner "local-exec" { command = "id" }\n}', True),
     ('data "external" "e" { program = ["id"] }', True),
     ('module "m" { source = "./m" }', True),
     ('terraform { backend "local" {} }', True),
@@ -463,9 +473,9 @@ def test_render_refusals(values, templates, where, why):
      "templates[t].resources[0].spec.cloudinit.user_data"),
     ("image", {"name": "i", "url": "https://{{extra}}/x.img"}, "u:hunter2@h",
      "templates[t].resources[0].spec.url"),
-    ("raw", {"tf": 'resource "x" "y" { data = { {{extra}} } }'}, 'token = "hunter2"',
+    ("raw", {"tf": 'resource "harvester_ssh_key" "y" { data = { {{extra}} } }'}, 'token = "hunter2"',
      "templates[t].resources[0].spec.tf"),
-    ("raw", {"tf": 'resource "x" "y" { name = "{{extra}}" }'}, "passwd",
+    ("raw", {"tf": 'resource "harvester_ssh_key" "y" { name = "{{extra}}" }'}, "passwd",
      "templates[t].resources[0].spec.tf"),
 ])
 def test_render_refuses_secret_brought_by_a_value(kind, spec, value, where):
@@ -488,18 +498,18 @@ def test_render_refuses_secret_brought_by_a_value(kind, spec, value, where):
 # oblique inverse, interpolation `${`, directive `%{`) et arrive comme texte ;
 # hors chaîne, seuls un nombre et true/false passent.
 @pytest.mark.parametrize("tf,value,expected", [
-    ('resource "x" "y" { name = "{{extra}}" }', 'a"b', 'resource "x" "y" { name = "a\\"b" }'),
-    ('resource "x" "y" { name = "{{extra}}" }', 'a\\b', 'resource "x" "y" { name = "a\\\\b" }'),
-    ('resource "x" "y" { name = "{{extra}}" }', '${var.k}', 'resource "x" "y" { name = "$${var.k}" }'),
-    ('resource "x" "y" { name = "{{extra}}" }', '%{if true}x%{endif}',
-     'resource "x" "y" { name = "%%{if true}x%%{endif}" }'),
-    ('resource "x" "y" {\n  user_data = <<EOF\nhost: {{extra}}\nEOF\n}', 'a"${b}',
-     'resource "x" "y" {\n  user_data = <<EOF\nhost: a"$${b}\nEOF\n}'),
-    ('resource "x" "y" { vlan_id = {{extra}} }', '42', 'resource "x" "y" { vlan_id = 42 }'),
-    ('resource "x" "y" { on = {{extra}} }', 'true', 'resource "x" "y" { on = true }'),
+    ('resource "harvester_ssh_key" "y" { name = "{{extra}}" }', 'a"b', 'resource "harvester_ssh_key" "y" { name = "a\\"b" }'),
+    ('resource "harvester_ssh_key" "y" { name = "{{extra}}" }', 'a\\b', 'resource "harvester_ssh_key" "y" { name = "a\\\\b" }'),
+    ('resource "harvester_ssh_key" "y" { name = "{{extra}}" }', '${var.k}', 'resource "harvester_ssh_key" "y" { name = "$${var.k}" }'),
+    ('resource "harvester_ssh_key" "y" { name = "{{extra}}" }', '%{if true}x%{endif}',
+     'resource "harvester_ssh_key" "y" { name = "%%{if true}x%%{endif}" }'),
+    ('resource "harvester_ssh_key" "y" {\n  user_data = <<EOF\nhost: {{extra}}\nEOF\n}', 'a"${b}',
+     'resource "harvester_ssh_key" "y" {\n  user_data = <<EOF\nhost: a"$${b}\nEOF\n}'),
+    ('resource "harvester_ssh_key" "y" { vlan_id = {{extra}} }', '42', 'resource "harvester_ssh_key" "y" { vlan_id = 42 }'),
+    ('resource "harvester_ssh_key" "y" { on = {{extra}} }', 'true', 'resource "harvester_ssh_key" "y" { on = true }'),
     # la sonde de la revue : lue comme texte, jamais évaluée par Terraform
-    ('resource "x" "y" { name = "{{extra}}" }', '${file("/home/ju/.kube/harvester.yaml")}',
-     'resource "x" "y" { name = "$${file(\\"/home/ju/.kube/harvester.yaml\\")}" }'),
+    ('resource "harvester_ssh_key" "y" { name = "{{extra}}" }', '${file("/home/ju/.kube/harvester.yaml")}',
+     'resource "harvester_ssh_key" "y" { name = "$${file(\\"/home/ju/.kube/harvester.yaml\\")}" }'),
 ])
 def test_render_raw_values_neutralized(tf, value, expected):
     t, _ = dp.check_template({"variables": ["extra"],
@@ -510,10 +520,10 @@ def test_render_raw_values_neutralized(tf, value, expected):
 
 
 @pytest.mark.parametrize("tf,value", [
-    ('resource "x" "y" { vlan_id = {{extra}} }', '1 } resource "z" "w" { a = 1'),
-    ('resource "x" "y" { vlan_id = {{extra}} }', 'var.k'),
-    ('resource "x" "y" { name = "${ {{extra}} }" }', 'file("/etc/hosts")'),
-    ('resource "x" "y" { vlan_id = 1 # {{extra}}\n}', 'x'),
+    ('resource "harvester_ssh_key" "y" { vlan_id = {{extra}} }', '1 } resource "harvester_image" "w" { a = 1'),
+    ('resource "harvester_ssh_key" "y" { vlan_id = {{extra}} }', 'var.k'),
+    ('resource "harvester_ssh_key" "y" { name = "${ {{extra}} }" }', 'file("/etc/hosts")'),
+    ('resource "harvester_ssh_key" "y" { vlan_id = 1 # {{extra}}\n}', 'x'),
 ])
 def test_render_raw_values_refused(tf, value):
     t, _ = dp.check_template({"variables": ["extra"],

@@ -326,8 +326,14 @@ def test_the_rc_pins_every_mirrored_provider_under_both_registries(tmp_path, mon
     for host in ("registry.terraform.io", "registry.opentofu.org"):
         assert (ws / "plugins" / host / "dmacvicar/libvirt/0.9.9" / f"linux_{wapp._tf_host_arch()}"
                 / "terraform-provider-libvirt_v0.9.9").exists()
-        assert rc.count(f'"{host}/dmacvicar/libvirt"') == 2           # inclus au miroir, exclu du direct
-    assert wapp._tf_write_rc(tmp_path / "empty") is None
+    # 2.3.1 : le miroir de l'espace est la SEULE source (aucun bloc direct :
+    # un provider absent du miroir ne se télécharge pas)
+    assert f'path = "{(ws / "plugins").resolve()}"' in rc
+    assert "direct" not in rc and "plugin_cache_dir" not in rc
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    rc2 = wapp._tf_write_rc(empty).read_text()
+    assert "filesystem_mirror" in rc2 and "direct" not in rc2
 
 
 def test_the_libvirt_provider_is_found_by_its_card(tmp_path, monkeypatch):
@@ -490,7 +496,8 @@ def test_tf_run_cmd_drops_the_agent_and_passes_the_token_by_env(tmp_path, monkey
     assert "SSH_AUTH_SOCK" not in seen["env"] and seen["env"]["TF_VAR_lab_rke2_token"] == "s3cret"
     assert "s3cret" not in " ".join(seen["argv"])
     wapp._tf_run_cmd(tmp_path, "", ["plan"])
-    assert seen["env"]["SSH_AUTH_SOCK"] == "/run/user/1000/agent.sock"     # Harvester : inchangé
+    # 2.3.1 : plus rien n'est hérité de la console, Harvester compris
+    assert "SSH_AUTH_SOCK" not in seen["env"]
 
 
 # ---------------------------------------------------------------------------

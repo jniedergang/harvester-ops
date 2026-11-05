@@ -25,7 +25,7 @@ HTML = (ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
 
 FINDING_CODES = ["plan-invalid", "phase-not-available", "template-missing", "var-missing", "var-invalid",
                  "decl-name-taken", "tf-missing", "cluster-unreachable", "template-newer", "decl-differs",
-                 "plan-changed", "decl-exists", "readiness-later"]
+                 "plan-changed", "decl-exists", "readiness-later", "admin-kind", "forbidden-construct"]
 
 
 # --- onglet, historique, page d'hôte (source) ----------------------------------

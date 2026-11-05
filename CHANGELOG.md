@@ -4,6 +4,70 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.3.1] - 2026-11-05 - Terraform declarations cannot run commands on the console host
+
+### Security
+- **Terraform declarations could run commands on the console host** (found
+  during an internal review). OpenTofu runs code on the machine that
+  launches it, and the free code of a declaration was planned and applied
+  at the operator level: a `provisioner "local-exec"`, a `data "external"`,
+  a `module`, a `backend`, or a `file()` call reading the console's own
+  kubeconfig or the SSH key of a KVM host ran with the rights of the
+  console. Form values could also become code: a heredoc delimiter line in
+  a cloud-init closed the heredoc, a quote in a name closed the block label,
+  and `${...}` in a description was evaluated. Fixed in depth:
+  - **free code is for admins**: creating, editing, planning, applying or
+    destroying a declaration that holds Terraform code written by hand needs
+    the `admin` role (`403`, code `raw-admin-only`); declarations made with
+    the forms stay at operator level;
+  - **every declaration is read before each plan, apply or destroy**, form
+    or free code, Harvester or KVM target, and refused with `422`, code
+    `forbidden-construct`, naming the construct and its line: provisioner
+    and connection blocks at any depth (`dynamic "provisioner"` included),
+    resource and data source types outside the embedded providers
+    (`null_resource`, `terraform_data`, `external`,
+    `terraform_remote_state`, `harvester_bootstrap`...), the `file_path` of
+    `harvester_image`, `module`, `terraform` (backend, cloud) and `provider`
+    blocks, functions that read files or evaluate templates (`file*`,
+    `templatefile`, `templatestring`, `pathexpand`, `core::` form included)
+    and provider functions, and any code the console cannot read safely.
+    The reader handles comments, string escapes, nested template sequences,
+    heredocs and unquoted labels;
+  - **the workspace is checked again right before every OpenTofu command**,
+    whatever wrote its files (older shared workspaces included); a
+    `.tf.json`, `.tofu` or `.tfvars` file refuses the run;
+  - **OpenTofu starts from a minimal environment**: language, path, proxy
+    and certificate authority variables only (no inherited tokens,
+    `TF_CLI_ARGS*`, `TF_VAR_*`, plugin cache or SSH agent), `HOME` and
+    `TMPDIR` inside the 0700 workspace, and a CLI configuration that takes
+    providers from the workspace mirror only (the `direct` fallback that let
+    OpenTofu download any other provider is gone);
+  - form values are neutralised: template sequences escaped, heredoc
+    delimiter chosen absent from the value, labels limited to
+    `[A-Za-z0-9_]`; a resource named `_providers` no longer replaces the
+    provider file.
+
+### Changed
+- **Blocked declarations**: a saved declaration that breaks these rules is
+  flagged, not deleted. The console logs it at startup, its card shows
+  **Blocked**, the declaration lists each refused construct, and plan,
+  apply and destroy stay refused until an admin fixes or removes the code.
+  `GET /api/tf-declarations` gives `raw` and `blocked` for each declaration.
+- For a non-admin, the free code buttons (add, edit, remove) and the
+  actions of a declaration that holds free code are disabled, with a
+  tooltip that says why, in the five languages.
+
+### Tests
+- `tests/api/test_tf_guard_231.py`: every refused construct by table with
+  its line, bypass attempts (unquoted labels, escaped type names, one-line
+  blocks, template sequences in strings, heredocs and directives, an
+  indented heredoc closer, a block comment over two lines, JSON bodies, a
+  lone carriage return), allowed code, every form kind and header, form
+  injection, roles on every route, environment scrubbing, mirror-only
+  configuration, startup flagging, and mutations proving each guard; with
+  the real binary, a `local-exec` is refused and never runs while the same
+  code runs without the console.
+
 ## [2.3.0] - 2026-11-02 - Terraform declarations for KVM hosts
 
 ### Added

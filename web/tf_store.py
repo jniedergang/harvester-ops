@@ -18,8 +18,8 @@ ressources d'une famille ne vont pas dans une déclaration de l'autre ; le
 code libre (`raw`) ne va que sur Harvester.
 
 2.4.0 : une déclaration produite par un plan de déploiement porte son
-ORIGINE (`origin`, JSON {plan, template, template_revision, plan_revision},
-NULL pour les autres) : écrite à la création, jamais modifiée ensuite.
+ORIGINE (`origin`, JSON {plan, template, template_revision, plan_revision,
+template_by facultatif}, NULL pour les autres) : écrite à la création, jamais modifiée ensuite.
 
 Ce module ne connaît ni Flask ni Terraform : il est essayé seul.
 """
@@ -112,15 +112,25 @@ def clean_resources(resources, target_kind="harvester"):
 
 
 ORIGIN_KEYS = ("plan", "template", "template_revision", "plan_revision")
+# 2.4.0 (décision 161) : qui a écrit la révision du modèle (un admin : les
+# modèles s'écrivent sous /api/baremetal/), facultatif pour les lignes d'avant
+ORIGIN_OPTIONAL = ("template_by",)
 
 
 def clean_origin(origin):
     """Origine d'une déclaration produite par un plan, ou None."""
     if origin is None:
         return None
-    if not isinstance(origin, dict) or set(origin) != set(ORIGIN_KEYS):
+    if not isinstance(origin, dict) or not set(ORIGIN_KEYS) <= set(origin) \
+            or set(origin) - set(ORIGIN_KEYS) - set(ORIGIN_OPTIONAL):
         raise StoreError("invalid-origin", "origin needs plan, template, template_revision and plan_revision")
     out = {}
+    by = origin.get("template_by")
+    if by is not None:
+        if not isinstance(by, str) or len(by) > 128 or any(ord(c) < 32 or ord(c) == 127 for c in by):
+            raise StoreError("invalid-origin", "origin template_by is not a user name")
+        if by:
+            out["template_by"] = by
     for k in ORIGIN_KEYS:
         v = origin[k]
         if k.endswith("_revision"):

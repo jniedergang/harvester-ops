@@ -2402,9 +2402,53 @@ Drive the Terraform provider for Harvester from saved declarations.
   console starts (logged).
 - **Offline providers (2.3.0)**: every provider of a workspace comes from a
   local mirror laid out under both registry names (`registry.opentofu.org`
-  and `registry.terraform.io`), included in the mirror and excluded from
-  direct downloads. Before, OpenTofu resolved `harvester/harvester` to
+  and `registry.terraform.io`); since 2.3.1 the mirror is the only source
+  (no direct downloads). Before, OpenTofu resolved `harvester/harvester` to
   `registry.opentofu.org` and fetched it from the Internet.
+- **What a declaration may hold (2.3.1)**: OpenTofu runs code on the
+  machine that launches it, so the console reads every declaration before
+  each plan, apply or destroy, and refuses, naming the construct and its
+  line:
+  - `provisioner` blocks of any type (`local-exec`, `remote-exec`, `file`)
+    and `connection` blocks, at any depth, `dynamic "provisioner"` included;
+  - any resource or data source type outside the embedded providers:
+    `null_resource`, `terraform_data`, `data "external"`,
+    `terraform_remote_state`, `local_file`... and `harvester_bootstrap`
+    (it writes a kubeconfig on the console host);
+  - the `file_path` attribute of `harvester_image` (it uploads a file of the
+    console host);
+  - `module`, `terraform` (backend, cloud, required providers) and
+    `provider` blocks: the console writes the providers itself, from the
+    embedded mirror only;
+  - functions that read files or evaluate templates (`file`, `fileexists`,
+    `fileset`, `filebase64`, `filemd5`..., `templatefile`,
+    `templatestring`, `pathexpand`), whatever the path, `core::` form
+    included, and provider functions (`provider::...`);
+  - code the console cannot read safely (a JSON body, an unterminated
+    string or heredoc).
+  Allowed: `resource`, `data`, `locals`, `variable` and `output` blocks with
+  the resource and data source types of the embedded providers. The check
+  sees through comments, string escapes (`"null\u005fresource"`), template
+  sequences (`${...}`, `%{...}`, nested), heredocs and unquoted labels. The
+  workspace itself is checked again right before every OpenTofu command,
+  whatever wrote its files; a `.tf.json`, `.tofu` or `.tfvars` file there
+  refuses the run.
+- **Free code is for admins (2.3.1)**: a declaration that holds Terraform
+  code written by hand can only be created, edited, planned, applied or
+  destroyed by an admin (403 for an operator; the buttons say so).
+  Declarations made with the forms stay at operator level. A form value can
+  no longer become code: template sequences are neutralised and a heredoc
+  delimiter is chosen absent from the value.
+- **Blocked declarations (2.3.1)**: a saved declaration that breaks these
+  rules is not deleted. The console logs it at startup, its card shows
+  **Blocked** and the declaration lists each refused construct; plan, apply
+  and destroy are refused until an admin fixes or removes the code.
+- **Minimal environment (2.3.1)**: OpenTofu no longer inherits the
+  console environment. It gets the language, path, proxy and certificate
+  authority variables only, with `HOME` and `TMPDIR` inside the 0700
+  workspace and the per-workspace CLI configuration: providers come from
+  the workspace mirror and from nowhere else (no direct download, no plugin
+  cache).
 - **Declarations**: named groups of resources (VMs, VM images, SSH keys,
   Terraform code written by hand) applied together, each with its own
   Terraform state (1.54.0). They are kept by the console (shared between
@@ -2582,7 +2626,8 @@ Terraform workspace.
   reads, `operator` performs the everyday mutating work (VMs, snapshots,
   Terraform applies), `admin` adds what cuts a service or changes the tool's
   own configuration: cluster power sequencing, node maintenance, cluster
-  declarations, bare-metal, the ISO store and the Terraform provider.
+  declarations, bare-metal, the ISO store, the Terraform provider and
+  Terraform declarations that hold free code (2.3.1).
 - **Enforced centrally, deny by default.** Any request that changes
   something needs at least `operator`, and an explicit list of paths needs
   `admin`. An endpoint added tomorrow is protected without anyone having to

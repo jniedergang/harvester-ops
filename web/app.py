@@ -40,6 +40,7 @@ import time
 import uuid
 from collections import Counter as _TallyCounter, deque
 from functools import wraps
+import functools
 from pathlib import Path
 from urllib.parse import quote
 
@@ -92,6 +93,7 @@ import rancher_admin as _radm
 import tf_store as _tfs
 import tf_state as _tfst
 import tf_kvm as _tfk
+import tf_guard as _tfg
 import baremetal_onboarding as _bmo
 import baremetal_onboarding_runtime as _bmor
 from flask import (
@@ -1570,6 +1572,7 @@ class ActionRun:
         # v1.96.0 : rôle qu'il a fallu pour lancer l'action ; l'annuler en
         # demande autant (un opérateur n'annule pas l'ajout d'hôte d'un admin)
         self.required_role = None
+        self.launch_role = None            # 2.4.0 : rôle figé de qui a lancé un plan
         # v1.96.0 : message d'une annulation pour un outil qui ne défait pas
         # tout (None : celui des transferts, « transfer undone »)
         self.cancel_summary = None
@@ -26787,26 +26790,16 @@ def _tf_mirror_provider(ws_dir, namespace, ptype, version, bin_src):
 
 
 def _tf_write_rc(ws_dir):
-    """`terraformrc` de l'espace : chaque provider du miroir local vient du
-    miroir et JAMAIS d'Internet (inclus dans le miroir, exclu du direct). Réécrit
-    quand le miroir change ; None sans miroir."""
+    """`terraformrc` de l'espace : les providers viennent du miroir local de
+    l'espace et de NULLE PART ailleurs. 2.3.1 : plus de bloc `direct` (il
+    laissait OpenTofu télécharger tout provider absent du miroir :
+    hashicorp/null, hashicorp/external, hashicorp/local...), ni de cache de
+    greffons. Toujours écrit : sans miroir, `init` échoue au lieu de
+    retomber sur la configuration de l'utilisateur ou sur Internet."""
     plug_root = (ws_dir / "plugins").resolve()
-    if not plug_root.is_dir():
-        return None
-    addrs = sorted(f"{h.name}/{n.name}/{t.name}"
-                   for h in plug_root.iterdir() if h.is_dir()
-                   for n in h.iterdir() if n.is_dir()
-                   for t in n.iterdir() if t.is_dir())
-    if not addrs:
-        return None
-    inc = ", ".join(json.dumps(a) for a in addrs)
     content = ("provider_installation {\n"
                "  filesystem_mirror {\n"
-               f"    path    = {json.dumps(str(plug_root))}\n"
-               f"    include = [{inc}]\n"
-               "  }\n"
-               "  direct {\n"
-               f"    exclude = [{inc}]\n"
+               f"    path = {json.dumps(str(plug_root))}\n"
                "  }\n"
                "}\n")
     rc = ws_dir / "terraformrc"
@@ -27727,15 +27720,23 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
     dans argv) ; `drop_env` : variables retirées (SSH_AUTH_SOCK : seule la
     clé de l'hôte doit servir)."""
     _tf_secure_ws(ws_dir)
-    rc_file = _tf_write_rc(ws_dir) or (ws_dir / "terraformrc")
-    env = {
-        **os.environ,
+    # 2.3.1 : dernier rempart, quel que soit le chemin qui a écrit les
+    # fichiers (déclaration, ancien espace partagé, fichier posé à la main) :
+    # OpenTofu ne se lance jamais sur une construction refusée.
+    refused = _tfg.check_workspace(ws_dir, known_headers=(_TF_HEADER,))
+    if refused:
+        log_tf.warning("terraform %s refused in %s: %s", args[0] if args else "?", ws_dir.name,
+                       "; ".join(str(v) for v in refused[:5]))
+        return 126, "", "refused: " + "; ".join(str(v) for v in refused[:5])
+    rc_file = _tf_write_rc(ws_dir)
+    env = _tf_env(ws_dir)
+    env.update({
         "HARVESTER_KUBECONFIG": kc_path,
         "TF_INPUT": "false",
         "TF_IN_AUTOMATION": "true",
-        "TF_CLI_CONFIG_FILE": str(rc_file) if rc_file.exists() else os.environ.get("TF_CLI_CONFIG_FILE", ""),
+        "TF_CLI_CONFIG_FILE": str(rc_file),
         "NO_COLOR": "1",
-    }
+    })
     for k in drop_env:
         env.pop(k, None)
     env.update(extra_env or {})
@@ -27761,6 +27762,30 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
         return 124, "", "timeout"
     finally:
         _tf_secure_ws(ws_dir)
+
+
+# 2.3.1 : OpenTofu part d'un environnement minimal. Il héritait de tout celui
+# de la console (jetons Vault ou de cloud, TF_CLI_ARGS*, TF_VAR_*,
+# TF_PLUGIN_CACHE_DIR, SSH_AUTH_SOCK...) : seules passent les variables de
+# langue, de chemin, de proxy et d'autorités de certification.
+_TF_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ",
+                "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+                "SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
+def _tf_env(ws_dir):
+    """Environnement de base d'une commande OpenTofu : HOME et TMPDIR dans
+    l'espace (0700), pas de télémétrie, rien d'autre de la console."""
+    env = {k: os.environ[k] for k in _TF_ENV_KEEP if k in os.environ}
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    tmp = ws_dir / ".tmp"
+    try:
+        tmp.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(tmp, 0o700)
+    except OSError as e:
+        log_tf.warning("terraform tmp dir: %s", e)
+    env.update({"HOME": str(ws_dir), "TMPDIR": str(tmp), "CHECKPOINT_DISABLE": "1"})
+    return env
 
 
 _TF_STALE_LOCK = "doesn't match any of the checksums previously recorded in the dependency lock file"
@@ -27863,6 +27888,9 @@ def api_terraform_apply(cluster):
     kind = data.get("kind", "")
     spec = data.get("spec") or {}
     dry_run = bool(data.get("dry_run", False))
+    denied = _tf_role_refusal([{"kind": kind, "spec": spec}], current_role())
+    if denied:
+        return jsonify(denied), 403
     try:
         tf_content = _render_tf_for_kind(kind, spec)
     except _tfk.SpecError as e:
@@ -27870,6 +27898,10 @@ def api_terraform_apply(cluster):
     if not tf_content:
         return jsonify({"error": f"unsupported kind: {kind}",
                         "supported": list(_tfs.KINDS_OF["harvester"])}), 400
+    bad = _tf_guard_rendered([(re.sub(r"[^a-z0-9_]+", "_", str(spec.get("name") or "resource").lower()),
+                               kind, spec, tf_content)])
+    if bad:
+        return _tf_guard_refused(bad)
 
     run_id = uuid.uuid4().hex[:12]
     label = f"tf-apply:{kind}:{spec.get('name', '?')}"
@@ -27897,6 +27929,141 @@ def _tf_store_error(e):
 
 def _tf_decl_id_ok(decl_id):
     return bool(_tfs.ID_RE.match(str(decl_id or "")))
+
+
+# ---------------------------------------------------------------------------
+# 2.3.1 : le code Terraform ne commande pas la machine de la console
+# ---------------------------------------------------------------------------
+# Revue interne : le code libre d'une déclaration (`raw`) se lançait au rôle
+# opérateur, et OpenTofu exécute sur la machine qui le lance (provisioner
+# local-exec, data external, module, backend, file()...). Défense en
+# profondeur : (1) le code libre est réservé à l'admin (créer, modifier,
+# planifier, appliquer, détruire) ; (2) tout code, formulaire ou libre,
+# passe par tf_guard avant chaque plan ou apply, et l'espace entier juste
+# avant chaque commande (_tf_run_cmd) ; (3) OpenTofu part d'un environnement
+# minimal, sans autre source de provider que le miroir de l'espace.
+def _tf_has_raw(resources):
+    return any(isinstance(r, dict) and r.get("kind") == "raw" for r in (resources or []))
+
+
+def _tf_raw_payload(role=None):
+    return {"error": "free Terraform code needs the 'admin' role", "code": "raw-admin-only",
+            "role": role, "required": "admin",
+            "hint": "free Terraform code runs on the console host: creating, editing, "
+                    "planning, applying or destroying it needs the 'admin' role"}
+
+
+# 2.4.0 (décision 160) : ce que la console réserve ailleurs à l'admin
+# (_OBJ_ADMIN_KINDS, préfixes /api/net-admin/, /api/hv-settings/,
+# /api/devices/ de ADMIN_ONLY_PREFIXES) l'est aussi par Terraform : genres de
+# formulaire, et types de ressource écrits dans un code libre (celui d'un
+# modèle de plan, que lance un opérateur, décision 161).
+_TF_ADMIN_KINDS = ("network", "storageclass", "ippool")
+_TF_ADMIN_TYPES = frozenset({
+    "harvester_network", "harvester_storageclass", "harvester_ippool",       # _OBJ_ADMIN_KINDS, net-admin
+    "harvester_clusternetwork", "harvester_vlanconfig", "harvester_loadbalancer",  # /api/net-admin/
+    "harvester_setting",                                                    # /api/hv-settings/
+    "harvester_pcidevice", "harvester_sriov_network_device",               # /api/devices/
+})
+
+
+def _tf_admin_kinds(resources):
+    """Genres (ou types du code libre) de `resources` réservés à l'admin,
+    triés ; vide = permis à l'opérateur."""
+    out = set()
+    for r in resources or []:
+        if not isinstance(r, dict):
+            continue
+        kind = r.get("kind")
+        if kind in _TF_ADMIN_KINDS:
+            out.add(kind)
+        elif kind == "raw":
+            spec = r.get("spec")
+            tf = spec.get("tf") if isinstance(spec, dict) else None
+            out |= set(_tfg.resource_types(tf if isinstance(tf, str) else "")) & _TF_ADMIN_TYPES
+    return sorted(out)
+
+
+def _tf_role_refusal(resources, role, via_plan=False):
+    """Corps du refus (403) pour lancer, créer ou modifier ces ressources
+    au rôle `role`, None si permis. `role` None : appelant local (ligne de
+    commande, qui a l'état de la console entre les mains). `via_plan` :
+    déclaration produite par un plan et lancée par sa chaîne ; le code libre
+    d'un modèle (écrit par un admin, valeurs neutralisées) est alors permis à
+    l'opérateur (décision 161), jamais les genres réservés (décision 160)."""
+    if role is None or ROLE_RANK.get(role, 0) >= ROLE_RANK["admin"]:
+        return None
+    kinds = _tf_admin_kinds(resources)
+    if kinds:
+        return {"error": "these resources need the 'admin' role: " + ", ".join(kinds),
+                "code": "admin-kind", "kinds": kinds, "role": role, "required": "admin",
+                "hint": "VM networks, storage classes, IP pools and other cluster-wide objects "
+                        "are managed by administrators, in Terraform as elsewhere in the console"}
+    if _tf_has_raw(resources) and not via_plan:
+        return _tf_raw_payload(role)
+    return None
+
+
+@functools.lru_cache(maxsize=512)
+def _tf_guard_cached(text, target_kind, file):
+    return tuple(v.as_dict() for v in _tfg.check_resources(text, target_kind, file))
+
+
+def _tf_guard_text(text, target_kind, file):
+    """Lecture d'un fichier rendu ; gardée en cache pour les textes courts
+    (la liste relit chaque déclaration à chaque affichage), jamais pour un
+    code libre volumineux (le cache ne grossit pas au-delà de ~32 Mo)."""
+    if len(text) <= 64 * 1024:
+        return _tf_guard_cached(text, target_kind, file)
+    return tuple(v.as_dict() for v in _tfg.check_resources(text, target_kind, file))
+
+
+def _tf_guard_rendered(rendered, target_kind="harvester"):
+    """Constructions refusées dans le code rendu d'une déclaration :
+    [{construct, line, file, error, index, resource}] ; vide = permis."""
+    out = []
+    for r in rendered:
+        safe, hcl, i = r[0], r[3], (r[5] if len(r) > 5 else None)
+        body = hcl[len(_TF_HEADER):] if hcl.startswith(_TF_HEADER) else hcl
+        for v in _tf_guard_text(body, target_kind or "harvester", f"{safe}.tf"):
+            out.append(dict(v, index=i, resource=safe))
+    return out
+
+
+def _tf_guard_payload(violations):
+    return {"error": "refused: " + violations[0]["error"], "code": "forbidden-construct",
+            "violations": violations[:20],
+            "hint": "a declaration may only hold resources and data sources of the embedded "
+                    "providers: no provisioner, external data, module, backend, provider "
+                    "block, nor function reading files of the console host"}
+
+
+def _tf_guard_refused(violations):
+    return jsonify(_tf_guard_payload(violations)), 422
+
+
+def _tf_decl_startup_audit():
+    """Au démarrage : chaque déclaration enregistrée qui contient désormais
+    une construction refusée est signalée (rien n'est supprimé ; plan et
+    apply la refusent, la liste le montre). Rend {id: [violations]}."""
+    flagged = {}
+    try:
+        decls = TF_DECLS.list(None, None)
+    except Exception as e:                 # noqa: BLE001 : le démarrage passe
+        log_tf.warning("Terraform declaration audit skipped: %s", e)
+        return flagged
+    for d in decls:
+        kind = d.get("target_kind") or "harvester"
+        rendered, _errors = _tf_render_resources(d.get("resources") or [], kind)
+        bad = _tf_guard_rendered(rendered, kind)
+        if bad:
+            flagged[d["id"]] = bad
+            log_tf.warning("Terraform declaration %s (%s on %s) is blocked: %s", d["id"], d.get("name"),
+                           d.get("cluster"), "; ".join(v["error"] for v in bad[:3]))
+    if flagged:
+        log_tf.warning("Terraform declarations: %d blocked by the 2.3.1 rules (plan and apply refused "
+                       "until an admin fixes them)", len(flagged))
+    return flagged
 
 
 # Le cloud-init d'une ressource peut porter des mots de passe : lu par un
@@ -27955,6 +28122,10 @@ def api_tf_declaration_create():
             return jsonify({"error": err[0]}), err[1]
     elif not _kubectl_for_cluster(cluster):
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    denied = _tf_role_refusal(data.get("resources") if isinstance(data.get("resources"), list) else [],
+                              current_role())
+    if denied:
+        return jsonify(denied), 403
     decl_id = str(data.get("id") or uuid.uuid4().hex[:12])
     try:
         d = TF_DECLS.create(decl_id, cluster, data.get("name"), data.get("description") or "",
@@ -27983,6 +28154,13 @@ def api_tf_declaration_update(decl_id):
     if not _tf_decl_id_ok(decl_id):
         return jsonify({"error": "invalid declaration id"}), 400
     data = request.get_json(force=True, silent=True) or {}
+    cur = TF_DECLS.get(decl_id)
+    # le contenu écrit ET celui qu'il remplace (un opérateur ne retire pas
+    # le code libre ou le réseau d'une déclaration d'admin)
+    new = data.get("resources") if isinstance(data.get("resources"), list) else []
+    denied = _tf_role_refusal(new + list((cur or {}).get("resources") or []), current_role())
+    if denied:
+        return jsonify(denied), 403
     try:
         d = TF_DECLS.update(decl_id, data.get("revision"), user=current_user() or "",
                             name=data.get("name"), description=data.get("description"),
@@ -28120,6 +28298,9 @@ def api_terraform_apply_declaration(cluster):
                               plan_hash=data.get("plan_hash"))
     if not isinstance(resources, list) or not resources:
         return jsonify({"error": "declaration.resources must be a non-empty list"}), 400
+    denied = _tf_role_refusal(resources, current_role())
+    if denied:
+        return jsonify(denied), 403
     rendered, errors = _tf_render_resources(resources)
 
     if errors:
@@ -28128,6 +28309,9 @@ def api_terraform_apply_declaration(cluster):
             "errors": errors,
             "supported": list(_tfs.KINDS_OF["harvester"]),
         }), 400
+    bad = _tf_guard_rendered(rendered)
+    if bad:
+        return _tf_guard_refused(bad)
 
     run_id = uuid.uuid4().hex[:12]
     label = _tf_decl_label(decl.get("name", "?"), len(rendered), dry_run)
@@ -28178,7 +28362,9 @@ def _tf_render_resources(resources, target_kind="harvester"):
     départagées (`node`, `node_2`). v1.54.0 : une ressource « raw » prend le
     nom de son bloc `resource` (elle s'appelait d'après les 24 premiers
     caractères de son code, `resource_harvester_ssh_`, audit D6)."""
-    rendered, errors, seen = [], [], set()
+    # 2.3.1 : `_providers` est le fichier de la console (une ressource de ce
+    # nom écrasait l'en-tête et ses providers)
+    rendered, errors, seen = [], [], {"_providers"}
     target_kind = target_kind or "harvester"
     taken = {}                       # adresse -> rang, pour les ressources KVM
     for i, res in enumerate(resources or []):
@@ -28408,6 +28594,11 @@ def _tf_decl_view(decl):
     # dernier plan vaut encore pour ce qui est écrit.
     d["content_hash"] = _tf_decl_hash(rendered) if not errors else None
     d["incomplete"] = [e["index"] for e in errors]
+    # 2.3.1 : code libre (réservé à l'admin) et constructions refusées
+    d["raw"] = _tf_has_raw(decl.get("resources"))
+    # 2.4.0 (décision 160) : genres réservés à l'admin, l'écran les bride
+    d["admin_kinds"] = _tf_admin_kinds(decl.get("resources"))
+    d["blocked"] = _tf_guard_rendered(rendered, d["target_kind"])
     ws = None
     try:
         ws = _tf_decl_ws(decl, create=False)
@@ -28442,7 +28633,7 @@ class TfLaunchError(Exception):
 
 
 def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster_user=None,
-                    target_kind="harvester", holder=None):
+                    target_kind="harvester", holder=None, role=None):
     """Lance plan, apply ou destroy d'une déclaration gardée par la console,
     en action suivie ; rend (identifiant de l'action, empreinte du contenu).
     `mode` : plan | apply | destroy | destroy-plan. 2.3.0 : `target_kind`
@@ -28452,7 +28643,10 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
 
     2.4.0 : ne lit ni la requête ni la session (`user` et `cluster_user`
     sont passés par l'appelant, figés au déclenchement) : la chaîne d'un
-    plan l'appelle depuis son fil. Refus : TfLaunchError(statut, corps)."""
+    plan l'appelle depuis son fil. Refus : TfLaunchError(statut, corps).
+    `role` : rôle de qui a déclenché (figé comme `user`) ; les routes et la
+    chaîne le passent toujours, None = appelant local (_tf_role_refusal).
+    Rôle et tf_guard sont contrôlés ICI : la chaîne d'un plan y passe aussi."""
     decl = TF_DECLS.get(decl_id)
     if decl is None:
         raise TfLaunchError(404, {"error": "declaration not found", "id": decl_id})
@@ -28462,10 +28656,20 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
     if decl["cluster"] != cluster:
         raise TfLaunchError(400, {"error": "declaration belongs to another cluster",
                                   "cluster": decl["cluster"]})
+    denied = _tf_role_refusal(decl["resources"], role, via_plan=holder is not None
+                              and bool((decl.get("origin") or {}).get("plan")))
+    if denied:
+        raise TfLaunchError(403, denied)
     rendered, errors = _tf_render_resources(decl["resources"], target_kind)
     if errors:
         raise TfLaunchError(400, {"error": "one or more resources are incomplete", "errors": errors,
-                                  "supported": list(_tfs.KINDS_OF["harvester"])})
+                                  "supported": list(_tfs.KINDS_OF[target_kind or "harvester"])})
+    # 2.3.1 : destroy aussi (il évalue le code : un provisioner `when =
+    # destroy` s'y lance). 2.4.0 : ici et non dans la route, pour que la
+    # chaîne d'un plan passe par le même contrôle.
+    bad = _tf_guard_rendered(rendered, target_kind)
+    if bad:
+        raise TfLaunchError(422, _tf_guard_payload(bad))
     if mode in ("plan", "apply") and not rendered:
         raise TfLaunchError(400, {"error": "declaration.resources must be a non-empty list"})
     missing = [r[0] for r in rendered if not r[4]]
@@ -28515,7 +28719,7 @@ def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harv
         run_id, h = _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=plan_hash,
                                     user=current_user() or "",
                                     cluster_user=(current_cluster_identity() or {}).get("user"),
-                                    target_kind=target_kind)
+                                    target_kind=target_kind, role=current_role())
     except TfLaunchError as e:
         return jsonify(e.payload), e.status
     return jsonify({"action_id": run_id, "plan_hash": h}), 201
@@ -28773,26 +28977,32 @@ provider "harvester" {
 def _hcl_str(s):
     """Quote a string for HCL; newlines become a heredoc.
 
-    2.4.0 (revue B2-I4) : la valeur arrive comme du TEXTE. `${` et `%{`
-    sont échappés (`$${`, `%%{`) dans une chaîne comme dans un heredoc :
-    sinon Terraform évalue `${file("...")}` et lit un fichier de la console.
-    Le délimiteur du heredoc n'apparaît sur aucune ligne de la valeur."""
+    2.3.1 : une valeur de formulaire ne devient jamais du code. Les
+    séquences de gabarit `${` et `%{` sont neutralisées (`$${`, `%%{` : un
+    `${file("/etc/shadow")}` dans une description lisait un fichier de la
+    console), dans une chaîne (`tf_kvm.hcl_string`) comme dans un heredoc, et
+    le marqueur du heredoc est choisi absent de toute ligne de la valeur (une
+    ligne `EOT` dans un cloud-init fermait le heredoc et la suite était lue
+    comme du code)."""
     if s is None:
         return '""'
-    s = str(s).replace("${", "$${").replace("%{", "%%{")
+    s = str(s)
     if "\n" in s:
         lines = {ln.strip() for ln in s.split("\n")}
-        term, n = "EOT", 0
-        while term in lines:
+        delim, n = "EOT", 0
+        while delim in lines:
             n += 1
-            term = f"EOT{n}"
-        return f"<<-{term}\n{s}\n{term}"
-    return '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
+            delim = f"EOT{n}"
+        body = s.replace("${", "$${").replace("%{", "%%{")
+        return f"<<-{delim}\n{body}\n{delim}"
+    return _tfk.hcl_string(s)
 
 
 def _hcl_id(s):
-    """Sanitize a string for use as an HCL resource identifier."""
-    return (s or "x").replace("-", "_").replace(".", "_")
+    """Sanitize a string for use as an HCL resource identifier. 2.3.1 : tout
+    caractère hors [A-Za-z0-9_] devient `_` (un guillemet dans un nom fermait
+    l'étiquette du bloc et la suite devenait du code)."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", s or "x")
 
 
 def _render_disk_block(disk):
@@ -31781,6 +31991,7 @@ DEPLOY_FINDING_LEVELS = {
     "plan-invalid": "blocking", "phase-not-available": "blocking", "template-missing": "blocking",
     "var-missing": "blocking", "var-invalid": "blocking", "decl-name-taken": "blocking",
     "tf-missing": "blocking", "cluster-unreachable": "blocking",
+    "admin-kind": "blocking", "forbidden-construct": "blocking",
     "template-newer": "warning", "decl-differs": "warning", "plan-changed": "warning",
     "decl-exists": "info", "readiness-later": "info",
 }
@@ -31973,11 +32184,14 @@ def _deploy_values(plan, variables, cluster, vip):
     return values, errors
 
 
-def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=False, update_differing=False):
+def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=False, update_differing=False,
+                    role=None):
     """Contrôles d'un lancement, lecture seule. Rend (constats, résumé,
     contexte) ; le contexte porte de quoi lancer : plan, modèles, valeurs,
     ressources rendues. `install` : le cluster sera créé par la chaîne (ni
-    joignabilité ni déclarations à lire)."""
+    joignabilité ni déclarations à lire). `role` : rôle de qui lance (None :
+    ligne de commande locale) ; décision 160, un genre réservé à l'admin
+    bloque un opérateur, ici comme au lancement de chaque déclaration."""
     state = _deploy_state()
     findings = []
     plan = _dpl.load_plan(state, plan_name)
@@ -32017,6 +32231,17 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
             for where, why in e.errors:
                 code = "var-missing" if why == "missing variable" else "var-invalid"
                 findings.append(_deploy_finding(code, "terraform", f"{where}: {why}"))
+        for tname, res in rendered.items():
+            # mêmes contrôles qu'au lancement de la déclaration (_tf_decl_launch),
+            # montrés avant de lancer : rôle (160) et constructions (tf_guard)
+            denied = _tf_role_refusal(res, role, via_plan=True)
+            if denied:
+                findings.append(_deploy_finding(
+                    "admin-kind", "terraform", f"{tname}: {', '.join(denied.get('kinds') or [])} "
+                    "need the 'admin' role"))
+            tf_rendered, _errs = _tf_render_resources(res)
+            for v in _tf_guard_rendered(tf_rendered)[:3]:
+                findings.append(_deploy_finding("forbidden-construct", "terraform", f"{tname}: {v['error']}"))
         if _deploy_tf_tools_missing():
             findings.append(_deploy_finding("tf-missing", "terraform",
                                             ", ".join(_deploy_tf_tools_missing()) + " not found"))
@@ -32259,11 +32484,12 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
         tname = item.id
         t = templates[tname]
         dname = _dpl.declaration_name(plan["name"], tname)
-        data = {"declaration": dname}
+        data = {"declaration": dname, "template_by": t.get("updated_by") or ""}
         decl = TF_DECLS.find_by_name(cluster, dname)
         if decl is None:
             origin = {"plan": plan["name"], "template": tname,
-                      "template_revision": t["revision"], "plan_revision": plan["revision"]}
+                      "template_revision": t["revision"], "plan_revision": plan["revision"],
+                      "template_by": t.get("updated_by") or ""}
             decl = TF_DECLS.create(uuid.uuid4().hex[:12], cluster, dname,
                                    description=f"plan {plan['name']}, template {tname}",
                                    resources=rendered[tname], user=user, origin=origin)
@@ -32294,7 +32520,7 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
         try:
             kc = kc_ref()
             pid, h = _tf_decl_launch(cluster, kc, decl["id"], "plan", user=user,
-                                     cluster_user=cluster_user, holder=run.id)
+                                     cluster_user=cluster_user, holder=run.id, role=run.launch_role)
             actions.append(pid)
             status, child = _deploy_wait_child(pid)
             _tf_decl_wait_idle(decl["id"])
@@ -32320,7 +32546,7 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
                 return _dch.ItemOutcome("done", "kept: values differ from the declaration" if kept
                                         else "nothing to change", data=data)
             aid, _h = _tf_decl_launch(cluster, kc, decl["id"], "apply", plan_hash=h, user=user,
-                                      cluster_user=cluster_user, holder=run.id)
+                                      cluster_user=cluster_user, holder=run.id, role=run.launch_role)
             actions.append(aid)
             status, _child = _deploy_wait_child(aid)
             _tf_decl_wait_idle(decl["id"])
@@ -32439,7 +32665,7 @@ def _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, in
 
 def _deploy_start(cluster, kc, dctx, dry_run=False, user="", cluster_user=None, previous=None,
                   resumes=None, install=None, run_id=None, store=None, required_role="operator",
-                  lock_fd=None):
+                  lock_fd=None, role=None):
     """Crée l'action `deploy:<cluster>` et lance son fil ; rend son
     identifiant. L'appelant a fait les contrôles (constats bloquants,
     occupation, garde 132) dans la requête."""
@@ -32448,6 +32674,7 @@ def _deploy_start(cluster, kc, dctx, dry_run=False, user="", cluster_user=None, 
     run = ActionRun(run_id, f"{DEPLOY_PREFIX}{cluster}", cluster, [], dry_run=bool(dry_run))
     run.cluster_user = cluster_user
     run.required_role = required_role
+    run.launch_role = role                 # figé : chaque déclaration lancée par la chaîne le reprend
     plan = dctx["plan"]
     run.result = {"plan": plan["name"], "plan_revision": plan["revision"], "cluster": cluster,
                   "resumes": resumes, "dry_run": bool(dry_run), "by": user or "",
@@ -32496,11 +32723,13 @@ def _deploy_previous(action_id):
 
 def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, cluster_user,
                            previous=None, resumes=None, install=None, vip=None, run_id=None,
-                           store=None, required_role="operator", update_differing=False):
+                           store=None, required_role="operator", update_differing=False, role=None):
     """Contrôles puis lancement, sous le verrou de lancement : (corps,
-    statut). Partagé par les routes et la ligne de commande."""
+    statut). Partagé par les routes et la ligne de commande. `role` : rôle
+    de qui lance, figé pour toute la chaîne (None : ligne de commande)."""
     findings, summary, dctx = _deploy_prepare(cluster, plan_name, variables, kc=kc, vip=vip,
-                                              install=bool(install), update_differing=update_differing)
+                                              install=bool(install), update_differing=update_differing,
+                                              role=role)
     if findings is None:
         return {"error": "no such plan", "fields": ["plan"]}, 404
     if previous is not None and dctx is not None \
@@ -32540,7 +32769,7 @@ def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, clu
             action_id = _deploy_start(cluster, kc, dctx, dry_run=dry_run, user=user,
                                       cluster_user=cluster_user, previous=previous, resumes=resumes,
                                       install=install, run_id=run_id, store=store,
-                                      required_role=required_role, lock_fd=lock_fd)
+                                      required_role=required_role, lock_fd=lock_fd, role=role)
         except BaseException:
             _flock_release(lock_fd)
             raise
@@ -32650,7 +32879,7 @@ def api_deploy_template_get(name):
 
 def _deploy_template_save(name, doc, rev):
     try:
-        out, removed = _dpl.save_template(_deploy_state(), name, doc, rev)
+        out, removed = _dpl.save_template(_deploy_state(), name, doc, rev, by=current_user() or "")
     except _dpl.PlanConflict as e:
         return jsonify({"error": "the template changed in the meantime", "code": "conflict",
                         "current_revision": e.current_revision}), 409
@@ -32736,7 +32965,8 @@ def api_deploy_check(cluster):
     if not _deploy_name_ok(data.get("plan")):
         return jsonify({"error": "invalid plan name", "fields": ["plan"]}), 400
     findings, summary, _ctx = _deploy_prepare(cluster, data["plan"], data.get("variables"), kc=kc,
-                                              update_differing=data.get("update_differing") is True)
+                                              update_differing=data.get("update_differing") is True,
+                                              role=current_role())
     if findings is None:
         return jsonify({"error": "no such plan", "fields": ["plan"]}), 404
     return jsonify({"findings": findings, "summary": summary,
@@ -32757,7 +32987,7 @@ def api_deploy_start(cluster):
     body, status = _deploy_launch_checked(
         cluster, kc, data["plan"], data.get("variables"), bool(data.get("dry_run")),
         current_user() or "", (current_cluster_identity() or {}).get("user"),
-        update_differing=data.get("update_differing") is True)
+        update_differing=data.get("update_differing") is True, role=current_role())
     return jsonify(body), status
 
 
@@ -32876,7 +33106,7 @@ def api_deploy_resume(cluster):
         cluster, kc, result.get("plan") or "", result.get("variables") or {}, False,
         current_user() or "", cluster_user, previous=result, resumes=data["action_id"],
         install=install, vip=vip, run_id=run_id, store=store, required_role=required,
-        update_differing=result.get("update_differing") is True)
+        update_differing=result.get("update_differing") is True, role=current_role())
     if status != 202 and store is not None:
         store.delete_tree(_dch.SECRET_CLASS, run_id)
     return jsonify(body), status
@@ -32898,7 +33128,8 @@ def _deploy_install_precheck(plan_name, plan_variables, cluster, vip):
     pas) : réponse 400, ou None."""
     if not isinstance(cluster, str) or not cluster:
         return None                             # refusé ensuite par les contrôles de la série
-    findings, summary, _ctx = _deploy_prepare(cluster, plan_name, plan_variables, vip=vip or "", install=True)
+    findings, summary, _ctx = _deploy_prepare(cluster, plan_name, plan_variables, vip=vip or "", install=True,
+                                              role=current_role())
     if findings and _deploy_blocking(findings):
         return jsonify({"error": "the plan cannot start", "code": "blocking-findings",
                         "findings": findings, "summary": summary}), 400
@@ -32919,7 +33150,8 @@ def _deploy_with_install(plan_name, plan_variables, cluster, vip, rows, kind, re
                "concurrency": concurrency, "record": record}
     body, status = _deploy_launch_checked(cluster, None, plan_name, plan_variables, False,
                                           user, None, install=install, vip=vip,
-                                          run_id=run_id, store=store, required_role="admin")
+                                          run_id=run_id, store=store, required_role="admin",
+                                          role=current_role())
     if status != 202:
         store.delete_tree(_dch.SECRET_CLASS, run_id)
         rows.clear()
@@ -32952,4 +33184,8 @@ if __name__ == "__main__":
     except Exception as _e:                      # noqa: BLE001
         log_watch.error("replication follower startup failed: %s", _e)
     _announce_setup()
+    try:
+        _tf_decl_startup_audit()
+    except Exception as _e:                      # noqa: BLE001
+        log_tf.warning("Terraform declaration audit failed: %s", _e)
     app.run(host=host, port=port, ssl_context=ssl_ctx, threaded=True, debug=False)

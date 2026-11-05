@@ -77,8 +77,8 @@ _SECRET_NAME_RE = _hcl.SECRET_NAME_OK_RE
 _TEXT_FIELDS = frozenset(("user_data",))
 _PASSWORD_TEXT_RE = re.compile(r"password|passwd|chpasswd", re.I)
 # HCL brut (`raw`, champ `tf`) : jamais retiré en silence, REFUSÉ par la
-# garde de hcl_guard (garde contre les accidents : secrets, fichiers de
-# l'hôte, blocs qui exécutent) ; ses valeurs de variables y sont échappées.
+# règle de toute déclaration (web/tf_guard.py) puis par la garde des secrets
+# de hcl_guard ; ses valeurs de variables y sont échappées et le rendu relu.
 # identifiants dans une adresse (`https://user:pass@hôte/...`)
 _URL_USERINFO_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/\s@]+@")
 # ... ou dans sa requête (`?token=...`, signature d'une adresse présignée)
@@ -415,6 +415,18 @@ def delete_plan(state, name):
 
 # --- modèles de déclaration ---------------------------------------------------
 
+def _raw_refusal(text):
+    """Raison du refus d'un HCL brut de modèle : d'abord la règle de toute
+    déclaration (web/tf_guard.py : blocs, types, fonctions, provisioners),
+    puis ce qui est propre aux modèles (secrets, hcl_guard). None s'il passe.
+    Les variables `{{x}}` hors chaîne se lisent comme `{ {x} }` : relu tel
+    quel, le modèle passe par la même lecture que son rendu."""
+    bad = _hcl._tfg.check_resources(text, "harvester")
+    if bad:
+        return str(bad[0]).split(": ", 1)[-1]
+    return _hcl.refusal(text)
+
+
 def secret_refusals(resources, base="resources"):
     """[(chemin, raison)] de ce qui ne se retire pas sans changer le sens et
     se refuse donc : HCL brut qui porte un secret, identifiants dans une
@@ -426,7 +438,7 @@ def secret_refusals(resources, base="resources"):
         if isinstance(value, dict):
             for k, v in value.items():
                 here = f"{where}.{k}"
-                why = _hcl.refusal(v) if k == "tf" and isinstance(v, str) else None
+                why = _raw_refusal(v) if k == "tf" and isinstance(v, str) else None
                 if why:
                     out.append((here, why))
                     continue
@@ -498,7 +510,8 @@ def check_template(doc, clean_resources=None):
     name = doc.get("name")
     if name is not None and (not isinstance(name, str) or not NAME_RE.match(name)):
         errors.append(("name", "invalid name (RFC 1123)"))
-    unknown = sorted(set(doc) - {"name", "revision", "description", "variables", "resources", "removed"})
+    unknown = sorted(set(doc) - {"name", "revision", "description", "variables", "resources", "removed",
+                                 "updated_by"})
     errors.extend((k, "unknown key") for k in unknown)
     desc = _check_description(doc, errors)
     variables = _check_variables(doc, errors)
@@ -533,13 +546,15 @@ def check_template(doc, clean_resources=None):
     return {"description": desc, "variables": variables, "resources": clean}, removed
 
 
-def save_template(state, name, doc, revision=None, clean_resources=None):
+def save_template(state, name, doc, revision=None, clean_resources=None, by=""):
     """(modèle écrit, chemins retirés) ; PlanConflict, ProfileError. Les
     chemins retirés sont aussi gardés dans le fichier (`removed`), pour que
-    l'interface les annonce à la relecture."""
+    l'interface les annonce à la relecture. `by` : qui écrit cette révision
+    (décision 161 : la chaîne lancée par un opérateur consigne l'auteur du
+    modèle dont elle applique le code), jamais pris du document."""
     def check(d):
         clean, removed = check_template(d, clean_resources)
-        return dict(clean, removed=removed), removed
+        return dict(clean, removed=removed, updated_by=str(by or "")[:128]), removed
     return _save(state, TEMPLATE_DIR, name, doc, revision, check)
 
 
@@ -551,6 +566,8 @@ def load_template(state, name, clean_resources=None):
         doc = _read(template_path(state, name)) or {}
         removed = doc.get("removed")
         t["removed"] = [str(x) for x in removed] if isinstance(removed, list) else []
+        by = doc.get("updated_by")
+        t["updated_by"] = by if isinstance(by, str) else ""
     return t
 
 

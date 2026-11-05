@@ -160,7 +160,8 @@ def cmd_store(args, state):
         if plan:
             out = deploy_plans.save_plan(state, args.name, doc, args.revision)
         else:
-            out, _removed = deploy_plans.save_template(state, args.name, doc, args.revision)
+            out, _removed = deploy_plans.save_template(state, args.name, doc, args.revision,
+                                                       by=f"cli:{getpass.getuser()}")
     except deploy_plans.PlanConflict as e:
         raise Refused(f"the {what} changed in the meantime", "conflict",
                       current_revision=e.current_revision) from None

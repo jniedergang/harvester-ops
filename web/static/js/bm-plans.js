@@ -64,6 +64,8 @@ const BMPlans = (() => {
     'plan-changed': () => tr('dpw.f.planChanged'),
     'decl-exists': () => tr('dpw.f.declExists'),
     'readiness-later': () => tr('dpw.f.readinessLater'),
+    'admin-kind': () => tr('dpw.f.adminKind'),
+    'forbidden-construct': () => tr('dpw.f.forbiddenConstruct'),
   };
   const LEVELS = {
     blocking: () => tr('dpw.lvl.blocking'), warning: () => tr('dpw.lvl.warning'), info: () => tr('dpw.lvl.info'),
