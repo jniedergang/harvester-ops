@@ -32833,7 +32833,7 @@ def _deploy_read_cluster(kc, cluster):
 
 def _deploy_read_capi(kc, cluster):
     """Lectures Cluster API de la disponibilité (2.5.0, décision 155) :
-    version de Harvester, service rke2-traefik, CAPIProvider ; None pour une
+    version de Harvester, services rke2-traefik et ingress-expose, CAPIProvider ; None pour une
     lecture en échec."""
     def setting():
         d = _kubectl_json(kc, "get", "settings.harvesterhci.io", "server-version", timeout=20, cluster=cluster)
@@ -32843,10 +32843,16 @@ def _deploy_read_capi(kc, cluster):
         return _kubectl_json(kc, "get", "services", "-n", "kube-system", "rke2-traefik", timeout=20,
                              cluster=cluster)
 
+    def ingress_expose():
+        # cluster mis à jour depuis 1.8 : l'adresse est là, pas sur rke2-traefik
+        return _kubectl_json(kc, "get", "services", "-n", "kube-system", "ingress-expose", timeout=20,
+                             cluster=cluster)
+
     def providers():
         d = _kubectl_json(kc, "get", "capiproviders.turtles-capi.cattle.io", "-A", timeout=30, cluster=cluster)
         return None if d is None else (d.get("items") or [])
-    jobs = {"server_version": setting, "traefik": traefik, "capi_providers": providers}
+    jobs = {"server_version": setting, "traefik": traefik, "ingress_expose": ingress_expose,
+            "capi_providers": providers}
     if not kc:
         return {k: None for k in jobs}
     from concurrent.futures import ThreadPoolExecutor

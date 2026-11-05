@@ -192,12 +192,25 @@ def contract_state(kube, wanted=()):
 SHIM_NS, SHIM_NAME = "kube-system", "ingress-expose"
 
 
+VIP_ANNOTATION = "kube-vip.io/loadbalancerIPs"
+
+
 def harvester_vip(kube):
-    """L'adresse de Harvester (VIP) : celle que porte le statut du service
-    `kube-system/rke2-traefik` sur Harvester 1.9, ou None."""
+    """L'adresse de Harvester (VIP), ou None. Une installation neuve de 1.9
+    la porte dans le statut de `kube-system/rke2-traefik` ; un cluster mis à
+    jour depuis 1.8 n'a pas ce service et garde `kube-system/ingress-expose`
+    (statut et annotation kube-vip : vu sur harvlab2 le 05/11/2026). Le
+    service de remplacement de la console n'a que l'annotation."""
     traefik = kube.get("services", SHIM_NS, "rke2-traefik") or {}
     ing = ((traefik.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
-    return ing[0].get("ip") if ing else None
+    if ing and ing[0].get("ip"):
+        return ing[0]["ip"]
+    expose = kube.get("services", SHIM_NS, SHIM_NAME) or {}
+    ing = ((expose.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
+    if ing and ing[0].get("ip"):
+        return ing[0]["ip"]
+    ann = ((expose.get("metadata") or {}).get("annotations") or {}).get(VIP_ANNOTATION) or ""
+    return ann.split(",")[0].strip() or None
 
 
 def shim_state(kube, wanted=()):
@@ -304,7 +317,8 @@ def install(kube, desc, step, wait=True, timeout=300, now=time.time, sleep=time.
     shim = shim_state(kube, providers)
     if shim["needed"] and not shim["present"]:
         if not shim["vip"]:
-            raise RuntimeError("cannot find the Harvester VIP (service kube-system/rke2-traefik)")
+            raise RuntimeError("cannot find the Harvester VIP (services kube-system/rke2-traefik "
+                               "and ingress-expose have no address)")
         kube.apply([shim_manifest(shim["vip"])])
         step("compatibility", "done", f"ingress-expose recreated for CAPHV (VIP {shim['vip']})")
     for left in contract_state(kube, providers):

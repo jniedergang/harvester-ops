@@ -721,7 +721,8 @@ def identity_up(kube, spec, version, now=None, sleep=None):
         sleep(1)
     vip = cs.harvester_vip(kube)
     if not vip:
-        raise RuntimeError("the Harvester address is unknown (kube-system/rke2-traefik has no address)")
+        raise RuntimeError("the Harvester address is unknown (kube-system/rke2-traefik and "
+                           "ingress-expose have no address)")
     token = base64.b64decode(data["token"]).decode()
     path = _work_file(ci.kubeconfig(f"https://{vip}:6443", data["ca.crt"], token))
     rules = sum(len(d.get("rules") or []) for d in docs)

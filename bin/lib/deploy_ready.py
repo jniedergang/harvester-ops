@@ -21,9 +21,10 @@ Constats (code, détail) :
 2.5.0 (décision 155), si la phase `capi` ou `clusters` est activée :
 - `harvester-too-old` : réglage `server-version` en dessous de v1.9 (pas de
   Turtles embarqué, décision 117) ;
-- `rke2-traefik-no-address` : le service `kube-system/rke2-traefik` n'a
-  aucune adresse dans `status.loadBalancer.ingress` (ce que lit CAPHV, et
-  d'où la console tire l'adresse de l'identité restreinte) ;
+- `rke2-traefik-no-address` : ni `kube-system/rke2-traefik` (installation
+  neuve de 1.9) ni `kube-system/ingress-expose` (cluster mis à jour depuis
+  1.8) ne donne l'adresse de Harvester (capi_stack.harvester_vip, d'où la
+  console tire l'adresse de l'identité restreinte) ;
 - `turtles-not-ready` : aucun `CAPIProvider` lisible, ou cœur Cluster API
   pas prêt. Règle de capi_stack.stack_status, appelée sur les objets lus
   (jamais recopiée). Une pile de fournisseurs absente n'est PAS un constat
@@ -36,7 +37,7 @@ from kube import KubeError
 
 DEFAULT_CLASS_ANN = "storageclass.kubernetes.io/is-default-class"
 READS = ("version", "nodes", "charts", "lh_nodes", "storageclasses")
-CAPI_READS = ("server_version", "traefik", "capi_providers")
+CAPI_READS = ("server_version", "traefik", "ingress_expose", "capi_providers")
 CAPI_PHASES = ("capi", "clusters")
 CODES = ("api-unreachable", "read-failed", "nodes-missing", "nodes-not-ready", "charts-not-ready",
          "longhorn-not-schedulable", "no-default-storageclass",
@@ -58,6 +59,8 @@ class _ReadsKube:
             return {"value": v} if v else None
         if kind == "services" and ns == capi_stack.SHIM_NS and name == "rke2-traefik":
             return self.reads.get("traefik")
+        if kind == "services" and ns == capi_stack.SHIM_NS and name == capi_stack.SHIM_NAME:
+            return self.reads.get("ingress_expose")
         return None
 
     def list(self, kind, ns=None, selector=None):
@@ -86,9 +89,9 @@ def capi_unmet(reads):
     elif ver is None or parsed is None:
         unmet.append({"code": "read-failed", "detail": "server-version"})
     kube = _ReadsKube(reads)
-    if reads.get("traefik") is None or not capi_stack.harvester_vip(kube):
+    if not capi_stack.harvester_vip(kube):
         unmet.append({"code": "rke2-traefik-no-address",
-                      "detail": "kube-system/rke2-traefik has no address in status.loadBalancer.ingress"})
+                      "detail": "neither kube-system/rke2-traefik nor ingress-expose gives the Harvester address"})
     st = capi_stack.stack_status(kube)
     if not st["turtles"] or not (st["core"] or {}).get("ready"):
         unmet.append({"code": "turtles-not-ready",

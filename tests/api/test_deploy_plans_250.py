@@ -227,9 +227,9 @@ def test_all_ready_from_harv1():
     ({"server_version": "v1.4.3"}, "harvester-too-old", "Harvester v1.4.3: Cluster API needs v1.9 or later"),
     ({"server_version": None}, "read-failed", "server-version"),
     ({"traefik": None}, "rke2-traefik-no-address",
-     "kube-system/rke2-traefik has no address in status.loadBalancer.ingress"),
+     "neither kube-system/rke2-traefik nor ingress-expose gives the Harvester address"),
     ({"traefik": {"metadata": {"name": "rke2-traefik"}, "status": {"loadBalancer": {}}}},
-     "rke2-traefik-no-address", "kube-system/rke2-traefik has no address in status.loadBalancer.ingress"),
+     "rke2-traefik-no-address", "neither kube-system/rke2-traefik nor ingress-expose gives the Harvester address"),
     ({"capi_providers": None}, "turtles-not-ready", "no CAPIProvider readable"),
     ({"capi_providers": providers(core_phase="Provisioning")}, "turtles-not-ready",
      "the Cluster API core is not ready"),
@@ -239,6 +239,32 @@ def test_each_capi_code(over, code, detail):
     ev = dr.evaluate(reads(**over), phases=["clusters"])
     assert not ev["ready"]
     assert {"code": code, "detail": detail} in ev["unmet"], ev
+
+
+# Cluster mis à jour depuis 1.8 (harvlab2, 05/11/2026) : pas de rke2-traefik,
+# l'adresse est sur ingress-expose (statut et annotation kube-vip)
+UPGRADED_EXPOSE = {"metadata": {"name": "ingress-expose",
+                                "annotations": {"kube-vip.io/loadbalancerIPs": "172.16.2.70"}},
+                   "status": {"loadBalancer": {"ingress": [{"ip": "172.16.2.70"}]}}}
+
+
+@pytest.mark.parametrize("label,traefik,expose,vip", [
+    ("fresh 1.9", {"status": {"loadBalancer": {"ingress": [{"ip": "172.16.3.100"}]}}}, None, "172.16.3.100"),
+    ("upgraded from 1.8", None, UPGRADED_EXPOSE, "172.16.2.70"),
+    ("console shim, annotation only", None,
+     {"metadata": {"annotations": {"kube-vip.io/loadbalancerIPs": "172.16.3.100"}}}, "172.16.3.100"),
+    ("traefik first", {"status": {"loadBalancer": {"ingress": [{"ip": "172.16.3.100"}]}}}, UPGRADED_EXPOSE,
+     "172.16.3.100"),
+    ("none", None, {"metadata": {"annotations": {}}}, None),
+])
+def test_harvester_vip_sources(label, traefik, expose, vip):
+    import capi_stack
+    assert capi_stack.harvester_vip(dr._ReadsKube({"traefik": traefik, "ingress_expose": expose})) == vip, label
+
+
+def test_upgraded_cluster_is_ready_for_capi():
+    ev = dr.evaluate(reads(traefik=None, ingress_expose=UPGRADED_EXPOSE), phases=["capi", "clusters"])
+    assert "rke2-traefik-no-address" not in codes(ev)
 
 
 @pytest.mark.parametrize("version", ["v1.9.0", "v1.9.1-rc1", "v1.10.0", "v2.0.0"])
