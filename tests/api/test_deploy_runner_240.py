@@ -484,3 +484,21 @@ def test_resume_after_a_plan_change_says_so(world):
     [f] = [f for f in r.get_json()["findings"] if f["code"] == "plan-changed"]
     assert f["level"] == "warning" and "1 -> 2" in f["detail"]
     assert wait(r.get_json()["action_id"]).status == "done"
+
+
+def test_apply_waits_for_the_plan_thread_to_release(world, monkeypatch):
+    """Le statut d'une action Terraform est écrit avant que son fil rende la
+    déclaration ; l'apply de la chaîne attend ce rendu au lieu d'échouer en
+    « already running » (vu sous charge). Fil ralenti entre son statut final
+    et son `finally` pour le montrer à coup sûr. Mutation jouée : attente
+    retirée (l'élément tombe en erreur `running`)."""
+    tr.seed(world["client"])
+    real = wapp._tf_decl_runner_body
+
+    def slow_body(*a, **k):
+        out = real(*a, **k)
+        time.sleep(0.4)
+        return out
+    monkeypatch.setattr(wapp, "_tf_decl_runner_body", slow_body)
+    run = start(world)
+    assert run.status == "done", run.result

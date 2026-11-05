@@ -27005,6 +27005,20 @@ def _tf_decl_flock(decl_id, note):
     return fd
 
 
+def _tf_decl_wait_idle(decl_id, timeout=30, sleep=None):
+    """Attend que le fil d'une exécution finie ait rendu la déclaration :
+    son statut final est écrit AVANT son `finally` (TF_DECL_RUNNING), et un
+    apply lancé dans l'instant se heurtait à « already running »."""
+    sleep = sleep or time.sleep
+    end = time.time() + timeout
+    while time.time() < end:
+        with TF_DECL_RUNNING_LOCK:
+            if decl_id not in TF_DECL_RUNNING:
+                return True
+        sleep(0.02)
+    return False
+
+
 def _tf_decl_unlock_if_idle(decl_id):
     """Rend le verrou de fichier quand la déclaration ne tourne plus et n'est
     plus réservée dans ce processus. Sous TF_DECL_RUNNING_LOCK."""
@@ -32283,6 +32297,7 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
                                      cluster_user=cluster_user, holder=run.id)
             actions.append(pid)
             status, child = _deploy_wait_child(pid)
+            _tf_decl_wait_idle(decl["id"])
             if status != "done":
                 return _dch.ItemOutcome("error", f"plan failed (action {pid})", data=data)
             # le résumé de CE plan, dans le résultat de son action (revue I4)
@@ -32308,6 +32323,7 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
                                       cluster_user=cluster_user, holder=run.id)
             actions.append(aid)
             status, _child = _deploy_wait_child(aid)
+            _tf_decl_wait_idle(decl["id"])
             if status != "done":
                 return _dch.ItemOutcome("error", f"apply failed (action {aid})", data=data)
             data["revision_applied"] = (TF_DECLS.get(decl["id"]) or decl)["revision"]
