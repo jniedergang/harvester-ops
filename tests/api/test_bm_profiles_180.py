@@ -181,6 +181,25 @@ def test_profile_refuses_secrets_undeclared_variables_and_foreign_fields():
     assert errs["{{nope}}"] == errs["{{other}}"] == "undeclared variable"
 
 
+@pytest.mark.parametrize("plan,ok", [
+    ("site-standard", True), ("", True), (None, True),
+    ("Site", False), ("-x", False), ("a" * 64, False), (["x"], False), (3, False),
+])
+def test_profile_plan_field_240(tmp_path, plan, ok):
+    """2.4.0 : un profil désigne un plan de déploiement (nom RFC 1123 ou
+    vide), aller-retour par le fichier ; le plan n'est pas chargé."""
+    if not ok:
+        with pytest.raises(bmp.ProfileError) as e:
+            profile(plan=plan)
+        assert dict(e.value.errors)["plan"] == "invalid plan name (RFC 1123)"
+        return
+    state = tmp_path / "state"
+    bmp.save_profile(state, "rack-a", profile(plan=plan))
+    assert bmp.load_profile(state, "rack-a")["plan"] == (plan or "")
+    assert bmp.list_profiles(state)[0]["plan"] == (plan or "")
+    assert not (state / "plans.d").exists()
+
+
 def test_store_is_private_and_moves_with_the_state_dir(tmp_path):
     state = tmp_path / "state"
     bmp.save_profile(state, "rack-a", profile())
