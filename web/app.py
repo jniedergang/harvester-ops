@@ -28233,49 +28233,65 @@ def _tf_decl_view(decl):
     return d
 
 
-def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harvester"):
+class TfLaunchError(Exception):
+    """Refus de lancer une déclaration : statut HTTP et corps de la réponse
+    (2.4.0, pour les appelants hors requête comme la chaîne d'un plan)."""
+
+    def __init__(self, status, payload):
+        super().__init__(payload.get("error") or "refused")
+        self.status = status
+        self.payload = payload
+
+
+def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster_user=None,
+                    target_kind="harvester"):
     """Lance plan, apply ou destroy d'une déclaration gardée par la console,
-    en action suivie. `mode` : plan | apply | destroy | destroy-plan.
-    2.3.0 : `target_kind` kvm pour un hôte KVM (`cluster` = l'hôte, pas de
-    kubeconfig) ; une seule exécution à la fois par déclaration KVM."""
+    en action suivie ; rend (identifiant de l'action, empreinte du contenu).
+    `mode` : plan | apply | destroy | destroy-plan. 2.3.0 : `target_kind`
+    kvm pour un hôte KVM (`cluster` = l'hôte, pas de kubeconfig) ; une seule
+    exécution à la fois par déclaration KVM.
+
+    2.4.0 : ne lit ni la requête ni la session (`user` et `cluster_user`
+    sont passés par l'appelant, figés au déclenchement) : la chaîne d'un
+    plan l'appelle depuis son fil. Refus : TfLaunchError(statut, corps)."""
     decl = TF_DECLS.get(decl_id)
     if decl is None:
-        return jsonify({"error": "declaration not found", "id": decl_id}), 404
+        raise TfLaunchError(404, {"error": "declaration not found", "id": decl_id})
     if (decl.get("target_kind") or "harvester") != target_kind:
-        return jsonify({"error": f"declaration targets a {decl.get('target_kind')} "
-                                 f"host, not a {target_kind} one"}), 400
+        raise TfLaunchError(400, {"error": f"declaration targets a {decl.get('target_kind')} "
+                                           f"host, not a {target_kind} one"})
     if decl["cluster"] != cluster:
-        return jsonify({"error": "declaration belongs to another cluster",
-                        "cluster": decl["cluster"]}), 400
+        raise TfLaunchError(400, {"error": "declaration belongs to another cluster",
+                                  "cluster": decl["cluster"]})
     rendered, errors = _tf_render_resources(decl["resources"], target_kind)
     if errors:
-        return jsonify({"error": "one or more resources are incomplete", "errors": errors,
-                        "supported": ["vm", "image", "ssh_key", "raw"]}), 400
+        raise TfLaunchError(400, {"error": "one or more resources are incomplete", "errors": errors,
+                                  "supported": ["vm", "image", "ssh_key", "raw"]})
     if mode in ("plan", "apply") and not rendered:
-        return jsonify({"error": "declaration.resources must be a non-empty list"}), 400
+        raise TfLaunchError(400, {"error": "declaration.resources must be a non-empty list"})
     missing = [r[0] for r in rendered if not r[4]]
     if missing:
-        return jsonify({"error": "cannot compute Terraform address", "resources": missing}), 400
+        raise TfLaunchError(400, {"error": "cannot compute Terraform address", "resources": missing})
     h = _tf_decl_hash(rendered)
     if mode == "apply" and plan_hash and plan_hash != h:
-        return jsonify({"error": "plan outdated",
-                        "hint": "the declaration changed since this plan; plan again"}), 409
+        raise TfLaunchError(409, {"error": "plan outdated",
+                                  "hint": "the declaration changed since this plan; plan again"})
     label = {"plan": "tf-plan-decl", "apply": "tf-apply-decl",
              "destroy": "tf-destroy-decl", "destroy-plan": "tf-destroy-decl"}[mode]
     if target_kind == "kvm":
         if not _tf_libvirt_binary() or not _tf_libvirt_version():
-            return jsonify({"error": "the libvirt Terraform provider is not installed",
-                            "hint": "it ships with the harvester-ops package; see the Installation tab"}), 503
+            raise TfLaunchError(503, {"error": "the libvirt Terraform provider is not installed",
+                                      "hint": "it ships with the harvester-ops package; see the Installation tab"})
         with TF_KVM_RUNNING_LOCK:
             if decl["id"] in TF_KVM_RUNNING:
-                return jsonify({"error": "this declaration is already running",
-                                "hint": "wait for the current plan, apply or destroy to end"}), 409
+                raise TfLaunchError(409, {"error": "this declaration is already running",
+                                          "hint": "wait for the current plan, apply or destroy to end"})
             TF_KVM_RUNNING.add(decl["id"])
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, f"{label}:{decl['name']}:{len(rendered)}", cluster, [],
                     dry_run=mode in ("plan", "destroy-plan"))
-    run.cluster_user = (current_cluster_identity() or {}).get("user")
-    user = current_user() or ""
+    run.cluster_user = cluster_user
+    user = user or ""
     # v1.55.0 : l'historique d'une déclaration retrouve ses actions par là.
     run.result = {"declaration_id": decl["id"], "by": user, "mode": mode}
     with ACTIONS_LOCK:
@@ -28283,7 +28299,31 @@ def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harv
     threading.Thread(target=_tf_decl_runner,
                      args=(run, cluster, kc, decl, rendered, mode, h, bool(plan_hash), user),
                      daemon=True).start()
+    return run_id, h
+
+
+def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harvester"):
+    """Enveloppe de route de _tf_decl_launch : l'identité vient de la
+    session, le refus devient la réponse HTTP."""
+    try:
+        run_id, h = _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=plan_hash,
+                                    user=current_user() or "",
+                                    cluster_user=(current_cluster_identity() or {}).get("user"),
+                                    target_kind=target_kind)
+    except TfLaunchError as e:
+        return jsonify(e.payload), e.status
     return jsonify({"action_id": run_id, "plan_hash": h}), 201
+
+
+def _tf_plan_meta(decl):
+    """Le dernier plan de l'espace d'une déclaration ({hash, revision, at,
+    by, summary}), ou None : la chaîne d'un plan y lit les destructions
+    (`summary.counts`) avant d'appliquer. Retiré par l'apply."""
+    try:
+        ws = _tf_decl_ws(decl, create=False)
+        return json.loads((ws / "tfplan.meta").read_text())
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
 
 
 def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_saved_plan, user):
