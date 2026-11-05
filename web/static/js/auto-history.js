@@ -38,12 +38,16 @@ const AutoHistory = (() => {
    *   shown: () => bool             l'onglet est-il affiché ?
    *   cls: 'bm'                     préfixe des classes (bm-history-row...) ;
    *   hint, empty: () => texte      phrase d'en-tête, liste vide ;
-   *   cluster: bool                 colonne Cluster (écrans d'un cluster de gestion).
+   *   cluster: bool                 colonne Cluster (écrans d'un cluster de gestion) ;
+   *   extra: (action) => html       geste de plus à côté du journal (2.4.0 :
+   *                                 « Reprendre » d'un déroulé de plan), échappé
+   *                                 par l'appelant.
    * }
    */
   function create(o) {
     let timer = null;
     let rev = 0;
+    let byId = new Map();                 // actions de la dernière lecture
     const prefixes = o.prefixes || o.queries;
     const cls = o.cls || 'auto';
     const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
@@ -69,6 +73,7 @@ const AutoHistory = (() => {
       } catch (e) { failed = true; }
       // l'onglet a changé, ou une lecture plus récente est partie
       if (mine !== rev || !o.shown() || !document.body.contains(box)) return;
+      byId = new Map(runs.map(a => [a.id, a]));
       const running = runs.filter(a => RUNNING.includes(a.status));
       const past = runs.filter(a => !RUNNING.includes(a.status));
       running.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
@@ -84,7 +89,7 @@ const AutoHistory = (() => {
             <td>${esc(fmtDate(a.started_at))}</td>
             <td class="auto-num">${dur == null ? '' : esc(dur < 120 ? dur.toFixed(0) + ' s' : (dur / 60).toFixed(0) + ' min')}</td>
             <td><a class="tip auto-history-log ${cls}-history-log" href="#activity/action/${encodeURIComponent(a.id)}"
-                   data-tip="${esc(tr('bmh.logTip'))}">${Icons.svg('logs', { size: 14 })} ${esc(tr('bmh.log'))}</a></td>
+                   data-tip="${esc(tr('bmh.logTip'))}">${Icons.svg('logs', { size: 14 })} ${esc(tr('bmh.log'))}</a>${o.extra ? o.extra(a) : ''}</td>
           </tr>`;
       };
       const table = (list, title) => `<h3 class="auto-history-title ${cls}-history-title">${esc(title)} <span class="form-hint">${list.length}</span></h3>
@@ -102,7 +107,7 @@ const AutoHistory = (() => {
       if (running.length) timer = setTimeout(() => { timer = null; if (o.shown()) render(); }, POLL_MS);
     }
 
-    return { render, stop };
+    return { render, stop, get: (id) => byId.get(id) || null };
   }
 
   return { create, POLL_MS };

@@ -115,7 +115,23 @@ const HostPage = (() => {
     }).join('')}</div>`;
   }
 
+  // 2.4.0 : « Appliquer un plan » (opérateur), grisé pour un lecteur avec la
+  // raison ; le rôle de la session ne sert qu'à griser, le serveur décide
+  function paintApplyPlan() {
+    const b = document.getElementById('btn-apply-plan');
+    if (!b) return;
+    const ok = hasRole({ role: window.App && App.role ? App.role() : null }, 'operator');
+    const tip = ok ? tr('hp.applyPlanTip') : tr('hp.applyPlanViewer');
+    b.disabled = !ok;
+    b.title = tip;
+    b.setAttribute('data-tip', tip);
+    // la traduction réécrirait la bulle d'un bouton grisé
+    if (ok) b.setAttribute('data-tip-i18n', 'hp.applyPlanTip'); else b.removeAttribute('data-tip-i18n');
+    if (ok) b.setAttribute('data-i18n-title', 'hp.applyPlanTip'); else b.removeAttribute('data-i18n-title');
+  }
+
   function render() {
+    paintApplyPlan();
     const head = $('#host-page-head');
     if (!head) return;
     const on = !!(route && route.name === 'host' && route.host);
@@ -576,6 +592,13 @@ const HostPage = (() => {
       if (k && !k.disabled && k.closest('#kvmparams-host')) { e.preventDefault(); kvmAction(k.dataset.hpKvm, k); return; }
       const b = e.target.closest('[data-hp-conn]');
       if (b) { e.preventDefault(); connAction(b.dataset.hpConn, b.closest('#hconn-host')); return; }
+      const plan = e.target.closest('#btn-apply-plan');
+      if (plan) {
+        e.preventDefault();
+        const c = window.App && App.getCurrentCluster();
+        if (!plan.disabled && c && window.BMPlans) BMPlans.openDeploy({ cluster: c });
+        return;
+      }
       const join = e.target.closest('#btn-join-node');
       if (join) {
         e.preventDefault();
@@ -586,6 +609,7 @@ const HostPage = (() => {
   }
 
   document.addEventListener('DOMContentLoaded', init);
+  document.addEventListener('hops:role', paintApplyPlan);
   return { show, render, renderConn, renderKvmParams, openLabels, labelChecks };
 })();
 window.HostPage = HostPage;

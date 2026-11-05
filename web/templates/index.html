@@ -257,6 +257,11 @@
                   data-tip-i18n="hp.joinTip" data-i18n-title="hp.joinTip"
                   title="Add a machine to this cluster from its BMC: Automation, Bare-metal, with this cluster already chosen">
             <span data-icon="add"></span> <span data-i18n="hp.join">Join a node</span></button>
+          <!-- 2.4.0 : appliquer un plan de déploiement à ce cluster (opérateur) -->
+          <button type="button" id="btn-apply-plan" class="btn btn-sm btn-secondary tip"
+                  data-tip-i18n="hp.applyPlanTip" data-i18n-title="hp.applyPlanTip"
+                  title="Apply a deployment plan to this cluster: checks first, then readiness and Terraform declarations, followed in the dock">
+            <span data-icon="build"></span> <span data-i18n="hp.applyPlan">Apply a plan</span></button>
         </div>
         <div class="topology-host" data-topology-mode="cluster"></div>
       </div>
@@ -720,6 +725,8 @@
                   data-tip-i18n="bmt.machinesTip" data-i18n-title="bmt.machinesTip" title="The machines found by the last discovery: hardware, power, disks, network cards; install, join or power them"><span class="tab-icon" data-icon="compute"></span> <span data-i18n="bmt.machines">Machines</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-bm-tab="profiles"
                   data-tip-i18n="bmt.profilesTip" data-i18n-title="bmt.profilesTip" title="Multi-node installation profiles and batch launch"><span class="tab-icon" data-icon="notes"></span> <span data-i18n="bmt.profiles">Profiles</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-bm-tab="plans"
+                  data-tip-i18n="bmt.plansTip" data-i18n-title="bmt.plansTip" title="Deployment plans: what a cluster receives after its installation, and the declaration templates they use"><span class="tab-icon" data-icon="build"></span> <span data-i18n="bmt.plans">Plans</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-bm-tab="images"
                   data-tip-i18n="bmt.imagesTip" data-i18n-title="bmt.imagesTip" title="The store of Harvester ISOs used by installations"><span class="tab-icon" data-icon="cdrom"></span> <span data-i18n="bmt.images">Images</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-bm-tab="history"
@@ -1370,6 +1377,7 @@
 <script src="/static/js/terraform.js"></script>
 <script src="/static/js/bmc.js"></script>
 <script src="/static/js/bm-profiles.js"></script>
+<script src="/static/js/bm-plans.js"></script>
 <script src="/static/js/board.js"></script>
 <script src="/static/js/fabric.js"></script>
 <script src="/static/js/netmap.js"></script>

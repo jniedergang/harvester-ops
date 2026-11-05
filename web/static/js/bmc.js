@@ -6,6 +6,8 @@
  *      console, sans identifiant), leurs gestes (installer, joindre,
  *      alimentation), la découverte en fenêtre et « Relire » ;
  *   2. Profils : profils multi-nœuds et séries (bm-profiles.js) ;
+ *   2 bis. Plans (2.4.0) : plans de déploiement et modèles de déclaration
+ *      (bm-plans.js), appliqués après une installation ou à un cluster ;
  *   3. Images : le magasin d'ISO (téléchargement côté serveur, en flux) ;
  *   4. Historique : les actions bare-metal de l'Activité, avec leur journal.
  * L'installation zéro-touch d'une machine passe par sa fenêtre (openInstall).
@@ -38,12 +40,13 @@ const BMC = (() => {
   let lastAt = null;                        // sa date (secondes), null sans découverte
   let machinesLoaded = false;               // dernière découverte relue auprès de la console
   let discovering = false;
-  const TABS = ['machines', 'profiles', 'images', 'history'];
+  const TABS = ['machines', 'profiles', 'plans', 'images', 'history'];
   let tab = 'machines';
   // Actions de l'historique : installations et jonctions, séries, démarrages
-  // de découverte (baremetal-*), gestes d'alimentation (bmc-power:*). Filtre
-  // `action` de l'Activité (sous-chaîne, côté serveur).
-  const HISTORY_KINDS = ['baremetal-', 'bmc-power'];
+  // de découverte (baremetal-*), gestes d'alimentation (bmc-power:*), plans
+  // de déploiement (deploy:<cluster>, 2.4.0). Filtre `action` de l'Activité
+  // (sous-chaîne, côté serveur).
+  const HISTORY_KINDS = ['baremetal-', 'bmc-power', 'deploy'];
   const fmtDate = (at) => {
     const t = Number(at);
     return t ? new Date(t * 1000).toLocaleString() : '';
@@ -115,6 +118,7 @@ const BMC = (() => {
         <div id="bmc-discover-result"></div>
       </div>
       <div class="bm-pane" data-bm-pane="profiles" role="tabpanel" hidden><div id="bm-profiles"></div></div>
+      <div class="bm-pane" data-bm-pane="plans" role="tabpanel" hidden><div id="bm-plans"></div></div>
       <div class="bm-pane" data-bm-pane="images" role="tabpanel" hidden><div id="bmc-iso-store"></div></div>
       <div class="bm-pane" data-bm-pane="history" role="tabpanel" hidden><div id="bm-history"></div></div>`;
   }
@@ -151,6 +155,9 @@ const BMC = (() => {
     } else if (tab === 'profiles') {
       // v1.80.0 : profils d'installation multi-nœuds (bm-profiles.js)
       if (window.BMProfiles) BMProfiles.render();
+    } else if (tab === 'plans') {
+      // 2.4.0 : plans de déploiement et modèles de déclaration (bm-plans.js)
+      if (window.BMPlans) BMPlans.render();
     } else if (tab === 'images') {
       renderIsoStore();
     } else {
@@ -406,6 +413,7 @@ const BMC = (() => {
       case 'baremetal-batch': return tr('bmh.kind.batch');
       case 'baremetal-discover': return tr('bmh.kind.discover');
       case 'bmc-power': return tr('bmh.kind.power');
+      case 'deploy': return tr('bmh.kind.deploy');
       default: return verb;
     }
   }
@@ -414,6 +422,8 @@ const BMC = (() => {
   const bmHistory = AutoHistory.create({
     box: () => $('#bm-history'), queries: HISTORY_KINDS, cls: 'bm', shown: historyShown,
     label: (a) => kindLabel(a.action), hint: () => tr('bmh.hint'), empty: () => tr('bmh.empty'),
+    // 2.4.0 : « Reprendre » sur un déroulé de plan arrêté (bm-plans.js)
+    extra: (a) => (window.BMPlans ? BMPlans.resumeButton(a) : ''),
   });
 
   // -------------------------------------------------------------------------
@@ -702,6 +712,11 @@ const BMC = (() => {
             <label style="grid-column:1/-1;" ${tipAttr(tr('bmc.tip.modules'))}>${esc(tr('bmc.f.modules'))}
               <input name="modules" autocomplete="off" placeholder="rbd, nbd"></label>
           </fieldset>
+          <fieldset class="bm-plan-fs">
+            <legend>${esc(tr('bmpl.pick.legend'))}</legend>
+            <!-- 2.4.0 : plan de déploiement enchaîné et ses variables -->
+            <div class="bm-plan-pick" style="grid-column:1/-1;"></div>
+          </fieldset>
           <fieldset>
             <legend>${esc(tr('bmc.fs.access'))}</legend>
             <label>${esc(tr('bmc.f.token'))} *<input name="token" type="password" autocomplete="new-password" required></label>
@@ -735,6 +750,7 @@ const BMC = (() => {
 
     const form = panel.el.querySelector('#bm-install-form');
     const field = (name) => form.querySelector(`[name="${name}"]`);
+    const planPick = window.BMPlans ? BMPlans.mountPicker(form.querySelector('.bm-plan-pick'), '', true) : null;
     const msg = panel.el.querySelector('#bm-config-msg');
     const onboardEnabled = field('onboard_enabled');
     const onboardFields = form.querySelector('[data-onboard-fields]');
@@ -1631,6 +1647,9 @@ const BMC = (() => {
       body.bmc_password = creds.password;
       if (!body.bmc_password) { alert(tr('bmc.needCreds')); return; }
       if (!confirm(tr('bmc.confirmInstall', { host, device: body.device }))) return;
+      // 2.4.0 : avec un plan, l'action suivie est le déroulé `deploy:`
+      const pv = planPick && planPick.value();
+      if (pv) Object.assign(body, pv);
       res.textContent = '…';
       try {
         const r = await fetch('/api/baremetal/install', {
@@ -1639,7 +1658,15 @@ const BMC = (() => {
         });
         const d = await r.json().catch(() => ({}));
         if (r.ok) {
-          res.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${esc(d.action_id)}</span>`;
+          res.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${d.plan && window.BMPlans
+            ? BMPlans.actionLink(d.action_id) : esc(d.action_id)}</span>`;
+          if (d.plan && typeof Dock !== 'undefined' && Dock.poll) Dock.poll();
+        } else if (d.code === 'blocking-findings' && window.BMPlans) {
+          // le plan ne peut pas partir : les constats de la console
+          msg.innerHTML = `<div class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(tr('dpw.refusedFindings'))}</div>`
+            + BMPlans.findingsHtml(d.findings);
+          res.innerHTML = '';
+          msg.scrollIntoView({ block: 'nearest' });
         } else if ((d.fields || []).includes('system_confirm') && d.system) {
           // 2.2.0 : la console a relu le BMC et refuse ; la fenêtre le montre
           paintSystem(d.system, true);
@@ -1759,7 +1786,10 @@ const BMC = (() => {
     });
   }
 
-  return { init, render, openJoin, setTab, tab: () => tab, evidenceText };
+  // 2.4.0 : l'historique est relu et ses actions retrouvées par bm-plans.js
+  // (bouton « Reprendre »)
+  return { init, render, openJoin, setTab, tab: () => tab, evidenceText,
+    historyAction: (id) => bmHistory.get(id), renderHistory: () => bmHistory.render() };
 })();
 
 document.addEventListener('DOMContentLoaded', BMC.init);
