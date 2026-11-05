@@ -655,9 +655,15 @@ def test_the_legacy_apply_route_answers_400_on_a_refused_value():
 # ---------------------------------------------------------------------------
 # Rendu relu par `terraform validate` contre le provider du miroir (sinon skip)
 # ---------------------------------------------------------------------------
-def test_rendered_hcl_passes_terraform_validate(tmp_path):
+def test_rendered_hcl_passes_terraform_validate(tmp_path, monkeypatch):
+    """Revue m4 : sur une machine sans provider installé (node1), le binaire
+    se désigne par HOPS_TF_PROVIDER_BIN (celui du miroir de la tâche 8)."""
     import os
     import shutil
+    from pathlib import Path as _P
+    forced = os.environ.get("HOPS_TF_PROVIDER_BIN")
+    if forced and _P(forced).is_file():
+        monkeypatch.setattr(wapp, "_tf_provider_binary", lambda: _P(forced))
     if not wapp._tf_provider_binary() or not shutil.which(wapp.TF_BIN):
         pytest.skip("Harvester provider or terraform not installed")
     ws = tmp_path / "ws"

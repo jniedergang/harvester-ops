@@ -380,3 +380,61 @@ def test_the_screen_greys_admin_kinds_with_the_reason():
     i18n = (ROOT / "web/static/js/i18n.js").read_text()
     for key in ("tfd.t.adminKind", "dpw.f.adminKind", "dpw.f.forbiddenConstruct"):
         assert i18n.count(f"'{key}':") + i18n.count(f'"{key}":') == 5, key
+
+
+# ---------------------------------------------------------------------------
+# Revue du bloc 3, remarques m1 à m3
+# ---------------------------------------------------------------------------
+def test_m1_a_probe_holding_the_cluster_lock_for_an_instant_is_waited_for(env, monkeypatch):
+    tr.seed(env["client"])
+    real, calls = wapp._deploy_cluster_lock, []
+
+    def lock(cluster, run_id, plan_name):
+        calls.append(run_id)
+        if len(calls) <= 2:
+            return None, {"run": "", "plan": ""}          # sonde de _deploy_lock_holder
+        return real(cluster, run_id, plan_name)
+    monkeypatch.setattr(wapp, "_deploy_cluster_lock", lock)
+    r = env["client"].post("/api/deploy/harvlab", json={"plan": "site", "variables": {"equipe": "ops"}})
+    assert r.status_code == 202, r.get_json()
+    assert len(calls) == 3
+
+
+def test_m3_a_declaration_not_released_in_time_is_said(world, monkeypatch):
+    tr.seed(world["client"])
+    monkeypatch.setattr(wapp, "_tf_decl_wait_idle", lambda decl_id, **kw: False)
+    run = trun.start(world)
+    item = next(p for p in run.result["phases"] if p["id"] == "terraform")["items"][0]
+    assert item["status"] == "error" and item["message"] == "declaration-busy"
+
+
+def test_m2_an_updated_declaration_whose_plan_fails_says_it_is_not_applied(world):
+    c = world["client"]
+    tr.seed(c)
+    assert trun.start(world, variables={"equipe": "ops"}).status == "done"
+    world["fake"].fail.add("dev-ops")
+    r = c.post("/api/deploy/harvlab", json={"plan": "site", "variables": {"equipe": "dev"},
+                                            "update_differing": True})
+    run = trun.wait(r.get_json()["action_id"])
+    item = next(p for p in run.result["phases"] if p["id"] == "terraform")["items"][0]
+    assert item["status"] == "error" and item["updated"] is True
+    assert item["message"].endswith("; declaration updated, not applied")
+
+
+@pytest.mark.parametrize("kind,spec,error", [
+    ("ippool", dict(ADMIN_SPECS["ippool"], range=[dict(ADMIN_SPECS["ippool"]["range"][0], subnet="10.9.0.5/24")]),
+     "has host bits set: write 10.9.0.0/24"),
+    ("network", dict(ADMIN_SPECS["network"], route_mode="manual", route_cidr="10.9.0.1/24",
+                     route_gateway="10.9.0.1"), "has host bits set"),
+    ("network", dict(ADMIN_SPECS["network"], labels={"bad key": "x"}), "not a Kubernetes label key"),
+    ("network", dict(ADMIN_SPECS["network"], labels={"-a": "x"}), "not a Kubernetes label key"),
+])
+def test_m5_subnets_and_label_keys_are_refused_before_the_webhook(kind, spec, error):
+    with pytest.raises(wapp._tfk.SpecError) as e:
+        wapp._render_tf_for_kind(kind, spec)
+    assert error in str(e.value)
+
+
+@pytest.mark.parametrize("labels", [{"app": "x"}, {"example.com/team": "ops"}, {"a.b_c-d": ""}])
+def test_m5_ordinary_label_keys_pass(labels):
+    assert "labels" in wapp._render_tf_for_kind("network", dict(ADMIN_SPECS["network"], labels=labels))

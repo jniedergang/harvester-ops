@@ -29166,11 +29166,16 @@ def _tf_ip(value, field):
 
 
 def _tf_subnet(value, field):
+    """Sous-réseau écrit tel qu'il est lu : bits d'hôte refusés (revue m5 :
+    `10.0.0.5/24` passait et le webhook de Harvester le refusait à l'apply)."""
     import ipaddress
     try:
-        return ipaddress.ip_network(str(value).strip(), strict=False)
+        net = ipaddress.ip_network(str(value).strip(), strict=False)
     except ValueError:
         raise _tfk.SpecError(f"{field} {value!r} is not a subnet (address/prefix)") from None
+    if net.network_address != ipaddress.ip_interface(str(value).strip()).ip:
+        raise _tfk.SpecError(f"{field} {value!r} has host bits set: write {net}")
+    return net
 
 
 def _tf_items(spec, field):
@@ -29186,9 +29191,16 @@ def _tf_items(spec, field):
     return v
 
 
+# clé d'étiquette Kubernetes : préfixe DNS facultatif, nom de 63 caractères
+_K8S_LABEL_KEY_RE = re.compile(
+    r"^(?:(?=.{1,253}/)[a-z0-9]([-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?"
+    r"(?=.{1,63}$)[A-Za-z0-9](?:[-A-Za-z0-9_.]*[A-Za-z0-9])?$")
+
+
 def _tf_kv_pairs(spec, field):
     """Carte Terraform (`parameters`, `labels`) : un objet clé -> valeur, ce
-    que le champ `map` du formulaire envoie ; clé vide refusée."""
+    que le champ `map` du formulaire envoie ; clé vide refusée. Revue m5 :
+    les clés de `labels` suivent la syntaxe des étiquettes Kubernetes."""
     v = spec.get(field)
     if v in (None, ""):
         return {}
@@ -29199,6 +29211,8 @@ def _tf_kv_pairs(spec, field):
         k = str(k).strip()
         if not k or any(ord(c) < 32 for c in k):
             raise _tfk.SpecError(f"{field}: every entry needs a key")
+        if field == "labels" and not _K8S_LABEL_KEY_RE.match(k):
+            raise _tfk.SpecError(f"labels: {k!r} is not a Kubernetes label key")
         out[k] = "" if val is None else (str(val).lower() if isinstance(val, bool) else str(val))
     return out
 
@@ -32481,6 +32495,14 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
     dry = bool(run.dry_run)
 
     def run_item(ctx, state, item):
+        out = _run_item(ctx, state, item)
+        if out.status != "done" and out.data.get("updated"):
+            # revue m2 : la déclaration a déjà pris les nouvelles valeurs ;
+            # qui l'ouvre dans Terraform doit savoir qu'elles ne sont pas appliquées
+            out.message = f"{out.message}; declaration updated, not applied"
+        return out
+
+    def _run_item(ctx, state, item):
         tname = item.id
         t = templates[tname]
         dname = _dpl.declaration_name(plan["name"], tname)
@@ -32523,7 +32545,9 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
                                      cluster_user=cluster_user, holder=run.id, role=run.launch_role)
             actions.append(pid)
             status, child = _deploy_wait_child(pid)
-            _tf_decl_wait_idle(decl["id"])
+            if not _tf_decl_wait_idle(decl["id"]):
+                # revue m3 : le fil du plan n'a pas rendu la déclaration à temps
+                return _dch.ItemOutcome("error", "declaration-busy", data=data)
             if status != "done":
                 return _dch.ItemOutcome("error", f"plan failed (action {pid})", data=data)
             # le résumé de CE plan, dans le résultat de son action (revue I4)
@@ -32549,7 +32573,8 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
                                       cluster_user=cluster_user, holder=run.id, role=run.launch_role)
             actions.append(aid)
             status, _child = _deploy_wait_child(aid)
-            _tf_decl_wait_idle(decl["id"])
+            if not _tf_decl_wait_idle(decl["id"]):
+                return _dch.ItemOutcome("error", "declaration-busy", data=data)
             if status != "done":
                 return _dch.ItemOutcome("error", f"apply failed (action {aid})", data=data)
             data["revision_applied"] = (TF_DECLS.get(decl["id"]) or decl)["revision"]
@@ -32760,6 +32785,12 @@ def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, clu
             # le déroulé précédent de ce processus a écrit son statut final et
             # rend son verrou dans l'instant (reprise cliquée aussitôt)
             time.sleep(0.05)
+            lock_fd, holder = _deploy_cluster_lock(cluster, run_id, dctx["plan"]["name"])
+        end = time.time() + 0.5
+        while lock_fd is None and not holder.get("run") and time.time() < end:
+            # revue m1 : verrou pris un instant par une sonde (_deploy_lock_holder,
+            # qui l'écrit sans déroulé) ; il est rendu aussitôt
+            time.sleep(0.02)
             lock_fd, holder = _deploy_cluster_lock(cluster, run_id, dctx["plan"]["name"])
         if lock_fd is None:
             # un déroulé de l'autre processus (console ou ligne de commande)
