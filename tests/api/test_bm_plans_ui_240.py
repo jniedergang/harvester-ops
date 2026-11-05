@@ -31,6 +31,8 @@ FINDING_CODES = ["plan-invalid", "phase-not-available", "template-missing", "var
                  "capi-version-differs", "capi-stack-missing", "capi-template-missing", "cluster-var-missing",
                  "cluster-name-taken", "cluster-exists", "identity-rules-unknown", "refs-later",
                  "cluster-failed", "capi-check-failed",
+                 # identité restreinte, copiés de check --many (2.5.0, revue)
+                 "identity-name-reserved", "target-namespace-forced", "cloud-provider-binding-taken",
                  "fleet-name-twice", "fleet-cpu-short", "fleet-memory-short", "fleet-storage-short",
                  "fleet-replicas-nodes", "fleet-pool-short", "fleet-dhcp-leases", "fleet-sizes",
                  "rights-missing", "rights-unchecked"]
