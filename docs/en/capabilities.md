@@ -2268,6 +2268,11 @@ be read).
   exist.
 - **Older Harvester releases** keep the previous install: cert-manager,
   Cluster API core and providers, all from the bundle.
+- **The legacy Uninstall** (2.5.0) is refused on a stack managed by Turtles,
+  and its button is greyed with the reason: it deletes namespaces and images,
+  not the `CAPIProvider` objects, and would break what Harvester and the
+  plans declared. It stays available for a stack made by the previous
+  install.
 
 ### Creating a cluster (1.48.0, window with menus in 1.53.0)
 

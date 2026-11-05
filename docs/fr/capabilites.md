@@ -2493,6 +2493,11 @@ vers Installation (rien n'est dit quand le cluster ne peut pas être lu).
 - **Les versions antérieures de Harvester** gardent l'installation
   d'avant : cert-manager, cœur Cluster API et fournisseurs, tout depuis le
   paquet.
+- **L'ancien retrait** (2.5.0) est refusé sur une pile gérée par Turtles, et
+  son bouton est grisé avec la raison : il supprime des namespaces et des
+  images, pas les objets `CAPIProvider`, et casserait ce que Harvester et les
+  plans ont déclaré. Il reste offert pour une pile posée par l'installation
+  d'avant.
 
 ### Créer un cluster (1.48.0, fenêtre à menus en 1.53.0)
 

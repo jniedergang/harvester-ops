@@ -53,7 +53,7 @@ const CAPI = (() => {
           fetch(`/api/capi/${encodeURIComponent(cluster)}/stack`).then(r => r.json()).catch(() => ({})),
         ]);
         if (stack && stack.turtles && stack.core) renderTurtles(out, cluster, stack, d);
-        else render(out, d);
+        else render(out, d, stack);
       } catch (e) {
         out.innerHTML = `<div class="summary-bar bad">${esc(e.message)}</div>`;
       }
@@ -143,7 +143,7 @@ const CAPI = (() => {
            tr('capi.stack.confirmLegacy', { cluster })));
   }
 
-  function render(out, d) {
+  function render(out, d, stack) {
     // Cluster déclaré mais hors tension : le dire, et surtout ne rien
     // conclure sur la pile.
     if (d.unreachable) {
@@ -183,6 +183,8 @@ const CAPI = (() => {
         <td><code>${esc(c.details || '—')}</code></td>
       </tr>`).join('');
 
+    // Revue 2.5.0 (D2) : l'ancien retrait casserait une pile Turtles
+    const turtles = !!(stack && stack.turtles);
     const bundleSection = `
       <div class="apply-bar" style="margin-top: 16px; padding-top: 12px; flex-wrap: wrap; gap: 8px;">
         <button class="btn btn-secondary btn-sm tip" id="btn-capi-bundle-build"
@@ -199,8 +201,8 @@ const CAPI = (() => {
                 data-tip="${esc(d.bundle_available ? tr('capi.tip.install') : tr('capi.tip.installNoBundle'))}">
           ${Icons.svg('bundle')} ${esc(tr('capi.v.legacy.install'))}
         </button>
-        <button class="btn btn-danger btn-sm tip" id="btn-capi-uninstall"
-                data-tip="${esc(tr('capi.tip.uninstall'))}">
+        <button class="btn btn-danger btn-sm tip" id="btn-capi-uninstall" ${turtles ? 'disabled' : ''}
+                data-tip="${esc(turtles ? tr('capi.tip.uninstallTurtles') : tr('capi.tip.uninstall'))}">
           ${Icons.svg('delete')} ${esc(tr('capi.v.legacy.uninstall'))}
         </button>
         <label class="apply-dry tip" data-tip="${esc(tr('capi.tip.dryRun'))}">

@@ -22136,6 +22136,16 @@ def api_capi_uninstall(cluster):
                               current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"error": "kubeconfig missing"}), 400
+    # Revue 2.5.0 (D2) : ce retrait d'avant Turtles supprime des namespaces
+    # et des images, pas les objets CAPIProvider ; sur une pile Turtles il
+    # casserait ce que Harvester et les plans ont déclaré. Refusé, le bouton
+    # est grisé avec la raison (réécriture prévue).
+    stack_cmd, err = _capi_base(cluster, "status")
+    if not err:
+        got, _err = _capi_run_json(stack_cmd + ["--json"], timeout=90)
+        if got and (got[0] or {}).get("turtles"):
+            return jsonify({"error": "this stack is managed by Rancher Turtles: the legacy uninstall "
+                                     "would break it", "code": "turtles-stack"}), 409
     data = request.get_json(force=True, silent=True) or {}
     dry_run = bool(data.get("dry_run", False))
     keep_cm = bool(data.get("keep_cert_manager", True))
