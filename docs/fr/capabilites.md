@@ -2601,7 +2601,10 @@ v0.10.1, relevés appel par appel dans sa source à l'étiquette (commit
 - Les VMs vont dans un namespace à elles, `<namespace>-vms`, créé et
   supprimé avec l'identité ; une demande qui fixe un autre namespace de VMs
   est refusée, de même qu'un namespace de VMs qui existe déjà et appartient
-  à autre chose (`vm-namespace-taken`). Pas le namespace du cluster : CAPHV
+  à autre chose (`vm-namespace-taken`), ou un namespace dont le nom en
+  `-vms` dépasserait 63 caractères (`vm-namespace-too-long`). Le namespace
+  des VMs est supprimé avec tout son contenu à la suppression du cluster :
+  n'y mettez rien d'autre. Pas le namespace du cluster : CAPHV
   y nommerait le jeton du fournisseur de cloud `<cluster>-token`, le nom du
   jeton d'amorçage RKE2, relirait le mauvais secret, et le cluster ne serait
   jamais prêt. Rien n'est accordé dans le namespace du cluster, qui porte
@@ -2609,7 +2612,11 @@ v0.10.1, relevés appel par appel dans sa source à l'étiquette (commit
 - Le compte du fournisseur de cloud `<nom>` et sa liaison à
   `harvesterhci.io:cloudprovider` sont créés d'avance par la console :
   l'identité n'a jamais besoin de `bind`. Le jeton est un Secret de jeton de
-  compte de service, supprimé avec le cluster.
+  compte de service, supprimé avec le cluster. Comme l'identité peut créer
+  des secrets dans le namespace des VMs, où vit ce compte, elle peut obtenir
+  un jeton du compte, donc les droits de `harvesterhci.io:cloudprovider` :
+  c'est ce que fait CAPHV pour donner son kubeconfig au fournisseur de
+  cloud.
 - La console crée ces objets avec l'identité de la personne qui lance la
   création. Le contrôle préalable de la fenêtre et d'un plan demande au
   serveur, en un seul lot de `SelfSubjectAccessReview`, si cette personne

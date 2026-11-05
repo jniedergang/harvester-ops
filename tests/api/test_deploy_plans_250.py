@@ -256,6 +256,11 @@ UPGRADED_EXPOSE = {"metadata": {"name": "ingress-expose",
     ("traefik first", {"status": {"loadBalancer": {"ingress": [{"ip": "172.16.3.100"}]}}}, UPGRADED_EXPOSE,
      "172.16.3.100"),
     ("none", None, {"metadata": {"annotations": {}}}, None),
+    # revue finale n3 : VIP en DHCP sans bail, jamais une adresse
+    ("dhcp annotation", None, {"metadata": {"annotations": {"kube-vip.io/loadbalancerIPs": "0.0.0.0"}}}, None),
+    ("dhcp status", {"status": {"loadBalancer": {"ingress": [{"ip": "0.0.0.0"}]}}},
+     {"metadata": {"annotations": {"kube-vip.io/loadbalancerIPs": "172.16.2.70"}}}, "172.16.2.70"),
+    ("ipv6 unspecified", None, {"metadata": {"annotations": {"kube-vip.io/loadbalancerIPs": "::"}}}, None),
 ])
 def test_harvester_vip_sources(label, traefik, expose, vip):
     import capi_stack

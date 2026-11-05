@@ -306,3 +306,15 @@ def test_a_short_answer_is_unchecked(cli):
         def create_many(self, objs):
             return [{"status": {"allowed": True}}]
     assert cli.rights_denied(Short(), [(None, "get", "", "nodes", None), ("x", "get", "", "pods", None)]) is None
+
+
+@pytest.mark.parametrize("storage_class,warned", [("lh-leap", False), (None, True), ("lh-other", True)])
+def test_an_image_without_a_known_class_is_told(storage_class, warned):
+    """Revue m10 : image encore à l'import, ses disques racine hors de la
+    somme Longhorn ; un avertissement, pas un oubli silencieux."""
+    f = facts()
+    f["images"]["default/leap"]["storage_class"] = storage_class
+    got = [x for x in cc.check_many(three(), f) if x["code"] == "fleet-storage-unknown"]
+    assert bool(got) is warned
+    if warned:
+        assert len(got) == 1 and got[0]["level"] == "warn" and got[0]["facts"]["image"] == "default/leap"

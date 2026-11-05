@@ -939,3 +939,12 @@ def test_a_refused_read_still_fails_while_the_identity_account_exists(cli, capsy
     assert cli.remove_cluster(kube, "web", "web", 60, sleep=lambda s: None) == cli.EXIT_FAIL
     assert "STEP_EVENT|delete|error|" in capsys.readouterr().err
     assert ("serviceaccounts", "web", ci.IDENTITY) in kube.objs
+
+
+@pytest.mark.parametrize("ns,blocked", [("a" * 59, False), ("a" * 60, True), ("a" * 63, True)])
+def test_a_vm_namespace_longer_than_63_characters_is_refused(ns, blocked):
+    """Revue finale n2 : `<namespace>-vms` au-delà de 63 caractères."""
+    spec = dict(demand(), namespace=ns, target_namespace=ci.vm_namespace(ns))
+    codes = [f["code"] for f in ci.findings(spec, V, "restricted")]
+    assert ("vm-namespace-too-long" in codes) is blocked
+    assert "vm-namespace-too-long" not in [f["code"] for f in ci.findings(spec, V, "console")]

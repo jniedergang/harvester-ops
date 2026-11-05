@@ -57,6 +57,7 @@ const CapiCreate = (() => {
     'target-namespace-forced': (v) => tr('capi.new.fd.target-namespace-forced', v),
     'cloud-provider-binding-taken': (v) => tr('capi.new.fd.cloud-provider-binding-taken', v),
     'identity-name-reserved': (v) => tr('capi.new.fd.identity-name-reserved', v),
+    'vm-namespace-too-long': (v) => tr('capi.new.fd.vm-namespace-too-long', v),
     'rights-missing': (v) => tr('capi.new.fd.rights-missing', v),
     'rights-unchecked': (v) => tr('capi.new.fd.rights-unchecked', v),
     'vm-namespace-taken': (v) => tr('capi.new.fd.vm-namespace-taken', v),

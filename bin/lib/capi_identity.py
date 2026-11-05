@@ -481,6 +481,11 @@ def findings(spec, version, identity, bindings=None, vm_namespace_labels=None):
         out.append({"code": "target-namespace-forced", "level": "block",
                     "facts": {"target_namespace": spec.get("target_namespace"),
                               "namespace": vm_namespace(spec.get("namespace"))}})
+    if len(vm_namespace(spec.get("namespace") or "")) > 63:
+        # revue finale n2 : `<namespace>-vms` dépasserait la limite d'un nom
+        # de namespace (RFC 1123), l'identité serait refusée à la création
+        out.append({"code": "vm-namespace-too-long", "level": "block",
+                    "facts": {"namespace": vm_namespace(spec.get("namespace") or ""), "max": 63}})
     if vm_namespace_labels is not None and (vm_namespace_labels.get(L_CLUSTER) != spec.get("name")
                                             or vm_namespace_labels.get(L_NAMESPACE) != spec.get("namespace")):
         # namespace des VMs déjà là, pas à ce cluster : l'identité aurait les

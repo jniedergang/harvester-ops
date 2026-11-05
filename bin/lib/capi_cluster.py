@@ -666,6 +666,14 @@ def check_many(specs, facts, extra_addresses=None):
         out.append(finding("fleet-memory-short", "block", needed=mem, free=free_mem, clusters=len(specs)))
     lh = facts.get("longhorn")
     volumes = [v for s in specs for v in _volumes(s, facts)]
+    # revue m10 : une image sans classe (import en cours) laisse ses disques
+    # racine hors de la somme ; le dire plutôt que les compter pour rien
+    replicas = facts.get("class_replicas") or {}
+    for img in sorted({s.get("image") for s in specs}):
+        info = (facts.get("images") or {}).get(img)
+        if info is not None and info.get("storage_class") not in replicas:
+            out.append(finding("fleet-storage-unknown", "warn", image=img,
+                               storage_class=info.get("storage_class") or "-"))
     if lh is not None:
         nodes = _lr.storage_room(lh.get("nodes") or [], [], lh.get("over", 200.0),
                                  lh.get("minimal", 25.0))["schedulable_nodes"]

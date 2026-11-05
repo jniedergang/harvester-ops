@@ -33,8 +33,9 @@ FINDING_CODES = ["plan-invalid", "phase-not-available", "template-missing", "var
                  "cluster-failed", "capi-check-failed", "capi-install-admin",
                  # identité restreinte, copiés de check --many (2.5.0, revue)
                  "identity-name-reserved", "target-namespace-forced", "cloud-provider-binding-taken",
-                 "vm-namespace-taken",
+                 "vm-namespace-taken", "vm-namespace-too-long",
                  "fleet-name-twice", "fleet-cpu-short", "fleet-memory-short", "fleet-storage-short",
+                 "fleet-storage-unknown",
                  "fleet-replicas-nodes", "fleet-pool-short", "fleet-dhcp-leases", "fleet-sizes",
                  "rights-missing", "rights-unchecked"]
 

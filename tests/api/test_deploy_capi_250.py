@@ -703,3 +703,13 @@ def test_the_capi_phase_refuses_the_install_itself(capi, role, installs):
         assert out.status == "done" and fake.subs("install")
     else:
         assert out.status == "error" and out.message == "capi-install-admin" and fake.subs("install") == []
+
+
+def test_the_optional_provider_is_counted_in_the_message(capi):
+    """Revue finale n5 : CAAPH (facultatif) est déclaré avec la pile."""
+    capi["capi"].stack.update(ready=False, missing=["bootstrap/rke2", "controlPlane/rke2",
+                                                    "infrastructure/harvester"],
+                              optional=[{"provider": "addon/helm", "ready": False}])
+    seed(capi["client"])
+    run = trn.start(capi)
+    assert phase(run, "capi")["message"] == "declared 4 provider(s)"

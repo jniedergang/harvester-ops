@@ -2372,7 +2372,10 @@ in `bin/lib/capi_identity.py`:
 - The VMs go to a namespace of their own, `<namespace>-vms`, created and
   deleted with the identity; a request that sets another VM namespace is
   refused, and so is a VM namespace that already exists and belongs to
-  something else (`vm-namespace-taken`). Not the cluster namespace: there
+  something else (`vm-namespace-taken`), or a namespace whose `-vms` name
+  would pass 63 characters (`vm-namespace-too-long`). The VM namespace is
+  deleted with all its content when the cluster is deleted: do not put
+  anything else in it. Not the cluster namespace: there
   CAPHV would name the cloud provider token `<cluster>-token`, the name of
   the RKE2 bootstrap token, read the wrong secret, and the cluster would
   never be ready. Nothing is granted in the cluster namespace, which holds
@@ -2380,7 +2383,10 @@ in `bin/lib/capi_identity.py`:
 - The cloud provider account `<name>` and its binding to
   `harvesterhci.io:cloudprovider` are created by the console beforehand, so
   the identity never needs `bind`. The token is a service account token
-  Secret, deleted with the cluster.
+  Secret, deleted with the cluster. Since the identity may create secrets
+  in the VM namespace, where that account lives, it can obtain a token of
+  the account, and so the rights of `harvesterhci.io:cloudprovider`: CAPHV
+  does exactly that to give the cloud provider its kubeconfig.
 - The console creates these objects with the identity of the person who
   launches the creation. The pre-check of the window and of a plan asks the
   server, in one batch of `SelfSubjectAccessReview`, whether this person may

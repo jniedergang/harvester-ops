@@ -141,7 +141,9 @@ arrêt entre éléments, partiel et reprise élément par élément sont déjà
   administrateur (comme les modèles de déclaration, mêmes préfixes de
   routes) ; appliquer un plan à phases Cluster API = opérateur (règle 148),
   à condition que l'identité Harvester de la personne ait les droits
-  contrôlés par `rights`.
+  contrôlés par `rights`, sauf quand la phase capi doit installer la pile :
+  administrateur, comme Cluster API > Installation (revue finale, D3,
+  constat `capi-install-admin`).
 - **Interface** : `FloatingPanels`, `.sub-tabs-inline`, `.btn`, `.card` ;
   `escapeHtml` sur tout nom ; bulle d'aide sur chaque contrôle ; cinq langues,
   écart de `test_i18n` à zéro ; SSE par `SSEReconnect.connect()`.
@@ -846,4 +848,4 @@ vont donc dans un namespace propre au cluster, `<namespace>-vms`, créé et
 supprimé avec l'identité ; l'intention du point 164 (une identité
 n'atteint que les VMs de son cluster) est gardée, et rien n'est plus
 accordé dans le namespace du cluster, qui porte les secrets de CAPRKE2.
-À confirmer par le propriétaire du produit. Le point 162 (bancs) attend l'accord du propriétaire du produit pour harv4, harvlab2 à 32 Gio et un cluster sur harv1.
+Confirmé par le propriétaire du produit le 05/11/2026. Le point 162 (bancs) est fait : harvlab2 à 32 Gio et harv4 (trois clusters enfants), résultats dans le CHANGELOG 2.5.0.

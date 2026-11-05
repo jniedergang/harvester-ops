@@ -33139,7 +33139,9 @@ def _deploy_capi_phase(run, cluster, kc_ref, plan):
         missing = [m for m in stack.get("missing") or [] if m not in ("turtles", "core/cluster-api")]
         if len(missing) != len(stack.get("missing") or []):
             return _dch.PhaseOutcome("error", message="turtles-not-ready", data=data)
-        provs = [m for m in missing if not m.startswith("compatibility/")]
+        # le facultatif (CAAPH, 172) est déclaré avec la pile : compté aussi
+        provs = [m for m in missing if not m.startswith("compatibility/")] + [
+            o.get("provider") for o in stack.get("optional") or [] if not o.get("ready")]
         compat = [m for m in missing if m.startswith("compatibility/")]
         what = f"{len(provs)} provider(s)" + (f" and restore {', '.join(compat)}" if compat else "")
         if _deploy_capi_install_refused(getattr(run, "launch_role", None)):

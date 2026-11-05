@@ -769,11 +769,13 @@ pour chaque cluster.
   `capi-install-admin` (la pile est à installer et le rôle n'est pas admin),
   `capi-template-missing`, `cluster-var-missing`, `cluster-name-taken`,
   `identity-rules-unknown`, `identity-name-reserved`,
-  `target-namespace-forced`, `vm-namespace-taken`, `cloud-provider-binding-taken`,
+  `target-namespace-forced`, `vm-namespace-taken`, `vm-namespace-too-long`,
+  `cloud-provider-binding-taken`,
   `capi-check-failed`, `fleet-name-twice`, `fleet-cpu-short`,
   `fleet-memory-short`, `fleet-storage-short`, `fleet-replicas-nodes`,
   `fleet-pool-short`, `rights-missing`.
-- Avertissements : `rights-unchecked`, `cluster-failed`, et les
+- Avertissements : `rights-unchecked`, `cluster-failed`, `fleet-storage-unknown`
+  (image encore à l'import, ses disques racine non comptés), et les
   avertissements de la fenêtre de création (un seul nœud de plan de
   contrôle, version non éprouvée...).
 - Information : `cluster-exists`, `capi-later`, `refs-later`,

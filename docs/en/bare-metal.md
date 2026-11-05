@@ -730,11 +730,13 @@ the stack version, and the per-cluster rules of the creation window.
   `capi-install-admin` (the stack must be installed and the role is not
   admin), `capi-template-missing`, `cluster-var-missing`, `cluster-name-taken`,
   `identity-rules-unknown`, `identity-name-reserved`,
-  `target-namespace-forced`, `vm-namespace-taken`, `cloud-provider-binding-taken`,
+  `target-namespace-forced`, `vm-namespace-taken`, `vm-namespace-too-long`,
+  `cloud-provider-binding-taken`,
   `capi-check-failed`, `fleet-name-twice`, `fleet-cpu-short`,
   `fleet-memory-short`, `fleet-storage-short`, `fleet-replicas-nodes`,
   `fleet-pool-short`, `rights-missing`.
-- Warnings: `rights-unchecked`, `cluster-failed`, and the warnings of the
+- Warnings: `rights-unchecked`, `cluster-failed`, `fleet-storage-unknown`
+  (an image still importing, its root disks not counted), and the warnings of the
   creation window (one control plane node, version not tested...).
 - Information: `cluster-exists`, `capi-later`, `refs-later`,
   `fleet-dhcp-leases`, `fleet-sizes`.

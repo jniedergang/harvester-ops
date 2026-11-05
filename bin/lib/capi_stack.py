@@ -203,14 +203,21 @@ def harvester_vip(kube):
     service de remplacement de la console n'a que l'annotation."""
     traefik = kube.get("services", SHIM_NS, "rke2-traefik") or {}
     ing = ((traefik.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
-    if ing and ing[0].get("ip"):
+    if ing and _usable(ing[0].get("ip")):
         return ing[0]["ip"]
     expose = kube.get("services", SHIM_NS, SHIM_NAME) or {}
     ing = ((expose.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
-    if ing and ing[0].get("ip"):
+    if ing and _usable(ing[0].get("ip")):
         return ing[0]["ip"]
     ann = ((expose.get("metadata") or {}).get("annotations") or {}).get(VIP_ANNOTATION) or ""
-    return ann.split(",")[0].strip() or None
+    first = ann.split(",")[0].strip()
+    return first if _usable(first) else None
+
+
+def _usable(ip):
+    """Une VIP en DHCP porte `0.0.0.0` dans l'annotation kube-vip tant
+    qu'elle n'a pas de bail : ce n'est pas une adresse joignable."""
+    return bool(ip) and ip not in ("0.0.0.0", "::")
 
 
 def shim_state(kube, wanted=()):
