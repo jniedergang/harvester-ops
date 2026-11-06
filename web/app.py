@@ -34071,7 +34071,8 @@ def _art_public(pkg):
             images.append({"name": ann.get(_ol.A_NAME), "digest": e.get("digest"), "size": size,
                            "platform": "/".join((e.get("platform") or {}).values()) or None})
     trust = {k: pkg["trust"].get(k) for k in ("state", "principal", "key_fingerprint", "person", "date", "mode")}
-    return {"name": pkg["name"], "version": pkg["version"], "index": pkg["index"], "images": images,
+    index = _art.check_index(pkg["index"])[0] or pkg["index"]          # sortes à venir marquées `later`
+    return {"name": pkg["name"], "version": pkg["version"], "index": index, "images": images,
             "trust": trust, "published": _art_published(pkg["name"], pkg["version"])}
 
 
@@ -34278,6 +34279,77 @@ def api_artefacts_accept(name, version):
     if err:
         return err
     return jsonify({"action_id": run.id, "name": name, "version": version, "trust": chk["trust"]["state"]}), 202
+
+
+def _artefacts_publish_launch(cluster, kc, package, registry, items, parent=None, cluster_user=None, person=None):
+    """Lancement de la publication hors requête (chaîne d'un plan, comme
+    _capi_launch) : ne lit ni la requête ni la session ; `kc` et
+    `cluster_user` sont figés au déclenchement. (action, None) ou (None,
+    {"error", ...})."""
+    name, version = package
+    cmd = _art_cmd("publish")
+    if cmd is None:
+        return None, {"error": f"{ARTEFACTS_SCRIPT} not deployed"}
+    cmd += [name, version, "--cluster", cluster, "--registry", registry, "--kubeconfig", kc,
+            "--person", person or cluster_user or "?"]
+    if items:
+        cmd += ["--items", ",".join(items)]
+    with app.app_context():                    # réponse d'occupation (jsonify) hors requête
+        run, err = _cli_action(cluster, f"artefacts-publish:{name}-{version}@{registry}", cmd,
+                               "harvester-artefacts", capture=True, parent=parent, cluster_user=cluster_user,
+                               after=lambda: READ_SHARE.invalidate("_activity"))
+    if err:
+        body = err[0].get_json(silent=True) if hasattr(err[0], "get_json") else None
+        return None, body or {"error": "refused"}
+    return run, None
+
+
+@app.route("/api/artefacts/<name>/<version>/publish", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_artefacts_publish(name, version):
+    """Publie un paquet importé dans un registre rattaché au cluster :
+    constats d'abord (tag d'une autre empreinte, registre sans cet usage ou
+    non rattaché, mode strict activé depuis un import acquitté), sans rien
+    écrire ; puis action suivie `artefacts-publish:<paquet>@<registre>`."""
+    bad = _art_name_version(name, version)
+    if bad:
+        return bad
+    b = request.get_json(silent=True)
+    if not isinstance(b, dict):
+        return jsonify({"error": "a JSON object is expected"}), 400
+    cluster, registry, items = str(b.get("cluster") or ""), str(b.get("registry") or ""), b.get("items")
+    if not _valid_k8s_name(cluster) or not _registry_name_ok(registry):
+        return jsonify({"error": "cluster and registry are required"}), 400
+    if items is not None and (not isinstance(items, list) or not all(isinstance(i, str) and _art.ITEM_RE.match(i)
+                                                                    for i in items)):
+        return jsonify({"error": "items: a list of item names"}), 400
+    try:
+        _art.load_package(_art_state(), name, version)
+    except _art.ArtefactError:
+        return jsonify({"error": f"no package {name}-{version}", "code": "not-found"}), 404
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    cmd = _art_cmd("publish")
+    if cmd is None:
+        return jsonify({"error": f"{ARTEFACTS_SCRIPT} not deployed"}), 503
+    check = cmd + [name, version, "--cluster", cluster, "--registry", registry, "--kubeconfig", kc, "--dry-run"]
+    if items:
+        check += ["--items", ",".join(items)]
+    res, err = _capi_run_json(check, timeout=120)
+    if err:
+        return err
+    plan = res[0]
+    if plan.get("blocked"):
+        return jsonify({"error": "the publication is blocked", "code": "publish-blocked",
+                        "findings": plan.get("findings") or []}), 409
+    run, err = _artefacts_publish_launch(cluster, kc, (name, version), registry, items,
+                                         cluster_user=(current_cluster_identity() or {}).get("user"),
+                                         person=current_user())
+    if err:
+        return jsonify(err), 409
+    return jsonify({"action_id": run.id, "todo": plan.get("todo") or [], "findings": plan.get("findings") or []}), 202
 
 
 @app.route("/api/artefacts/<name>/<version>", methods=["GET"])

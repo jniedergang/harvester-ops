@@ -9,6 +9,8 @@
     harvester-artefacts import  PAQUET [--accept-unsigned | --accept-unknown-key] [--person NOM]
     harvester-artefacts list
     harvester-artefacts remove  NOM VERSION
+    harvester-artefacts publish NOM VERSION --cluster C --registry R [--kubeconfig K]
+                                [--items a,b] [--dry-run] [--person NOM]
 
 `pack` tourne sur une machine connectée, en bibliothèque standard seulement
 (décision 122) : la description (JSON ; YAML si PyYAML est là) nomme des
@@ -24,6 +26,14 @@ Les identifiants des registres sources viennent d'un fichier privé
 `harvester-artefacts`) ; `verify` rend 0 seulement pour une signature valide
 d'une clé de confiance. `import` (dans la console) applique la décision du
 plan (point 184) : 0 accepté, 2 refusé, 3 acquittement requis.
+
+`publish` (tâche 8) recopie les images puis les charts d'un paquet importé
+dans un registre déclaré (bin/lib/registries.py), couche par couche par
+l'API de registre v2 : `<registre>/<hôte d'origine>/<chemin>:<tag>` et
+`<registre>/charts/<chart>:<version>` (point 186). Le compte d'écriture est
+lu dans le Secret `<registre>-push` du cluster Harvester, jamais affiché.
+Un tag déjà présent avec une autre empreinte bloque tout, avant la moindre
+écriture ; une publication interrompue se reprend (blobs présents sautés).
 
 Progression sur stderr au format STEP_EVENT|<étape>|<statut>|<message> ;
 résultat en JSON sur stdout. Codes : 0 succès, 1 échec, 2 refus, 3
@@ -43,6 +53,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -447,10 +458,12 @@ def pack(desc, base_dir, out_dir, sources, platform=ol.DEFAULT_PLATFORM):
                     entry["files"].append(f"manifests/{it['name']}/{Path(f).name}")
                 step("manifests", "running", f"{it['name']}: {len(entry['files'])} file(s)")
             index["items"].append(entry)
-        idx, errors = art.check_index(index, image_names=list(wanted))
+        _, errors = art.check_index(index, image_names=list(wanted))
         if errors:
             raise ValueError("index: " + "; ".join(errors[:5]))
-        (root / art.INDEX).write_text(json.dumps(idx, indent=2) + "\n")
+        # l'index tel qu'écrit, pas sa forme lue (qui marque `later` les
+        # sortes à venir et serait refusée à la relecture)
+        (root / art.INDEX).write_text(json.dumps(index, indent=2) + "\n")
         step("package", "running", f"writing {top}.tar.gz")
         path = out_dir / f"{top}.tar.gz"
         res = write_package(root, path)
@@ -611,6 +624,184 @@ def cmd_remove(args):
     return EXIT_OK
 
 
+# ---------------------------------------------------------------------------
+# Publication dans un registre (tâche 8)
+# ---------------------------------------------------------------------------
+class Refused(Exception):
+    """Constats bloquants : rien n'a été écrit."""
+
+    def __init__(self, findings):
+        super().__init__(", ".join(f["code"] for f in findings))
+        self.findings = findings
+
+
+def _finding(code, level="block", **facts):
+    return {"code": code, "level": level, "facts": facts}
+
+
+def publication(pkg, items=None):
+    """Ce qu'un paquet rangé publierait : (images, charts, sautés) ;
+    `items` (noms d'éléments) restreint la sélection. Les sortes « à venir »
+    et les manifestes ne vont pas dans un registre."""
+    index = pkg["index"]
+    known = {it["name"]: it for it in index["items"]}
+    unknown = sorted(set(items or ()) - set(known))
+    if unknown:
+        raise Refused([_finding("publish-item-unknown", items=", ".join(unknown))])
+    chosen = [known[n] for n in (items or known)]
+    images, charts, skipped = [], [], []
+    for it in chosen:
+        if it["kind"] in art.LATER_KINDS:
+            skipped.append({"item": it["name"], "why": "coming"})
+            continue
+        for n in it.get("images") or []:
+            if n not in images:
+                images.append(n)
+        if it["kind"] == "chart":
+            charts.append(it["chart"])
+        elif it["kind"] == "manifest":
+            skipped.append({"item": it["name"], "why": "manifest"})
+    return images, charts, skipped
+
+
+def plan_publication(pkg, decl, dst, images, charts, work):
+    """Constats avant écriture et liste de ce qui partira : un tag d'une
+    autre empreinte (`publish-tag-differs`, lu par HEAD), un registre qui ne
+    sert pas cet usage (`registry-no-usage`)."""
+    findings, todo = [], []
+    usage = decl.get("usage") or []
+    if images and "images" not in usage:
+        findings.append(_finding("registry-no-usage", registry=decl["name"], usage="images"))
+    if charts and "charts" not in usage:
+        findings.append(_finding("registry-no-usage", registry=decl["name"], usage="charts"))
+    lay = ol.Layout(Path(pkg["path"]) / "images")
+    for n in images:
+        e = lay.find(n)
+        repo, tag = ol.target_repo(n)
+        todo.append({"kind": "image", "name": n, "layout": lay, "entry": e, "repo": repo, "tag": tag})
+    clay = ol.Layout(Path(work) / "charts")
+    for c in charts:
+        meta = ol.chart_to_layout(Path(pkg["path"]) / c, clay)
+        repo, tag = ol.chart_repo(meta["name"], meta["version"])
+        todo.append({"kind": "chart", "name": f"{meta['name']}:{meta['version']}", "layout": clay,
+                     "entry": clay.find(f"{meta['name']}:{meta['version']}"), "repo": repo, "tag": tag})
+    for t in todo:
+        have = dst.manifest_digest(t["repo"], t["tag"])
+        t["state"] = "new" if have is None else "present" if have == t["entry"]["digest"] else "differs"
+        if t["state"] == "differs":
+            findings.append(_finding("publish-tag-differs", reference=f"{decl['name']}/{t['repo']}:{t['tag']}",
+                                     have=have[:19], want=t["entry"]["digest"][:19]))
+    return findings, todo
+
+
+def publish(pkg, decl, dst, items=None, dry_run=False, work=None):
+    """Publie (ou liste, `dry_run`) ; rend le résultat sans identifiant."""
+    images, charts, skipped = publication(pkg, items)
+    for s in skipped:
+        step("publish", "running", f"{s['item']}: skipped ({'coming in 2.7' if s['why'] == 'coming' else 'manifests are not published'})")
+    findings, todo = plan_publication(pkg, decl, dst, images, charts, work)
+    if dry_run or [f for f in findings if f["level"] == "block"]:
+        return {"findings": findings, "blocked": bool(findings),
+                "todo": [{k: t[k] for k in ("kind", "name", "repo", "tag", "state")} for t in todo]}
+    res = {"images": 0, "charts": 0, "pushed_blobs": 0, "skipped_blobs": 0, "mounted_blobs": 0, "bytes": 0}
+    mounts = {}
+    sent = {"n": 0, "last": 0}
+
+    def progress(n):
+        sent["n"] += n
+        if sent["n"] - sent["last"] >= 64 << 20:
+            sent["last"] = sent["n"]
+            step("publish", "running", f"{sent['n'] >> 20} MiB sent")
+    for kind in ("image", "chart"):
+        part = [t for t in todo if t["kind"] == kind]
+        for i, t in enumerate(part, 1):
+            step(f"{kind}s", "running", f"{kind}s {i}/{len(part)}: {t['name']}")
+            r = ol.push_image(t["layout"], t["entry"], dst, t["repo"], t["tag"], progress=progress, mounts=mounts)
+            res[f"{kind}s"] += 1
+            res["pushed_blobs"] += r["sent"]
+            res["skipped_blobs"] += r["skipped"]
+            res["mounted_blobs"] += r["mounted"]
+        if part:
+            step(f"{kind}s", "done", f"{len(part)} {kind}(s) in {decl['name']}")
+    res["bytes"] = sent["n"]
+    return res
+
+
+def cmd_publish(args):
+    import deploy_plans as dp           # chargés ici : pack reste en bibliothèque standard
+    import registries as rg
+    from kube import Kube, KubeError, cluster_config
+    state = state_dir()
+    try:
+        pkg = art.load_package(state, args.name, args.version)
+    except art.ArtefactError as e:
+        step("publish", "error", str(e))
+        return EXIT_REFUSED
+    decl = rg.load(state, args.registry)
+    findings = []
+    if decl is None:
+        findings.append(_finding("registry-unknown", registry=args.registry))
+    elif args.cluster not in (decl.get("clusters") or []):
+        findings.append(_finding("registry-not-attached", registry=args.registry, cluster=args.cluster))
+    conf = art.settings(state, console_config())
+    if conf["strict"] and (pkg["trust"] or {}).get("state") != "valid":
+        findings.append(_finding("package-untrusted-strict", package=f"{args.name}-{args.version}",
+                                 state=(pkg["trust"] or {}).get("state")))
+    creds = None
+    if not findings:
+        kc = args.kubeconfig or (cluster_config(args.cluster) or {}).get("kubeconfig")
+        try:
+            creds = rg.read_creds(Kube(kc), args.registry, "push")
+        except KubeError as e:
+            findings.append(_finding("cluster-unreachable", error=str(e)[:200]))
+        if creds is None and not findings:
+            findings.append(_finding("registry-not-attached", registry=args.registry, cluster=args.cluster))
+    if findings:
+        step("check", "error", ", ".join(f["code"] for f in findings))
+        out({"findings": findings, "blocked": True})
+        return EXIT_REFUSED
+    endpoint = decl.get("push_endpoint") or decl["endpoint"]
+    work = Path(tempfile.mkdtemp(prefix="hops-publish-", dir=os.environ.get("HARVESTER_OPS_WORK_DIR")))
+    try:
+        dst = op.Registry(endpoint, creds, ca_pem=decl.get("ca_pem"))
+        step("check", "running", f"{args.name}-{args.version} to {args.registry} ({endpoint})")
+        res = publish(pkg, decl, dst, items=[i for i in (args.items or "").split(",") if i] or None,
+                      dry_run=args.dry_run, work=work)
+        if "findings" in res:
+            blocked = res["blocked"]
+            step("check", "error" if blocked else "done",
+                 ", ".join(f["code"] for f in res["findings"]) or f"{len(res['todo'])} artefact(s) to publish")
+            out(res)
+            return EXIT_REFUSED if blocked else EXIT_OK
+        at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        entry = {"package": args.name, "version": args.version, "at": at, "by": args.person or getpass.getuser()}
+
+        def note(d):
+            d["published"] = [p for p in d.get("published") or []
+                              if (p.get("package"), p.get("version")) != (args.name, args.version)] + [entry]
+        for attempt in (0, 1):
+            try:
+                rg.update(state, args.registry, note)
+                break
+            except dp.PlanConflict:
+                if attempt:
+                    raise
+        step("publish", "done", f"{res['images']} image(s), {res['charts']} chart(s); "
+                                f"{res['pushed_blobs']} blob(s) sent, {res['skipped_blobs'] + res['mounted_blobs']} "
+                                "already there")
+    except Refused as e:
+        step("check", "error", str(e))
+        out({"findings": e.findings, "blocked": True})
+        return EXIT_REFUSED
+    except (op.RegistryError, OSError, ValueError, KeyError, dp.PlanConflict) as e:
+        step("publish", "error", str(e)[:300])
+        return EXIT_FAIL
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    out(res)
+    return EXIT_OK
+
+
 def parser():
     p = argparse.ArgumentParser(prog="harvester-artefacts", allow_abbrev=False,
                                 description="Signed artefact packages: pack, sign, verify, import.")
@@ -647,6 +838,16 @@ def parser():
     s.add_argument("name")
     s.add_argument("version")
     s.set_defaults(fn=cmd_remove)
+    s = sub.add_parser("publish", allow_abbrev=False)
+    s.add_argument("name")
+    s.add_argument("version")
+    s.add_argument("--cluster", required=True)
+    s.add_argument("--registry", required=True)
+    s.add_argument("--kubeconfig")
+    s.add_argument("--items", help="item names, comma separated (default: all)")
+    s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--person")
+    s.set_defaults(fn=cmd_publish)
     return p
 
 
