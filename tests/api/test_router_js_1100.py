@@ -49,7 +49,7 @@ def screens():
             # 2.1.0 : chaque onglet de Bare-metal a son adresse, aller et retour ;
             # 2.2.0 : ceux de Cluster API et de Terraform
             out += [dict(s, automation="pxe", autoTab=t) for t in ("machines", "profiles", "images", "history")]
-            out += [dict(s, automation="capi", autoTab=t) for t in ("clusters", "services", "artefacts", "history", "installation")]
+            out += [dict(s, automation="capi", autoTab=t) for t in ("clusters", "services", "registries", "artefacts", "history", "installation")]
             out += [dict(s, automation="terraform", autoTab=t)
                     for t in ("declarations", "resources", "history", "installation")]
         # 2.0.0 : écrans d'un hôte KVM (hôte imposé) ; Paramètres : chaque onglet

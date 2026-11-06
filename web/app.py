@@ -34761,6 +34761,11 @@ def api_artefacts_publish(name, version):
     if err:
         return err
     plan = res[0]
+    if b.get("dry_run"):
+        # 2.6.0 (tâche 12) : constats et liste de ce qui partirait, montrés
+        # avant le bouton Publier ; rien n'est écrit
+        return jsonify({"blocked": bool(plan.get("blocked")), "findings": plan.get("findings") or [],
+                        "todo": plan.get("todo") or []})
     if plan.get("blocked"):
         return jsonify({"error": "the publication is blocked", "code": "publish-blocked",
                         "findings": plan.get("findings") or []}), 409
@@ -34836,9 +34841,20 @@ def api_registries_list():
 @app.route("/api/registries/<name>", methods=["GET"])
 @requires_auth
 def api_registry_get(name):
+    """Déclaration d'un registre, et qui l'emploie (plans et modèles ;
+    `?cluster=` ajoute les clusters enfants et services de ce cluster
+    Harvester, lus avec l'identité de la personne)."""
     d = _rg.load(_bm_profiles_state(), name) if _registry_name_ok(name) else None
     if d is None:
         return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    c = request.args.get("cluster") or ""
+    if c and _valid_k8s_name(c) and c in (d.get("clusters") or []):
+        used, why = _registry_users(name, [c])
+        d["used_by"] = used
+        if why:
+            d["used_by_error"] = why
+    else:
+        d["used_by"] = _dpl.registry_users(_bm_profiles_state(), name)
     return jsonify(d)
 
 

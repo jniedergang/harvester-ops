@@ -4548,7 +4548,8 @@ body.no-tooltips .tip-layer { display: none; }
 /* Les formulaires kube-ovn sont réservés aux administrateurs : ne pas les
    proposer aux autres (le serveur refuse de toute façon). */
 body.roles-active.role-viewer .needs-admin,
-body.roles-active.role-operator .needs-admin { display: none !important; }
+body.roles-active.role-operator .needs-admin,
+body.roles-active.role-viewer .needs-operator { display: none !important; }
 
 /* v1.50.0 : page de connexion (compte local ou Rancher) */
 body.login-page {
@@ -6024,3 +6025,15 @@ html[data-mode="dark"] .tbl-scroll { --tbl-shade: rgba(0, 0, 0, 0.42); }
 .capi-reg-row .capi-var { flex: 1 1 200px; }
 .capi-reg-note { color: var(--warning, var(--accent)); }
 .capi-reg-note[hidden] { display: none; }
+
+/* 2.6.0 : registres (Cluster API > Registres) */
+.reg-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0 0 10px; }
+.reg-facts dt { color: var(--text-dim); }
+.reg-facts dd { margin: 0; overflow-wrap: anywhere; }
+.reg-actions { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.reg-modal .modal { width: min(760px, 96vw); }
+.reg-modal textarea { width: 100%; font-family: var(--font-mono, monospace); font-size: 12px; }
+.reg-row { cursor: pointer; }
+.reg-row.selected { background: var(--bg-hover, rgba(127, 127, 127, .12)); }
+.art-todo { margin: 6px 0; padding-left: 18px; }
+.art-todo li { overflow-wrap: anywhere; }

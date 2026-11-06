@@ -95,6 +95,9 @@ const Artefacts = (() => {
     const pubs = (d.published || []).map(p => `<li>${esc(p.registry)} <span class="form-hint">${esc(p.at || '')}</span></li>`).join('');
     box.innerHTML = `
       <div class="card-header"><h3>${esc(d.name)} ${esc(d.version)}</h3>
+        <button type="button" class="btn btn-sm btn-primary tip needs-operator" data-art-publish
+                data-tip="${esc(tr('art.t.publish', 'Copy the images and charts of this package into a registry attached to the cluster'))}"
+                title="${esc(tr('art.t.publish', 'Copy the images and charts of this package into a registry attached to the cluster'))}">${icon('upload')} ${esc(tr('art.publish', 'Publish'))}</button>
         <button type="button" class="btn btn-sm btn-danger tip needs-admin" data-art-remove
                 data-tip="${esc(tr('art.t.remove', 'Remove this package from the console (the registries keep what was published)'))}"
                 title="${esc(tr('art.t.remove', 'Remove this package from the console (the registries keep what was published)'))}">${icon('trash')} ${esc(tr('art.remove', 'Remove'))}</button></div>
@@ -109,6 +112,124 @@ const Artefacts = (() => {
         <h4>${esc(tr('art.published', 'Published in'))}</h4>
         ${pubs ? `<ul>${pubs}</ul>` : `<p class="form-hint">${esc(tr('art.notPublished', 'Not published in a registry yet.'))}</p>`}
       </div>`;
+  }
+
+  // -------------------------------------------------------------------------
+  // Publication (2.6.0, tâche 12) : constats avant le bouton, progression
+  // -------------------------------------------------------------------------
+  const PUB_FINDINGS = {
+    'registry-unknown': (v) => tr('art.pfd.registry-unknown', 'The registry {registry} is not declared.', v),
+    'registry-not-attached': (v) => tr('art.pfd.registry-not-attached', 'The registry {registry} is not attached to {cluster}.', v),
+    'registry-no-usage': (v) => tr('art.pfd.registry-no-usage', 'The registry {registry} does not serve {usage}.', v),
+    'publish-tag-differs': (v) => tr('art.pfd.publish-tag-differs', '{reference} already exists with another content: nothing is overwritten.', v),
+    'package-untrusted-strict': (v) => tr('art.pfd.package-untrusted-strict', 'Strict mode refuses {package} ({state}).', v),
+    'publish-item-unknown': (v) => tr('art.pfd.publish-item-unknown', 'Unknown item(s): {items}.', v),
+    'cluster-unreachable': (v) => tr('art.pfd.cluster-unreachable', 'The Harvester cluster cannot be read.', v),
+  };
+  const pubText = (f) => (PUB_FINDINGS[f.code] ? PUB_FINDINGS[f.code](Object.assign({}, f.facts || {})) : f.code);
+
+  async function openPublish() {
+    if (!selected) return;
+    const pkg = Object.assign({}, selected);
+    const cluster = window.App && App.managementCluster ? App.managementCluster() : '';
+    const [dr, rr] = await Promise.all([
+      fetch(`/api/artefacts/${enc(pkg.name)}/${enc(pkg.version)}`).then(r => r.json()).catch(() => ({})),
+      fetch('/api/registries').then(r => r.json()).catch(() => ({})),
+    ]);
+    const regs = (rr.registries || []).filter(x => (x.clusters || []).includes(cluster));
+    const items = ((dr.index || {}).items || []);
+    const publishable = (it) => !it.later && it.kind !== 'manifest';
+    closeModal();
+    modal = document.createElement('div');
+    modal.className = 'modal-overlay active art-modal art-publish';
+    modal.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-header"><div><h3>${icon('upload')} ${esc(tr('art.publishTitle', 'Publish a package'))}</h3>
+          <div class="modal-subtitle">${esc(`${pkg.name} ${pkg.version}`)} · ${esc(cluster)}</div></div>
+          <button type="button" class="btn-close tip" data-art-close data-tip="${esc(tr('common.cancel', 'Cancel'))}" title="${esc(tr('common.cancel', 'Cancel'))}">×</button></div>
+        <div class="modal-body">
+          <div class="form-row"><label>${esc(tr('art.registry', 'Registry'))}</label>
+            <select data-x="registry" class="tip" data-tip="${esc(tr('art.t.registry', 'Registries attached to this Harvester cluster (Registries tab)'))}"
+                    title="${esc(tr('art.t.registry', 'Registries attached to this Harvester cluster (Registries tab)'))}">${regs.map(x =>
+              `<option value="${esc(x.name)}">${esc(`${x.name} (${x.endpoint || ''})`)}</option>`).join('')}</select></div>
+          ${regs.length ? '' : `<p class="form-hint">${esc(tr('art.noRegistry', 'No registry attached to this cluster: declare or pose one in the Registries tab.'))}</p>`}
+          <fieldset class="tf-block"><legend>${esc(tr('art.items', 'Items'))}</legend>${items.map(it => `
+            <label class="bm-check tip" data-tip="${esc(publishable(it) ? tr('art.t.item', 'Published with the others when checked')
+              : it.later ? tr('art.t.later', 'Kept in the package; applied by a later version') : tr('art.t.manifest', 'Manifests are not published in a registry'))}">
+              <input type="checkbox" data-item="${esc(it.name)}" ${publishable(it) ? 'checked' : 'disabled'}> ${esc(it.name)}
+              <span class="badge dim">${esc(it.kind)}</span></label>`).join('')}</fieldset>
+          <h4>${esc(tr('art.checks', 'Checks'))}</h4><div class="xfer-report" data-x="report"></div>
+          <ul class="art-todo" data-x="todo"></ul>
+          <div class="xfer-live-line" data-x="progress" hidden></div>
+        </div>
+        <div class="modal-footer apply-bar" style="margin:0;">
+          <button type="button" class="btn btn-secondary btn-sm" data-art-close>${esc(tr('common.cancel', 'Cancel'))}</button>
+          <span class="tip" data-x="go-wrap"><button type="button" class="btn btn-primary btn-sm" data-art-go disabled>${icon('upload', 13)} ${esc(tr('art.publish', 'Publish'))}</button></span>
+          <span class="apply-result" data-x="feedback"></span>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const m = modal;
+    const q = (x) => m.querySelector(`[data-x="${x}"]`);
+    const body = () => {
+      const all = [...m.querySelectorAll('[data-item]:not([disabled])')];
+      const chosen = all.filter(c => c.checked).map(c => c.dataset.item);
+      return { cluster, registry: q('registry').value, items: chosen.length === all.length ? null : chosen };
+    };
+    const go = m.querySelector('[data-art-go]');
+    const setGo = (ok, why) => {
+      go.disabled = !ok;
+      q('go-wrap').dataset.tip = why;
+      go.title = why;
+    };
+    let seq = 0;
+    async function check() {
+      const n = ++seq;
+      const b = body();
+      if (!b.registry) { setGo(false, tr('art.noRegistry', 'No registry attached to this cluster: declare or pose one in the Registries tab.')); return; }
+      if (b.items && !b.items.length) { setGo(false, tr('art.noItem', 'Choose at least one item.')); return; }
+      q('report').innerHTML = `<p class="form-hint">${esc(tr('art.checking', 'Checking…'))}</p>`;
+      const r = await fetch(`/api/artefacts/${enc(pkg.name)}/${enc(pkg.version)}/publish`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ dry_run: true }, b)) });
+      const d = await r.json().catch(() => ({}));
+      if (n !== seq || modal !== m) return;
+      const fs = d.findings || [];
+      q('report').innerHTML = !r.ok ? `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(d.error || `HTTP ${r.status}`)}</div></div>`
+        : fs.map(f => `<div class="sto-finding ${f.level === 'block' ? 'sev-critical' : 'sev-watch'}" data-code="${esc(f.code)}"><div class="sto-finding-title">${esc(pubText(f))}</div></div>`).join('')
+          || `<div class="sto-finding sev-info"><div class="sto-finding-title">${esc(tr('art.noBlocker', 'No blocker.'))}</div></div>`;
+      q('todo').innerHTML = (d.todo || []).map(t => `<li><span class="badge ${t.state === 'present' ? 'ok' : 'info'}">${esc(t.state === 'present'
+        ? tr('art.todo.present', 'already there') : tr('art.todo.new', 'to send'))}</span> <code>${esc(t.name)}</code></li>`).join('');
+      const first = fs.find(f => f.level === 'block');
+      if (!r.ok || d.blocked) setGo(false, tr('art.t.publishBlocked', 'Blocked: {reason}', { reason: first ? pubText(first) : (d.error || '?') }));
+      else setGo(true, tr('art.t.publishGo', 'Send the missing layers; what is already there is skipped'));
+    }
+    m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-art-close]')) closeModal(); });
+    m.addEventListener('change', check);
+    go.addEventListener('click', async () => {
+      if (go.disabled) return;
+      go.disabled = true;
+      const r = await fetch(`/api/artefacts/${enc(pkg.name)}/${enc(pkg.version)}/publish`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body()) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { q('feedback').textContent = d.error || `HTTP ${r.status}`; go.disabled = false; return; }
+      const line = q('progress');
+      line.hidden = false;
+      line.textContent = tr('art.publishStarted', 'Publishing (action {id}), see the dock.', { id: d.action_id });
+      if (!window.SSEReconnect) return;
+      const es = SSEReconnect.connect(`/api/stream/${enc(d.action_id)}`, {
+        on: {
+          step: (ev) => { try { const st = JSON.parse(ev.data); if (st.message) line.textContent = st.message; } catch { /* ligne illisible */ } },
+          end: (ev) => {
+            let x = {};
+            try { x = JSON.parse(ev.data); } catch { /* fin sans détail */ }
+            es.close();
+            line.textContent = x.status === 'done' ? tr('art.publishDone', 'Published.') : tr('art.publishFailed', 'The publication failed: see the dock.');
+            setTimeout(() => showDetail(pkg.name, pkg.version), 500);
+          },
+        },
+      });
+    });
+    check();
   }
 
   async function remove() {
@@ -298,6 +419,7 @@ const Artefacts = (() => {
       const row = e.target.closest('.art-row');
       if (row) { showDetail(row.dataset.artName, row.dataset.artVersion); return; }
       if (e.target.closest('[data-art-remove]')) { remove(); return; }
+      if (e.target.closest('[data-art-publish]')) { openPublish(); return; }
       const un = e.target.closest('[data-art-unsign]');
       if (un) { putSettings({ remove_signer: un.dataset.artUnsign }); return; }
       if (e.target.closest('#art-add-key-btn')) {
@@ -316,6 +438,6 @@ const Artefacts = (() => {
   }
 
   document.addEventListener('DOMContentLoaded', init);
-  return { start: refresh, refresh, openImport, _verdictHtml: verdictHtml };
+  return { start: refresh, refresh, openImport, openPublish, _verdictHtml: verdictHtml };
 })();
 window.Artefacts = Artefacts;

@@ -63,6 +63,7 @@ ADDRESSES = [
     ("#automation/capi/clusters", ["automation", "clusters", "capi", "clusters", "#automation/capi/clusters"]),
     ("#automation/capi/services", ["automation", "services", "capi", "services", "#automation/capi/services"]),
     ("#automation/capi/history", ["automation", "history", "capi", "history", "#automation/capi/history"]),
+    ("#automation/capi/registries", ["automation", "registries", "capi", "registries", "#automation/capi/registries"]),
     ("#automation/capi/artefacts", ["automation", "artefacts", "capi", "artefacts", "#automation/capi/artefacts"]),
     ("#automation/capi/installation",
      ["automation", "installation", "capi", "installation", "#automation/capi/installation"]),
@@ -96,7 +97,7 @@ def test_capi_and_terraform_tab_addresses():
 
 
 @pytest.mark.parametrize("old,new,probe", [
-    ("capi: ['clusters', 'services', 'artefacts', 'history', 'installation']", "capi: []",
+    ("capi: ['clusters', 'services', 'registries', 'artefacts', 'history', 'installation']", "capi: []",
      "#automation/capi/services"),
     ("terraform: ['declarations', 'resources', 'history', 'installation']", "terraform: []",
      "#automation/terraform/history"),
@@ -113,8 +114,8 @@ def test_mutation_without_a_tab_list_the_addresses_are_unknown(tmp_path, old, ne
 
 @pytest.mark.parametrize("old,new,probe", [
     # l'ordre décide de l'onglet par défaut : Clusters avant Installation
-    ("capi: ['clusters', 'services', 'artefacts', 'history', 'installation']",
-     "capi: ['installation', 'clusters', 'services', 'artefacts', 'history']", "#automation/capi"),
+    ("capi: ['clusters', 'services', 'registries', 'artefacts', 'history', 'installation']",
+     "capi: ['installation', 'clusters', 'services', 'registries', 'artefacts', 'history']", "#automation/capi"),
     ("terraform: ['declarations', 'resources', 'history', 'installation']",
      "terraform: ['resources', 'declarations', 'history', 'installation']", "#automation/terraform"),
 ])
@@ -135,7 +136,7 @@ def strip(only_for):
 
 
 @pytest.mark.parametrize("only_for,attr,order", [
-    ("capi", "data-capi-tab", ["clusters", "services", "artefacts", "history", "installation"]),
+    ("capi", "data-capi-tab", ["clusters", "services", "registries", "artefacts", "history", "installation"]),
     ("terraform", "data-tf-tab", ["declarations", "resources", "history", "installation"]),
 ])
 def test_header_strips_have_the_decided_order_and_tooltips(only_for, attr, order):

@@ -37,7 +37,14 @@ FINDING_CODES = ["plan-invalid", "phase-not-available", "template-missing", "var
                  "fleet-name-twice", "fleet-cpu-short", "fleet-memory-short", "fleet-storage-short",
                  "fleet-storage-unknown",
                  "fleet-replicas-nodes", "fleet-pool-short", "fleet-dhcp-leases", "fleet-sizes",
-                 "rights-missing", "rights-unchecked"]
+                 "rights-missing", "rights-unchecked",
+                 # 2.6.0 : phase Registre (constats de la console et des outils de registre)
+                 "registry-name-taken", "registry-unknown", "registry-admin", "registry-check-failed",
+                 "registry-package-too-big", "registry-address-differs", "artefact-package-missing",
+                 "package-untrusted-strict", "registry-var-missing", "registry-exists", "registry-later",
+                 "publish-later", "cluster-registry-later", "registry-address-answers", "registry-address-in-pool",
+                 "registry-address-vip", "registry-room-short", "registry-not-attached", "registry-unreachable",
+                 "publish-tag-differs", "cluster-registry-not-attached", "cluster-registry-no-fallback-system"]
 
 
 # --- onglet, historique, page d'hôte (source) ----------------------------------
