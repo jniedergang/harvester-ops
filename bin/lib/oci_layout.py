@@ -249,7 +249,7 @@ def copy_image(src, ref, layout, platform=DEFAULT_PLATFORM, progress=None):
         # image d'une seule plateforme : sa configuration dit laquelle
         cd = man["config"]["digest"]
         if not layout.has_blob(cd):
-            src.blob_to_file(path, cd, layout.blob_path(cd))
+            src.blob_to_file(path, cd, layout.blob_path(cd), size=man["config"].get("size"))
         cfg = json.loads(layout.read_blob(cd))
         want = _platform(platform)
         got = [cfg.get("os"), cfg.get("architecture")] + ([cfg.get("variant")] if len(want) == 3 else [])
@@ -259,7 +259,7 @@ def copy_image(src, ref, layout, platform=DEFAULT_PLATFORM, progress=None):
     blobs = [man["config"]] + list(man.get("layers") or [])
     for b in blobs:
         if not layout.has_blob(b["digest"]):
-            src.blob_to_file(path, b["digest"], layout.blob_path(b["digest"]), on_bytes=progress)
+            src.blob_to_file(path, b["digest"], layout.blob_path(b["digest"]), on_bytes=progress, size=b.get("size"))
     mdigest = layout.add_blob_bytes(body)
     desc = {"mediaType": mt, "digest": mdigest, "size": len(body), **({"platform": plat} if plat else {})}
     layout.add_entry(desc, tag or "", name)

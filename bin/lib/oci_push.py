@@ -64,6 +64,10 @@ class RegistryError(Exception):
 CHUNK = 1 << 20                  # bloc de lecture et d'écriture en flux
 UPLOAD_CHUNK = 64 << 20          # au-delà, envoi par morceaux (PATCH) reprenable
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# revue 2.6.0 : corps lus en mémoire bornés (manifeste comme containerd,
+# réponse d'un serveur de jetons, corps d'une erreur)
+MANIFEST_MAX = 4 << 20
+TOKEN_MAX = 64 << 10
 
 
 class _Limited:
@@ -171,12 +175,17 @@ class Registry:
             req.add_header("Authorization", self._basic())
         try:
             with self.opener.open(req, timeout=self.timeout) as r:
-                body = json.load(r)
+                raw = r.read(TOKEN_MAX + 1)
+            if len(raw) > TOKEN_MAX:
+                raise RegistryError(f"{self.host}: token reply too large", code="too-large")
+            body = json.loads(raw)
         except urllib.error.HTTPError as e:
             e.close()
             raise RegistryError(f"{self.host}: authentication refused (HTTP {e.code})") from None
         except urllib.error.URLError as e:
             raise RegistryError(f"{self.host}: authentication failed ({e.reason})") from None
+        except ValueError:
+            raise RegistryError(f"{self.host}: unreadable token reply") from None
         except OSError as e:
             raise RegistryError(f"{self.host}: authentication failed ({e})") from None
         tok = body.get("token") or body.get("access_token")
@@ -185,13 +194,16 @@ class Registry:
         return "Bearer " + tok
 
     def _http_error(self, method, url, e):
-        text = e.read()[:200].decode(errors="replace")
+        text = e.read(200).decode(errors="replace")
         e.close()
         return RegistryError(f"{method} {self.host}{urllib.parse.urlparse(url).path}: HTTP {e.code} {text}")
 
-    def _read(self, r, stream_to):
+    def _read(self, r, stream_to, cap=MANIFEST_MAX):
         if stream_to is None:
-            return r.read()
+            data = r.read(cap + 1)
+            if len(data) > cap:
+                raise RegistryError(f"{self.host}: reply too large (more than {cap} bytes)", code="too-large")
+            return data
         if hasattr(stream_to, "start"):
             stream_to.start(r.status)
         while True:
@@ -201,7 +213,7 @@ class Registry:
             stream_to.write(b)
 
     def request(self, method, url, scope, data=None, headers=None, ok=(),
-                stream_to=None, body_file=None, body_size=None):
+                stream_to=None, body_file=None, body_size=None, cap=MANIFEST_MAX):
         """(code, en-têtes, corps). Un 401 fait prendre un jeton ou poser
         Basic, une fois ; une redirection est suivie sans identifiant. Toute
         panne, y compris celle de la cible d'une redirection, devient une
@@ -231,7 +243,7 @@ class Registry:
             req = urllib.request.Request(url, data=body, method=method, headers=h)
             try:
                 with self.opener.open(req, timeout=self.timeout) as r:
-                    return r.status, r.headers, self._read(r, stream_to)
+                    return r.status, r.headers, self._read(r, stream_to, cap)
             except urllib.error.HTTPError as e:
                 try:
                     if e.code in (301, 302, 303, 307, 308) and method in ("GET", "HEAD") and e.headers.get("Location"):
@@ -240,7 +252,7 @@ class Registry:
                         try:
                             with self.opener.open(urllib.request.Request(loc, method=method, headers=rh),
                                                   timeout=self.timeout) as r:
-                                return r.status, r.headers, self._read(r, stream_to)
+                                return r.status, r.headers, self._read(r, stream_to, cap)
                         except urllib.error.HTTPError as e2:
                             if e2.code in ok:
                                 e2.close()
@@ -282,7 +294,7 @@ class Registry:
         return body, mt
 
     def blob(self, repo, digest):
-        _, _, body = self.request("GET", f"/v2/{repo}/blobs/{digest}", f"repository:{repo}:pull")
+        _, _, body = self.request("GET", f"/v2/{repo}/blobs/{digest}", f"repository:{repo}:pull", cap=UPLOAD_CHUNK)
         if digest_of(body) != digest:
             raise RegistryError(f"{self.host}/{repo}: blob {digest[:19]} does not match its digest")
         return body
@@ -325,12 +337,14 @@ class Registry:
         body, _ = self.manifest(repo, ref)
         return digest_of(body)
 
-    def blob_to_file(self, repo, digest, path, on_bytes=None):
+    def blob_to_file(self, repo, digest, path, on_bytes=None, size=None):
         """Blob écrit dans `path` en flux : `path.part` d'abord, empreinte
         calculée pendant l'écriture, renommé seulement si elle est juste
         (sinon supprimé, RegistryError `digest-mismatch`). Un `.part` laissé
         par une copie interrompue est repris où il s'arrête (Range) ; si le
-        registre renvoie tout le blob (200), la copie repart de zéro."""
+        registre renvoie tout le blob (200), la copie repart de zéro.
+        `size` (taille du descripteur) : la copie s'arrête dès qu'elle la
+        dépasse, et un blob plus court est refusé (`size-mismatch`)."""
         if not DIGEST_RE.match(digest or ""):
             raise RegistryError(f"{self.host}/{repo}: {digest!r} is not a sha256 digest")
         part = str(path) + ".part"
@@ -344,10 +358,13 @@ class Registry:
             pass
         try:
             with open(part, "ab" if have else "wb") as f:
-                sink = _BlobSink(f, h, have, on_bytes)
+                sink = _BlobSink(f, h, have, on_bytes, size, f"{self.host}/{repo}: blob {digest[:19]}")
                 self.request("GET", f"/v2/{repo}/blobs/{digest}", f"repository:{repo}:pull",
                              headers={"Range": f"bytes={have}-"} if have else None, ok=(416,),
                              stream_to=sink)
+            if size is not None and sink.total != size:
+                raise RegistryError(f"{self.host}/{repo}: blob {digest[:19]} is shorter than its {size} bytes",
+                                    code="size-mismatch")
             if "sha256:" + sink.h.hexdigest() != digest:
                 raise RegistryError(f"{self.host}/{repo}: blob {digest[:19]} does not match its digest",
                                     code="digest-mismatch")
@@ -438,16 +455,21 @@ class _BlobSink:
     ignoré la demande de reprise (statut 200 et non 206), vide d'abord le
     fichier partiel."""
 
-    def __init__(self, f, h, have, on_bytes):
+    def __init__(self, f, h, have, on_bytes, size=None, what="blob"):
         self.f, self.h, self.have, self.on_bytes = f, h, have, on_bytes
+        self.size, self.what, self.total = size, what, have
 
     def start(self, status):
         if self.have and status != 206:
             self.f.seek(0)
             self.f.truncate()
             self.h = hashlib.sha256()
+            self.total = 0
 
     def write(self, b):
+        self.total += len(b)
+        if self.size is not None and self.total > self.size:
+            raise RegistryError(f"{self.what} is larger than its {self.size} bytes", code="size-mismatch")
         self.h.update(b)
         self.f.write(b)
         if self.on_bytes:

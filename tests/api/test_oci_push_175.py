@@ -47,6 +47,7 @@ class FakeRegistry:
         # revue 2.6.0 : adresse d'envoi, royaume du jeton et cible de
         # redirection imposés (autre hôte, autre schéma)
         self.location_base, self.realm_url, self.redirect_to = "", None, None
+        self.token_pad = 0
         reg = self
 
         class H(BaseHTTPRequestHandler):
@@ -89,7 +90,7 @@ class FakeRegistry:
                     want = "Basic " + base64.b64encode(f"{reg.user}:{reg.password}".encode()).decode()
                     if self.headers.get("Authorization") != want:
                         return self._send(401, b"{}")
-                    return self._send(200, json.dumps({"token": "good-token"}).encode())
+                    return self._send(200, json.dumps({"token": "good-token", "pad": "x" * reg.token_pad}).encode())
                 if path.startswith("/cdn/"):
                     if self.headers.get("Authorization"):
                         return self._send(400, b"only one auth mechanism allowed")
@@ -722,3 +723,43 @@ def test_the_opener_has_no_file_ftp_or_data_handler():
     c = op.Registry("127.0.0.1:1", plain_http=True)
     kinds = {type(h).__name__ for h in c.opener.handlers}
     assert not kinds & {"FileHandler", "FTPHandler", "CacheFTPHandler", "DataHandler"}
+
+
+
+# ---------------------------------------------------------------------------
+# Revue 2.6.0 (I4) : tailles bornées (disque et mémoire)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("declared,match", [
+    ("smaller", "larger than"),            # le registre envoie plus que le descripteur
+    ("larger", "shorter than"),            # moins : refusé aussi, même si l'empreinte collait
+])
+def test_a_blob_past_or_short_of_its_declared_size_is_refused(reg, tmp_path, declared, match):
+    data = payload(3 << 20)
+    reg.blobs[sha(data)] = data
+    size = len(data) - (1 << 20) if declared == "smaller" else len(data) + 1
+    seen = []
+    with pytest.raises(op.RegistryError, match=match) as e:
+        client(reg).blob_to_file("x/y", sha(data), tmp_path / "b", on_bytes=seen.append, size=size)
+    assert e.value.code == "size-mismatch"
+    assert not (tmp_path / "b").exists() and not (tmp_path / "b.part").exists()
+    if declared == "smaller":
+        assert sum(seen) <= size                     # rien d'écrit au-delà de la taille annoncée
+
+
+def test_a_manifest_over_the_cap_is_refused(reg):
+    big = b'{"schemaVersion":2,"x":"' + b"a" * (op.MANIFEST_MAX) + b'"}'
+    reg.manifests[("x/y", "1")] = (big, op.M_OCI)
+    with pytest.raises(op.RegistryError, match="too large") as e:
+        client(reg).manifest("x/y", "1")
+    assert e.value.code == "too-large"
+
+
+def test_a_token_reply_over_the_cap_is_refused():
+    r = FakeRegistry(user="ju", password="pw")
+    try:
+        r.token_pad = op.TOKEN_MAX
+        r.manifests[("x/y", "1")] = (b"{}", op.M_OCI)
+        with pytest.raises(op.RegistryError, match="too large"):
+            client(r).manifest_digest("x/y", "1")
+    finally:
+        r.close()
