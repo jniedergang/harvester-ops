@@ -130,7 +130,23 @@ class Registry:
             ctx = ssl.create_default_context(cadata=ca_pem) if ca_pem else ssl.create_default_context()
         except (ssl.SSLError, ValueError) as e:
             raise RegistryError(f"{host}: unreadable registry CA ({e})") from None
-        self.opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=ctx))
+        # revue 2.6.0 : HTTP(S) seulement, sans file:, ftp: ni data: (un
+        # royaume ou une redirection hostile ne lit pas un fichier local)
+        self.opener = urllib.request.OpenerDirector()
+        for handler in (urllib.request.ProxyHandler(), urllib.request.HTTPHandler(),
+                        urllib.request.HTTPSHandler(context=ctx), urllib.request.HTTPDefaultErrorHandler(),
+                        _NoRedirect(), urllib.request.HTTPErrorProcessor()):
+            self.opener.add_handler(handler)
+        self.schemes = ("https", "http") if plain_http else ("https",)
+
+    def _check_scheme(self, url, what):
+        """Royaume d'un jeton ou cible d'une redirection : https, ou http
+        pour un registre en clair ; jamais un passage de https à http."""
+        scheme = urllib.parse.urlparse(url).scheme.lower()
+        if scheme not in self.schemes:
+            raise RegistryError(f"{self.host}: {what} with scheme {scheme or '?'!r} refused "
+                                f"({' or '.join(self.schemes)} only)")
+        return url
 
     def _own(self, url):
         """Vrai si `url` vise le registre même (schéma et hôte:port)."""
@@ -150,7 +166,7 @@ class Registry:
         q = {"service": p.get("service", "")}
         if scope:
             q["scope"] = scope
-        req = urllib.request.Request(p["realm"] + "?" + urllib.parse.urlencode(q))
+        req = urllib.request.Request(self._check_scheme(p["realm"], "token realm") + "?" + urllib.parse.urlencode(q))
         if self._basic():
             req.add_header("Authorization", self._basic())
         try:
@@ -219,7 +235,7 @@ class Registry:
             except urllib.error.HTTPError as e:
                 try:
                     if e.code in (301, 302, 303, 307, 308) and method in ("GET", "HEAD") and e.headers.get("Location"):
-                        loc = urllib.parse.urljoin(url, e.headers["Location"])
+                        loc = self._check_scheme(urllib.parse.urljoin(url, e.headers["Location"]), "redirect")
                         rh = {k: v for k, v in (headers or {}).items() if k.lower() in ("range", "accept")}
                         try:
                             with self.opener.open(urllib.request.Request(loc, method=method, headers=rh),
@@ -345,7 +361,7 @@ class Registry:
         return path
 
     def _upload_url(self, loc):
-        return urllib.parse.urljoin(self.base + "/", loc)
+        return self._check_scheme(urllib.parse.urljoin(self.base + "/", loc), "upload location")
 
     def push_blob_file(self, repo, digest, path, size, mount_from=None, on_bytes=None,
                        chunk=UPLOAD_CHUNK):

@@ -684,3 +684,41 @@ def test_a_401_from_another_host_fetches_no_token_and_sends_nothing(tmp_path):
     finally:
         s.close()
         r.close()
+
+
+@pytest.mark.parametrize("what,target", [
+    ("realm", "file:///etc/hostname"),
+    ("realm", "ftp://127.0.0.1/token"),
+    ("redirect", "file:///etc/hostname"),
+    ("redirect", "data:text/plain,abc"),
+])
+def test_only_http_schemes_are_followed(tmp_path, what, target):
+    r = FakeRegistry(user=None if what == "redirect" else "ju", password="pw", redirect_blobs=(what == "redirect"))
+    try:
+        data = b"abc"
+        r.blobs[sha(data)] = data
+        if what == "realm":
+            r.realm_url = target
+        else:
+            r.redirect_to = target
+        c = op.Registry(r.host, {"username": "ju", "password": "pw"}, plain_http=True)
+        with pytest.raises(op.RegistryError, match="scheme"):
+            c.blob_to_file("x/y", sha(data), tmp_path / "out")
+        assert not (tmp_path / "out").exists() and not (tmp_path / "out.part").exists()
+    finally:
+        r.close()
+
+
+def test_an_http_realm_is_refused_for_an_https_registry(tls_pki, tls_reg):
+    tls_reg.user, tls_reg.password = "ju", "pw"
+    tls_reg.realm_url = "http://127.0.0.1:9/token"
+    tls_reg.manifests[("x/y", "1")] = (b"{}", op.M_OCI)
+    c = op.Registry(tls_reg.host, {"username": "ju", "password": "pw"}, ca_pem=(tls_pki / "ca.crt").read_text())
+    with pytest.raises(op.RegistryError, match="scheme"):
+        c.manifest_digest("x/y", "1")
+
+
+def test_the_opener_has_no_file_ftp_or_data_handler():
+    c = op.Registry("127.0.0.1:1", plain_http=True)
+    kinds = {type(h).__name__ for h in c.opener.handlers}
+    assert not kinds & {"FileHandler", "FTPHandler", "CacheFTPHandler", "DataHandler"}
