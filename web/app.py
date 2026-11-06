@@ -1249,9 +1249,25 @@ def required_role_for(path, method):
     # le dit pas) : un opérateur annule son propre geste sur une VM KVM
     if method == "DELETE" and path.startswith("/api/action/"):
         return "operator"
+    if path.startswith(("/api/registries", "/api/artefacts")):
+        return _artefacts_required_role(path)
     if path.startswith(ADMIN_ONLY_PREFIXES) or path.endswith(ADMIN_ONLY_SUFFIXES):
         return "admin"
     return "operator"
+
+
+# 2.6.0 : paquets d'artefacts et registres (point 195). Importer ou supprimer
+# un paquet, les clés et le mode strict, déclarer un registre du client, poser
+# ou supprimer un registre d'amorçage = admin ; rattacher un registre à un
+# cluster (ses identifiants), le vérifier et publier un paquet = opérateur.
+def _artefacts_required_role(path):
+    parts = path.split("/")
+    if path.startswith("/api/registries/") and len(parts) == 6 and parts[3] != "bootstrap" \
+            and parts[4] in ("attach", "check"):
+        return "operator"
+    if path.startswith("/api/artefacts/") and len(parts) == 6 and parts[5] == "publish":
+        return "operator"
+    return "admin"
 
 
 # v1.96.0 : hôtes KVM. Déclarer un hôte (et en relever les empreintes, ce qui
@@ -33979,6 +33995,154 @@ def _deploy_with_install(plan_name, plan_variables, cluster, vip, rows, kind, re
 # revue B2-I1 : au chargement (console comme ligne de commande, sans risque
 # pour un déroulé vivant : son verrou est tenu)
 _deploy_mark_orphans()
+
+
+# ---------------------------------------------------------------------------
+# 2.6.0 : registres déclarés (bin/lib/registries.py, bin/harvester-registry.py)
+#
+# Déclarations sans secret dans l'état de la console (comme les plans) ;
+# identifiants saisis au rattachement et posés en Secrets sur le cluster
+# Harvester par l'outil (action suivie, demande dans un fichier privé effacé
+# à la fin, jamais en argument). Voir
+# docs/design/2026-11-05-artefacts-registre-260-plan.md (tâches 6 à 8).
+# ---------------------------------------------------------------------------
+import registries as _rg  # noqa: E402
+
+REGISTRY_SCRIPT = "harvester-registry.py"
+
+
+def _registry_cmd(sub):
+    script = BIN_DIR / REGISTRY_SCRIPT
+    if not script.is_file():
+        return None
+    return [sys.executable, str(script), f"--state-dir={_bm_profiles_state()}", sub]
+
+
+def _registry_name_ok(name):
+    return bool(_dpl.NAME_RE.match(name or "")) and len(name) <= _rg.NAME_MAX
+
+
+@app.route("/api/registries", methods=["GET"])
+@requires_auth
+def api_registries_list():
+    return jsonify({"registries": _rg.list_decls(_bm_profiles_state())})
+
+
+@app.route("/api/registries/<name>", methods=["GET"])
+@requires_auth
+def api_registry_get(name):
+    d = _rg.load(_bm_profiles_state(), name) if _registry_name_ok(name) else None
+    if d is None:
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    return jsonify(d)
+
+
+@app.route("/api/registries/<name>", methods=["PUT"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_registry_put(name):
+    """Déclare (ou modifie, à la révision lue) un registre du client. Un
+    registre d'amorçage n'est déclaré que par son déploiement."""
+    if not _registry_name_ok(name):
+        return jsonify({"error": f"invalid name (RFC 1123, {_rg.NAME_MAX} characters at most)",
+                        "fields": ["name"]}), 400
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return _bm_errors_json([("registry", "not a mapping")], "invalid registry declaration")
+    rev, err = _deploy_revision(data)
+    if err:
+        return err
+    doc = _deploy_doc(data)
+    current = _rg.load(_bm_profiles_state(), name)
+    if doc.get("kind") == "bootstrap" or (current or {}).get("kind") == "bootstrap":
+        return jsonify({"error": "a bootstrap registry is declared by its deployment",
+                        "code": "registry-bootstrap"}), 409
+    # la liste des clusters rattachés et des paquets publiés appartient aux
+    # gestes qui les écrivent, jamais au formulaire
+    for k in ("clusters", "published"):
+        doc[k] = (current or {}).get(k) or []
+    doc["updated_by"] = current_user() or ""
+    try:
+        out = _rg.save(_bm_profiles_state(), name, doc, rev)
+    except _dpl.PlanConflict as e:
+        return jsonify({"error": "the registry changed in the meantime", "code": "conflict",
+                        "current_revision": e.current_revision}), 409
+    except _dpl.ProfileError as e:
+        return _bm_errors_json(e.errors, "invalid registry declaration")
+    return jsonify(out), 201 if out["revision"] == 1 else 200
+
+
+@app.route("/api/registries/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_registry_delete(name):
+    if not _registry_name_ok(name):
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    try:
+        _rg.forget(_bm_profiles_state(), name)
+    except KeyError:
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    except ValueError as e:
+        code = "registry-in-use" if str(e).startswith("registry-in-use") else "registry-bootstrap"
+        return jsonify({"error": str(e), "code": code}), 409
+    return "", 204
+
+
+def _registry_target(name, cluster):
+    """(déclaration, kubeconfig de la personne) ou une réponse d'erreur."""
+    d = _rg.load(_bm_profiles_state(), name) if _registry_name_ok(name) else None
+    if d is None:
+        return None, None, (jsonify({"error": "no such registry", "code": "registry-unknown"}), 404)
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return None, None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
+    return d, kc, None
+
+
+@app.route("/api/registries/<name>/attach/<cluster>", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_registry_attach(name, cluster):
+    """Pose les Secrets du registre sur le cluster Harvester (identifiants
+    dans le corps, jamais renvoyés) : action suivie."""
+    d, kc, err = _registry_target(name, cluster)
+    if err:
+        return err
+    try:
+        creds = _rg.check_creds(request.get_json(silent=True))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    cmd = _registry_cmd("attach")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    run, err = _cli_action(cluster, f"registry-attach:{cluster}/{name}",
+                           cmd + [name, "--cluster", cluster, "--kubeconfig", kc], "harvester-registry",
+                           spec=creds)
+    if err:
+        return err
+    warn = ["registry-pull-is-push"] if creds["pull"]["username"] == creds["push"]["username"] else []
+    return jsonify({"action_id": run.id, "registry": name, "cluster": cluster, "warnings": warn}), 202
+
+
+@app.route("/api/registries/<name>/check/<cluster>", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_registry_check(name, cluster):
+    """Constats d'un registre sur un cluster : Secrets posés, puis sondes de
+    lecture et d'écriture depuis la console, sans rien écrire."""
+    if not _registry_name_ok(name) or _rg.load(_bm_profiles_state(), name) is None:
+        return jsonify({"registry": name, "cluster": cluster,
+                        "findings": _rg.check(None, {}, name), "blocked": True})
+    d, kc, err = _registry_target(name, cluster)
+    if err:
+        return err
+    cmd = _registry_cmd("check")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    res, err = _capi_run_json(cmd + [name, "--cluster", cluster, "--kubeconfig", kc], timeout=90)
+    if err:
+        return err
+    return jsonify(res[0])
 
 
 if __name__ == "__main__":

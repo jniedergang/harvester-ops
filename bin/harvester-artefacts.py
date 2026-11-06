@@ -614,6 +614,7 @@ def cmd_remove(args):
 def parser():
     p = argparse.ArgumentParser(prog="harvester-artefacts", allow_abbrev=False,
                                 description="Signed artefact packages: pack, sign, verify, import.")
+    p.add_argument("--state-dir", help="console state directory (default HARVESTER_OPS_STATE_DIR)")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("pack", allow_abbrev=False, help="build a package from a description")
     s.add_argument("description")
@@ -651,6 +652,8 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.state_dir:
+        os.environ["HARVESTER_OPS_STATE_DIR"] = os.path.abspath(args.state_dir)
     return args.fn(args)
 
 
