@@ -248,3 +248,14 @@ def test_the_acknowledgement_is_bound_to_the_checked_archive(env, pkg, tmp_path,
     assert r.status_code == 409 and r.get_json()["code"] == "archive-changed"
     # l'archive reste à accepter, avec la bonne empreinte
     assert (env["state"] / "artefacts" / "incoming" / "socle-2026.11.tar.gz").is_file()
+
+
+def test_an_archive_named_after_another_package_is_refused_at_upload(env, pkg, tmp_path):
+    """Revue m-11 : le nom de fichier doit être `<nom>-<version>` de l'index,
+    sinon Accepter viserait une archive qui n'existe pas (déjà refusé par
+    artefacts.inspect_package : test de non-régression)."""
+    other = tmp_path / "autre-2026.11.tar.gz"
+    other.write_bytes(Path(pkg).read_bytes())
+    r = upload(env["client"], other)
+    staged = r.get_json().get("staged") or {}
+    assert staged.get("ok") is False and staged.get("code") == "root-mismatch", r.get_json()

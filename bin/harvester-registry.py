@@ -321,7 +321,17 @@ def cmd_deploy(args):
     if not 5 <= args.size_gib <= 2048:
         step("check", "error", "size: an integer from 5 to 2048 GiB")
         return EXIT_REFUSED
+    if args.dns_name and not rg.HOST_RE.fullmatch(args.dns_name):
+        # revue m-4 : écrit tel quel dans l'extension du certificat
+        step("check", "error", "--dns-name: a host name")
+        return EXIT_REFUSED
     kube, entry = kube_from(args, need_entry=not args.dry_run)
+    if not args.dry_run and not (entry or {}).get("nodes"):
+        # revue m-5 : les images du registre s'importent sur les nœuds de la
+        # configuration ; sans elle, un message plutôt qu'une trace
+        step("check", "error", f"{args.cluster}: no nodes in the console configuration (the registry "
+                               "images are imported on each node)")
+        return EXIT_REFUSED
     step("check", "running", f"{args.name} on {args.cluster} at {args.address}")
     try:
         findings = rs.check(spec, deploy_facts(kube, spec))

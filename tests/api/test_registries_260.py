@@ -387,3 +387,25 @@ def test_attach_refuses_a_bootstrap_registry():
     with pytest.raises(ValueError, match="registry-bootstrap"):
         rg.attach(kube, decl("amorcage", kind="bootstrap"), {"push": {"username": "u", "password": PUSH_PW}})
     assert kube.applied == []
+
+
+@pytest.mark.parametrize("user,password,ok", [
+    ("pull", "pass word:with colon", True),          # revue m-3 : un mot de passe peut porter espace et ':'
+    ("pull", "x\n", False),                          # jamais de fin de ligne (fichier htpasswd, config.json)
+    ("pu ll", "x", False),
+    ("pu:ll", "x", False),
+    ("pull\n", "x", False),                          # `$` laissait passer une fin de ligne
+])
+def test_credentials_rules_apply_the_colon_rule_to_the_username_only(user, password, ok):
+    creds = {"push": {"username": user, "password": password}}
+    if ok:
+        assert rg.check_creds(creds)["push"]["password"] == password
+    else:
+        with pytest.raises(ValueError) as e:
+            rg.check_creds(creds)
+        assert password not in str(e.value) or password == "x"
+
+
+def test_a_host_with_a_trailing_newline_is_refused():
+    with pytest.raises(dp.ProfileError):
+        rg.check_decl(decl("a", endpoint="h.example:443\n"))

@@ -203,3 +203,15 @@ def test_wait_ready_wants_401_then_the_read_account(tmp_path):
         assert why == "the registry answered without authentication"
     finally:
         r.close()
+
+
+@pytest.mark.parametrize("extra,entry,why", [
+    (("--dns-name", "bad name\nsubjectAltName=DNS:evil"), {"nodes": [{"ip": "10.0.0.1"}]}, "--dns-name"),   # m-4
+    ((), None, "no nodes in the console configuration"),                                                   # m-5
+    ((), {"kubeconfig": "/k"}, "no nodes in the console configuration"),
+])
+def test_deploy_refuses_a_bad_dns_name_or_a_cluster_without_nodes(world, capsys, monkeypatch, extra, entry, why):
+    monkeypatch.setattr(cli, "kube_from", lambda args, need_entry=False: (world["kube"], entry))
+    code, out, err = deploy(capsys, *extra)
+    assert code == 2 and why in err and "Traceback" not in err
+    assert world["kube"].applied == [] and world["imports"] == []

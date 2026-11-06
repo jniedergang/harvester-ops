@@ -35,7 +35,10 @@ USAGES = ("images", "charts")
 NAME_MAX = 30                       # <cluster>-registry-<registre>-auth tient dans 253
 HOST_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
                      r"|\d{1,3}(?:\.\d{1,3}){3})(?::\d{1,5})?$")
-CRED_RE = re.compile(r"^[^\s:]{1,256}$")
+# revue m-3 : `:` et espaces interdits dans le nom seulement (htpasswd,
+# auth de config.json) ; un mot de passe sans fin de ligne ni NUL ; fullmatch
+USER_RE = re.compile(r"[^\s:]{1,256}")
+PASSWORD_RE = re.compile(r"[^\r\n\x00]{1,256}")
 KEYS = {"name", "revision", "kind", "software", "endpoint", "push_endpoint", "ca_pem", "usage", "mirrors",
         "clusters", "insecure_skip_verify", "published", "updated_by"}
 BOOTSTRAP_KEYS = {"cluster", "address", "size_gib", "storage_class", "dns_name"}
@@ -49,7 +52,7 @@ def _err(errors, where, why):
 def _host_list(v, where, errors):
     if v is None:
         return []
-    if not isinstance(v, list) or not all(isinstance(x, str) and HOST_RE.match(x) for x in v):
+    if not isinstance(v, list) or not all(isinstance(x, str) and HOST_RE.fullmatch(x) for x in v):
         _err(errors, where, "a list of registry hosts (host[:port], no scheme)")
         return []
     return list(dict.fromkeys(v))
@@ -88,7 +91,7 @@ def check_decl(doc):
         v = doc.get(key)
         if v is None and key == "push_endpoint":
             continue
-        if not isinstance(v, str) or not HOST_RE.match(v):
+        if not isinstance(v, str) or not HOST_RE.fullmatch(v):
             _err(errors, key, "host[:port], without scheme nor path")
         else:
             out[key] = v
@@ -211,8 +214,9 @@ def check_creds(creds):
         c = creds.get(role)
         if c is None and role == "pull":
             continue
-        if not isinstance(c, dict) or set(c) != {"username", "password"} or not all(
-                isinstance(c[k], str) and CRED_RE.match(c[k]) for k in c):
+        if not isinstance(c, dict) or set(c) != {"username", "password"} or not (
+                isinstance(c["username"], str) and USER_RE.fullmatch(c["username"])
+                and isinstance(c["password"], str) and PASSWORD_RE.fullmatch(c["password"])):
             raise ValueError(f"credentials.{role}: username and password, no spaces nor ':' in the username")
         out[role] = {"username": c["username"], "password": c["password"]}
     out.setdefault("pull", dict(out["push"]))
