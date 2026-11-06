@@ -331,3 +331,29 @@ def test_the_modules_need_only_the_standard_library():
             "bad = [m for m in sys.modules if m.split('.')[0] in ('yaml', 'requests', 'flask')]; "
             "assert not bad, bad")
     subprocess.run([sys.executable, "-I", "-S", "-c", code], check=True)
+
+
+# ---------------------------------------------------------------------------
+# Revue 2.6.0 (I3) : la plateforme tirée d'un index est celle qu'il désigne
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("child,code", [
+    ("altered", "digest-mismatch"),        # manifeste servi différent de l'empreinte de l'index
+    ("not-a-digest", None),                # empreinte illisible : refusée avant toute requête
+])
+def test_the_platform_manifest_must_match_the_index_entry(src, tmp_path, child, code):
+    images, idx = put_index(src, "a/x", "1", ["amd64"])
+    man_d = images["amd64"][0]
+    body, mt = src.manifests[("a/x", man_d)]
+    if child == "altered":
+        src.manifests[("a/x", man_d)] = (body.replace(b'"schemaVersion": 2', b'"schemaVersion":2'), mt)
+    else:
+        bad = json.dumps({"schemaVersion": 2, "mediaType": op.M_OCI_INDEX, "manifests": [
+            {"mediaType": op.M_OCI, "digest": "sha256:../../x", "size": 1,
+             "platform": {"os": "linux", "architecture": "amd64"}}]}).encode()
+        src.manifests[("a/x", "1")] = (bad, op.M_OCI_INDEX)
+    lay = ol.Layout(tmp_path / "l")
+    with pytest.raises(op.RegistryError) as e:
+        ol.copy_image(registry(src), f"{src.host}/a/x:1", lay)
+    assert e.value.code == code
+    assert not lay.entries()
+    assert not [x for x in src.log if "../" in x[1]]

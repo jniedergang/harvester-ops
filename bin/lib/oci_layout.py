@@ -217,7 +217,14 @@ def _pick_platform(src, repo, body, ref, platform):
         p = m.get("platform") or {}
         got = [p.get("os"), p.get("architecture")] + ([p["variant"]] if len(want) == 3 and p.get("variant") else [])
         if got[:len(want)] == want:
-            return src.manifest(repo, m["digest"]), {"os": want[0], "architecture": want[1],
+            # revue 2.6.0 : l'empreinte de l'index épingle aussi l'image tirée
+            if not op.DIGEST_RE.match(str(m.get("digest") or "")):
+                raise op.RegistryError(f"{ref}: its index names {str(m.get('digest'))[:30]!r}, not a digest")
+            child = src.manifest(repo, m["digest"])
+            if op.digest_of(child[0]) != m["digest"]:
+                raise op.RegistryError(f"{ref}: the {platform} manifest does not match its index entry",
+                                       code="digest-mismatch")
+            return child, {"os": want[0], "architecture": want[1],
                                                      **({"variant": want[2]} if len(want) == 3 else {})}
     raise op.RegistryError(f"{ref}: no {platform} image in its index", code="no-platform")
 
