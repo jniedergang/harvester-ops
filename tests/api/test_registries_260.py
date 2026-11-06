@@ -378,3 +378,12 @@ def test_cli_refuses_a_hand_made_bootstrap_registry_and_bad_credentials(tmp_path
     assert not fake_kubectl["log"].exists()
     assert cli(tmp_path, "forget", "a").returncode == 0
     assert cli(tmp_path, "forget", "a").returncode == 2
+
+
+def test_attach_refuses_a_bootstrap_registry():
+    """Revue I-3 : les comptes d'un registre d'amorçage sont générés par la
+    console ; un opérateur ne doit pas pouvoir les remplacer."""
+    kube = FakeKube()
+    with pytest.raises(ValueError, match="registry-bootstrap"):
+        rg.attach(kube, decl("amorcage", kind="bootstrap"), {"push": {"username": "u", "password": PUSH_PW}})
+    assert kube.applied == []

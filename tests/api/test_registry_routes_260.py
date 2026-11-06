@@ -237,3 +237,16 @@ def test_bootstrap_limits_are_readable():
     for fn in ("api_registry_bootstrap_deploy", "api_registry_bootstrap_delete"):
         i = src.index(f"def {fn}(")
         parse_many(re.findall(r'@_rate_limit\("([^"]+)"\)', src[i - 160:i])[-1])
+
+
+def test_attach_of_a_bootstrap_registry_is_refused(env, monkeypatch):
+    """Revue I-3 : 409 registry-bootstrap, aucune action lancée."""
+    import registries as rg
+    import registry_seed as rs
+    d = rs.declaration(dict(boot(), name="amorcage"), "", "harvlab")
+    d.pop("ca_pem")
+    rg.save(env["state"], "amorcage", d)
+    monkeypatch.setattr(wapp, "_cli_action", lambda *a, **k: pytest.fail("no action expected"))
+    r = env["client"].post("/api/registries/amorcage/attach/harvlab",
+                           json={"push": {"username": "u", "password": "p"}})
+    assert r.status_code == 409 and r.get_json()["code"] == "registry-bootstrap"
