@@ -57,9 +57,10 @@ def creds(*names):
 # ---------------------------------------------------------------------------
 # Configuration RKE2 des clusters enfants
 # ---------------------------------------------------------------------------
-def test_one_bootstrap_registry_mirrors_its_origins_without_fallback(ca_pem):
+def test_one_bootstrap_registry_mirrors_its_origins_and_cuts_the_fallback_when_asked(ca_pem):
     d = decl("amorcage", kind="bootstrap", endpoint="172.16.2.76", mirrors=["ghcr.io", "docker.io"], ca=ca_pem)
-    prc, files, secrets = rg.rke2_config(["amorcage"], {"amorcage": d}, CLUSTER, creds("amorcage"))
+    prc, files, secrets = rg.rke2_config(["amorcage"], {"amorcage": d}, CLUSTER, creds("amorcage"),
+                                         no_fallback=True)
     assert prc == {"mirrors": {
         "ghcr.io": {"endpoint": ["https://172.16.2.76"], "rewrite": {"^(.*)$": "ghcr.io/$1"}},
         "docker.io": {"endpoint": ["https://172.16.2.76"], "rewrite": {"^(.*)$": "docker.io/$1"}}},
@@ -86,13 +87,31 @@ def test_two_registries_for_the_same_origin_keep_the_cluster_order(order):
     assert files == []                                    # registres du client seulement : repli gardé
 
 
+@pytest.mark.parametrize("kind", ["external", "bootstrap"])
 @pytest.mark.parametrize("no_fallback,files", [(None, 0), (True, 1), (False, 0)])
-def test_fallback_is_cut_only_when_asked_or_for_a_bootstrap_registry(no_fallback, files):
-    prc, f, _ = rg.rke2_config(["a"], {"a": decl("a")}, CLUSTER, creds("a"), no_fallback=no_fallback)
-    assert len(f) == files
-    prc, f, _ = rg.rke2_config(["z"], {"z": decl("z", kind="bootstrap")}, CLUSTER, creds("z"),
+def test_fallback_is_cut_only_when_asked_never_by_default(kind, no_fallback, files):
+    """Revue I-4, point 198 : `disable-default-registry-endpoint` vaut pour
+    tous les registres miroités ; jamais coupé par défaut, même pour un
+    registre d'amorçage (il couperait les images système de RKE2)."""
+    prc, f, _ = rg.rke2_config(["z"], {"z": decl("z", kind=kind, mirrors=["ghcr.io"])}, CLUSTER, creds("z"),
                                no_fallback=no_fallback)
-    assert len(f) == (0 if no_fallback is False else 1)
+    assert len(f) == files
+
+
+@pytest.mark.parametrize("mirrors_a,mirrors_b,ready,codes", [
+    (["ghcr.io"], [], (), []),                                           # rien des images système
+    (["docker.io"], [], (), ["cluster-registry-no-fallback-system"]),
+    (["ghcr.io"], ["docker.io"], (), ["cluster-registry-no-fallback-system"]),   # miroité par l'autre registre
+    (["registry.rancher.com"], [], (), ["cluster-registry-no-fallback-system"]),
+    (["docker.io"], [], ("a",), []),                                     # le registre porte les images système
+    (["docker.io"], ["docker.io"], ("b",), []),                          # l'un des deux suffit
+    (["ghcr.io"], ["docker.io"], ("a",), ["cluster-registry-no-fallback-system"]),   # porté par le mauvais
+])
+def test_no_fallback_for_the_rke2_system_origins_needs_their_images(mirrors_a, mirrors_b, ready, codes):
+    decls = {"a": decl("a", kind="bootstrap", mirrors=mirrors_a), "b": decl("b", mirrors=mirrors_b)}
+    got = rg.fallback_findings(True, ["a", "b"], decls, ready)
+    assert [f["code"] for f in got] == codes and all(f["level"] == "block" for f in got)
+    assert rg.fallback_findings(False, ["a", "b"], decls, ()) == []        # rien à dire sans coupure
 
 
 def test_a_charts_only_registry_stays_out_of_the_node_configuration():

@@ -380,6 +380,34 @@ def child_secret_names(cluster_name, registry):
     return {"auth": f"{cluster_name}-registry-{registry}-auth", "ca": f"{cluster_name}-registry-{registry}-ca"}
 
 
+# Point 198 : les images système de RKE2 viennent de ces registres
+# d'origine. Couper le repli vers Internet pour l'un d'eux, sans ces images
+# dans un registre qui le miroite, empêche les nœuds de démarrer (essais
+# préalables de la 2.6.0 : le cluster a monté en tirant ses images système
+# de docker.io). Et RKE2 coupe le repli pour TOUS les registres miroités à
+# la fois.
+SYSTEM_ORIGINS = ("docker.io", "registry.rancher.com")
+SYSTEM_IMAGE = "rancher/rke2-runtime"
+
+
+def fallback_findings(no_fallback, entries, decls, system_ready=()):
+    """Refus `cluster-registry-no-fallback-system` (bloquant) quand le repli
+    est coupé alors qu'un registre d'origine des images système de RKE2 est
+    miroité sans qu'un registre qui le sert porte ces images
+    (`system_ready` : noms des registres qui les portent)."""
+    if not no_fallback:
+        return []
+    served = {}
+    for e in normalize_entries(entries):
+        d = decls.get(e["registry"]) or {}
+        if "images" in (d.get("usage") or []):
+            for o in d.get("mirrors") or []:
+                served.setdefault(o, []).append(e["registry"])
+    missing = sorted(o for o in SYSTEM_ORIGINS if o in served
+                     and not set(served[o]) & set(system_ready or ()))
+    return [cc.finding("cluster-registry-no-fallback-system", "block", origins=", ".join(missing))] if missing else []
+
+
 def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
     """(privateRegistriesConfig, files, secrets) d'un cluster enfant (pur).
 
@@ -388,8 +416,9 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
     `pull_creds` : {nom: compte de lecture}, lu dans les Secrets `-pull`
     du cluster Harvester (jamais le compte d'écriture).
     `no_fallback` : coupe le repli vers le point d'accès d'origine pour les
-    registres miroités (fichier config.yaml.d de RKE2) ; par défaut, vrai
-    dès qu'un registre d'amorçage est dans la liste.
+    registres miroités (fichier config.yaml.d de RKE2), seulement s'il est
+    demandé (point 198 : jamais par défaut, même pour un registre
+    d'amorçage ; `fallback_findings` refuse la demande avant).
 
     Secrets : `<cluster>-registry-<registre>-auth` (`username`, `password`)
     et `-ca` (`Opaque`, `ca.crt` seul : un Secret `kubernetes.io/tls` vide
@@ -426,8 +455,6 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
         if tls:
             conf["tls"] = tls
         configs[d["endpoint"]] = conf
-    if no_fallback is None:
-        no_fallback = any(decls[n].get("kind") == "bootstrap" for n in used)
     files = []
     if no_fallback and mirrors:
         files.append({"path": NO_FALLBACK_FILE, "owner": "root:root", "permissions": "0600",
