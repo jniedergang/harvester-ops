@@ -62,6 +62,7 @@ import capi_identity as ci  # noqa: E402
 import capi_stack as cs  # noqa: E402
 import capi_services as sv  # noqa: E402
 import longhorn_room as lr  # noqa: E402
+import node_images  # noqa: E402
 from kube import Kube, KubeError, cluster_config  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_BLOCKED, EXIT_CANCELLED = 0, 1, 2, 3
@@ -479,30 +480,12 @@ def cmd_install(args):
 
 def push_images(entry, desc):
     """Airgap : chaque image du paquet importée dans le containerd RKE2 de
-    chaque nœud, par SSH (comme l'installation d'avant Turtles)."""
+    chaque nœud, par SSH (comme l'installation d'avant Turtles ;
+    bin/lib/node_images.py depuis la 2.6.0)."""
     if not entry:
         raise SystemExit("--push-images needs --cluster (nodes and SSH come from the configuration)")
-    ssh = entry.get("ssh") or {}
-    nodes = [n.get("ip") for n in entry.get("nodes") or [] if n.get("ip")]
     files = [f for p in desc["providers"] for f in p.get("image_files") or []]
-    step("images", "running", f"{len(files)} image(s) to load on {len(nodes)} node(s)")
-    remote = ("set -eo pipefail; TMP=$(mktemp); cat > \"$TMP\"; "
-              "{ zcat \"$TMP\" 2>/dev/null || cat \"$TMP\"; } | sudo /var/lib/rancher/rke2/bin/ctr "
-              "--address /run/k3s/containerd/containerd.sock --namespace k8s.io images import -; "
-              "rm -f \"$TMP\"")
-    opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-            "-o", "StrictHostKeyChecking=accept-new", "-p", str(ssh.get("port", 22))]
-    if ssh.get("key"):
-        opts += ["-i", ssh["key"]]
-    for node in nodes:
-        for f in files:
-            with open(f, "rb") as fh:
-                p = subprocess.run(["ssh", *opts, f"{ssh.get('user', 'rancher')}@{node}", remote],
-                                   stdin=fh, capture_output=True, timeout=600)
-            if p.returncode != 0:
-                raise RuntimeError(f"{node}: import of {Path(f).name} failed")
-            step("images", "running", f"{node}: {Path(f).name}")
-    step("images", "done", f"{len(files) * len(nodes)} image import(s)")
+    node_images.import_on_nodes(entry, files, step)
 
 
 def cmd_cleanup(args):
