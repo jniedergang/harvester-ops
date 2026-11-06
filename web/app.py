@@ -21731,7 +21731,7 @@ def api_capi_services(cluster):
     key = (cluster, (current_cluster_identity() or {}).get("user"), current_user())
     hit = _CAPI_SERVICES_CACHE.get(key)
     if hit and request.args.get("fresh") != "1" and time.time() - hit[0] < 5:
-        return jsonify(hit[1])
+        return jsonify(dict(hit[1], registry_charts=_capi_registry_charts(cluster)))
     kc = _kubectl_for_cluster(cluster)
     if kc and _cluster_reachable(kc) is False:
         return jsonify({"unreachable": True, "caaph": False, "clusters": [],
@@ -21744,7 +21744,37 @@ def api_capi_services(cluster):
         return err
     out = res[0]
     _CAPI_SERVICES_CACHE[key] = (time.time(), out)
-    return jsonify(out)
+    return jsonify(dict(out, registry_charts=_capi_registry_charts(cluster)))
+
+
+def _capi_registry_charts(cluster):
+    """2.6.0 (tâche 10) : charts publiés dans les registres rattachés à ce
+    cluster Harvester qui servent des charts, lus dans l'état (paquets
+    rangés) : de quoi remplir « Depuis un registre »."""
+    import artefacts as _artm
+    import oci_layout as _olm
+    import registries as _rgm
+    state = _bm_profiles_state()
+    out = []
+    for summary in _rgm.list_decls(state):
+        d = _rgm.load(state, summary["name"])
+        if not d or cluster not in (d.get("clusters") or []) or "charts" not in (d.get("usage") or []):
+            continue
+        for p in d.get("published") or []:
+            try:
+                pkg = _artm.load_package(state, p.get("package"), p.get("version"))
+            except (_artm.ArtefactError, TypeError):
+                continue
+            for it in pkg["index"].get("items") or []:
+                if it.get("kind") != "chart":
+                    continue
+                try:
+                    meta = _olm.chart_meta(Path(pkg["path"]) / it["chart"])
+                except ValueError:
+                    continue
+                out.append({"registry": d["name"], "package": pkg["name"], "version": pkg["version"],
+                            "item": it["name"], "chart": meta["name"], "chart_version": meta["version"]})
+    return out
 
 
 @app.route("/api/capi/<cluster>/service-check", methods=["POST"])

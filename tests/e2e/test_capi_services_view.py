@@ -82,15 +82,19 @@ def x(root, key):
 def test_catalog_and_deployed_services(view):
     page, host, _ = view()
     cards = host.locator(".svc-card")
-    expect(cards).to_have_count(3)
+    expect(cards).to_have_count(4)
     expect(cards.nth(0)).to_contain_text("Serveur DNS (CoreDNS)")
-    expect(cards.nth(2)).to_contain_text("Chart Helm libre")
+    expect(cards.nth(2)).to_contain_text("Depuis un registre")         # 2.6.0
+    expect(cards.nth(3)).to_contain_text("Chart Helm libre")
     row = host.locator('tr[data-svc="essai/podinfo"]')
     expect(row).to_contain_text("Application témoin (podinfo)")
     expect(row.locator(".badge.ok")).to_contain_text("essai · deployed · r1")
     for b in host.locator("button").all():
         assert b.get_attribute("data-tip"), b.inner_text()
-    assert all(not b.is_disabled() for b in host.locator("[data-svc-deploy]").all())
+    assert all(not b.is_disabled() for b in host.locator('[data-svc-deploy]:not([data-svc-deploy="registry"])').all())
+    # 2.6.0 : aucun chart publié dans un registre rattaché : grisé, la raison dite
+    expect(host.locator('[data-svc-deploy="registry"]')).to_be_disabled()
+    assert "Artefacts" in host.locator('[data-svc-deploy="registry"]').get_attribute("data-tip")
 
 
 def test_without_caaph_the_view_says_so_and_deploy_is_off(view):

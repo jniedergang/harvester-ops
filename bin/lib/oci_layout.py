@@ -321,9 +321,9 @@ def _chart_yaml(text):
     return out
 
 
-def chart_to_layout(tgz, layout):
-    """Le chart `tgz` (sortie de `helm package`) en artefact OCI aux types de
-    Helm. Rend {"name", "version", "digest", "size"}."""
+def chart_meta(tgz):
+    """Scalaires de `<chart>/Chart.yaml` d'un `.tgz` (nom et version exigés) ;
+    ValueError sinon."""
     meta = None
     try:
         with tarfile.open(tgz, "r:gz") as t:
@@ -338,6 +338,13 @@ def chart_to_layout(tgz, layout):
         raise ValueError(f"chart {Path(tgz).name}: no <chart>/Chart.yaml")
     if not meta.get("name") or not meta.get("version"):
         raise ValueError(f"chart {Path(tgz).name}: Chart.yaml has no name or version")
+    return meta
+
+
+def chart_to_layout(tgz, layout):
+    """Le chart `tgz` (sortie de `helm package`) en artefact OCI aux types de
+    Helm. Rend {"name", "version", "digest", "size"}."""
+    meta = chart_meta(tgz)
     layout.init()
     size = os.path.getsize(tgz)
     cdigest = "sha256:" + sha256_file(tgz)

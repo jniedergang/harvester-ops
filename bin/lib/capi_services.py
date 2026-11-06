@@ -10,6 +10,8 @@ contrôle d'une demande, manifestes, lecture de l'état.
 Voir docs/design/2026-09-26-services-capi.md.
 """
 
+import base64
+import json
 import re
 
 K_HCP = "helmchartproxies.addons.cluster.x-k8s.io"
@@ -74,8 +76,12 @@ service:
     },
 }
 CUSTOM = "custom"
+# 2.6.0 (tâche 10) : un chart publié dans un registre déclaré, tiré par CAAPH
+# en `oci://` avec le compte de lecture et la CA du registre
+REGISTRY = "registry"
+SOURCE_KEYS = ("registry", "package", "version", "item")
 KEYS = {"service", "name", "cluster", "repo", "chart", "version", "namespace",
-        "values", "params"}
+        "values", "params", "source"}
 
 
 def catalog():
@@ -95,7 +101,13 @@ def normalize(raw):
     base = CATALOG.get(svc, {})
     params = dict(base.get("params") or {})
     params.update({str(k): str(v) for k, v in (raw.get("params") or {}).items()})
-    return {
+    source = raw.get("source")
+    if source is not None:
+        if not isinstance(source, dict) or set(source) != set(SOURCE_KEYS) or \
+                not all(isinstance(source[k], str) and source[k] for k in SOURCE_KEYS):
+            raise ValueError("source: {registry, package, version, item}")
+        svc = REGISTRY
+    out = {
         "service": svc,
         "name": str(raw.get("name") or svc).strip().lower(),
         "cluster": str(raw.get("cluster") or "").strip(),
@@ -106,6 +118,11 @@ def normalize(raw):
         "values": raw.get("values") if raw.get("values") is not None else base.get("values", ""),
         "params": params,
     }
+    if source is not None:
+        out["service"] = REGISTRY
+        out["source"] = {k: source[k] for k in SOURCE_KEYS}
+        out["name"] = str(raw.get("name") or source["item"]).strip().lower()
+    return out
 
 
 def finding(code, level, **facts):
@@ -119,7 +136,8 @@ def check(spec, facts):
     out = []
     if not facts.get("caaph"):
         out.append(finding("caaph-missing", "block"))
-    if spec["service"] not in CATALOG and spec["service"] != CUSTOM:
+    if spec["service"] not in CATALOG and spec["service"] not in (CUSTOM, REGISTRY) or \
+            (spec["service"] == REGISTRY) != bool(spec.get("source")):
         out.append(finding("service-unknown", "block", service=spec["service"]))
     if not NAME_RE.match(spec["name"]):
         out.append(finding("invalid-name", "block", name=spec["name"]))
@@ -170,7 +188,87 @@ def label_of(name):
     return LABEL_PREFIX + name
 
 
-def manifest(spec):
+# ---------------------------------------------------------------------------
+# Charts tirés d'un registre déclaré (2.6.0, tâche 10)
+# ---------------------------------------------------------------------------
+def _merge(base, over):
+    """Valeurs du formulaire posées sur celles de l'élément du paquet
+    (dictionnaires fusionnés en profondeur, le reste remplacé)."""
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def resolve_source(spec, endpoint, chart, item_values):
+    """La demande d'un chart publié devient celle d'un chart OCI : dépôt
+    `oci://<registre>/charts` (rangement de oci_layout.chart_repo), nom et
+    version du Chart.yaml du paquet, valeurs de l'élément puis celles du
+    formulaire. Rend une copie."""
+    import yaml
+    out = dict(spec, repo=f"oci://{endpoint}/charts", chart=chart["name"], version=chart["version"])
+    form = yaml.safe_load(spec.get("values") or "") or {}
+    if not isinstance(form, dict):
+        raise ValueError("values: a YAML mapping")
+    merged = _merge(item_values or {}, form)
+    out["values"] = yaml.safe_dump(merged, sort_keys=False, allow_unicode=True) if merged else ""
+    return out
+
+
+def registry_secret_names(spec, registry):
+    """Secrets d'un chart publié, dans le namespace du cluster enfant :
+    compte de lecture au format `config.json` de Docker (partagé par les
+    services du même registre) et CA (celui que pose la création du cluster
+    avec ce registre, tâche 9)."""
+    child = spec["cluster"].partition("/")[2]
+    return {"auth": f"{child}-chart-{registry}", "ca": f"{child}-registry-{registry}-ca"}
+
+
+def registry_secrets(spec, registry, endpoint, creds, ca_pem=None, labels=None):
+    """Secrets à poser pour un chart publié (`ca_pem` None : la CA existe
+    déjà ou le registre n'en a pas). Compte de LECTURE seulement : il est
+    lu par CAAPH sur le cluster Harvester. Étiquetés `labels` (la console,
+    le registre) et à ce service : retirés avec lui s'il est le dernier à
+    s'en servir, et avec le cluster."""
+    names = registry_secret_names(spec, registry)
+    ns = spec["cluster"].partition("/")[0]
+    lab = dict(labels or {}, **{label_of(spec["name"]): "on"})
+    auth = base64.b64encode(f"{creds['username']}:{creds['password']}".encode()).decode()
+    docs = [{"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+             "metadata": {"name": names["auth"], "namespace": ns, "labels": dict(lab)},
+             "stringData": {"config.json": json.dumps({"auths": {endpoint: {"auth": auth}}})}}]
+    if ca_pem:
+        docs.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                     "metadata": {"name": names["ca"], "namespace": ns, "labels": dict(lab)},
+                     "stringData": {"ca.crt": ca_pem}})
+    return docs
+
+
+def secrets_of(hcp):
+    """Noms des Secrets qu'un HelmChartProxy désigne (identifiants, CA)."""
+    sp = (hcp or {}).get("spec") or {}
+    return {n for n in (((sp.get("credentials") or {}).get("secret") or {}).get("name"),
+                        ((sp.get("tlsConfig") or {}).get("caSecret") or {}).get("name")) if n}
+
+
+def secrets_to_remove(removed, remaining, secrets):
+    """Secrets d'un service retiré qu'aucun autre service ne désigne plus
+    et que la console a posés pour un service (étiquette `svc-`) : jamais
+    la CA posée par la création du cluster."""
+    keep = set().union(*[secrets_of(h) for h in remaining]) if remaining else set()
+    out = []
+    for s in secrets:
+        md = s.get("metadata") or {}
+        if md.get("name") in secrets_of(removed) - keep and \
+                any(k.startswith(LABEL_PREFIX) for k in (md.get("labels") or {})):
+            out.append(md["name"])
+    return sorted(out)
+
+
+def manifest(spec, registry=None):
+    """HelmChartProxy du service. `registry` (2.6.0) : {"name", "ca": bool}
+    pour un chart publié ; identifiants et CA par les Secrets de
+    `registry_secret_names` (`insecureSkipTLSVerify` jamais posé)."""
     ns, _, _ = spec["cluster"].partition("/")
     body = {"clusterSelector": {"matchLabels": {label_of(spec["name"]): "on"}},
             "repoURL": spec["repo"], "chartName": spec["chart"],
@@ -180,10 +278,18 @@ def manifest(spec):
                         "timeout": "10m0s"}}
     if spec["version"]:
         body["version"] = spec["version"]
+    if registry:
+        names = registry_secret_names(spec, registry["name"])
+        body["credentials"] = {"secret": {"name": names["auth"], "namespace": ns}, "key": "config.json"}
+        if registry.get("ca"):
+            body["tlsConfig"] = {"caSecret": {"name": names["ca"], "namespace": ns}}
     return {"apiVersion": HCP_API, "kind": "HelmChartProxy",
             "metadata": {"name": spec["name"], "namespace": ns,
                          "labels": {MANAGED: "true"},
-                         "annotations": {"harvester-ops.io/service": spec["service"]}},
+                         "annotations": dict({"harvester-ops.io/service": spec["service"]},
+                                             **({"harvester-ops.io/source": "/".join(
+                                                 spec["source"][k] for k in SOURCE_KEYS)}
+                                                if spec.get("source") else {}))},
             "spec": body}
 
 

@@ -716,7 +716,7 @@ def cmd_check(args):
 def _harvester(args):
     """Nom du cluster Harvester dans la console (rattachement des
     registres) : `--harvester-name`, sinon `--cluster`."""
-    return getattr(args, "harvester_name", None) or args.cluster
+    return getattr(args, "harvester_name", None) or getattr(args, "cluster", None)
 
 
 def cmd_render(args):
@@ -1136,10 +1136,60 @@ def cmd_services(args):
     return EXIT_OK
 
 
+def service_source(kube, spec, harvester, read_creds=False):
+    """2.6.0 (tâche 10) : un chart publié dans un registre déclaré. Rend
+    (demande résolue, constats, contexte) ; le contexte porte la
+    déclaration et, pour le déploiement (`read_creds`), le compte de
+    LECTURE lu dans le Secret `-pull` du cluster Harvester."""
+    import artefacts as art
+    import oci_layout as ol
+    if not spec.get("source"):
+        return spec, [], None
+    src = spec["source"]
+    reg, ref = src["registry"], f"{src['package']}-{src['version']}"
+    decl = rg.load(_state(), reg)
+    if decl is None:
+        return spec, [sv.finding("service-registry-unknown", "block", registry=reg)], None
+    found = []
+    if "charts" not in (decl.get("usage") or []):
+        found.append(sv.finding("service-registry-no-charts", "block", registry=reg))
+    try:
+        pull = rg.read_creds(kube, reg, "pull") if harvester in (decl.get("clusters") or []) else None
+    except KubeError:
+        pull = None
+    if pull is None:
+        found.append(sv.finding("service-registry-not-attached", "block", registry=reg, cluster=harvester))
+    try:
+        pkg = art.load_package(_state(), src["package"], src["version"])
+    except art.ArtefactError:
+        return spec, found + [sv.finding("service-package-missing", "block", package=ref)], None
+    item = next((i for i in pkg["index"].get("items") or [] if i.get("name") == src["item"]), None)
+    if item is None or item.get("kind") != "chart":
+        return spec, found + [sv.finding("service-item-not-chart", "block", package=ref, item=src["item"])], None
+    try:
+        meta = ol.chart_meta(Path(pkg["path"]) / item["chart"])
+        resolved = sv.resolve_source(spec, decl["endpoint"], meta, item.get("values") or {})
+    except ValueError as e:
+        return spec, found + [sv.finding("invalid-values", "block", message=str(e)[:200])], None
+    if not any((p.get("package"), p.get("version")) == (src["package"], src["version"])
+               for p in decl.get("published") or []):
+        found.append(sv.finding("service-chart-not-published", "warn", registry=reg, package=ref))
+    ns, _, child = spec["cluster"].partition("/")
+    try:
+        mirrored = kube.get("secrets", ns, rg.child_secret_names(child, reg)["auth"]) is not None
+    except KubeError:
+        mirrored = False
+    if not mirrored:
+        found.append(sv.finding("service-registry-not-mirrored", "warn", registry=reg, cluster=spec["cluster"]))
+    ctx = {"decl": decl, "creds": pull if read_creds else None}
+    return resolved, found, ctx
+
+
 def cmd_service_check(args):
     kube, _, _ = kube_from(args)
     spec = service_spec_from(args.spec)
-    found = sv.check(spec, _service_facts(kube))
+    spec, extra, _ = service_source(kube, spec, _harvester(args))
+    found = sv.check(spec, _service_facts(kube)) + extra
     blocked = bool(sv.blocking(found))
     print(json.dumps({"blocked": blocked, "findings": found,
                       "values": sv.render_values(spec)}))
@@ -1159,7 +1209,8 @@ def cmd_service_deploy(args):
     étiquette, et suit l'installation jusqu'à ce que CAAPH la dise prête."""
     kube, _, _ = kube_from(args)
     spec = service_spec_from(args.spec)
-    found = sv.check(spec, _service_facts(kube))
+    spec, extra, src = service_source(kube, spec, _harvester(args), read_creds=True)
+    found = sv.check(spec, _service_facts(kube)) + extra
     if sv.blocking(found):
         for f in sv.blocking(found):
             step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
@@ -1167,7 +1218,19 @@ def cmd_service_deploy(args):
     ns, _, cluster = spec["cluster"].partition("/")
     step("check", "done", f"{spec['name']} ({spec['chart']} {spec['version'] or 'latest'}) for {spec['cluster']}")
     _ensure_kube_vip(kube, ns, cluster)
-    kube.apply([sv.manifest(spec)])
+    docs, registry = [], None
+    if src:
+        # compte de lecture au format config.json et CA, dans le namespace du
+        # cluster : la CA posée par la création du cluster est reprise
+        decl, reg = src["decl"], spec["source"]["registry"]
+        names = sv.registry_secret_names(spec, reg)
+        ca = decl.get("ca_pem") if decl.get("ca_pem") and kube.get("secrets", ns, names["ca"]) is None else None
+        docs = sv.registry_secrets(spec, reg, decl["endpoint"], src["creds"], ca,
+                                   labels={cc.GENERATED: "true", rg.LABEL: reg})
+        registry = {"name": reg, "ca": bool(decl.get("ca_pem"))}
+        step("registry", "done", f"chart {spec['chart']} {spec['version']} from {reg} ({decl['endpoint']}), "
+                                 "read account")
+    kube.apply(docs + [sv.manifest(spec, registry)])
     kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"labels": {sv.label_of(spec["name"]): "on"}}})
     step("apply", "done", f"service {spec['name']} declared, cluster {cluster} selected")
     deadline = time.time() + args.timeout
@@ -1215,6 +1278,15 @@ def cmd_service_remove(args):
     label = sv.label_of(name)
     kube.delete(sv.K_HCP, ns, name)
     step("remove", "running", f"service {ns}/{name} deleted, releases being uninstalled")
+    # 2.6.0 : identifiants et CA posés pour ce service, s'il était le dernier
+    # à s'en servir (jamais la CA posée par la création du cluster)
+    try:
+        others = [h for h in kube.list(sv.K_HCP, ns) if h["metadata"]["name"] != name]
+        for sname in sv.secrets_to_remove(hcp, others, kube.list("secrets", ns, selector=f"{cc.GENERATED}=true")):
+            kube.delete("secrets", ns, sname)
+            step("remove", "running", f"secret {sname} removed")
+    except KubeError as e:
+        step("remove", "running", f"registry secrets of {name} kept: {str(e)[:120]}")
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         left = [r for r in kube.list(sv.K_HRP, ns)
