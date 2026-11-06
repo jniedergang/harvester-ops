@@ -44,6 +44,9 @@ class FakeRegistry:
         self.fail_patch, self.patches, self.mounts = set(), 0, []
         self.sink, self.sunk = False, {}       # sink : envoi haché au fil de l'eau, rien gardé
         self.where = None                      # ensemble (dépôt, empreinte) : blobs rangés par dépôt
+        # revue 2.6.0 : adresse d'envoi, royaume du jeton et cible de
+        # redirection imposés (autre hôte, autre schéma)
+        self.location_base, self.realm_url, self.redirect_to = "", None, None
         reg = self
 
         class H(BaseHTTPRequestHandler):
@@ -99,7 +102,8 @@ class FakeRegistry:
                         return self._send(401, b"{}", {"WWW-Authenticate": 'Basic realm="fake"'})
                 elif reg.user is not None and self.headers.get("Authorization") != "Bearer good-token":
                     return self._send(401, b"{}", {"WWW-Authenticate":
-                                                   f'Bearer realm="{reg.url}/token",service="fake",scope="repository:x:pull"'})
+                                                   f'Bearer realm="{reg.realm_url or reg.url + "/token"}",service="fake",'
+                                                   'scope="repository:x:pull"'})
                 if path == "/v2/":
                     return self._send(200, b"{}")
                 m = re.match(r"^/v2/(.+?)/(blobs|manifests)/(uploads/)?(.*)$", path)
@@ -117,7 +121,7 @@ class FakeRegistry:
                                 return self._send(201, headers={"Docker-Content-Digest": q["mount"][0]})
                         sid = uuid.uuid4().hex
                         reg.sessions[sid] = bytearray()
-                        return self._send(202, headers={"Location": f"/v2/{repo}/blobs/uploads/{sid}"})
+                        return self._send(202, headers={"Location": f"{reg.location_base}/v2/{repo}/blobs/uploads/{sid}"})
                     sid = ref
                     if sid not in reg.sessions:
                         return self._send(404, b"unknown upload")
@@ -168,7 +172,7 @@ class FakeRegistry:
                     if ref not in reg.blobs or (reg.where is not None and (repo, ref) not in reg.where):
                         return self._send(404)
                     if self.command == "GET" and reg.redirect:
-                        return self._send(307, headers={"Location": f"{reg.url}/cdn/{ref}"})
+                        return self._send(307, headers={"Location": reg.redirect_to or f"{reg.url}/cdn/{ref}"})
                     data = reg.blobs[ref]
                     if ref in reg.corrupt:
                         data = data[:-1] + bytes([data[-1] ^ 1])
@@ -600,3 +604,83 @@ def test_a_registry_ca_of_its_own_is_trusted_only_when_given(tls_pki, tls_reg, c
     else:
         with pytest.raises(op.RegistryError, match="CERTIFICATE_VERIFY_FAILED|certificate verify failed"):
             c.manifest_digest("x/y", "1")
+
+
+# ---------------------------------------------------------------------------
+# Revue 2.6.0 (I1, I2) : identifiants jamais hors du registre, schémas
+# ---------------------------------------------------------------------------
+class Spy:
+    """Second serveur : note chaque requête (méthode, chemin, Authorization)
+    et répond `answer` (201 par défaut, ou 401 avec un défi Bearer qui
+    désigne son propre royaume)."""
+
+    def __init__(self, answer=201):
+        self.seen, self.answer = [], answer
+        spy = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _any(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                if n:
+                    self.rfile.read(n)
+                spy.seen.append((self.command, self.path.partition("?")[0], self.headers.get("Authorization")))
+                if spy.answer == 401 and not self.path.startswith("/token"):
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", f'Bearer realm="{spy.url}/token",service="spy"')
+                else:
+                    self.send_response(201 if spy.answer != 401 else 200)
+                    self.send_header("Docker-Content-Digest", "sha256:" + "0" * 64)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+            do_GET = do_PUT = do_POST = do_PATCH = do_HEAD = _any
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        threading.Thread(target=self.srv.serve_forever, args=(0.05,), daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+@pytest.fixture
+def spy():
+    s = Spy()
+    yield s
+    s.close()
+
+
+@pytest.mark.parametrize("bearer", [False, True])
+def test_an_upload_location_on_another_host_gets_no_credentials(spy, tmp_path, bearer):
+    r = FakeRegistry(user="ju", password="pw", basic=not bearer)
+    try:
+        r.location_base = spy.url
+        data = payload(5000)
+        f = tmp_path / "b"
+        f.write_bytes(data)
+        client(r).push_blob_file("x/y", sha(data), f, len(data))
+        assert [m for m, _, _ in spy.seen] == ["PUT"]
+        assert all(a is None for _, _, a in spy.seen)
+    finally:
+        r.close()
+
+
+def test_a_401_from_another_host_fetches_no_token_and_sends_nothing(tmp_path):
+    s = Spy(answer=401)
+    r = FakeRegistry(user="ju", password="pw", basic=True)
+    try:
+        r.location_base = s.url
+        data = payload(3000)
+        f = tmp_path / "b"
+        f.write_bytes(data)
+        with pytest.raises(op.RegistryError, match="authentication"):
+            client(r).push_blob_file("x/y", sha(data), f, len(data))
+        assert s.seen and not [p for _, p, _ in s.seen if p.startswith("/token")]
+        assert all(a is None for _, _, a in s.seen)
+    finally:
+        s.close()
+        r.close()

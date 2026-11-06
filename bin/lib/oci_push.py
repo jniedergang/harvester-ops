@@ -132,6 +132,11 @@ class Registry:
             raise RegistryError(f"{host}: unreadable registry CA ({e})") from None
         self.opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=ctx))
 
+    def _own(self, url):
+        """Vrai si `url` vise le registre même (schéma et hôte:port)."""
+        a, b = urllib.parse.urlparse(url), urllib.parse.urlparse(self.base)
+        return (a.scheme, a.netloc) == (b.scheme, b.netloc)
+
     def _basic(self):
         if not self.creds:
             return None
@@ -193,10 +198,13 @@ class Registry:
         recommencer."""
         if not url.startswith("http"):
             url = self.base + url
+        # revue 2.6.0 : une adresse d'un autre hôte (Location d'un envoi) ne
+        # reçoit jamais d'identifiant, et son 401 n'en fait pas chercher
+        own = self._own(url)
         start = body_file.tell() if body_file is not None and hasattr(body_file, "tell") else None
         for attempt in (0, 1):
             h = dict(headers or {})
-            if self.auth.get(scope):
+            if self.auth.get(scope) and own:
                 h["Authorization"] = self.auth[scope]
             body = data
             if body_file is not None:
@@ -226,6 +234,9 @@ class Registry:
                             raise RegistryError(f"{method} {self.host}: {e2.reason}") from None
                         except OSError as e2:
                             raise RegistryError(f"{method} {self.host}: {e2}") from None
+                    if e.code == 401 and not own:
+                        raise RegistryError(f"{self.host}: authentication refused by "
+                                            f"{urllib.parse.urlparse(url).netloc}, not the registry") from None
                     if e.code == 401 and attempt == 0:
                         ch = e.headers.get("WWW-Authenticate", "")
                         if ch.lower().startswith("bearer"):
