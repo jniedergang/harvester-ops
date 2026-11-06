@@ -1010,6 +1010,11 @@ def remove_cluster(kube, ns, name, timeout, sleep=None, now=None):
                     kube.delete(kind, ns, obj["metadata"]["name"])
                     gone += 1
                 except KubeError as e:
+                    if "(NotFound)" in str(e):
+                        # 2.6.0, vu en réel : CAPI efface déjà les objets dont
+                        # le Cluster est propriétaire, entre la liste et ici
+                        gone += 1
+                        continue
                     step("delete", "running", f"{kind} {obj['metadata']['name']} kept: {e}")
         if gone:
             step("delete", "running", f"{gone} generated object(s) removed from {ns}")
