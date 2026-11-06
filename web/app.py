@@ -34466,7 +34466,12 @@ def _art_precheck(archive):
     conf = _art_settings()
     accepted, code = _art.decide(trust, conf["strict"])
     need = trust["state"] if code.startswith("acknowledge-") else None
+    h = hashlib.sha256()
+    with open(archive, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
     return {"ok": accepted or need is not None, "name": info["name"], "version": info["version"],
+            "sha256": h.hexdigest(),
             "description": info["index"].get("description", ""), "items": len(info["index"]["items"]),
             "size": info["size"], "files": info["files"], "trust": trust, "strict": conf["strict"],
             "locked": conf["locked"], "acknowledge_needed": need, "code": code}
@@ -34666,14 +34671,37 @@ def api_artefacts_accept(name, version):
         return bad
     b = request.get_json(silent=True) or {}
     ack = b.get("acknowledge")
-    arch = _art_incoming() / f"{name}-{version}.tar.gz"
-    if not arch.is_file():
+    staged = _art_incoming() / f"{name}-{version}.tar.gz"
+    if not staged.is_file():
         return jsonify({"error": "no uploaded archive for this package", "code": "not-uploaded"}), 404
+    # Revue I-2 : l'archive (et sa signature) part dans un répertoire propre
+    # à cette demande AVANT toute vérification ; un téléversement suivant
+    # remplace `incoming/<nom>-<version>.tar.gz` sans jamais toucher ce
+    # qui a été vérifié puis sera extrait.
+    own = Path(tempfile.mkdtemp(prefix="accept-", dir=str(_art_incoming())))
+    arch = own / staged.name
+    os.replace(staged, arch)
+    if Path(str(staged) + ".sig").is_file():
+        os.replace(str(staged) + ".sig", str(arch) + ".sig")
+
+    def give_back():
+        """Refus : l'archive redevient à accepter, sauf si une autre est
+        arrivée entre-temps (elle l'emporte)."""
+        for src, dst in ((arch, staged), (Path(str(arch) + ".sig"), Path(str(staged) + ".sig"))):
+            if src.is_file() and not dst.exists():
+                os.replace(src, dst)
+        shutil.rmtree(own, ignore_errors=True)
     chk = _art_precheck(arch)
     if "trust" not in chk:
+        give_back()
         return jsonify({"error": chk.get("error"), "code": chk.get("code")}), 422
+    if b.get("sha256") is not None and b.get("sha256") != chk["sha256"]:
+        give_back()
+        return jsonify({"error": "the archive changed since it was checked: check it again",
+                        "code": "archive-changed"}), 409
     accepted, code = _art.decide(chk["trust"], chk["strict"], ack)
     if not accepted:
+        give_back()
         if code.startswith("acknowledge-") and code in ("acknowledge-unsigned", "acknowledge-unknown-key"):
             return jsonify({"error": "this package needs an explicit acknowledgement", "code": "acknowledge-required",
                             "state": chk["trust"]["state"], "trust": chk["trust"]}), 409
@@ -34683,20 +34711,22 @@ def api_artefacts_accept(name, version):
         status, c = _ART_REFUSALS.get(code, (422, code))
         return jsonify({"error": f"refused: {code}", "code": c, "state": chk["trust"]["state"]}), status
     if (_art.package_dir(_art_state(), name, version)).exists():
+        give_back()
         return jsonify({"error": f"{name}-{version} is already imported", "code": "exists"}), 409
     cmd = _art_cmd("import")
     if cmd is None:
+        give_back()
         return jsonify({"error": f"{ARTEFACTS_SCRIPT} not deployed"}), 503
     flag = {"unsigned": ["--accept-unsigned"], "unknown-key": ["--accept-unknown-key"]}.get(ack, [])
     cmd += [str(arch), *flag, "--person", current_user() or "?"]
 
     def cleanup():
-        for p in (arch, Path(str(arch) + ".sig")):
-            p.unlink(missing_ok=True)
+        shutil.rmtree(own, ignore_errors=True)
     run, err = _cli_action("", f"artefacts-import:{name}-{version}", cmd, "harvester-artefacts",
                            check_busy=False, capture=True, after=cleanup,
                            setup=lambda r: setattr(r, "required_role", "admin"))
     if err:
+        give_back()
         return err
     return jsonify({"action_id": run.id, "name": name, "version": version, "trust": chk["trust"]["state"]}), 202
 

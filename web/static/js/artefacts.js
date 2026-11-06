@@ -356,7 +356,8 @@ const Artefacts = (() => {
     modal.querySelector('[data-art-accept]').addEventListener('click', async (e) => {
       if (!staged || e.target.disabled) return;
       e.target.disabled = true;
-      const body = { acknowledge: staged.acknowledge_needed || null };
+      // revue I-2 : l'acquittement vaut pour l'archive vérifiée, pas une autre
+      const body = { acknowledge: staged.acknowledge_needed || null, sha256: staged.sha256 || null };
       const r = await fetch(`/api/artefacts/${enc(staged.name)}/${enc(staged.version)}/accept`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const b = await r.json().catch(() => ({}));

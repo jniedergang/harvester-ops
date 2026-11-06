@@ -209,3 +209,42 @@ def test_limits_of_the_package_routes_are_readable():
     for fn in ("api_artefacts_upload", "api_artefacts_accept", "api_artefacts_delete", "api_artefacts_settings_put"):
         i = src.index(f"def {fn}(")
         parse_many(re.findall(r'@_rate_limit\("([^"]+)"\)', src[i - 160:i])[-1])
+
+
+def test_a_swap_after_accept_never_reaches_the_import(env, pkg, tmp_path, monkeypatch):
+    """Revue I-2 : l'archive vérifiée est celle que l'outil extrait. Le
+    téléversement suivant remplace `incoming/<nom>-<version>.tar.gz` ;
+    l'import travaille sur une copie déplacée dans un répertoire propre à
+    l'action, que rien ne touche."""
+    c = env["client"]
+    upload(c, pkg)
+    seen = {}
+
+    def fake(cluster, label, cmd, tool, spec=None, after=None, **kw):
+        arch = Path(next(a for a in cmd if a.endswith(".tar.gz")))
+        incoming = env["state"] / "artefacts" / "incoming" / "socle-2026.11.tar.gz"
+        incoming.write_bytes(b"swapped by a concurrent upload")          # téléversement concurrent
+        seen["path"], seen["data"] = arch, arch.read_bytes()
+        seen["incoming"] = incoming
+
+        class Run:
+            id = "i1i1i1i1i1i1"
+        return Run(), None
+    monkeypatch.setattr(wapp, "_cli_action", fake)
+    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned"})
+    assert r.status_code == 202, r.get_json()
+    assert seen["path"] != seen["incoming"] and seen["path"].parent != seen["incoming"].parent
+    assert seen["data"] == Path(pkg).read_bytes()
+
+
+def test_the_acknowledgement_is_bound_to_the_checked_archive(env, pkg, tmp_path, monkeypatch):
+    """Revue M8 et I-2 : l'empreinte montrée à la pré-vérification revient
+    avec l'acquittement ; une autre archive arrivée entre-temps est refusée."""
+    c = env["client"]
+    staged = upload(c, pkg).get_json()["staged"]
+    assert len(staged["sha256"]) == 64
+    monkeypatch.setattr(wapp, "_cli_action", lambda *a, **k: pytest.fail("no import expected"))
+    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned", "sha256": "0" * 64})
+    assert r.status_code == 409 and r.get_json()["code"] == "archive-changed"
+    # l'archive reste à accepter, avec la bonne empreinte
+    assert (env["state"] / "artefacts" / "incoming" / "socle-2026.11.tar.gz").is_file()

@@ -30,7 +30,7 @@ def staged(state="unsigned", ack="unsigned", code="acknowledge-unsigned", ok=Tru
            principal=None):
     return {"ok": ok, "name": "socle", "version": "2026.11", "items": 3, "size": 1234, "files": 4,
             "trust": {"state": state, "principal": principal, "key_fingerprint": None},
-            "acknowledge_needed": ack, "code": code, "strict": strict, "locked": locked}
+            "acknowledge_needed": ack, "code": code, "strict": strict, "locked": locked, "sha256": "ab" * 32}
 
 
 def open_artefacts(context, flask_server, packages=None, stage=None, accept_log=None, detail=None):
@@ -76,7 +76,7 @@ def test_an_unsigned_package_needs_the_box_ticked_before_accept(context, flask_s
     page.locator('.art-modal [data-x="ack"]').check()
     accept.click()
     expect(page.locator(".art-modal")).to_have_count(0)
-    assert log == [{"acknowledge": "unsigned"}]
+    assert log == [{"acknowledge": "unsigned", "sha256": "ab" * 32}]          # revue I-2 : lié à l'archive vue
 
 
 def test_a_valid_package_is_accepted_without_a_box(context, flask_server, tmp_path):
