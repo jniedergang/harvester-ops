@@ -590,13 +590,13 @@ def test_automation_capi_inline_subtabs(page):
     page.wait_for_timeout(200)
     order = page.evaluate("""() => [...document.querySelectorAll(
         '#tab-automation .sub-tabs-inline[data-only-for="capi"] .sub-tab')].map(b => b.dataset.capiTab)""")
-    assert order == ["clusters", "services", "history", "installation"]
+    assert order == ["clusters", "services", "artefacts", "history", "installation"]
     for tab in ("k8s", "install"):
         assert page.locator(f'.sub-tabs-inline .sub-tab[data-capi-tab="{tab}"]').count() == 0
     # Défaut : Clusters, avec le bouton de création
     expect(page.locator('.capi-tab-content[data-capi-tab="clusters"]')).to_have_class("capi-tab-content active")
     expect(page.locator("#btn-capi-create")).to_be_visible()
-    for tab in ("services", "history", "installation", "clusters"):
+    for tab in ("services", "artefacts", "history", "installation", "clusters"):
         page.click(f'.sub-tabs-inline .sub-tab[data-capi-tab="{tab}"]')
         page.wait_for_timeout(150)
         expect(page.locator(f'.capi-tab-content[data-capi-tab="{tab}"]')).to_have_class("capi-tab-content active")
