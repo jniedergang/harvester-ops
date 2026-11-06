@@ -592,7 +592,8 @@ def test_plan_put_returns_the_warnings_of_a_240_plan(capi):
     assert r.status_code == 201
     assert r.get_json()["warnings"] == ["phases.capi.providers: unknown key, ignored (phase disabled)"]
     assert "warnings" not in c.get("/api/baremetal/plans/old").get_json()
-    assert c.get("/api/baremetal/plans").get_json()["available"] == ["readiness", "terraform", "capi", "clusters"]
+    assert c.get("/api/baremetal/plans").get_json()["available"] == ["readiness", "terraform", "registry", "capi",
+                                                                      "clusters"]
 
 
 def test_bundles_route_lists_the_active_providers(capi, monkeypatch, tmp_path):

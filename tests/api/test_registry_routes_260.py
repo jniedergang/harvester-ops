@@ -206,9 +206,11 @@ def test_bootstrap_deploy_is_a_tracked_action_with_the_client_key_in_the_private
     assert recorded["actions"][1][3] is None                 # CA générée : aucune demande privée
 
 
-def test_bootstrap_delete_needs_the_typed_name_for_the_data(env, recorded):
+def test_bootstrap_delete_needs_the_typed_name_for_the_data(env, recorded, monkeypatch):
     import registries as rg
     import registry_seed as rs
+    # usage (clusters enfants, plans) : test_deploy_registry_260
+    monkeypatch.setattr(wapp, "_registry_users", lambda name, clusters: ([], None))
     d = rs.declaration(dict(boot(), name="amorcage"), "", "harvlab")
     d.pop("ca_pem")
     rg.save(env["state"], "amorcage", d)

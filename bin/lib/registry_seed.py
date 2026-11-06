@@ -88,11 +88,31 @@ def _meta(name, spec, **extra):
     return dict({"name": name, "namespace": NAMESPACE, "labels": {LABEL: spec["name"]}}, **extra)
 
 
-def manifests(spec, tls, htpasswd):
+def origin_of(deployment):
+    """Origine d'un registre posé par la chaîne d'un plan : {plan, run}
+    (étiquette et annotation du Deployment), clés absentes omises."""
+    import capi_cluster as cc
+    return cc.origin_of(deployment)
+
+
+def manifests(spec, tls, htpasswd, origin=None):
     """Objets du registre d'amorçage. `spec` : {"name", "address",
     "size_gib", "storage_class", "image"} ; `tls` : {"crt", "key", "ca"}
     (PEM) ; `htpasswd` : {"read": lignes des comptes push et pull, "write":
-    ligne du compte push} (empreintes bcrypt seulement)."""
+    ligne du compte push} (empreintes bcrypt seulement). `origin` (2.6.0,
+    tâche 11) : {plan, run} d'une chaîne, posés comme sur un cluster enfant
+    (étiquette `harvester-ops.io/plan`, annotation `harvester-ops.io/plan-run`)."""
+    docs = _manifests(spec, tls, htpasswd)
+    import capi_cluster as cc
+    for d in docs[1:] if origin else []:
+        if origin.get("plan"):
+            d["metadata"]["labels"][cc.ORIGIN_LABELS["plan"]] = origin["plan"]
+        if origin.get("run") and d["kind"] == "Deployment":
+            d["metadata"].setdefault("annotations", {})[cc.ORIGIN_ANNOTATIONS["run"]] = origin["run"]
+    return docs
+
+
+def _manifests(spec, tls, htpasswd):
     n = spec["name"]
     sel = {LABEL: n}
     mounts = [{"name": "data", "mountPath": DATA},

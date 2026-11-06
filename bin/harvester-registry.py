@@ -180,9 +180,41 @@ def cmd_show(args):
     return EXIT_OK
 
 
-def cmd_forget(args):
+def users(name, clusters, kube_for=None):
+    """Qui emploie un registre (revue m-15, tâche 11) : plans et modèles de
+    cluster enregistrés, puis clusters enfants et services sur chaque
+    cluster Harvester donné (Secrets étiquetés au nom du registre). Un
+    cluster illisible rend la réponse inconnue : KubeError."""
+    out = dp.registry_users(state(), name)
+    for c in clusters:
+        kube = kube_for(c) if kube_for else Kube((cluster_config(c) or {}).get("kubeconfig"))
+        out += [f"cluster:{c}/{ns}" for ns in rg.child_users(kube, name)]
+    return out
+
+
+def _cluster_kube(c):
     try:
-        rg.forget(state(), args.name)
+        entry = cluster_config(c)
+    except SystemExit:
+        return None
+    if not (entry or {}).get("kubeconfig"):
+        return None
+    return Kube(entry["kubeconfig"])
+
+
+def cmd_forget(args):
+    d = rg.load(state(), args.name)
+    used = []
+    if d is not None and d.get("kind") != "bootstrap":
+        try:
+            # un cluster retiré de la configuration n'emploie plus rien d'ici
+            known = [c for c in d.get("clusters") or [] if _cluster_kube(c) is not None]
+            used = users(args.name, known, _cluster_kube)
+        except (KubeError, SystemExit) as e:
+            step("forget", "error", f"registry-usage-unknown: {str(e)[:200]}")
+            return EXIT_REFUSED
+    try:
+        rg.forget(state(), args.name, used)
     except KeyError:
         step("forget", "error", f"registry-unknown: {args.name}")
         return EXIT_REFUSED
@@ -271,6 +303,11 @@ def wait_ready(decl, pull, timeout, registry_cls=None, clock=time.monotonic, sle
 
 
 def cmd_deploy(args):
+    try:
+        origin = cc.parse_origin(args.origin)
+    except ValueError as e:
+        step("check", "error", str(e))
+        return EXIT_REFUSED
     spec = {"name": args.name, "address": args.address, "size_gib": args.size_gib,
             "storage_class": args.storage_class}
     if args.dns_name:
@@ -319,7 +356,7 @@ def cmd_deploy(args):
         node_images.import_on_nodes(entry, [b["tar"]], step, sid="images")
         step("apply", "running", f"namespace {rs.NAMESPACE}: pod, volume of {args.size_gib} GiB, address "
                                  f"{args.address}")
-        kube.apply(rs.manifests(spec, tls, htp) + rg.attach_manifests(decl, creds)[1:])
+        kube.apply(rs.manifests(spec, tls, htp, origin) + rg.attach_manifests(decl, creds)[1:])
         step("apply", "done", f"{args.name}: deployment, service, volume, secrets")
         step("ready", "running", f"waiting for https://{args.address}/v2/")
         why = wait_ready(decl, creds["pull"], args.timeout)
@@ -373,6 +410,7 @@ def cmd_status(args):
             except (op.RegistryError, ValueError):
                 repos = None
     out({"registry": args.name, "declared": d is not None, "present": dep is not None,
+         "origin": rs.origin_of(dep) if dep else {},
          "ready": bool(st.get("readyReplicas")), "image": containers[0].get("image") if containers else None,
          "address": ingress.get("ip") or (d or {}).get("address"),
          "volume": {"size": (((pvc or {}).get("spec") or {}).get("resources") or {}).get("requests", {}).get("storage"),
@@ -387,6 +425,15 @@ def cmd_delete(args):
         step("delete", "error", f"{args.name} is not a bootstrap registry (use forget)")
         return EXIT_REFUSED
     kube, _ = kube_from(args)
+    try:
+        used = users(args.name, [args.cluster], lambda c: kube)
+    except KubeError as e:
+        step("delete", "error", f"registry-usage-unknown: {str(e)[:200]}")
+        return EXIT_REFUSED
+    if used:
+        step("delete", "error", f"registry-in-use: {', '.join(sorted(set(used)))}")
+        out({"registry": args.name, "deleted": False, "used_by": sorted(set(used))})
+        return EXIT_REFUSED
     names = rg.secret_names(args.name)
     objs = [("deployments", args.name), ("services", args.name), ("configmaps", f"{args.name}-config"),
             ("secrets", f"{args.name}-tls"), ("secrets", f"{args.name}-htpasswd"),
@@ -449,6 +496,7 @@ def parser():
     s.add_argument("--spec", help="private JSON file {cert, key, ca} (client certificate)")
     s.add_argument("--timeout", type=int, default=600)
     s.add_argument("--dry-run", action="store_true", help="checks only")
+    s.add_argument("--origin", default="", help="plan=P,run=ID: origin set on the objects (chain of a plan)")
     s.set_defaults(fn=cmd_deploy)
     s = sub.add_parser("status", allow_abbrev=False)
     s.add_argument("name")

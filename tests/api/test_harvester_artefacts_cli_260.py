@@ -391,9 +391,10 @@ def test_import_twice_is_refused_then_list_and_remove(tmp_path):
     assert json.loads(p.stdout)["code"] == "exists"
     listed = json.loads(run("list", env=env, check=0).stdout)
     assert [(x["name"], x["version"], x["trust"]) for x in listed] == [("socle", "2026.11", "unsigned")]
-    run("remove", "socle", "2026.11", env=env, check=0)
+    # 2.6.0 : `remove` lit les plans (usage du paquet), donc PyYAML
+    run("remove", "socle", "2026.11", env=env, check=0, stdlib_only=False)
     assert json.loads(run("list", env=env, check=0).stdout) == []
-    run("remove", "socle", "2026.11", env=env, check=2)
+    run("remove", "socle", "2026.11", env=env, check=2, stdlib_only=False)
 
 
 def test_sums_written_last_are_refused_by_the_streaming_import(tmp_path, monkeypatch):

@@ -32353,6 +32353,13 @@ DEPLOY_FINDING_LEVELS = {
     "cluster-var-missing": "blocking", "cluster-name-taken": "blocking", "capi-check-failed": "blocking",
     "cluster-failed": "warning",
     "capi-later": "info", "cluster-exists": "info", "refs-later": "info",
+    # 2.6.0 : phase Registre
+    "registry-name-taken": "blocking", "registry-unknown": "blocking", "registry-admin": "blocking",
+    "registry-check-failed": "blocking", "registry-package-too-big": "blocking",
+    "registry-address-differs": "blocking", "artefact-package-missing": "blocking",
+    "package-untrusted-strict": "blocking", "registry-var-missing": "blocking",
+    "registry-exists": "info", "registry-later": "info", "publish-later": "info",
+    "cluster-registry-later": "info",
 }
 # Constats de `harvester-capi check --many` repris dans la phase clusters :
 # niveau de l'outil -> niveau d'un lancement
@@ -32649,13 +32656,15 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
     if (phases.get("readiness") or {}).get("enabled"):
         findings.append(_deploy_finding("readiness-later", "readiness",
                                         "readiness is checked again when the phase starts"))
-    capi = _deploy_capi_prepare(kc, plan, values, install, findings, role=role)
+    reg = _deploy_registry_prepare(kc, plan, values, install, findings, role=role)
+    capi = _deploy_capi_prepare(kc, plan, values, install, findings, role=role, later=reg["created_here"])
     estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) \
-        + (30 if install else 0) + capi["estimate"]
+        + (30 if install else 0) + reg["estimate"] + capi["estimate"]
     summary = {"declarations": decls, "estimate_minutes": estimate, "capi": capi["capi"],
-               "clusters": capi["summary"]}
+               "clusters": capi["summary"], "registries": reg["summary"], "publish": reg["publish"]}
     ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
-           "update_differing": bool(update_differing), "clusters": capi["entries"]}
+           "update_differing": bool(update_differing), "clusters": capi["entries"],
+           "registries": reg["entries"]}
     return findings, summary, ctx
 
 
@@ -32725,7 +32734,175 @@ def _deploy_capi_install_refused(role):
 CAPI_INSTALL_ADMIN = "capi-install-admin"
 
 
-def _deploy_capi_prepare(kc, plan, values, install, findings, role=None):
+def _deploy_registry_json(kc, sub, args, timeout=120):
+    """Sous-commande de harvester-registry ou harvester-artefacts (`sub` :
+    `registry:<sous-commande>` ou `artefacts:<sous-commande>`) qui répond en
+    JSON, hors requête comme dans la requête : (sortie, code, None) ou
+    (None, None, message)."""
+    tool, _, verb = sub.partition(":")
+    cmd = _registry_cmd(verb) if tool == "registry" else _art_cmd(verb)
+    if cmd is None:
+        return None, None, f"{tool} tool not deployed"
+    with app.app_context():
+        got, err = _capi_run_json(cmd + list(args) + ["--kubeconfig", kc], timeout=timeout)
+    if err:
+        body = err[0].get_json(silent=True) or {}
+        return None, None, str(body.get("error") or "failed")[:300]
+    return got[0], got[1], None
+
+
+def _deploy_tool_findings(out, phase, prefix=""):
+    """Constats d'un outil (block/warn/ok) au format d'un lancement."""
+    rows = []
+    for f in (out or {}).get("findings") or []:
+        facts = f.get("facts") or {}
+        text = ", ".join(f"{k}={v}" for k, v in facts.items() if v not in (None, ""))
+        rows.append({"code": f.get("code") or "check", "level": DEPLOY_CHECK_LEVELS.get(f.get("level"), "blocking"),
+                     "phase": phase, "detail": (prefix + text) or f.get("code", "")})
+    return rows
+
+
+def _deploy_package_size(name, version):
+    """Taille d'un paquet rangé (octets), None s'il est absent."""
+    try:
+        root = Path(_art.load_package(_art_state(), name, version)["path"])
+    except _art.ArtefactError:
+        return None
+    return sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+
+
+def _deploy_registry_prepare(kc, plan, values, install, findings, role=None):
+    """Constats et contexte de la phase Registre (2.6.0, tâche 11), lecture
+    seule : registres d'amorçage à poser (constats de `deploy --dry-run` :
+    adresse libre, place Longhorn, nom libre, paquet interne, outils ; rôle
+    administrateur, point 195), repris s'ils portent l'origine de ce plan,
+    registres du client vérifiés (`check` : rattachement, joignable, CA,
+    comptes), paquets à publier (présents, confiance en mode strict, place
+    sur le volume du registre, tag d'une autre empreinte relevé par HEAD).
+    Rend {"summary", "publish", "entries", "created_here", "estimate"}."""
+    out = {"summary": [], "publish": [], "entries": [], "created_here": set(), "estimate": 0}
+    ph = (plan["phases"].get("registry") or {})
+    if not ph.get("enabled"):
+        return out
+    cluster = values.get("cluster")
+    state = _bm_profiles_state()
+    try:
+        regs = _dpl.render_plan_registries(plan, values)
+    except _dpl.ProfileError as e:
+        for where, why in e.errors:
+            code = "registry-var-missing" if "missing variable" in why else "var-invalid"
+            findings.append(_deploy_finding(code, "registry", f"{where}: {why}"))
+        return out
+    out["entries"] = regs
+    strict = _art_settings()["strict"]
+    sizes = {}
+    for p in _dpl.plan_publications(plan):
+        size = _deploy_package_size(p["package"], p["version"])
+        sizes.setdefault(p["registry"], 0)
+        sizes[p["registry"]] += size or 0
+        row = dict(p, size=size)
+        out["publish"].append(row)
+        if size is None:
+            findings.append(_deploy_finding("artefact-package-missing", "registry",
+                                            f"{p['package']}-{p['version']} is not imported"))
+            continue
+        trust = (_art.load_package(state, p["package"], p["version"]).get("trust") or {}).get("state")
+        if strict and trust != "valid":
+            findings.append(_deploy_finding("package-untrusted-strict", "registry",
+                                            f"{p['package']}-{p['version']}: {trust}, refused in strict mode"))
+        out["estimate"] += 2 + int((size or 0) / (20 << 20) / 60)
+    names = {r["name"] for r in regs}
+    ready = set()
+    for r in regs:
+        d = _rg.load(state, r["name"])
+        row = {"name": r["name"], "mode": r["mode"], "address": r.get("address") or (d or {}).get("endpoint"),
+               "size_gib": r.get("size_gib") or (d or {}).get("size_gib"), "exists": d is not None}
+        out["summary"].append(row)
+        if r["mode"] == "external":
+            if d is None:
+                findings.append(_deploy_finding("registry-unknown", "registry", f"{r['name']} is not declared"))
+                continue
+            if install or not kc:
+                findings.append(_deploy_finding("registry-later", "registry",
+                                                f"{r['name']}: checked when the phase starts"))
+                continue
+            res, _rc, err = _deploy_registry_json(kc, "registry:check", [r["name"], "--cluster", cluster])
+            if err:
+                findings.append(_deploy_finding("registry-check-failed", "registry", f"{r['name']}: {err}"))
+                continue
+            findings += _deploy_tool_findings(res, "registry", f"{r['name']}: ")
+            if not res.get("blocked"):
+                ready.add(r["name"])
+            continue
+        room = r["size_gib"] * (1 << 30) * 0.9
+        if sizes.get(r["name"], 0) > room:
+            findings.append(_deploy_finding("registry-package-too-big", "registry",
+                                            f"{r['name']}: {sizes[r['name']] >> 20} MiB of packages for a volume "
+                                            f"of {r['size_gib']} GiB"))
+        if d is not None:
+            if d.get("kind") != "bootstrap" or d.get("cluster") != cluster:
+                findings.append(_deploy_finding("registry-name-taken", "registry",
+                                                f"{r['name']} exists and was not made here by this plan"))
+                continue
+            st = None
+            if not install and kc:
+                st, _rc, err = _deploy_registry_json(kc, "registry:status", [r["name"], "--cluster", cluster])
+                if err:
+                    findings.append(_deploy_finding("registry-check-failed", "registry", f"{r['name']}: {err}"))
+                    continue
+            if st is not None and (st.get("origin") or {}).get("plan") != plan["name"]:
+                findings.append(_deploy_finding("registry-name-taken", "registry",
+                                                f"{r['name']} exists and was not made by this plan"))
+                continue
+            if d.get("address") != r.get("address"):
+                findings.append(_deploy_finding("registry-address-differs", "registry",
+                                                f"{r['name']} answers at {d.get('address')}, the plan asks for "
+                                                f"{r.get('address')}: the plan never moves a registry"))
+                continue
+            findings.append(_deploy_finding("registry-exists", "registry", f"{r['name']} exists: it is adopted"))
+            ready.add(r["name"])
+            continue
+        out["created_here"].add(r["name"])
+        out["estimate"] += 3
+        if role is not None and ROLE_RANK.get(role, 0) < ROLE_RANK["admin"]:
+            findings.append(_deploy_finding("registry-admin", "registry", f"{r['name']}: posing a bootstrap "
+                                            "registry needs the 'admin' role (point 195)"))
+        if install or not kc:
+            findings.append(_deploy_finding("registry-later", "registry",
+                                            f"{r['name']}: address and room are checked when the phase starts"))
+            continue
+        args = [r["name"], "--cluster", cluster, "--address", r["address"], "--size-gib", str(r["size_gib"]),
+                "--storage-class", r["storage_class"], "--mirrors", ",".join(r.get("mirrors") or []), "--dry-run"]
+        res, _rc, err = _deploy_registry_json(kc, "registry:deploy", args)
+        if err:
+            findings.append(_deploy_finding("registry-check-failed", "registry", f"{r['name']}: {err}"))
+            continue
+        findings += _deploy_tool_findings(res, "registry", f"{r['name']}: ")
+    for p in out["publish"]:
+        if p["registry"] not in names and _rg.load(state, p["registry"]) is None:
+            findings.append(_deploy_finding("registry-unknown", "registry",
+                                            f"{p['registry']} (publication of {p['package']}-{p['version']})"))
+            continue
+        if p["size"] is None:
+            continue
+        if p["registry"] in names and p["registry"] not in ready:
+            findings.append(_deploy_finding("publish-later", "registry", f"{p['package']}-{p['version']} to "
+                                            f"{p['registry']}: checked once the registry is there"))
+            continue
+        if install or not kc:
+            continue
+        res, _rc, err = _deploy_registry_json(kc, "artefacts:publish", [p["package"], p["version"], "--cluster",
+                                                                        cluster, "--registry", p["registry"],
+                                                                        "--dry-run"])
+        if err:
+            findings.append(_deploy_finding("registry-check-failed", "registry",
+                                            f"{p['package']}-{p['version']}: {err}"))
+            continue
+        findings += _deploy_tool_findings(res, "registry", f"{p['package']}-{p['version']} to {p['registry']}: ")
+    return out
+
+
+def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=()):
     """Constats et contexte des phases capi et clusters (2.5.0), lecture
     seule : paquet actif, version de Harvester et pile (décisions 117,
     171), modèles et rendu de chaque entrée, clusters déjà présents (repris
@@ -32843,6 +33020,11 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None):
         level = DEPLOY_CHECK_LEVELS.get(f.get("level"), "blocking")
         code = f.get("code") or "check"
         e = by_ref.get(f.get("cluster") or "")
+        if code in ("cluster-registry-unknown", "cluster-registry-not-attached") and \
+                (f.get("facts") or {}).get("registry") in set(later):
+            # registre posé par la phase Registre de ce plan : rejoué au
+            # début de la phase Clusters (`before`)
+            code, level = "cluster-registry-later", "info"
         if tf_on and e and code in DEPLOY_REF_KEYS and any(
                 _bmp.variables_in(e["raw"].get(k)) for k in DEPLOY_REF_KEYS[code]):
             code, level = "refs-later", "info"
@@ -33389,6 +33571,182 @@ def _deploy_clusters_phase(run, cluster, kc_ref, dctx):
                       item_key="cluster", item_step="k8s-")
 
 
+def _deploy_wait_until(action_id, timeout_s, run, sleep=None):
+    """État final d'une action fille attendue au plus `timeout_s` ; au-delà,
+    elle est annulée (publication d'un paquet : délai du plan, revue m-12)."""
+    sleep = sleep or time.sleep
+    end = time.time() + timeout_s
+    while True:
+        with ACTIONS_LOCK:
+            child = ACTIONS.get(action_id)
+        if child is None:
+            return "error", None
+        if child.status in ("done", "error", "cancelled", "interrupted"):
+            return child.status, child
+        if time.time() > end:
+            child._cancel = True
+            return "timeout", child
+        sleep(DEPLOY_CHILD_POLL)
+
+
+def _deploy_registry_phase(run, cluster, kc_ref, dctx):
+    """Phase Registre (2.6.0, tâche 11, point 189) : un élément par registre
+    (`reg-<nom>`), puis un par publication (`pub-<paquet>-<version>-<registre>`)
+    qui dépend de son registre s'il est du plan. Registre d'amorçage :
+    `harvester-registry deploy --origin` en action fille (administrateur),
+    ou repris s'il porte l'origine de ce plan ; jamais supprimé par la
+    chaîne. Registre du client : `check`. Publication :
+    `harvester-artefacts publish` en action fille, délai
+    `publish_timeout_minutes`. `before` rejoue les constats (adresse libre,
+    place, paquets présents, confiance en mode strict)."""
+    plan = dctx["plan"]
+    ph = plan["phases"].get("registry") or {}
+    timeout_s = int(ph.get("timeout_minutes") or _dpl.REGISTRY_TIMEOUT[2]) * 60
+    publish_s = int(ph.get("publish_timeout_minutes") or _dpl.PUBLISH_TIMEOUT[2]) * 60
+    regs = {f"reg-{r['name']}": r for r in dctx.get("registries") or []}
+    pubs = {f"pub-{p['package']}-{p['version']}-{p['registry']}": p for p in _dpl.plan_publications(plan)}
+    dry = bool(run.dry_run)
+    state = _bm_profiles_state()
+
+    def status(kc, name):
+        st, _rc, err = _deploy_registry_json(kc, "registry:status", [name, "--cluster", cluster])
+        return st if err is None else None
+
+    def ours(st):
+        return bool(st and st.get("present") and (st.get("origin") or {}).get("plan") == plan["name"])
+
+    def before(ctx, state_):
+        if _deploy_capi_install_refused(getattr(run, "launch_role", None)) and any(
+                r["mode"] == "bootstrap" and _rg.load(state, r["name"]) is None for r in regs.values()):
+            return _dch.PhaseOutcome("error", message="registry-admin")
+        for p in pubs.values():
+            if _deploy_package_size(p["package"], p["version"]) is None:
+                return _dch.PhaseOutcome("error", message=f"artefact-package-missing ({p['package']}-{p['version']})")
+            trust = (_art.load_package(state, p["package"], p["version"]).get("trust") or {}).get("state")
+            if _art_settings()["strict"] and trust != "valid":
+                return _dch.PhaseOutcome("error", message=f"package-untrusted-strict ({p['package']}-{p['version']})")
+        kc = kc_ref()
+        for r in regs.values():
+            if r["mode"] != "bootstrap" or _rg.load(state, r["name"]) is not None:
+                continue
+            res, _rc, err = _deploy_registry_json(kc, "registry:deploy", [
+                r["name"], "--cluster", cluster, "--address", r["address"], "--size-gib", str(r["size_gib"]),
+                "--storage-class", r["storage_class"], "--mirrors", ",".join(r.get("mirrors") or []), "--dry-run"])
+            if err:
+                return _dch.PhaseOutcome("error", message=f"check failed ({err})"[:200])
+            blocking = [f for f in res.get("findings") or [] if f.get("level") == "block"]
+            if blocking:
+                return _dch.PhaseOutcome("error", message="blocked by the pre-check: " + ", ".join(
+                    sorted({f.get("code") or "check" for f in blocking})))
+        return None
+
+    def run_registry(ctx, r, prev):
+        kc = kc_ref()
+        name = r["name"]
+        data = {"kind": r["mode"], "created": False, "actions": []}
+        d = _rg.load(state, name)
+        if r["mode"] == "external":
+            res, _rc, err = _deploy_registry_json(kc, "registry:check", [name, "--cluster", cluster])
+            if err:
+                return _dch.ItemOutcome("error", f"check failed ({err})"[:200], data=data)
+            if res.get("blocked"):
+                codes = sorted({f.get("code") for f in res.get("findings") or [] if f.get("level") == "block"})
+                return _dch.ItemOutcome("error", "blocked: " + ", ".join(codes), data=data)
+            data["endpoint"] = d.get("endpoint") if d else None
+            return _dch.ItemOutcome("done", "checked", data=data)
+        if d is not None:
+            st = status(kc, name)
+            if not ours(st) or d.get("cluster") != cluster:
+                return _dch.ItemOutcome("error", "registry-name-taken", data=data)
+            if prev.get("created"):
+                data.update({k: prev[k] for k in ("created", "undo") if k in prev})
+            data["endpoint"] = d.get("endpoint")
+            if d.get("address") != r["address"]:
+                return _dch.ItemOutcome("error", "registry-address-differs", data=data)
+            return _dch.ItemOutcome("done" if st.get("ready") or dry else "error",
+                                    "already present, adopted" if st.get("ready") or dry else "present, not ready",
+                                    data=data)
+        if dry:
+            return _dch.ItemOutcome("done", "checked (dry run): would be posed", data=data)
+        args = [name, "--cluster", cluster, "--kubeconfig", kc, "--address", r["address"],
+                "--size-gib", str(r["size_gib"]), "--storage-class", r["storage_class"],
+                "--mirrors", ",".join(r.get("mirrors") or []), "--timeout", str(timeout_s),
+                "--origin", f"plan={plan['name']},run={run.id}"]
+        if r.get("dns_name"):
+            args += ["--dns-name", r["dns_name"]]
+        cmd = _registry_cmd("deploy")
+        if cmd is None:
+            return _dch.ItemOutcome("error", f"{REGISTRY_SCRIPT} not deployed", data=data)
+        with app.app_context():
+            child, err = _cli_action(cluster, f"registry-deploy:{cluster}/{name}", cmd + args, "harvester-registry",
+                                     parent=run.id, cluster_user=run.cluster_user,
+                                     setup=lambda c: setattr(c, "required_role", "admin"))
+        if err:
+            body = err[0].get_json(silent=True) if hasattr(err[0], "get_json") else None
+            return _dch.ItemOutcome("error", str((body or {}).get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        st_, _c = _deploy_wait_child(child.id)
+        after = _rg.load(state, name)
+        if after is not None and ours(status(kc, name)):
+            data.update(created=True, endpoint=after.get("endpoint"),
+                        undo={"kind": "registry", "ref": f"{cluster}/{name}"})
+        if st_ == "done" and data["created"]:
+            return _dch.ItemOutcome("done", "posed", data=data)
+        return _dch.ItemOutcome("error", f"deployment failed (action {child.id})", data=data)
+
+    def run_publish(ctx, p):
+        data = {"actions": []}
+        if dry:
+            return _dch.ItemOutcome("done", "would publish (dry run)", data=data)
+        child, err = _artefacts_publish_launch(cluster, kc_ref(), (p["package"], p["version"]), p["registry"], None,
+                                               parent=run.id, cluster_user=run.cluster_user,
+                                               person=(run.result or {}).get("by") or None)
+        if err:
+            return _dch.ItemOutcome("error", str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        st_, c = _deploy_wait_until(child.id, publish_s, run)
+        res = ((c.result or {}).get("output") if c else None) or {}
+        data.update({k: res[k] for k in ("images", "charts", "pushed_blobs", "skipped_blobs", "mounted_blobs",
+                                         "bytes") if isinstance(res.get(k), int)})
+        if st_ == "done":
+            return _dch.ItemOutcome("done", "published", data=data)
+        if st_ == "timeout":
+            return _dch.ItemOutcome("error", f"not published within {publish_s // 60} min (action {child.id})",
+                                    data=data)
+        return _dch.ItemOutcome("error", f"publication failed (action {child.id})", data=data)
+
+    def run_item(ctx, state_, item):
+        prev = next((it for it in ((state_.get("previous") or {}).get("items") or [])
+                     if it.get("id") == item.id), {})
+        if item.id in regs:
+            return run_registry(ctx, regs[item.id], prev)
+        return run_publish(ctx, pubs[item.id])
+
+    def verify_item(ctx, state_, prev):
+        kc = kc_ref()
+        if prev.get("id") in regs:
+            r = regs[prev["id"]]
+            if r["mode"] == "external":
+                res, _rc, err = _deploy_registry_json(kc, "registry:check", [r["name"], "--cluster", cluster])
+                return err is None and not res.get("blocked")
+            d = _rg.load(state, r["name"])
+            st = status(kc, r["name"])
+            return bool(d and ours(st) and st.get("ready") and d.get("address") == r["address"])
+        p = pubs.get(prev.get("id"))
+        if p is None:
+            return False
+        # publié : le manifeste de chaque artefact est là, à la bonne empreinte
+        res, _rc, err = _deploy_registry_json(kc, "artefacts:publish", [p["package"], p["version"], "--cluster",
+                                                                        cluster, "--registry", p["registry"],
+                                                                        "--dry-run"])
+        return err is None and not res.get("blocked") and all(t.get("state") == "present"
+                                                               for t in res.get("todo") or [])
+    items = [_dch.Item(i) for i in regs] + [
+        _dch.Item(i, (f"reg-{p['registry']}",) if f"reg-{p['registry']}" in regs else ()) for i, p in pubs.items()]
+    return _dch.Phase("registry", items=items, run_item=run_item, verify_item=verify_item, before=before,
+                      item_key="id", item_step="")
+
+
 def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=None, store=None):
     """Phases du déroulé, branchées sur les mécanismes existants."""
     plan = dctx["plan"]
@@ -33410,6 +33768,8 @@ def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=
                                                   expected=(install or {}).get("hostnames")))
         elif pid == "terraform":
             phases.append(_deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, created))
+        elif pid == "registry":
+            phases.append(_deploy_registry_phase(run, cluster, kc_ref, dctx))
         elif pid == "capi":
             phases.append(_deploy_capi_phase(run, cluster, kc_ref, plan))
         elif pid == "clusters":
@@ -34433,7 +34793,8 @@ def api_artefacts_delete(name, version):
     if bad:
         return bad
     try:
-        _art.remove_package(_art_state(), name, version)
+        # revue m-15 : refusé tant qu'un plan enregistré le publie
+        _art.remove_package(_art_state(), name, version, used_by=_dpl.package_users(_art_state(), name, version))
     except _art.ArtefactError as e:
         return jsonify({"error": str(e), "code": e.code}), 404 if e.code == "not-found" else 409
     aid = _art_done_action(f"artefacts-remove:{name}-{version}",
@@ -34522,14 +34883,37 @@ def api_registry_put(name):
 def api_registry_delete(name):
     if not _registry_name_ok(name):
         return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    d = _rg.load(_bm_profiles_state(), name)
+    used, why = ([], None) if d is None or d.get("kind") == "bootstrap" else _registry_users(name, d.get("clusters"))
+    if why:
+        return jsonify({"error": why, "code": "registry-usage-unknown"}), 409
     try:
-        _rg.forget(_bm_profiles_state(), name)
+        _rg.forget(_bm_profiles_state(), name, used)
     except KeyError:
         return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
     except ValueError as e:
         code = "registry-in-use" if str(e).startswith("registry-in-use") else "registry-bootstrap"
         return jsonify({"error": str(e), "code": code}), 409
     return "", 204
+
+
+def _registry_users(name, clusters):
+    """(qui emploie ce registre, None) ou ([], raison) : plans et modèles
+    de cluster enregistrés, puis clusters enfants et services de chaque
+    cluster Harvester rattaché (Secrets étiquetés au nom du registre, lus
+    avec l'identité de la personne). Un cluster retiré de la console est
+    sauté ; un cluster illisible rend l'usage inconnu (revue m-15)."""
+    from kube import Kube as _Kube, KubeError as _KubeError
+    used = _dpl.registry_users(_bm_profiles_state(), name)
+    for c in clusters or []:
+        kc = _kubectl_for_cluster(c) if _valid_k8s_name(c) else None
+        if not kc:
+            continue
+        try:
+            used += [f"cluster:{c}/{ns}" for ns in _rg.child_users(_Kube(kc, timeout=30), name)]
+        except _KubeError as e:
+            return [], f"cannot read {c}: {str(e)[:160]}"
+    return sorted(set(used)), None
 
 
 def _registry_target(name, cluster):
@@ -34679,6 +35063,10 @@ def api_registry_bootstrap_delete(cluster, name):
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    used, why = _registry_users(name, [cluster])
+    if why or used:
+        return jsonify({"error": why or f"registry-in-use: {', '.join(used)}",
+                        "code": "registry-usage-unknown" if why else "registry-in-use", "used_by": used}), 409
     cmd = _registry_cmd("delete")
     if cmd is None:
         return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503

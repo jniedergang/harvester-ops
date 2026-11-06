@@ -615,8 +615,10 @@ def cmd_list(args):
 
 
 def cmd_remove(args):
+    import deploy_plans as dp          # chargé ici : pack reste en bibliothèque standard
     try:
-        art.remove_package(state_dir(), args.name, args.version)
+        art.remove_package(state_dir(), args.name, args.version,
+                           used_by=dp.package_users(state_dir(), args.name, args.version))
     except art.ArtefactError as e:
         step("remove", "error", f"{e.code}: {e}")
         return EXIT_REFUSED
