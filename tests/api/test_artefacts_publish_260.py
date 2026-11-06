@@ -247,3 +247,17 @@ def test_the_detail_marks_later_kinds_and_lists_the_registries(console, world, c
     assert kinds == {"podinfo": False, "outils": False, "quotas": False, "regles": True}
     assert [p["registry"] for p in d["published"]] == ["amorcage"]
     assert {im["name"].split("/", 1)[1] for im in d["images"]} == {"stefanprodan/podinfo:6.9.2", "x/tool:1.0"}
+
+
+@pytest.mark.parametrize("blocked", [True, False])
+def test_a_dry_run_shows_the_checks_and_launches_nothing(console, world, monkeypatch, blocked):
+    """2.6.0 (tâche 12) : la fenêtre Publier montre les constats et ce qui
+    partirait avant d'activer son bouton ; rien n'est lancé."""
+    monkeypatch.setattr(console, "_capi_run_json", lambda cmd, spec=None, timeout=180: (
+        ({"blocked": blocked, "findings": [{"code": "publish-tag-differs", "level": "block", "facts": {}}] if blocked
+          else [], "todo": [{"kind": "image", "name": "x", "repo": "r", "tag": "t", "state": "new"}]}, 0), None))
+    monkeypatch.setattr(console, "_artefacts_publish_launch", lambda *a, **k: pytest.fail("nothing launched"))
+    r = console.app.test_client().post("/api/artefacts/socle/2026.11/publish",
+                                       json={"cluster": "harvlab2", "registry": "amorcage", "dry_run": True})
+    assert r.status_code == 200 and r.get_json()["blocked"] is blocked
+    assert r.get_json()["todo"][0]["state"] == "new"
