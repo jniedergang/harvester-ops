@@ -33998,6 +33998,318 @@ _deploy_mark_orphans()
 
 
 # ---------------------------------------------------------------------------
+# 2.6.0 : paquets d'artefacts dans la console (bin/lib/artefacts.py,
+# bin/harvester-artefacts.py)
+#
+# Téléversement en flux vers <état>/artefacts/incoming/ (archive puis .sig),
+# pré-vérification (inspection et confiance) rendue avec l'acquittement
+# demandé ; l'import (décision, extraction vérifiée, trust.json, ligne du
+# journal) est fait par l'outil, en action suivie.
+# ---------------------------------------------------------------------------
+import artefacts as _art  # noqa: E402
+
+ARTEFACTS_SCRIPT = "harvester-artefacts.py"
+_ART_SIG_MAX = 64 * 1024
+
+
+def _art_state():
+    return _bm_profiles_state()
+
+
+def _art_incoming():
+    d = _art_state() / "artefacts" / "incoming"
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return d
+
+
+def _art_cmd(sub):
+    script = BIN_DIR / ARTEFACTS_SCRIPT
+    if not script.is_file():
+        return None
+    return [sys.executable, str(script), f"--state-dir={_art_state()}", sub]
+
+
+def _art_settings():
+    return _art.settings(_art_state(), load_config_ro())
+
+
+def _art_precheck(archive):
+    """Inspection et confiance d'une archive reçue, sans l'extraire :
+    {"ok", "name", "version", "trust", "acknowledge_needed", "strict",
+    "code"} ; jamais de chemin ni de sortie brute de ssh-keygen."""
+    sig = Path(str(archive) + ".sig")
+    try:
+        info = _art.inspect_package(archive)
+        trust = _art.verify_trust(archive, str(sig) if sig.is_file() else None, str(_art.signers_path(_art_state())))
+    except _art.ArtefactError as e:
+        return {"ok": False, "code": e.code, "error": str(e)}
+    conf = _art_settings()
+    accepted, code = _art.decide(trust, conf["strict"])
+    need = trust["state"] if code.startswith("acknowledge-") else None
+    return {"ok": accepted or need is not None, "name": info["name"], "version": info["version"],
+            "description": info["index"].get("description", ""), "items": len(info["index"]["items"]),
+            "size": info["size"], "files": info["files"], "trust": trust, "strict": conf["strict"],
+            "locked": conf["locked"], "acknowledge_needed": need, "code": code}
+
+
+def _art_public(pkg):
+    """Paquet rangé pour une réponse : index, images (noms, empreintes,
+    tailles), confiance ; sans le chemin sur le disque."""
+    import oci_layout as _ol
+    images = []
+    lay_dir = Path(pkg["path"]) / "images"
+    if (lay_dir / "index.json").is_file():
+        lay = _ol.Layout(lay_dir)
+        for e in lay.entries():
+            ann = e.get("annotations") or {}
+            size = None
+            try:
+                man = json.loads(lay.read_blob(e["digest"]))
+                size = sum(int(x.get("size") or 0) for x in [man.get("config") or {}] + (man.get("layers") or []))
+            except (OSError, ValueError, KeyError):
+                pass
+            images.append({"name": ann.get(_ol.A_NAME), "digest": e.get("digest"), "size": size,
+                           "platform": "/".join((e.get("platform") or {}).values()) or None})
+    trust = {k: pkg["trust"].get(k) for k in ("state", "principal", "key_fingerprint", "person", "date", "mode")}
+    return {"name": pkg["name"], "version": pkg["version"], "index": pkg["index"], "images": images,
+            "trust": trust, "published": _art_published(pkg["name"], pkg["version"])}
+
+
+def _art_published(name, version):
+    """Registres où ce paquet a été publié (déclarations, noms seulement)."""
+    out = []
+    for s in _rg.list_decls(_art_state()):
+        d = _rg.load(_art_state(), s["name"]) if not s.get("invalid") else None
+        for p in (d or {}).get("published") or []:
+            if p.get("package") == name and p.get("version") == version:
+                out.append({"registry": d["name"], "at": p.get("at")})
+    return out
+
+
+@app.route("/api/artefacts", methods=["GET"])
+@requires_auth
+def api_artefacts_list():
+    conf = _art_settings()
+    return jsonify({"packages": _art.list_packages(_art_state()), "strict": conf["strict"],
+                    "locked": conf["locked"]})
+
+
+@app.route("/api/artefacts/settings", methods=["GET"])
+@requires_auth
+def api_artefacts_settings_get():
+    return jsonify(_art_settings())
+
+
+@app.route("/api/artefacts/settings", methods=["PUT"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_artefacts_settings_put():
+    """Mode strict et clés de confiance : `strict` (bool), `add_signer`
+    (une ligne allowed_signers), `remove_signer` (empreinte d'une clé)."""
+    b = request.get_json(silent=True)
+    if not isinstance(b, dict) or set(b) - {"strict", "add_signer", "remove_signer"}:
+        return jsonify({"error": "expected strict, add_signer or remove_signer"}), 400
+    state = _art_state()
+    try:
+        if "add_signer" in b or "remove_signer" in b:
+            try:
+                text = _art.signers_path(state).read_text()
+            except OSError:
+                text = ""
+            keys, _ = _art.parse_signers(text)
+            lines = [k["line"] for k in keys if k["fingerprint"] != b.get("remove_signer")]
+            if b.get("remove_signer") and len(lines) == len(keys):
+                return jsonify({"error": "no trusted key with this fingerprint", "code": "not-found"}), 404
+            if b.get("add_signer"):
+                lines.append(str(b["add_signer"]).strip())
+            _art.save_signers(state, "\n".join(lines) + "\n")
+        if "strict" in b:
+            if not isinstance(b["strict"], bool):
+                return jsonify({"error": "strict: true or false"}), 400
+            _art.save_settings(state, b["strict"], load_config_ro())
+    except _art.ArtefactError as e:
+        return jsonify({"error": str(e), "code": e.code}), 409 if e.code == "strict-locked" else 400
+    conf = _art_settings()
+    steps = []
+    if "strict" in b:
+        steps.append(("strict", f"strict mode {'on' if conf['strict'] else 'off'} (by {current_user() or '?'})"))
+    if b.get("add_signer"):
+        added = _art.parse_signer_line(str(b["add_signer"]).strip())
+        steps.append(("signers", f"trusted key added: {added['principal']} {added['fingerprint']}"))
+    if b.get("remove_signer"):
+        steps.append(("signers", f"trusted key removed: {b['remove_signer']}"))
+    aid = _art_done_action("artefacts-settings", steps)
+    return jsonify(dict(conf, action_id=aid))
+
+
+@app.route("/api/artefacts/upload", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_artefacts_upload():
+    """Archive d'un paquet (ou sa .sig) reçue en flux ; rend la
+    pré-vérification et l'acquittement demandé."""
+    name = (request.args.get("name") or "").strip()
+    is_sig = name.endswith(".sig")
+    base = name[:-4] if is_sig else name
+    m = _art.ARCHIVE_RE.match(base)
+    if not m or not _art.VERSION_RE.match(m.group("version")):
+        return jsonify({"error": "expected <name>-<version>.tar.gz or its .sig", "code": "not-a-package"}), 400
+    try:
+        length = int(request.headers.get("Content-Length") or 0)
+    except ValueError:
+        length = 0
+    if length <= 0:
+        return jsonify({"error": "empty upload"}), 400
+    inc = _art_incoming()
+    if is_sig:
+        if length > _ART_SIG_MAX:
+            return jsonify({"error": "signature file too large"}), 413
+        data = request.stream.read(length)
+        (inc / name).write_bytes(data)
+        os.chmod(inc / name, 0o600)
+        arch = inc / base
+        return jsonify({"ok": True, "staged": _art_precheck(arch) if arch.exists() else None})
+    st = os.statvfs(inc)
+    need = 2 * length + (1 << 30)              # archive puis extraction (contraintes communes du plan)
+    if st.f_bavail * st.f_frsize < need:
+        return jsonify({"error": "not enough room to receive and extract the package", "need": need}), 507
+    (inc / (name + ".sig")).unlink(missing_ok=True)          # une ancienne signature ne vaut pas pour celle-ci
+    part = inc / (name + ".part")
+    label = f"artefacts-import:{base[:-len('.tar.gz')]}"
+    run = ActionRun(uuid.uuid4().hex[:12], label, "", ["upload", name])
+    run.cluster_user = current_user()
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    run.emit({"type": "step", "step_id": "upload", "status": "running",
+              "message": f"receiving {name} ({_vp.fmt_bytes(length)})", "ts": time.time()})
+    try:
+        res = _receive_archive(run, request.stream, length, part)
+        os.replace(part, inc / name)
+    except (_UploadCancelled, ValueError, OSError) as e:
+        part.unlink(missing_ok=True)
+        run.status, run.exit_code = "error", 1
+        run.error_summary = "cancelled" if isinstance(e, _UploadCancelled) else _error_text(e)
+        run.emit({"type": "step", "step_id": "upload", "status": "error",
+                  "message": run.error_summary, "ts": time.time()})
+        run.close()
+        return jsonify({"error": run.error_summary, "action_id": run.id}), 409
+    run.emit({"type": "step", "step_id": "upload", "status": "done",
+              "message": _vp.summary("upload", res), "ts": time.time()})
+    chk = _art_precheck(inc / name)
+    msg = (f"{chk.get('name')}-{chk.get('version')}: {chk['trust']['state']}"
+           + (f", acknowledgement needed ({chk['acknowledge_needed']})" if chk.get("acknowledge_needed") else "")
+           if "trust" in chk else f"{chk.get('code')}: {chk.get('error')}")
+    run.emit({"type": "step", "step_id": "check", "status": "done" if chk.get("ok") else "error",
+              "message": msg, "ts": time.time()})
+    run.result = chk
+    run.status, run.exit_code = ("done", 0) if chk.get("ok") else ("error", 2)
+    if not chk.get("ok"):
+        run.error_summary = msg
+    run.close()
+    return jsonify({"ok": True, "action_id": run.id, "staged": chk})
+
+
+def _art_done_action(label, steps):
+    """Geste court sur l'état de la console, tracé dans l'Activité."""
+    run = ActionRun(uuid.uuid4().hex[:12], label, "", [label.split(":")[0]])
+    run.cluster_user = current_user()
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    for sid, msg in steps:
+        run.emit({"type": "step", "step_id": sid, "status": "done", "message": msg, "ts": time.time()})
+    run.status, run.exit_code = "done", 0
+    run.close()
+    return run.id
+
+
+def _art_name_version(name, version):
+    if not _art.NAME_RE.match(name or "") or not _art.VERSION_RE.match(version or ""):
+        return jsonify({"error": "invalid package name or version", "code": "not-found"}), 400
+    return None
+
+
+_ART_REFUSALS = {"invalid": (422, "invalid-signature"), "sums-mismatch": (422, "sums-mismatch"),
+                 "acknowledge-invalid": (400, "acknowledge-invalid")}
+
+
+@app.route("/api/artefacts/<name>/<version>/accept", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_artefacts_accept(name, version):
+    """Décision sur une archive reçue, puis import par l'outil (action
+    suivie : check, extract, trust ; l'acquittement va au journal)."""
+    bad = _art_name_version(name, version)
+    if bad:
+        return bad
+    b = request.get_json(silent=True) or {}
+    ack = b.get("acknowledge")
+    arch = _art_incoming() / f"{name}-{version}.tar.gz"
+    if not arch.is_file():
+        return jsonify({"error": "no uploaded archive for this package", "code": "not-uploaded"}), 404
+    chk = _art_precheck(arch)
+    if "trust" not in chk:
+        return jsonify({"error": chk.get("error"), "code": chk.get("code")}), 422
+    accepted, code = _art.decide(chk["trust"], chk["strict"], ack)
+    if not accepted:
+        if code.startswith("acknowledge-") and code in ("acknowledge-unsigned", "acknowledge-unknown-key"):
+            return jsonify({"error": "this package needs an explicit acknowledgement", "code": "acknowledge-required",
+                            "state": chk["trust"]["state"], "trust": chk["trust"]}), 409
+        if code.startswith("strict-refuses-"):
+            return jsonify({"error": "strict mode refuses this package", "code": "strict-mode",
+                            "state": chk["trust"]["state"], "locked": chk["locked"]}), 409
+        status, c = _ART_REFUSALS.get(code, (422, code))
+        return jsonify({"error": f"refused: {code}", "code": c, "state": chk["trust"]["state"]}), status
+    if (_art.package_dir(_art_state(), name, version)).exists():
+        return jsonify({"error": f"{name}-{version} is already imported", "code": "exists"}), 409
+    cmd = _art_cmd("import")
+    if cmd is None:
+        return jsonify({"error": f"{ARTEFACTS_SCRIPT} not deployed"}), 503
+    flag = {"unsigned": ["--accept-unsigned"], "unknown-key": ["--accept-unknown-key"]}.get(ack, [])
+    cmd += [str(arch), *flag, "--person", current_user() or "?"]
+
+    def cleanup():
+        for p in (arch, Path(str(arch) + ".sig")):
+            p.unlink(missing_ok=True)
+    run, err = _cli_action("", f"artefacts-import:{name}-{version}", cmd, "harvester-artefacts",
+                           check_busy=False, capture=True, after=cleanup,
+                           setup=lambda r: setattr(r, "required_role", "admin"))
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "name": name, "version": version, "trust": chk["trust"]["state"]}), 202
+
+
+@app.route("/api/artefacts/<name>/<version>", methods=["GET"])
+@requires_auth
+def api_artefacts_get(name, version):
+    bad = _art_name_version(name, version)
+    if bad:
+        return bad
+    try:
+        pkg = _art.load_package(_art_state(), name, version)
+    except _art.ArtefactError:
+        return jsonify({"error": f"no package {name}-{version}", "code": "not-found"}), 404
+    return jsonify(_art_public(pkg))
+
+
+@app.route("/api/artefacts/<name>/<version>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_artefacts_delete(name, version):
+    bad = _art_name_version(name, version)
+    if bad:
+        return bad
+    try:
+        _art.remove_package(_art_state(), name, version)
+    except _art.ArtefactError as e:
+        return jsonify({"error": str(e), "code": e.code}), 404 if e.code == "not-found" else 409
+    aid = _art_done_action(f"artefacts-remove:{name}-{version}",
+                           [("remove", f"{name}-{version} removed by {current_user() or '?'}")])
+    return jsonify({"ok": True, "action_id": aid})
+
+
+# ---------------------------------------------------------------------------
 # 2.6.0 : registres déclarés (bin/lib/registries.py, bin/harvester-registry.py)
 #
 # Déclarations sans secret dans l'état de la console (comme les plans) ;

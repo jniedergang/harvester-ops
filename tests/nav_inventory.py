@@ -94,6 +94,8 @@ SCREENS = [
      '#tab-automation .capi-tab-content[data-capi-tab="clusters"].active', ()),
     ("Cluster API > Services", "#automation/capi/services", "automation",
      '#tab-automation .capi-tab-content[data-capi-tab="services"].active', ()),
+    ("(new) Cluster API > Artefacts", "#automation/capi/artefacts", "automation",
+     '#tab-automation .capi-tab-content[data-capi-tab="artefacts"].active', ()),
     ("(new) Cluster API > history", "#automation/capi/history", "automation",
      '#tab-automation .capi-tab-content[data-capi-tab="history"].active', ()),
     ("Cluster API > Installation (was the first tab)", "#automation/capi/installation", "automation",

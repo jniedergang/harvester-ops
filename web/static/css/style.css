@@ -6000,3 +6000,16 @@ html[data-mode="dark"] .tbl-scroll { --tbl-shade: rgba(0, 0, 0, 0.42); }
 .capi-var-wrap { display: flex; gap: 6px; align-items: center; }
 .capi-var-wrap .capi-var { flex: 1; min-width: 0; }
 .bmpl-capi-provider { font-size: 12px; }
+
+/* 2.6.0 : paquets d'artefacts (onglet Artefacts de Cluster API) */
+.art-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .art-layout { grid-template-columns: 1fr; } }
+.art-row { cursor: pointer; }
+.art-row.selected td { background: var(--selection-bg); }
+.art-detail { padding: 12px; }
+.art-detail h4 { margin: 12px 0 4px; }
+.art-items, .art-images { margin: 0; padding-left: 18px; }
+.art-images code { word-break: break-all; }
+.art-staged { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+.art-warning { display: flex; gap: 8px; align-items: flex-start; }
+.art-warning p { margin: 0 0 6px; }

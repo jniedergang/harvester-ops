@@ -716,9 +716,9 @@ const CAPI = (() => {
 
   // -------------------------------------------------------------------------
   // 2.2.0 : onglets de Cluster API (#automation/capi/<onglet>), dans l'ordre
-  // Clusters (défaut), Services, Historique, Installation
+  // Clusters (défaut), Services, Artefacts (2.6.0), Historique, Installation
   // -------------------------------------------------------------------------
-  const TABS = ['clusters', 'services', 'history', 'installation'];
+  const TABS = ['clusters', 'services', 'artefacts', 'history', 'installation'];
   // Anciens noms internes (onglets d'avant la 2.2.0, et « Création de
   // clusters » de la v1.53.0, devenue une fenêtre de Clusters)
   const OLD_TABS = { k8s: 'clusters', install: 'installation' };
@@ -752,6 +752,7 @@ const CAPI = (() => {
     if (tab !== 'history') capiHistory.stop();
     if (tab === 'clusters') { refreshK8sClustersPanel(); paintStackBanner(); }
     else if (tab === 'services') { if (window.CapiServices) CapiServices.start(); }
+    else if (tab === 'artefacts') { if (window.Artefacts) Artefacts.start(); }
     else if (tab === 'history') capiHistory.render();
     else refresh();
   }
