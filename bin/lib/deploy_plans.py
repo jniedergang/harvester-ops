@@ -403,7 +403,7 @@ def _check_clusters_phase(ph, errors, variables):
         if not isinstance(entry, dict):
             errors.append((w, "not a mapping"))
             continue
-        unknown = sorted(set(entry) - {"template", "name", "depends_on"})
+        unknown = sorted(set(entry) - {"template", "name", "depends_on", "registries"})
         errors.extend((f"{w}.{k}", "unknown key") for k in unknown)
         tname, name = entry.get("template"), entry.get("name")
         if not isinstance(tname, str) or not NAME_RE.match(tname):
@@ -434,10 +434,24 @@ def _check_clusters_phase(ph, errors, variables):
                 errors.append((f"{w}.depends_on", f"{d} is not listed before this cluster"))
             elif d not in clean:
                 clean.append(d)
+        regs = entry.get("registries")
+        if regs not in (None, []):
+            # 2.6.0 : registres de cette entrée, à la place de ceux du modèle ;
+            # un registre du plan (phase Registre) se désigne par son nom
+            if not registries_shape_ok(regs):
+                errors.append((f"{w}.registries", "a list of registry names or {registry, mirrors, no_fallback}"))
+                regs = None
+            else:
+                undeclared = [v for v in sorted(_bmp.variables_in(regs)) if v not in known]
+                if undeclared:
+                    errors.append((f"{w}.registries", f"undeclared variable {undeclared[0]}"))
+                    regs = None
         seen.append(name)
         item = {"template": tname, "name": name}
         if clean:
             item["depends_on"] = clean
+        if regs:
+            item["registries"] = regs
         out.append(item)
     return {"enabled": ph.get("enabled", True) is not False, "timeout_minutes": timeout, "items": out}
 
@@ -868,6 +882,45 @@ def _capi_url_refusals(spec, base):
     return out
 
 
+def registries_shape_ok(v):
+    """Forme d'une liste de registres d'un modèle ou d'une entrée de plan
+    (2.6.0) : noms (variables admises) ou {registry, mirrors, no_fallback}."""
+    if not isinstance(v, list):
+        return False
+    for e in v:
+        if isinstance(e, str):
+            continue
+        if not isinstance(e, dict) or set(e) - _cc.REGISTRY_ENTRY_KEYS or not isinstance(e.get("registry"), str):
+            return False
+        if e.get("mirrors") is not None and not (isinstance(e["mirrors"], list)
+                                                 and all(isinstance(m, str) for m in e["mirrors"])):
+            return False
+        if e.get("no_fallback") not in (None, True, False):
+            return False
+    return True
+
+
+def render_registries(entries, values, where):
+    """Liste de registres rendue avec les valeurs du lancement, puis
+    normalisée (capi_cluster.normalize_registry_entries) ; ProfileError."""
+    def sub(v):
+        if isinstance(v, str):
+            missing = [n for n in _bmp.VAR_RE.findall(v) if n not in (values or {})]
+            if missing:
+                raise ProfileError([(where, f"missing variable {missing[0]}")], "missing variable")
+            return _bmp.VAR_RE.sub(lambda m: str(values[m.group(1)]), v)
+        if isinstance(v, list):
+            return [sub(x) for x in v]
+        if isinstance(v, dict):
+            return {k: sub(x) for k, x in v.items()}
+        return v
+    rendered = sub(entries)
+    try:
+        return _cc.normalize_registry_entries(rendered)
+    except ValueError as e:
+        raise ProfileError([(where, str(e))], "invalid registries") from None
+
+
 def check_capi_template(doc):
     """Modèle de cluster normalisé {description, variables, spec}, ou
     ProfileError. `spec` : la demande du formulaire de création (liste
@@ -895,6 +948,11 @@ def check_capi_template(doc):
             errors.append((f"spec.{k}", "set by the plan, not by the template"))
         elif k not in _cc.KNOWN:
             errors.append((f"spec.{k}", "unknown key"))
+        elif k == "registries" and v not in (None, "", []):
+            if registries_shape_ok(v):
+                clean[k] = v
+            else:
+                errors.append((f"spec.{k}", "a list of registry names or {registry, mirrors, no_fallback}"))
         elif not (isinstance(v, (str, int, bool)) or v is None
                   or isinstance(v, list) and all(isinstance(x, str) for x in v)):
             errors.append((f"spec.{k}", "a string, a number, a boolean or a list of strings"))

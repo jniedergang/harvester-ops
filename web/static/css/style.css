@@ -6013,3 +6013,14 @@ html[data-mode="dark"] .tbl-scroll { --tbl-shade: rgba(0, 0, 0, 0.42); }
 .art-staged { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
 .art-warning { display: flex; gap: 8px; align-items: flex-start; }
 .art-warning p { margin: 0 0 6px; }
+
+/* 2.6.0 : registres d'un cluster enfant (fenêtre de création, modèles) */
+.capi-reg-list { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; }
+.capi-reg-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg-card, transparent); }
+.capi-reg-name { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.capi-reg-mirrors { display: flex; flex-wrap: wrap; gap: 8px; }
+.capi-reg-mirror { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; }
+.capi-reg-row .capi-var { flex: 1 1 200px; }
+.capi-reg-note { color: var(--warning, var(--accent)); }
+.capi-reg-note[hidden] { display: none; }

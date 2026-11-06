@@ -290,19 +290,6 @@ def check(decl, facts, name=None):
     return out
 
 
-def check_entries(entries, decls):
-    """Constats de la liste de registres d'un cluster enfant."""
-    out, seen = [], set()
-    for e in normalize_entries(entries):
-        n = e["registry"]
-        if n in seen:
-            out.append(cc.finding("registry-mirror-duplicate", "warn", registry=n))
-        seen.add(n)
-        if n not in decls:
-            out.append(cc.finding("registry-unknown", "block", registry=n))
-    return out
-
-
 def probe(decl, creds, role, registry_cls=None):
     """(joignable, CA juste, compte accepté) d'un point d'accès : GET /v2/
     avec le compte, sans rien écrire."""
@@ -348,14 +335,111 @@ def facts(kube, decl, cluster, probe_fn=probe):
 # Clusters enfants : configuration de registres privés de RKE2
 # ---------------------------------------------------------------------------
 def normalize_entries(entries):
+    """Liste ordonnée [{registry[, mirrors][, no_fallback]}] (règles de
+    capi_cluster.normalize_registry_entries) ; ValueError sinon."""
+    return cc.normalize_registry_entries(entries)
+
+
+# Point 198 : les images système de RKE2 viennent de ces registres
+# d'origine. Couper le repli vers Internet pour l'un d'eux, sans ces images
+# dans un registre qui le miroite, empêche les nœuds de démarrer (essais
+# préalables de la 2.6.0 : le cluster a monté en tirant ses images système
+# de docker.io). Et RKE2 coupe le repli pour TOUS les registres miroités à
+# la fois.
+SYSTEM_ORIGINS = ("docker.io", "registry.rancher.com")
+SYSTEM_IMAGE = "rancher/rke2-runtime"
+
+
+def _entry_origins(e, d):
+    """Registres d'origine qu'une entrée fait servir par son registre : ceux
+    de l'entrée s'ils sont donnés (pris parmi ceux de la déclaration), sinon
+    tous ceux de la déclaration."""
+    declared = list(d.get("mirrors") or [])
+    if e.get("mirrors") is None:
+        return declared
+    return [m for m in e["mirrors"] if m in declared]
+
+
+def fallback_asked(entries):
+    """Repli coupé si une entrée le demande (`no_fallback: true`) : une seule
+    décision par cluster, RKE2 coupant le repli pour tous les registres
+    miroités. Jamais par défaut (point 198, revue I-4)."""
+    return any(e.get("no_fallback") is True for e in normalize_entries(entries))
+
+
+def fallback_findings(no_fallback, entries, decls, system_ready=()):
+    """Refus `cluster-registry-no-fallback-system` (bloquant) quand le repli
+    est coupé alors qu'un registre d'origine des images système de RKE2 est
+    miroité sans qu'un registre qui le sert porte ces images
+    (`system_ready` : noms des registres qui les portent)."""
+    if not no_fallback:
+        return []
+    served = {}
+    for e in normalize_entries(entries):
+        d = decls.get(e["registry"]) or {}
+        if "images" in (d.get("usage") or []):
+            for o in _entry_origins(e, d):
+                served.setdefault(o, []).append(e["registry"])
+    missing = sorted(o for o in SYSTEM_ORIGINS if o in served
+                     and not set(served[o]) & set(system_ready or ()))
+    return [cc.finding("cluster-registry-no-fallback-system", "block", origins=", ".join(missing))] if missing else []
+
+
+def check_child(entries, decls, cluster, attached, system_ready=()):
+    """Constats de la liste de registres d'un cluster enfant (tâche 9) :
+    `decls` {nom: déclaration} (absent = inconnu), `cluster` le cluster
+    Harvester, `attached` {nom: bool} (compte de lecture posé sur ce
+    cluster), `system_ready` les registres qui portent les images système
+    de RKE2."""
     out = []
-    for e in entries or []:
-        if isinstance(e, str):
-            e = {"registry": e}
-        if not isinstance(e, dict) or not isinstance(e.get("registry"), str):
-            raise ValueError("registries: a list of names or {registry}")
-        out.append({"registry": e["registry"]})
+    seen = set()
+    for e in normalize_entries(entries):
+        n = e["registry"]
+        if n in seen:
+            continue                     # refusé par capi_cluster.validate (`invalid`)
+        seen.add(n)
+        d = decls.get(n)
+        if d is None:
+            out.append(cc.finding("cluster-registry-unknown", "block", registry=n))
+            continue
+        if cluster not in (d.get("clusters") or []) or not attached.get(n):
+            out.append(cc.finding("cluster-registry-not-attached", "block", registry=n, cluster=cluster))
+        if "images" not in (d.get("usage") or []):
+            out.append(cc.finding("cluster-registry-no-images", "warn", registry=n))
+        bad = [m for m in e.get("mirrors") or [] if m not in (d.get("mirrors") or [])]
+        if bad:
+            out.append(cc.finding("cluster-registry-mirror-unknown", "block", registry=n, mirrors=", ".join(bad)))
+    known = [e for e in normalize_entries(entries) if e["registry"] in decls]
+    out += fallback_findings(fallback_asked(known), known, decls, system_ready)
     return out
+
+
+def system_ready_registries(state, decls):
+    """Registres dont un paquet publié porte les images système de RKE2
+    (`<origine>/rancher/rke2-runtime`), relevé dans les paquets rangés."""
+    import artefacts as art
+    out = set()
+    for n, d in decls.items():
+        for p in (d or {}).get("published") or []:
+            try:
+                idx = art.load_package(state, p.get("package"), p.get("version"))["index"]
+            except (art.ArtefactError, TypeError):
+                continue
+            refs = [r if isinstance(r, str) else (r or {}).get("as") or (r or {}).get("ref") or ""
+                    for it in idx.get("items") or [] for r in it.get("images") or []]
+            if any(SYSTEM_IMAGE in str(r) for r in refs):
+                out.add(n)
+                break
+    return out
+
+
+def child_users(kube, name):
+    """Clusters enfants (namespaces) qui emploient ce registre : Secrets
+    étiquetés à son nom hors de son propre namespace (compte de lecture
+    d'un cluster enfant, identifiants d'un service)."""
+    found = kube.list("secrets", None, selector=f"{LABEL}={name},{cc.GENERATED}=true")
+    return sorted({(s.get("metadata") or {}).get("namespace") for s in found
+                   if (s.get("metadata") or {}).get("namespace") not in (None, NAMESPACE)})
 
 
 def pull_creds_for(kube, names):
@@ -380,34 +464,6 @@ def child_secret_names(cluster_name, registry):
     return {"auth": f"{cluster_name}-registry-{registry}-auth", "ca": f"{cluster_name}-registry-{registry}-ca"}
 
 
-# Point 198 : les images système de RKE2 viennent de ces registres
-# d'origine. Couper le repli vers Internet pour l'un d'eux, sans ces images
-# dans un registre qui le miroite, empêche les nœuds de démarrer (essais
-# préalables de la 2.6.0 : le cluster a monté en tirant ses images système
-# de docker.io). Et RKE2 coupe le repli pour TOUS les registres miroités à
-# la fois.
-SYSTEM_ORIGINS = ("docker.io", "registry.rancher.com")
-SYSTEM_IMAGE = "rancher/rke2-runtime"
-
-
-def fallback_findings(no_fallback, entries, decls, system_ready=()):
-    """Refus `cluster-registry-no-fallback-system` (bloquant) quand le repli
-    est coupé alors qu'un registre d'origine des images système de RKE2 est
-    miroité sans qu'un registre qui le sert porte ces images
-    (`system_ready` : noms des registres qui les portent)."""
-    if not no_fallback:
-        return []
-    served = {}
-    for e in normalize_entries(entries):
-        d = decls.get(e["registry"]) or {}
-        if "images" in (d.get("usage") or []):
-            for o in d.get("mirrors") or []:
-                served.setdefault(o, []).append(e["registry"])
-    missing = sorted(o for o in SYSTEM_ORIGINS if o in served
-                     and not set(served[o]) & set(system_ready or ()))
-    return [cc.finding("cluster-registry-no-fallback-system", "block", origins=", ".join(missing))] if missing else []
-
-
 def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
     """(privateRegistriesConfig, files, secrets) d'un cluster enfant (pur).
 
@@ -416,9 +472,9 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
     `pull_creds` : {nom: compte de lecture}, lu dans les Secrets `-pull`
     du cluster Harvester (jamais le compte d'écriture).
     `no_fallback` : coupe le repli vers le point d'accès d'origine pour les
-    registres miroités (fichier config.yaml.d de RKE2), seulement s'il est
-    demandé (point 198 : jamais par défaut, même pour un registre
-    d'amorçage ; `fallback_findings` refuse la demande avant).
+    registres miroités (fichier config.yaml.d de RKE2) ; par défaut, ce que
+    demandent les entrées (`fallback_asked`), jamais coupé sinon (point 198 ;
+    `fallback_findings`, rejoué par `check_child`, refuse la demande avant).
 
     Secrets : `<cluster>-registry-<registre>-auth` (`username`, `password`)
     et `-ca` (`Opaque`, `ca.crt` seul : un Secret `kubernetes.io/tls` vide
@@ -426,14 +482,16 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
     `GENERATED` pour partir avec le cluster ; `insecureSkipVerify` jamais
     posé sauf demande explicite (vérification active)."""
     ents = normalize_entries(entries)
-    used = [e["registry"] for e in ents if "images" in (decls[e["registry"]].get("usage") or [])]
-    used = list(dict.fromkeys(used))
+    used = {}
+    for e in ents:
+        if "images" in (decls[e["registry"]].get("usage") or []):
+            used.setdefault(e["registry"], e)
     mirrors, configs, secrets = {}, {}, []
     ns, cname = cluster["namespace"], cluster["name"]
-    labels = {cc.GENERATED: "true"}
-    for name in used:
+    for name, e in used.items():
         d = decls[name]
-        for origin in d.get("mirrors") or []:
+        labels = {cc.GENERATED: "true", LABEL: name}
+        for origin in _entry_origins(e, d):
             m = mirrors.setdefault(origin, {"endpoint": [], "rewrite": {"^(.*)$": f"{_origin_repo(origin)}/$1"}})
             ep = f"https://{d['endpoint']}"
             if ep not in m["endpoint"]:
@@ -455,6 +513,8 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
         if tls:
             conf["tls"] = tls
         configs[d["endpoint"]] = conf
+    if no_fallback is None:
+        no_fallback = fallback_asked(ents)
     files = []
     if no_fallback and mirrors:
         files.append({"path": NO_FALLBACK_FILE, "owner": "root:root", "permissions": "0600",

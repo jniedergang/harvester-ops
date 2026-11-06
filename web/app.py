@@ -17406,13 +17406,16 @@ def _capi_components_dir():
     return dest
 
 
-def _capi_cmd(kc, sub):
+def _capi_cmd(kc, sub, cluster=None):
     """La commande de l'outil pour un kubeconfig, ou None s'il n'est pas
-    déployé. Seul endroit qui la construit (routes et chaîne d'un plan)."""
+    déployé. Seul endroit qui la construit (routes et chaîne d'un plan).
+    2.6.0 : répertoire d'état (registres, paquets) et nom du cluster
+    Harvester (`cluster`, registres qui lui sont rattachés)."""
     script = _capi_script()
     if script is None:
         return None
-    return [sys.executable, str(script), sub, "--kubeconfig", kc]
+    return [sys.executable, str(script), sub, "--kubeconfig", kc, f"--state-dir={_bm_profiles_state()}"] + (
+        [f"--harvester-name={cluster}"] if cluster else [])
 
 
 def _capi_bundle_providers():
@@ -17439,7 +17442,7 @@ def _capi_base(cluster, sub):
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
-    return _capi_cmd(kc, sub), None
+    return _capi_cmd(kc, sub, cluster), None
 
 
 def _capi_run_json(cmd, spec=None, timeout=180):
@@ -17502,7 +17505,7 @@ def api_capi_inventory(cluster):
     pile. Mis en cache quelques secondes (`?fresh=1` pour relire)."""
     cached = _CAPI_INVENTORY_CACHE.get(cluster)
     if cached and time.time() - cached[0] < _CAPI_INVENTORY_TTL and not request.args.get("fresh"):
-        return jsonify(cached[1])
+        return jsonify(dict(cached[1], registries=_capi_registry_choices(cluster)))
     cmd, err = _capi_base(cluster, "inventory")
     if err:
         return err
@@ -17517,7 +17520,28 @@ def api_capi_inventory(cluster):
     # clusters (check --many), pas au formulaire
     out.pop("longhorn", None)
     _CAPI_INVENTORY_CACHE[cluster] = (time.time(), out)
-    return jsonify(out)
+    return jsonify(dict(out, registries=_capi_registry_choices(cluster)))
+
+
+def _capi_registry_choices(cluster):
+    """2.6.0 (tâche 9) : registres proposés au formulaire de création, lus
+    dans l'état à chaque fois (jamais en cache) : déclarés, rattachés ou non
+    à ce cluster Harvester, et s'ils portent les images système de RKE2
+    (point 198 : coupure du repli permise pour docker.io seulement alors)."""
+    import registries as _rgm
+    state = _bm_profiles_state()
+    out = []
+    decls = {}
+    for d in _rgm.list_decls(state):
+        full = _rgm.load(state, d["name"])
+        if full is not None:
+            decls[d["name"]] = full
+    ready = _rgm.system_ready_registries(state, decls)
+    for n, d in sorted(decls.items()):
+        out.append({"name": n, "kind": d["kind"], "endpoint": d.get("endpoint"), "usage": d.get("usage") or [],
+                    "mirrors": d.get("mirrors") or [], "attached": cluster in (d.get("clusters") or []),
+                    "system_images": n in ready})
+    return out
 
 
 @app.route("/api/capi/<cluster>/cluster-check", methods=["POST"])
@@ -17649,7 +17673,7 @@ def _capi_launch(cluster, kc, sub, args, spec=None, parent=None, cluster_user=No
     `cluster_user` sont figés au déclenchement. Même commande que les routes
     (_capi_cmd), même action suivie (_capi_action). (action, None) ou
     (None, {"error", ...})."""
-    cmd = _capi_cmd(kc, sub)
+    cmd = _capi_cmd(kc, sub, cluster)
     if cmd is None:
         return None, {"error": f"{CAPI_SCRIPT} not deployed"}
     with app.app_context():                    # réponse d'occupation (jsonify) hors requête
@@ -32651,11 +32675,13 @@ def _deploy_check_detail(f):
     return (f"{f['cluster']}: " if f.get("cluster") else "") + (text or f.get("code", ""))
 
 
-def _deploy_check_many(kc, specs):
+def _deploy_check_many(kc, specs, cluster=None):
     """`harvester-capi check --many` (identité restreinte) : (sortie, None)
-    ou (None, message)."""
+    ou (None, message). `cluster` : nom du cluster Harvester (registres qui
+    lui sont rattachés, 2.6.0)."""
     out, _rc, err = _deploy_capi_json(kc, "check", _deploy_capi_args() + [
-        "--many", "--spec", "-", "--identity", "restricted", "--json"], spec=specs, timeout=180)
+        "--many", "--spec", "-", "--identity", "restricted", "--json"]
+        + ([f"--harvester-name={cluster}"] if cluster else []), spec=specs, timeout=180)
     return (out, None) if err is None and isinstance(out, dict) else (None, err or "unreadable")
 
 
@@ -32735,6 +32761,10 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None):
         try:
             name = _dpl.render_cluster_name(e["name"], values)
             spec = _dpl.render_capi_template(t, values, name)
+            if e.get("registries"):
+                # 2.6.0 : les registres de l'entrée remplacent ceux du modèle
+                spec["registries"] = _dpl.render_registries(e["registries"], values,
+                                                            f"clusters[{e['name']}].registries")
         except _dpl.ProfileError as ex:
             for where, why in ex.errors:
                 code = "cluster-var-missing" if "missing variable" in why else "var-invalid"
@@ -32770,7 +32800,7 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None):
         out["summary"].append(row)
     if install or not kc or not absent or not providers:
         return out
-    res, err = _deploy_check_many(kc, [e["spec"] for e in absent])
+    res, err = _deploy_check_many(kc, [e["spec"] for e in absent], values.get("cluster"))
     if err:
         findings.append(_deploy_finding("capi-check-failed", "clusters", f"check: {err}"))
         return out
@@ -33233,7 +33263,7 @@ def _deploy_clusters_phase(run, cluster, kc_ref, dctx):
                 absent.append(e["spec"])
         if not absent:
             return None
-        res, err = _deploy_check_many(kc, absent)
+        res, err = _deploy_check_many(kc, absent, cluster)
         if err:
             return _dch.PhaseOutcome("error", message=f"check failed ({err})"[:200])
         blocking = [f for f in res.get("findings") or [] if f.get("level") == "block"]

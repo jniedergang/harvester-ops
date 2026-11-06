@@ -153,3 +153,31 @@ def test_save_as_template_is_greyed_with_the_reason(world, role):
     btn = x(host, "save-template")
     expect(btn).to_be_disabled(timeout=5000)
     assert "administrator" in btn.get_attribute("title")
+
+
+def test_a_template_keeps_its_registries_and_a_registry_variable(world):
+    """2.6.0 (tâche 9) : « Variable... » sur le nom du registre ; la liste
+    revient dans l'ordre et repart telle quelle à l'enregistrement."""
+    page, st = world()
+    TEMPLATE["spec"]["registries"] = ["{{registre}}", {"registry": "client", "mirrors": ["ghcr.io"]}]
+    try:
+        inv = dict(INVENTORY, registries=[{"name": "client", "kind": "external", "endpoint": "h:443",
+                                           "usage": ["images"], "mirrors": ["ghcr.io", "quay.io"],
+                                           "attached": True, "system_images": False}])
+        page.route("**/api/capi/harv-fake/inventory*", lambda r, q: fulfill(r, inv))
+        page.evaluate("BMPlans.openCapiTemplate('rke2-lab', { cluster: 'harv-fake' })")
+        form = page.locator("#fp-bm-ctpl-rke2-lab .bmpl-ctpl-form")
+        rows = form.locator(".capi-reg-row")
+        expect(rows).to_have_count(2)
+        expect(rows.nth(0).locator("[data-reg-var]")).to_have_value("{{registre}}")
+        expect(rows.nth(1).locator('[data-reg-mirror="quay.io"]')).not_to_be_checked()
+        form.locator('.vm-edit-nav [data-sec="registries"]').click()
+        form.locator('[data-reg="add"]').select_option("__var__")
+        form.locator(".capi-reg-row").nth(2).locator("[data-reg-var]").fill("{{secours}}")
+        form.locator(".bmpl-ctpl-save").click()
+        expect(form.locator(".bmpl-ctpl-msg")).to_contain_text("saved")
+        assert st["put"][0][1]["spec"]["registries"] == [
+            {"registry": "{{registre}}"}, {"registry": "client", "mirrors": ["ghcr.io"]}, {"registry": "{{secours}}"}]
+        assert st["errors"] == []
+    finally:
+        TEMPLATE["spec"].pop("registries")

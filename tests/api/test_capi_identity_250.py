@@ -387,13 +387,13 @@ def sim(cli, monkeypatch, tmp_path):
          "network": "default/production", "gateway": "172.16.0.1", "subnet_mask": "255.255.0.0",
          "ip_pool": "capi-vm-pool", "dns": ["172.16.3.6"]}))
     monkeypatch.setattr(cli, "components_from", lambda p: None)
-    monkeypatch.setattr(cli, "_check", lambda kube, spec, desc, identity="console": {
+    monkeypatch.setattr(cli, "_check", lambda kube, spec, desc, identity="console", harvester=None: {
         "findings": [], "blocked": False, "amount": {"vms": 2, "addresses": 3}, "spec": spec,
         "identity": identity, "caphv_version": V})
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     seen = {}
 
-    def render(spec, kc, origin=None):
+    def render(spec, kc, origin=None, registries=None):
         p = Path(kc)
         seen["path"] = p
         seen["mode"] = stat.S_IMODE(p.stat().st_mode)
@@ -433,7 +433,7 @@ def test_create_sets_up_the_identity_before_rendering_and_erases_the_file(cli, s
 
 def test_console_identity_renders_with_the_console_kubeconfig(cli, sim, monkeypatch):
     seen = {}
-    monkeypatch.setattr(cli, "render", lambda spec, kc, origin=None: seen.update(kc=kc, spec=spec) or [])
+    monkeypatch.setattr(cli, "render", lambda spec, kc, origin=None, registries=None: seen.update(kc=kc, spec=spec) or [])
     kube = Kube()
     assert _create(cli, kube, monkeypatch, identity="console") == cli.EXIT_OK
     assert seen["kc"] == "/console/kubeconfig" and seen["spec"]["target_namespace"] == "default"
@@ -809,7 +809,7 @@ def test_preview_renders_like_create(cli, monkeypatch, capsys, tmp_path, identit
          "ip_pool": "capi-vm-pool", "dns": ["172.16.3.6"]}))
     seen = {}
 
-    def render(spec, kc, origin=None):
+    def render(spec, kc, origin=None, registries=None):
         seen["ns"] = spec["target_namespace"]
         seen["kc"] = Path(kc).read_text() if kc != "/console/kubeconfig" else kc
         seen["path"] = kc

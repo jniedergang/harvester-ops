@@ -61,6 +61,11 @@ const CapiCreate = (() => {
     'rights-missing': (v) => tr('capi.new.fd.rights-missing', v),
     'rights-unchecked': (v) => tr('capi.new.fd.rights-unchecked', v),
     'vm-namespace-taken': (v) => tr('capi.new.fd.vm-namespace-taken', v),
+    'cluster-registry-unknown': (v) => tr('capi.new.fd.cluster-registry-unknown', v),
+    'cluster-registry-not-attached': (v) => tr('capi.new.fd.cluster-registry-not-attached', v),
+    'cluster-registry-no-images': (v) => tr('capi.new.fd.cluster-registry-no-images', v),
+    'cluster-registry-mirror-unknown': (v) => tr('capi.new.fd.cluster-registry-mirror-unknown', v),
+    'cluster-registry-no-fallback-system': (v) => tr('capi.new.fd.cluster-registry-no-fallback-system', v),
   };
   const LEVEL_CLASS = { block: 'sev-critical', warn: 'sev-watch', ok: 'sev-info' };
   const LEVEL_RANK = { block: 0, warn: 1, ok: 2 };
@@ -77,7 +82,7 @@ const CapiCreate = (() => {
   // v1.53.0 : la création passe dans une fenêtre à menus, comme celle d'une
   // VM (demande de l'exploitant) : l'essentiel au premier menu, le reste
   // rangé par thème, le contrôle préalable à part avec un compteur par menu.
-  const SECTIONS = ['essentials', 'nodes', 'network', 'storage', 'kubernetes', 'integrations', 'check'];
+  const SECTIONS = ['essentials', 'nodes', 'network', 'storage', 'kubernetes', 'integrations', 'registries', 'check'];
   const SEC_LABEL = {
     essentials: () => tr('capi.new.nav.essentials'),
     nodes: () => tr('capi.new.nav.nodes'),
@@ -85,6 +90,7 @@ const CapiCreate = (() => {
     storage: () => tr('capi.new.nav.storage'),
     kubernetes: () => tr('capi.new.nav.kubernetes'),
     integrations: () => tr('capi.new.nav.integrations'),
+    registries: () => tr('capi.new.nav.registries'),
     check: () => tr('capi.new.nav.check'),
   };
   const SEC_TIP = {
@@ -94,16 +100,24 @@ const CapiCreate = (() => {
     storage: () => tr('capi.new.nav.t.storage'),
     kubernetes: () => tr('capi.new.nav.t.kubernetes'),
     integrations: () => tr('capi.new.nav.t.integrations'),
+    registries: () => tr('capi.new.nav.t.registries'),
     check: () => tr('capi.new.nav.t.check'),
   };
   const SEC_ICON = { essentials: 'general', nodes: 'compute', network: 'network', storage: 'storage',
-                     kubernetes: 'capi', integrations: 'plug', check: 'test' };
+                     kubernetes: 'capi', integrations: 'plug', registries: 'containers', check: 'test' };
   // Le menu où se règle ce que dit chaque constat (compteur sur le menu).
   const FINDING_SEC = {
     'small-nodes': 'nodes', 'cpu-short': 'nodes', 'memory-short': 'nodes',
     'gateway-differs': 'network', 'mask-differs': 'network', 'endpoint-dhcp': 'network',
     'storage-class-missing': 'storage', 'cidr-overlap': 'kubernetes', 'cni-tuning-ignored': 'integrations',
+    'cluster-registry-unknown': 'registries', 'cluster-registry-not-attached': 'registries',
+    'cluster-registry-no-images': 'registries', 'cluster-registry-mirror-unknown': 'registries',
+    'cluster-registry-no-fallback-system': 'registries',
   };
+  // Point 198 : registres d'origine des images système de RKE2. Couper le
+  // repli vers Internet pour eux n'est proposé que si un registre qui les
+  // sert porte ces images (le serveur le refuse de toute façon).
+  const SYSTEM_ORIGINS = ['docker.io', 'registry.rancher.com'];
 
   function opts(list, selected, label = (v) => v, value = (v) => v) {
     return list.map(v => `<option value="${esc(value(v))}" ${value(v) === selected ? 'selected' : ''}>${esc(label(v))}</option>`).join('');
@@ -293,6 +307,23 @@ const CapiCreate = (() => {
               </select></label>
           </div>
         </section>
+        <section class="capi-sec" data-sec="registries" role="tabpanel" hidden>
+          <h3>${esc(SEC_LABEL.registries())}</h3>
+          <p class="tf-desc">${esc(tr('capi.reg.intro'))}</p>
+          <div class="capi-reg-list" data-reg="list"></div>
+          <div class="tf-args">
+            <label class="tf-field"><span class="tf-label">${esc(tr('capi.reg.add'))}</span>
+              <select data-reg="add" class="tip" data-tip="${esc(tr('capi.reg.t.add'))}">
+                <option value="">${esc(tr('capi.reg.choose'))}</option>
+                ${(inv.registries || []).map(r => `<option value="${esc(r.name)}"${r.attached ? '' : ' disabled'}>${esc(r.attached
+                  ? tr('capi.reg.option', { name: r.name, endpoint: r.endpoint || '' })
+                  : tr('capi.reg.optionNotAttached', { name: r.name }))}</option>`).join('')}
+                ${T ? `<option value="${VAR}">${esc(tr('capi.tpl.variable'))}</option>` : ''}
+              </select></label>
+            <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('capi.reg.t.noFallback'))}"><input data-reg="nofallback" type="checkbox"><span class="tf-label">${esc(tr('capi.reg.noFallback'))}</span></label>
+          </div>
+          <p class="tf-desc capi-reg-note" data-reg="note" hidden></p>
+        </section>
         ${T ? '' : `<section class="capi-sec" data-sec="check" role="tabpanel" hidden>
           <h3>${esc(SEC_LABEL.check())}</h3>
           <div class="xfer-report" data-x="report"></div>
@@ -362,6 +393,7 @@ const CapiCreate = (() => {
       b.addEventListener('click', () => show(b.dataset.sec)));
     q('check-status').addEventListener('click', () => show('check'));
     show('essentials');
+    wireRegistries(root, inv, false, () => later());
 
     // Un compteur par menu, et l'état du contrôle dans la barre d'actions,
     // visible quel que soit le menu ouvert.
@@ -590,7 +622,111 @@ const CapiCreate = (() => {
     if (b.ip_pool_refs && b.ip_pool && !b.ip_pool_refs.includes(b.ip_pool)) b.ip_pool_refs.unshift(b.ip_pool);
     (b.extra_networks || []).length || delete b.extra_networks;
     if (b.extra_networks) b.extra_networks = b.extra_networks.filter(n => n !== b.network);
+    const regs = readRegistries(root);
+    if (regs.length) b.registries = regs;
     return b;
+  }
+
+  // --- registres du cluster enfant (2.6.0, tâche 9) ---------------------
+  /** Liste ordonnée lue dans le formulaire : le premier registre est
+   *  préféré. Les miroirs ne partent que s'ils diffèrent de la déclaration ;
+   *  la coupure du repli vaut pour tout le cluster (RKE2). */
+  function readRegistries(root) {
+    const list = root.querySelector('[data-reg="list"]');
+    if (!list) return [];
+    const cut = !!(root.querySelector('[data-reg="nofallback"]') || {}).checked;
+    return [...list.querySelectorAll('.capi-reg-row')].map(row => {
+      const name = row.dataset.var ? (row.querySelector('[data-reg-var]') || {}).value || '' : row.dataset.name;
+      const e = { registry: name.trim() };
+      const boxes = [...row.querySelectorAll('[data-reg-mirror]')];
+      if (boxes.length && boxes.some(b => !b.checked)) e.mirrors = boxes.filter(b => b.checked).map(b => b.dataset.regMirror);
+      if (cut) e.no_fallback = true;
+      return e;
+    }).filter(e => e.registry);
+  }
+
+  function regRowHtml(r, entry, T) {
+    const tipUp = esc(tr('capi.reg.t.up'));
+    const tipDown = esc(tr('capi.reg.t.down'));
+    const tipRemove = esc(tr('capi.reg.t.remove'));
+    const btns = `
+      <button type="button" class="btn btn-sm btn-secondary tip" data-reg-act="up" data-tip="${tipUp}" title="${tipUp}" aria-label="${tipUp}">${Icons.svg('arrowUp', { size: 12 })}</button>
+      <button type="button" class="btn btn-sm btn-secondary tip" data-reg-act="down" data-tip="${tipDown}" title="${tipDown}" aria-label="${tipDown}">${Icons.svg('arrowDown', { size: 12 })}</button>
+      <button type="button" class="btn btn-sm btn-secondary tip" data-reg-act="remove" data-tip="${tipRemove}" title="${tipRemove}" aria-label="${tipRemove}">${Icons.svg('close', { size: 12 })}</button>`;
+    if (!r) {
+      const tip = esc(tr('capi.tpl.t.variableInput'));
+      return `<div class="capi-reg-row" data-var="1"><input type="text" data-reg-var="1" class="tip capi-var" placeholder="{{name}}"
+        spellcheck="false" value="${esc(entry.registry || '')}" data-tip="${tip}" title="${tip}" aria-label="${tip}">${btns}</div>`;
+    }
+    const chosen = entry.mirrors || r.mirrors;
+    const mirrors = (r.mirrors || []).map(m => `<label class="capi-reg-mirror tip" data-tip="${esc(tr('capi.reg.t.mirror', { origin: m }))}">
+        <input type="checkbox" data-reg-mirror="${esc(m)}"${chosen.includes(m) ? ' checked' : ''}> ${esc(m)}</label>`).join('');
+    return `<div class="capi-reg-row" data-name="${esc(r.name)}">
+      <span class="capi-reg-name"><strong>${esc(r.name)}</strong> <span class="tf-desc">${esc(r.endpoint || '')}${r.kind === 'bootstrap' ? ` (${esc(tr('capi.reg.bootstrap'))})` : ''}</span></span>
+      <span class="capi-reg-mirrors">${mirrors || `<span class="tf-desc">${esc(tr('capi.reg.noMirror'))}</span>`}</span>${btns}</div>`;
+  }
+
+  /** Branche la liste : ajout, ordre, retrait, coupure du repli (grisée
+   *  avec sa raison quand docker.io ou registry.rancher.com est miroité
+   *  sans les images système de RKE2). `onChange` relance le contrôle. */
+  function wireRegistries(root, inv, T, onChange) {
+    const list = root.querySelector('[data-reg="list"]');
+    if (!list) return { set() {} };
+    const byName = Object.fromEntries((inv.registries || []).map(r => [r.name, r]));
+    const add = root.querySelector('[data-reg="add"]');
+    const cut = root.querySelector('[data-reg="nofallback"]');
+    const note = root.querySelector('[data-reg="note"]');
+    function refresh() {
+      const rows = [...list.querySelectorAll('.capi-reg-row')];
+      const served = {};
+      rows.forEach(row => row.querySelectorAll('[data-reg-mirror]:checked').forEach(b => {
+        (served[b.dataset.regMirror] = served[b.dataset.regMirror] || []).push(row.dataset.name);
+      }));
+      const missing = SYSTEM_ORIGINS.filter(o => served[o] && !served[o].some(n => (byName[n] || {}).system_images));
+      cut.disabled = !rows.length || missing.length > 0;
+      if (cut.disabled) cut.checked = false;
+      note.hidden = !missing.length;
+      note.textContent = missing.length ? tr('capi.reg.systemNote', { origins: missing.join(', ') }) : '';
+      [...add.options].forEach(o => {
+        if (o.value && o.value !== VAR && byName[o.value]) o.hidden = rows.some(r => r.dataset.name === o.value);
+      });
+    }
+    function push(entry) {
+      const r = entry.var ? null : byName[entry.registry];
+      const html = regRowHtml(r || (entry.var ? null : { name: entry.registry, mirrors: entry.mirrors || [] }), entry, T);
+      list.insertAdjacentHTML('beforeend', html);
+    }
+    add.addEventListener('change', () => {
+      if (!add.value) return;
+      push(add.value === VAR ? { var: true, registry: '' } : { registry: add.value });
+      add.value = '';
+      refresh();
+      onChange();
+    });
+    list.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-reg-act]');
+      if (!b) return;
+      const row = b.closest('.capi-reg-row');
+      if (b.dataset.regAct === 'remove') row.remove();
+      else if (b.dataset.regAct === 'up' && row.previousElementSibling) row.parentNode.insertBefore(row, row.previousElementSibling);
+      else if (b.dataset.regAct === 'down' && row.nextElementSibling) row.parentNode.insertBefore(row.nextElementSibling, row);
+      refresh();
+      onChange();
+    });
+    list.addEventListener('change', () => { refresh(); onChange(); });
+    cut.addEventListener('change', onChange);
+    refresh();
+    return {
+      set(entries) {
+        list.innerHTML = '';
+        (entries || []).forEach(e => {
+          const x = typeof e === 'string' ? { registry: e } : e;
+          push(/\{\{/.test(x.registry) ? Object.assign({ var: true }, x) : x);
+        });
+        cut.checked = (entries || []).some(e => e && e.no_fallback === true);
+        refresh();
+      },
+    };
   }
 
   // --- éditeur de modèle (2.5.0) ----------------------------------------
@@ -696,7 +832,9 @@ const CapiCreate = (() => {
         if (p.mask) q('subnet_mask').value = p.mask;
       }
     });
+    const regs = wireRegistries(root, inv || {}, true, () => {});
     fillTemplate(root, spec || {});
+    regs.set((spec || {}).registries || []);
     return { read: () => { const b = readBody(root); PLAN_FIELDS.forEach(k => delete b[k]); return b; } };
   }
 

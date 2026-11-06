@@ -130,7 +130,7 @@ def test_the_essentials_are_filled_from_the_cluster(form):
     # l'essentiel au premier menu, le reste rangé : les autres menus fermés
     expect(host.locator('.capi-sec[data-sec="network"]')).to_be_hidden()
     navs = host.locator(".vm-edit-nav [data-sec]")
-    assert navs.count() == 7 and all(b.get_attribute("data-tip") for b in navs.all())
+    assert navs.count() == 8 and all(b.get_attribute("data-tip") for b in navs.all())
     expect(x(host, "summary")).to_contain_text("2 VM : 4 vCPU")
     # passerelle et masque déduits du pool, au menu Réseau
     menu(host, "network")
@@ -321,3 +321,55 @@ def test_a_refused_field_counts_on_its_own_menu(form):
     x(host, "name").dispatch_event("change")
     expect(host.locator('[data-count="network"]')).to_have_text("1", timeout=5000)
     expect(host.locator('[data-count="essentials"]')).to_be_hidden()
+
+
+# 2.6.0 (tâche 9) : registres du cluster enfant, posés à la création
+REGISTRIES = [
+    {"name": "amorcage", "kind": "bootstrap", "endpoint": "172.16.2.76", "usage": ["images", "charts"],
+     "mirrors": ["docker.io", "ghcr.io"], "attached": True, "system_images": False},
+    {"name": "client", "kind": "external", "endpoint": "harbor.client.example:443", "usage": ["images"],
+     "mirrors": ["ghcr.io"], "attached": True, "system_images": False},
+    {"name": "ailleurs", "kind": "external", "endpoint": "<b>x</b>:443", "usage": ["images"],
+     "mirrors": [], "attached": False, "system_images": False},
+]
+
+
+def test_registries_are_chosen_in_order_with_their_mirrors(form):
+    page, host, calls = form(inventory=dict(INVENTORY, registries=REGISTRIES), check={
+        "blocked": True, "findings": [{"code": "cluster-registry-not-attached", "level": "block",
+                                       "facts": {"registry": "client", "cluster": "harv-fake"}}]})
+    x(host, "name").fill("web")
+    menu(host, "registries")
+    sec = host.locator('.capi-sec[data-sec="registries"]')
+    add = sec.locator('[data-reg="add"]')
+    # un registre non rattaché se voit mais ne se choisit pas
+    expect(add.locator('option[value="ailleurs"]')).to_have_attribute("disabled", "")
+    expect(add.locator('option[value="ailleurs"]')).to_contain_text("ailleurs")
+    add.select_option("amorcage")
+    add.select_option("client")
+    rows = sec.locator(".capi-reg-row")
+    expect(rows).to_have_count(2)
+    # docker.io miroité sans les images système de RKE2 : coupure non proposée, raison dite
+    cut = sec.locator('[data-reg="nofallback"]')
+    expect(cut).to_be_disabled()
+    expect(sec.locator('[data-reg="note"]')).to_contain_text("docker.io")
+    rows.nth(0).locator('[data-reg-mirror="docker.io"]').uncheck()
+    expect(cut).to_be_enabled()
+    cut.check()
+    rows.nth(1).locator('[data-reg-act="up"]').click()        # le client devient préféré
+    expect(rows.nth(0)).to_have_attribute("data-name", "client")
+    menu(host, "check")
+    expect(x(host, "report")).to_contain_text("client", timeout=5000)
+    expect(host.locator('[data-count="registries"]')).to_have_text("1")
+    body = calls["check"][-1]
+    assert body["registries"] == [{"registry": "client", "no_fallback": True},
+                                  {"registry": "amorcage", "mirrors": ["ghcr.io"], "no_fallback": True}]
+    assert all(t.get_attribute("data-tip") for t in host.locator('.capi-sec[data-sec="registries"] .tip').all())
+
+
+def test_no_registry_means_no_registries_key(form):
+    page, host, calls = form(inventory=dict(INVENTORY, registries=REGISTRIES))
+    x(host, "name").fill("web")
+    menu(host, "check")
+    expect(x(host, "report")).to_contain_text("Aucun blocage", timeout=5000)
+    assert "registries" not in calls["check"][-1]

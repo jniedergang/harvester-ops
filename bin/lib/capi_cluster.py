@@ -71,7 +71,7 @@ FLAGS = {
 LIST_FLAGS = {"dns": "--dns", "ip_pool_refs": "--ip-pool-refs"}
 # Options traitées par la console elle-même, après le générateur.
 CONSOLE_OPTIONS = {"extra_disk_size", "extra_disk_class", "target_namespace",
-                   "rancher_import", "extra_networks", "service_cidr"}
+                   "rancher_import", "extra_networks", "service_cidr", "registries"}
 KNOWN = set(FLAGS) | set(LIST_FLAGS) | CONSOLE_OPTIONS
 # Options entières : `normalize` les convertit, le rendu d'un modèle de
 # cluster (deploy_plans) donne ce type à une chaîne qui n'est qu'une variable.
@@ -84,6 +84,50 @@ def _as_list(v):
     if isinstance(v, str):
         return [x.strip() for x in v.split(",") if x.strip()]
     return [str(x).strip() for x in v if str(x).strip()]
+
+
+# 2.6.0 : registres du cluster enfant (liste ordonnée, préféré d'abord).
+# Mêmes règles de nom et d'hôte que bin/lib/registries.py (qui importe ce
+# module : les règles vivent ici pour éviter l'import circulaire).
+REGISTRY_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,28}[a-z0-9])?$")
+REGISTRY_HOST_RE = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
+    r"|\d{1,3}(?:\.\d{1,3}){3})(?::\d{1,5})?$")
+REGISTRY_ENTRY_KEYS = {"registry", "mirrors", "no_fallback"}
+
+
+def normalize_registry_entries(v):
+    """`registries` de la demande : liste de noms ou de {registry, mirrors,
+    no_fallback}, rendue en [{registry[, mirrors][, no_fallback]}] dans
+    l'ordre (le premier registre est préféré). `mirrors` absent = ceux de la
+    déclaration ; `no_fallback` absent = décision de la console
+    (registries.fallback_decision). ValueError sur une forme fausse ; les
+    noms et les hôtes sont contrôlés par `validate`."""
+    if v in (None, "", []):
+        return []
+    if isinstance(v, str):
+        v = [x.strip() for x in v.split(",") if x.strip()]
+    if not isinstance(v, list):
+        raise ValueError("registries: a list of registry names or {registry, mirrors, no_fallback}")
+    out = []
+    for e in v:
+        if isinstance(e, str):
+            e = {"registry": e}
+        if not isinstance(e, dict) or set(e) - REGISTRY_ENTRY_KEYS or not isinstance(e.get("registry"), str):
+            raise ValueError("registries: a list of registry names or {registry, mirrors, no_fallback}")
+        item = {"registry": e["registry"].strip()}
+        m = e.get("mirrors")
+        if m is not None:
+            if not isinstance(m, list) or not all(isinstance(x, str) for x in m):
+                raise ValueError("registries.mirrors: a list of registry hosts")
+            item["mirrors"] = list(dict.fromkeys(x.strip() for x in m if x.strip()))
+        nf = e.get("no_fallback")
+        if nf is not None:
+            if nf not in (True, False, "true", "false"):
+                raise ValueError("registries.no_fallback: true or false")
+            item["no_fallback"] = nf in (True, "true")
+        out.append(item)
+    return out
 
 
 def normalize(raw):
@@ -108,6 +152,9 @@ def normalize(raw):
     spec["ip_pool_refs"] = _as_list(spec.get("ip_pool_refs"))
     spec["extra_networks"] = _as_list(spec.get("extra_networks"))
     spec["rancher_import"] = spec.get("rancher_import") in (True, "true", "1", 1, "on")
+    regs = normalize_registry_entries(spec.pop("registries", None))
+    if regs:
+        spec["registries"] = regs
     if not spec.get("namespace") and spec.get("name"):
         spec["namespace"] = spec["name"]
     return spec
@@ -173,6 +220,14 @@ def validate(spec):
         need("extra_disk_size", bool(QUANTITY_RE.match(str(size))), "a size such as 20Gi")
         need("extra_disk_class", bool(K8S_NAME_RE.match(spec.get("extra_disk_class") or "")),
              "a storage class")
+    seen = set()
+    for e in spec.get("registries") or []:
+        n = e.get("registry") or ""
+        need("registries", bool(REGISTRY_NAME_RE.match(n)), f"'{n[:40]}': a registry name (RFC 1123, 30 at most)")
+        need("registries", n not in seen, f"'{n}' listed twice")
+        seen.add(n)
+        for m in e.get("mirrors") or []:
+            need("registries", bool(REGISTRY_HOST_RE.match(m)), f"'{m[:60]}': a registry host (host[:port])")
     return errs
 
 
@@ -275,7 +330,32 @@ def _retarget_refs(node):
             _retarget_refs(v)
 
 
-def postprocess(docs, spec, origin=None):
+RKE2_TEMPLATE_KINDS = ("RKE2ControlPlaneTemplate", "RKE2ConfigTemplate")
+
+
+def _apply_registries(docs, registries):
+    """2.6.0 (tâche 9) : configuration de registres privés de RKE2 posée dans
+    les DEUX gabarits, plan de contrôle et workers (un worker sans elle
+    tirerait d'Internet), fichier `config.yaml.d` ajouté aux `files`
+    existants, Secrets (compte de lecture, CA) ajoutés aux documents tels
+    que rendus par registries.rke2_config."""
+    if not registries:
+        return docs
+    prc, files = registries.get("config") or {}, registries.get("files") or []
+    for d in docs:
+        if d.get("kind") not in RKE2_TEMPLATE_KINDS:
+            continue
+        tpl = d.setdefault("spec", {}).setdefault("template", {})
+        inner = tpl["spec"] = tpl.get("spec") or {}
+        if prc:
+            inner["privateRegistriesConfig"] = copy.deepcopy(prc)
+        if files:
+            have = [f for f in inner.get("files") or [] if f.get("path") not in {x["path"] for x in files}]
+            inner["files"] = have + copy.deepcopy(files)
+    return docs + [copy.deepcopy(s) for s in registries.get("secrets") or []]
+
+
+def postprocess(docs, spec, origin=None, registries=None):
     """Corrige les documents produits par le générateur ; rend une copie.
 
     - **v1alpha1 -> v1beta1 pour les objets Harvester.** Le générateur écrit
@@ -297,6 +377,9 @@ def postprocess(docs, spec, origin=None):
     - **Origine** (2.5.0) : étiquettes et annotation d'un cluster créé par un
       plan, passées par `origin` ({plan, template, run}), jamais par la
       demande, qui reste une liste blanche.
+    - **Registres** (2.6.0) : `registries` = {config, files, secrets} rendu
+      par registries.rke2_config, passé par l'appelant (jamais lu dans la
+      demande brute) ; voir `_apply_registries`.
     """
     out = []
     for d in docs:
@@ -337,7 +420,7 @@ def postprocess(docs, spec, origin=None):
     have = {(d.get("kind"), (d.get("metadata") or {}).get("name")) for d in out}
     if cluster and ("ClusterResourceSet", KUBE_VIP_CRS) not in have:
         out.extend(kube_vip_docs(cluster["metadata"].get("namespace") or "default"))
-    return out
+    return _apply_registries(out, registries)
 
 
 def parse_origin(text):

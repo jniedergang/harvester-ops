@@ -72,7 +72,7 @@ def test_one_bootstrap_registry_mirrors_its_origins_and_cuts_the_fallback_when_a
                       "content": "disable-default-registry-endpoint: true\n"}]
     auth, ca = secrets
     assert auth["metadata"] == {"name": "web-registry-amorcage-auth", "namespace": "web",
-                                "labels": {cc.GENERATED: "true"}}
+                                "labels": {cc.GENERATED: "true", rg.LABEL: "amorcage"}}
     assert auth["stringData"] == {"username": "pull-amorcage", "password": PULL_PW}
     assert ca["type"] == "Opaque" and ca["stringData"] == {"ca.crt": ca_pem}       # jamais kubernetes.io/tls
     assert "insecureSkipVerify" not in json.dumps(prc)
@@ -277,12 +277,6 @@ def test_each_registry_finding(d, facts, codes):
     assert [f["code"] for f in got] == codes
     levels = {"registry-pull-is-push": "warn", "registry-insecure": "warn"}
     assert all(f["level"] == levels.get(f["code"], "block") for f in got)
-
-
-def test_entry_findings_unknown_and_duplicate():
-    got = rg.check_entries(["a", "b", "a"], {"a": decl("a")})
-    assert [(f["code"], f["level"]) for f in got] == [("registry-unknown", "block"),
-                                                      ("registry-mirror-duplicate", "warn")]
 
 
 def test_facts_probe_read_then_write_from_the_console():
