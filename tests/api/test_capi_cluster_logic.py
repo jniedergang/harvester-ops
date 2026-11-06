@@ -253,6 +253,12 @@ def test_a_good_request_on_a_ready_cluster_has_no_blocker():
     ({"worker_replicas": 20}, {}, "pool-short"),
     ({"pod_cidr": "172.16.0.0/20"}, {}, "cidr-overlap"),
     ({"name": "Bad"}, {}, "invalid"),
+    # 2.6.0, vu sur harvlab2 : l'image openSUSE Leap 15.6 publiée annonce
+    # 10 Gio, Longhorn refuse un disque de 8 Gio (« volume size should be
+    # larger than the backing image size ») et la VM reste en Scheduling
+    ({"disk_size": "8Gi"}, {"images": {"default/sles15-sp7.qcow2": {"ready": True, "iso": False,
+                                                                    "virtual_size": 10 << 30}}},
+     "disk-smaller-than-image"),
 ])
 def test_each_blocker(over, facts, code):
     assert code in codes(cc.check(good(**over), _facts(**facts)), "block")
@@ -403,3 +409,18 @@ def test_created_clusters_carry_kube_vip():
     # une seule fois, même repassé
     again = cc.postprocess(out, {})
     assert sum(1 for d in again if d["kind"] == "ClusterResourceSet") == 1
+
+
+@pytest.mark.parametrize("disk, virtual, blocked", [
+    ("8Gi", 10 << 30, True),
+    ("10Gi", 10 << 30, False),          # égal : accepté par Longhorn
+    ("12Gi", 10 << 30, False),
+    ("8Gi", None, False),               # taille inconnue (image ancienne) : rien à dire
+])
+def test_root_disk_against_the_image_virtual_size(disk, virtual, blocked):
+    facts = _facts(images={"default/sles15-sp7.qcow2": {"ready": True, "iso": False, "virtual_size": virtual}})
+    found = [f for f in cc.check(good(disk_size=disk), facts) if f["code"] == "disk-smaller-than-image"]
+    assert bool(found) is blocked
+    if blocked:
+        assert found[0]["level"] == "block" and found[0]["facts"]["disk"] == disk \
+            and found[0]["facts"]["image_size"] == "10Gi"

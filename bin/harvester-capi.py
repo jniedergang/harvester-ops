@@ -203,7 +203,7 @@ def _image_facts(images):
     out = {}
     for i in images:
         info = {"ready": i["ready"], "iso": i["iso"], "os": i.get("os"),
-                "storage_class": i.get("storage_class")}
+                "storage_class": i.get("storage_class"), "virtual_size": i.get("virtual_size")}
         ns = i["ref"].split("/", 1)[0]
         out.setdefault(f"{ns}/{i['display_name']}", info)
         out[i["ref"]] = info

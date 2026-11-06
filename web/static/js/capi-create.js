@@ -35,6 +35,7 @@ const CapiCreate = (() => {
     'image-missing': (v) => tr('capi.new.fd.image-missing', v),
     'image-iso': (v) => tr('capi.new.fd.image-iso', v),
     'image-not-ready': (v) => tr('capi.new.fd.image-not-ready', v),
+    'disk-smaller-than-image': (v) => tr('capi.new.fd.disk-smaller-than-image', v),
     'image-sles-repos': (v) => tr('capi.new.fd.image-sles-repos', v),
     'keypair-missing': (v) => tr('capi.new.fd.keypair-missing', v),
     'network-missing': (v) => tr('capi.new.fd.network-missing', v),

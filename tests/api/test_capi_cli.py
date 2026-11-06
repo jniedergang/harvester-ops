@@ -129,6 +129,13 @@ def test_a_request_may_name_the_image_either_way(cli):
     assert set(facts) == {"default/image-nhtf9", "default/sles15-sp7.qcow2"}
 
 
+def test_the_image_facts_carry_the_virtual_size(cli):
+    img = image("image-nhtf9", "sles15-sp7.qcow2")
+    img["status"]["virtualSize"] = 10 << 30
+    facts = cli._image_facts([cli._image_info(img)])
+    assert facts["default/image-nhtf9"]["virtual_size"] == 10 << 30
+
+
 def test_only_tested_versions_escape_the_warning(cli):
     inv = dict(cli.EMPTY_INVENTORY, stack=None, free_cpu_m=0, free_memory=0, overcommit={},
                versions=[{"version": "v1.34.11", "tested": False},

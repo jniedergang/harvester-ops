@@ -596,6 +596,13 @@ def check(spec, facts):
         out.append(finding("image-iso", "block", image=spec.get("image")))
     elif img and not img.get("ready"):
         out.append(finding("image-not-ready", "block", image=spec.get("image")))
+    elif img and isinstance(img.get("virtual_size"), int) and img["virtual_size"] > _bytes(spec.get("disk_size")) > 0:
+        # 2.6.0, vu sur harvlab2 : Longhorn refuse un disque racine plus
+        # petit que la taille virtuelle de l'image (« volume size should be
+        # larger than the backing image size ») ; la PVC reste Pending et la
+        # VM en Scheduling jusqu'au délai, sans autre signe
+        out.append(finding("disk-smaller-than-image", "block", image=spec.get("image"),
+                           disk=spec.get("disk_size"), image_size=f"{-(-img['virtual_size'] // _QUANTITY['Gi'])}Gi"))
     elif img and img.get("os") == "sles":
         # Vu sur harv1 : une image SLES non enregistrée n'a aucun dépôt,
         # cloud-init n'installe ni iptables ni qemu-guest-agent, et les pods
