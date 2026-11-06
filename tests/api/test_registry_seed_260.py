@@ -75,7 +75,8 @@ def test_only_bcrypt_hashes_are_in_the_htpasswd_secret():
 @pytest.mark.parametrize("which,expected", [
     ("read.yml", {"version": 0.1, "log": {"level": "info"},
                   "storage": {"filesystem": {"rootdirectory": "/var/lib/docker-registry"},
-                              "delete": {"enabled": False}, "maintenance": {"readonly": {"enabled": True}}},
+                              "delete": {"enabled": False}, "maintenance": {"readonly": {"enabled": True},
+                                                                          "uploadpurging": {"enabled": False}}},
                   "http": {"addr": ":5000", "tls": {"certificate": "/etc/registry/tls/tls.crt",
                                                     "key": "/etc/registry/tls/tls.key"}},
                   "auth": {"htpasswd": {"realm": "harvester-ops", "path": "/etc/registry/auth/htpasswd"}}}),
@@ -186,3 +187,19 @@ def real_ca(tmp_path):
     d = tmp_path / "real-ca"
     d.mkdir()
     return rs.make_tls(d, "10.0.0.1")["ca"]
+
+
+def test_hardening_no_node_ports_and_a_read_only_reader():
+    """Revue m-6 et m-7 : kube-vip sert l'adresse sans NodePort (sinon 443 et
+    5443 s'ouvrent sur chaque nœud Harvester) ; l'instance de lecture monte
+    le volume en lecture seule et ne purge jamais les envois en cours de
+    l'instance d'écriture."""
+    o = objs()
+    assert o[("Service", "amorcage")]["spec"]["allocateLoadBalancerNodePorts"] is False
+    pod = o[("Deployment", "amorcage")]["spec"]["template"]["spec"]
+    read, write = pod["containers"]
+    data = {c["name"]: next(m for m in c["volumeMounts"] if m["name"] == "data") for c in (read, write)}
+    assert data["read"].get("readOnly") is True and not data["write"].get("readOnly")
+    conf = json.loads(o[("ConfigMap", "amorcage-config")]["data"]["read.yml"])
+    assert conf["storage"]["maintenance"]["uploadpurging"] == {"enabled": False}
+    assert "uploadpurging" not in json.dumps(json.loads(o[("ConfigMap", "amorcage-config")]["data"]["write.yml"]))

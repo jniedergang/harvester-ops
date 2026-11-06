@@ -62,13 +62,15 @@ def registry(tmp_path_factory):
     assert p.returncode == 0, p.stderr[-500:]
     subprocess.run([PODMAN, "volume", "create", vol], check=True, capture_output=True)
     try:
-        for role, target in (("read", rs.READ_TARGET), ("write", rs.WRITE_TARGET)):
+        # écriture d'abord (elle prépare le volume), lecture ensuite, volume en
+        # lecture seule comme dans le pod (revue m-7)
+        for role, target in (("write", rs.WRITE_TARGET), ("read", rs.READ_TARGET)):
             name = f"hops-it-{role}-{tag}"
             names.append(name)
             subprocess.run([PODMAN, "run", "-d", "--name", name, "--user", f"{rs.UID}:{rs.UID}",
                             "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                             "--memory", "512m", "-p", f"127.0.0.1:{ports[role]}:{target}",
-                            "-v", f"{vol}:{rs.DATA}:U",
+                            "-v", f"{vol}:{rs.DATA}:" + ("U" if role == "write" else "ro"),
                             "-v", f"{d / (role + '.yml')}:/etc/registry/conf/{role}.yml:ro,Z",
                             "-v", f"{d / 'tls.crt'}:/etc/registry/tls/tls.crt:ro,Z",
                             "-v", f"{d / 'tls.key'}:/etc/registry/tls/tls.key:ro,Z",

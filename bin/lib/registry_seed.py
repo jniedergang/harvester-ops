@@ -77,7 +77,9 @@ def distribution_config(read_only):
     """Configuration de Distribution (JSON, donc YAML valide)."""
     storage = {"filesystem": {"rootdirectory": DATA}, "delete": {"enabled": False}}
     if read_only:
-        storage["maintenance"] = {"readonly": {"enabled": True}}
+        # revue m-7 : l'instance de lecture ne purge jamais les envois en
+        # cours de l'instance d'écriture (même volume)
+        storage["maintenance"] = {"readonly": {"enabled": True}, "uploadpurging": {"enabled": False}}
     return {"version": 0.1, "log": {"level": "info"}, "storage": storage,
             "http": {"addr": f":{READ_TARGET if read_only else WRITE_TARGET}",
                      "tls": {"certificate": "/etc/registry/tls/tls.crt", "key": "/etc/registry/tls/tls.key"}},
@@ -120,6 +122,8 @@ def _manifests(spec, tls, htpasswd):
               {"name": "tls", "mountPath": "/etc/registry/tls", "readOnly": True}]
 
     def container(role, port, conf, auth):
+        # revue m-7 : volume en lecture seule pour l'instance de lecture
+        vols = [dict(m, readOnly=True) if m["name"] == "data" and role == "read" else m for m in mounts]
         return {"name": role, "image": spec["image"], "imagePullPolicy": "Never",
                 "args": ["serve", f"/etc/registry/conf/{conf}"],
                 "ports": [{"name": role, "containerPort": port}],
@@ -129,7 +133,7 @@ def _manifests(spec, tls, htpasswd):
                                   "initialDelaySeconds": 30},
                 "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
                                     "capabilities": {"drop": ["ALL"]}},
-                "volumeMounts": mounts + [{"name": auth, "mountPath": "/etc/registry/auth", "readOnly": True}]}
+                "volumeMounts": vols + [{"name": auth, "mountPath": "/etc/registry/auth", "readOnly": True}]}
 
     return [
         {"apiVersion": "v1", "kind": "Namespace",
@@ -164,7 +168,9 @@ def _manifests(spec, tls, htpasswd):
                                                             "items": [{"key": "write", "path": "htpasswd"}]}}]}}}},
         {"apiVersion": "v1", "kind": "Service",
          "metadata": _meta(n, spec, annotations={VIP_ANNOTATION: spec["address"]}),
-         "spec": {"type": "LoadBalancer", "selector": sel,
+         # revue m-6 : kube-vip sert l'adresse sans NodePort ; sans ce champ,
+         # 443 et 5443 s'ouvraient aussi sur chaque nœud Harvester
+         "spec": {"type": "LoadBalancer", "allocateLoadBalancerNodePorts": False, "selector": sel,
                   "ports": [{"name": "read", "port": READ_PORT, "targetPort": READ_TARGET},
                             {"name": "write", "port": WRITE_PORT, "targetPort": WRITE_TARGET}]}},
     ]
