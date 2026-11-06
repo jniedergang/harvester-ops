@@ -52,7 +52,8 @@ def world(tmp_path, tls_pki, monkeypatch):
     monkeypatch.setenv("HARVESTER_OPS_STATE_DIR", str(state))
     monkeypatch.setenv("HARVESTER_OPS_CONFIG", str(tmp_path / "none.yaml"))
     monkeypatch.setenv("HARVESTER_OPS_WORK_DIR", str(tmp_path))
-    tcli.run("pack", tmp_path / "d.json", "--out", tmp_path / "out", "--plain-http", src.host, check=0)
+    tcli.run("pack", tmp_path / "d.json", "--out", tmp_path / "out", "--plain-http", src.host,
+             "--plain-http", helm.host, check=0)
     env = dict(os.environ)
     tcli.run("import", tmp_path / "out" / "socle-2026.11.tar.gz", "--accept-unsigned", env=env, check=0)
     src.close()
