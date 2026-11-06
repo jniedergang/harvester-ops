@@ -135,7 +135,7 @@ def world(tmp_path):
 
 
 def pack_world(w, extra=(), stdlib_only=True):
-    plain = [x for h in (w["a"].host, w["b"].host) for x in ("--plain-http", h)]
+    plain = [x for h in (w["a"].host, w["b"].host, w["helm"].host) for x in ("--plain-http", h)]
     return run("pack", w["dir"] / "socle.json", "--out", w["dir"] / "out", "--creds", w["creds"], *plain, *extra,
                stdlib_only=stdlib_only)
 

@@ -291,33 +291,65 @@ def helm_index_entries(text, chart):
     return found
 
 
-def _fetch(url, dest, auth, cap, timeout=120):
+REDIRECTS_MAX = 5
+
+
+def _http_opener():
+    """HTTP(S) seulement, sans suivi automatique des redirections (revue
+    I-1 : le gestionnaire par défaut recopiait `Authorization` vers tout
+    hôte, et suivait http et ftp) ; même construction que oci_push."""
+    opener = urllib.request.OpenerDirector()
+    for handler in (urllib.request.ProxyHandler(), urllib.request.HTTPHandler(), urllib.request.HTTPSHandler(),
+                    urllib.request.HTTPDefaultErrorHandler(), op._NoRedirect(), urllib.request.HTTPErrorProcessor()):
+        opener.add_handler(handler)
+    return opener
+
+
+def _allowed(url, plain):
+    """https, ou http pour un hôte de `--plain-http` seulement."""
+    u = urllib.parse.urlparse(url)
+    return u.scheme == "https" or (u.scheme == "http" and u.netloc in set(plain or ()))
+
+
+def _fetch(url, dest, auth, cap, timeout=120, plain=()):
     """GET en flux vers `dest` (ou en mémoire si `dest` est None), borné à
-    `cap` octets ; rend (octets ou None, empreinte sha256)."""
-    if urllib.parse.urlparse(url).scheme not in ("https", "http"):
-        raise ValueError(f"{url}: https:// or http:// only")
-    req = urllib.request.Request(url, headers={"Authorization": auth} if auth else {})
-    h, n, buf = hashlib.sha256(), 0, bytearray()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            f = open(dest, "wb") if dest else None
-            try:
-                for b in iter(lambda: r.read(1 << 20), b""):
-                    n += len(b)
-                    if n > cap:
-                        raise ValueError(f"{urllib.parse.urlparse(url).netloc}: reply larger than {cap} bytes")
-                    h.update(b)
-                    (f.write(b) if f else buf.extend(b))
-            finally:
-                if f:
-                    f.close()
-    except urllib.error.HTTPError as e:
-        e.close()
-        raise ValueError(f"GET {urllib.parse.urlparse(url).netloc}{urllib.parse.urlparse(url).path}: "
-                         f"HTTP {e.code}") from None
-    except urllib.error.URLError as e:
-        raise ValueError(f"GET {urllib.parse.urlparse(url).netloc}: {e.reason}") from None
-    return (None if dest else bytes(buf)), h.hexdigest()
+    `cap` octets ; rend (octets ou None, empreinte sha256). Redirections
+    suivies à la main (5 au plus) : `Authorization` retiré dès que l'hôte
+    change, https seulement (http pour un hôte de `plain`)."""
+    host = urllib.parse.urlparse(url).netloc
+    opener = _http_opener()
+    for _hop in range(REDIRECTS_MAX + 1):
+        if not _allowed(url, plain):
+            raise ValueError(f"{urllib.parse.urlparse(url).netloc}: https:// only "
+                             "(http:// for a host given with --plain-http)")
+        same = urllib.parse.urlparse(url).netloc == host
+        req = urllib.request.Request(url, headers={"Authorization": auth} if auth and same else {})
+        h, n, buf = hashlib.sha256(), 0, bytearray()
+        try:
+            with opener.open(req, timeout=timeout) as r:
+                f = open(dest, "wb") if dest else None
+                try:
+                    for b in iter(lambda: r.read(1 << 20), b""):
+                        n += len(b)
+                        if n > cap:
+                            raise ValueError(f"{urllib.parse.urlparse(url).netloc}: reply larger than {cap} bytes")
+                        h.update(b)
+                        (f.write(b) if f else buf.extend(b))
+                finally:
+                    if f:
+                        f.close()
+            return (None if dest else bytes(buf)), h.hexdigest()
+        except urllib.error.HTTPError as e:
+            loc = e.headers.get("Location") if e.code in (301, 302, 303, 307, 308) else None
+            e.close()
+            if loc:
+                url = urllib.parse.urljoin(url, loc)
+                continue
+            raise ValueError(f"GET {urllib.parse.urlparse(url).netloc}{urllib.parse.urlparse(url).path}: "
+                             f"HTTP {e.code}") from None
+        except urllib.error.URLError as e:
+            raise ValueError(f"GET {urllib.parse.urlparse(url).netloc}: {e.reason}") from None
+    raise ValueError(f"GET {host}: more than {REDIRECTS_MAX} redirections")
 
 
 def fetch_chart(sources, c, dest):
@@ -340,7 +372,10 @@ def fetch_chart(sources, c, dest):
         reg.blob_to_file(rrepo, layer["digest"], dest, size=layer.get("size"))
         return
     index_url = repo + "/index.yaml"
-    text, _ = _fetch(index_url, None, sources.basic(index_url), INDEX_MAX)
+    if sources.basic(index_url) and not _allowed(index_url, sources.plain):
+        raise ValueError(f"chart {c['name']}: credentials are never sent in clear; use https:// "
+                         "(or --plain-http for a test repository)")
+    text, _ = _fetch(index_url, None, sources.basic(index_url), INDEX_MAX, plain=sources.plain)
     entry = next((e for e in helm_index_entries(text.decode("utf-8", "replace"), c["name"])
                   if str(e.get("version")) == c["version"]), None)
     if entry is None:
@@ -354,7 +389,7 @@ def fetch_chart(sources, c, dest):
     else:
         auth = sources.basic(url)
     try:
-        _, got = _fetch(url, dest, auth, CHART_MAX)
+        _, got = _fetch(url, dest, auth, CHART_MAX, plain=sources.plain)
         if got != digest:
             raise ValueError(f"chart {c['name']} {c['version']}: the download does not match the repository index")
     except BaseException:
