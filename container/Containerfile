@@ -12,6 +12,8 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Install runtime tools: kubectl, yq (mikefarah), openssh-clients, gettext (envsubst)
 # Also bash + ca-certificates
+# 2.6.0 : openssl (CA and certificate of the bootstrap registry) and
+# apache2-utils (htpasswd: bcrypt, the only format of Distribution)
 USER root
 RUN zypper --non-interactive ref && \
     zypper --non-interactive install --no-recommends \
@@ -19,6 +21,8 @@ RUN zypper --non-interactive ref && \
         ca-certificates \
         curl \
         openssh-clients \
+        openssl \
+        apache2-utils \
         gawk \
         jq \
         gzip \

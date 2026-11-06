@@ -145,3 +145,93 @@ def test_an_operator_cannot_declare_but_can_attach(env, monkeypatch):
     monkeypatch.setattr(wapp, "current_role", lambda: "viewer")
     assert env["client"].get("/api/registries").status_code == 200
     assert env["client"].post("/api/registries/harbor/attach/harvlab", json={}).status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Registre d'amorçage (tâche 7)
+# ---------------------------------------------------------------------------
+def boot(**over):
+    b = {"name": "amorcage", "address": "172.16.2.76", "size_gib": 20, "storage_class": "harv-rep1",
+         "mirrors": ["ghcr.io"]}
+    b.update(over)
+    return b
+
+
+@pytest.fixture
+def recorded(monkeypatch):
+    seen = {"actions": [], "reads": []}
+
+    class Run:
+        id = "b2b2b2b2b2b2"
+    monkeypatch.setattr(wapp, "_cli_action", lambda cluster, label, cmd, tool, spec=None, **kw:
+                        seen["actions"].append((cluster, label, cmd, spec)) or (Run(), None))
+    monkeypatch.setattr(wapp, "_capi_run_json", lambda cmd, spec=None, timeout=180:
+                        seen["reads"].append(cmd) or (({"findings": [], "blocked": False}, 0), None))
+    return seen
+
+
+@pytest.mark.parametrize("over,field", [
+    ({"address": "172.16.2"}, "address"),
+    ({"address": "harvlab2-registry"}, "address"),
+    ({"size_gib": 4}, "size_gib"),
+    ({"size_gib": "20"}, "size_gib"),
+    ({"name": "bootstrap"}, "name"),
+    ({"storage_class": "Bad Class"}, "storage_class"),
+    ({"mirrors": ["https://ghcr.io"]}, "mirrors"),
+    ({"cert": "C", "key": "K"}, "cert"),
+])
+def test_bootstrap_refusals_start_nothing(env, recorded, over, field):
+    r = env["client"].post("/api/registries/bootstrap/harvlab", json=boot(**over))
+    assert r.status_code == 400 and field in r.get_json()["fields"]
+    assert not recorded["actions"] and not recorded["reads"]
+
+
+def test_bootstrap_dry_run_only_reads(env, recorded):
+    r = env["client"].post("/api/registries/bootstrap/harvlab", json=boot(dry_run=True))
+    assert r.status_code == 200 and r.get_json()["blocked"] is False
+    cmd = recorded["reads"][0]
+    assert cmd[3:5] == ["deploy", "amorcage"] and cmd[-1] == "--dry-run" and not recorded["actions"]
+
+
+def test_bootstrap_deploy_is_a_tracked_action_with_the_client_key_in_the_private_spec(env, recorded):
+    r = env["client"].post("/api/registries/bootstrap/harvlab",
+                           json=boot(cert="CERT", key="Client-Key-Secret", ca="CA", dns_name="r.home.lo"))
+    assert r.status_code == 202 and r.get_json()["action_id"] == "b2b2b2b2b2b2"
+    cluster, label, cmd, spec = recorded["actions"][0]
+    assert label == "registry-deploy:harvlab/amorcage"
+    assert spec == {"cert": "CERT", "key": "Client-Key-Secret", "ca": "CA"}
+    assert "Client-Key-Secret" not in " ".join(cmd) and "--dns-name" in cmd
+    assert cmd[cmd.index("--mirrors") + 1] == "ghcr.io"
+    env["client"].post("/api/registries/bootstrap/harvlab", json=boot())
+    assert recorded["actions"][1][3] is None                 # CA générée : aucune demande privée
+
+
+def test_bootstrap_delete_needs_the_typed_name_for_the_data(env, recorded):
+    import registries as rg
+    import registry_seed as rs
+    d = rs.declaration(dict(boot(), name="amorcage"), "", "harvlab")
+    d.pop("ca_pem")
+    rg.save(env["state"], "amorcage", d)
+    c = env["client"]
+    r = c.delete("/api/registries/bootstrap/harvlab/amorcage", json={"delete_data": True, "confirm": "amorcag"})
+    assert r.status_code == 400 and r.get_json()["code"] == "confirm-name" and not recorded["actions"]
+    r = c.delete("/api/registries/bootstrap/harvlab/amorcage", json={})
+    assert r.status_code == 202 and r.get_json()["data_kept"] is True
+    assert "--delete-data" not in recorded["actions"][0][2]
+    r = c.delete("/api/registries/bootstrap/harvlab/amorcage", json={"delete_data": True, "confirm": "amorcage"})
+    assert r.status_code == 202 and recorded["actions"][1][2][-1] == "--delete-data"
+    assert c.delete("/api/registries/bootstrap/other/amorcage", json={}).status_code == 404
+    assert c.delete("/api/registries/bootstrap/harvlab/nope", json={}).status_code == 404
+
+
+def test_bootstrap_status_reads_through_the_tool(env, recorded):
+    r = env["client"].get("/api/registries/bootstrap/harvlab/amorcage")
+    assert r.status_code == 200 and recorded["reads"][0][3:5] == ["status", "amorcage"]
+
+
+def test_bootstrap_limits_are_readable():
+    from limits import parse_many
+    src = (ROOT / "web" / "app.py").read_text()
+    for fn in ("api_registry_bootstrap_deploy", "api_registry_bootstrap_delete"):
+        i = src.index(f"def {fn}(")
+        parse_many(re.findall(r'@_rate_limit\("([^"]+)"\)', src[i - 160:i])[-1])

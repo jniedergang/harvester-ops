@@ -34145,6 +34145,106 @@ def api_registry_check(name, cluster):
     return jsonify(res[0])
 
 
+_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+@app.route("/api/registries/bootstrap/<cluster>", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_registry_bootstrap_deploy(cluster):
+    """Pose un registre d'amorçage sur le cluster Harvester : `dry_run`
+    rend les constats sans rien écrire ; sinon action suivie
+    `registry-deploy:<cluster>/<nom>`. Un certificat du client part dans la
+    demande privée de l'outil, jamais en argument."""
+    b = request.get_json(silent=True)
+    if not isinstance(b, dict):
+        return jsonify({"error": "a JSON object is expected"}), 400
+    name, address = str(b.get("name") or ""), str(b.get("address") or "")
+    size, klass = b.get("size_gib", 20), str(b.get("storage_class") or "")
+    mirrors = b.get("mirrors") or []
+    errors = []
+    if not _registry_name_ok(name) or name in _rg.RESERVED:
+        errors.append(("name", f"RFC 1123, {_rg.NAME_MAX} characters at most"))
+    if not _IPV4_RE.match(address):
+        errors.append(("address", "an IPv4 address"))
+    if isinstance(size, bool) or not isinstance(size, int) or not 5 <= size <= 2048:
+        errors.append(("size_gib", "an integer from 5 to 2048"))
+    if not _valid_k8s_name(klass):
+        errors.append(("storage_class", "a storage class name"))
+    if b.get("dns_name") and not _rg.HOST_RE.match(str(b["dns_name"])):
+        errors.append(("dns_name", "a host name"))
+    if not isinstance(mirrors, list) or not all(isinstance(m, str) and _rg.HOST_RE.match(m) for m in mirrors):
+        errors.append(("mirrors", "a list of registry hosts"))
+    tls = {k: b[k] for k in ("cert", "key", "ca") if b.get(k)}
+    if tls and set(tls) != {"cert", "key", "ca"}:
+        errors.append(("cert", "a client certificate needs cert, key and ca"))
+    if errors:
+        return _bm_errors_json(errors, "invalid bootstrap registry")
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    cmd = _registry_cmd("deploy")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    cmd += [name, "--cluster", cluster, "--kubeconfig", kc, "--address", address, "--size-gib", str(size),
+            "--storage-class", klass, "--mirrors", ",".join(mirrors)]
+    if b.get("dns_name"):
+        cmd += ["--dns-name", str(b["dns_name"])]
+    if b.get("dry_run"):
+        res, err = _capi_run_json(cmd + ["--dry-run"], timeout=120)
+        if err:
+            return err
+        return jsonify(res[0])
+    run, err = _cli_action(cluster, f"registry-deploy:{cluster}/{name}", cmd, "harvester-registry",
+                           spec=tls or None)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "registry": name, "cluster": cluster}), 202
+
+
+@app.route("/api/registries/bootstrap/<cluster>/<name>", methods=["GET"])
+@requires_auth
+def api_registry_bootstrap_status(cluster, name):
+    if not _registry_name_ok(name):
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    cmd = _registry_cmd("status")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    res, err = _capi_run_json(cmd + [name, "--cluster", cluster, "--kubeconfig", kc], timeout=60)
+    if err:
+        return err
+    return jsonify(res[0])
+
+
+@app.route("/api/registries/bootstrap/<cluster>/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_registry_bootstrap_delete(cluster, name):
+    """Retire le registre d'amorçage ; son volume est gardé sauf
+    `delete_data` avec le nom retapé (point 193)."""
+    b = request.get_json(silent=True) or {}
+    d = _rg.load(_bm_profiles_state(), name) if _registry_name_ok(name) else None
+    if d is None or d.get("kind") != "bootstrap" or d.get("cluster") != cluster:
+        return jsonify({"error": "no such bootstrap registry on this cluster", "code": "registry-unknown"}), 404
+    delete_data = bool(b.get("delete_data"))
+    if delete_data and b.get("confirm") != name:
+        return jsonify({"error": "type the registry name to delete its data", "code": "confirm-name"}), 400
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    cmd = _registry_cmd("delete")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    cmd += [name, "--cluster", cluster, "--kubeconfig", kc] + (["--delete-data"] if delete_data else [])
+    run, err = _cli_action(cluster, f"registry-delete:{cluster}/{name}", cmd, "harvester-registry")
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "registry": name, "data_kept": not delete_data}), 202
+
+
 if __name__ == "__main__":
     cfg = load_config().get("web", {})
     host = cfg.get("bind_host", "0.0.0.0")
