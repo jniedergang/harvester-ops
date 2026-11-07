@@ -443,3 +443,21 @@ def test_the_write_route_has_a_readable_rate_limit():
     src = (ROOT / "web" / "app.py").read_text()
     i = src.index("def api_capi_uninstall(")
     parse_many(re.findall(r'@_rate_limit\("([^"]+)"\)', src[i - 200:i])[-1])
+
+
+@pytest.mark.parametrize("managed,blocked", [
+    (tuple(PROVIDERS), True),
+    (("helm",), False),                                   # CAPHV gardé : il lèvera le finaliseur
+])
+def test_orphan_harvesterclusters_refuse_the_removal_of_caphv(managed, blocked):
+    """Revue finale 2.7.0 (m3 i) : un HarvesterCluster resté sans son
+    Cluster garde son finaliseur jusqu'au retour de CAPHV ; le retrait est
+    refusé tant qu'il existe."""
+    k = FakeKube(managed=managed)
+    k.put(cs.K_HARVESTERCLUSTER, "web", "web", {"metadata": {"finalizers": ["harvestercluster.x"]}})
+    plan = cs.uninstall(k, steps()[1])
+    codes = [f["code"] for f in plan["refusals"]]
+    assert ("capi-harvesterclusters-present" in codes) is blocked
+    if blocked:
+        f = next(f for f in plan["refusals"] if f["code"] == "capi-harvesterclusters-present")
+        assert f["facts"] == {"clusters": "web/web", "count": 1} and provider_deletions(k) == []

@@ -530,6 +530,7 @@ const CAPI = (() => {
   const UN_FINDINGS = {
     'capi-clusters-present': (v) => tr('capi.un.fd.capi-clusters-present', v),
     'caaph-services-present': (v) => tr('capi.un.fd.caaph-services-present', v),
+    'capi-harvesterclusters-present': (v) => tr('capi.un.fd.capi-harvesterclusters-present', v),
     'capi-plan-running': (v) => tr('capi.un.fd.capi-plan-running', v),
   };
   const UN_REASONS = {

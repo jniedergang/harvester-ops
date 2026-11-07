@@ -21,6 +21,7 @@ import re
 import time
 from pathlib import Path
 
+from capi_cluster import K_HARVESTERCLUSTER
 from capi_services import K_HCP
 from kube import KubeError
 
@@ -493,6 +494,16 @@ def uninstall_plan(kube, running=None):
     if clusters:
         refusals.append(_finding("capi-clusters-present", clusters=", ".join(clusters[:20]),
                                  count=len(clusters)))
+    if any((p["type"], p["name"]) == CAPHV for p in providers):
+        # revue finale 2.7.0 (m3 i) : un HarvesterCluster resté sans son
+        # Cluster garde le finaliseur de CAPHV ; sans CAPHV, plus personne
+        # ne le lève (les Clusters présents sont déjà refusés plus haut)
+        hcs = sorted(f"{h['metadata'].get('namespace')}/{h['metadata']['name']}"
+                     for h in kube.list(K_HARVESTERCLUSTER))
+        hcs = [h for h in hcs if h not in clusters]
+        if hcs:
+            refusals.append(_finding("capi-harvesterclusters-present", clusters=", ".join(hcs[:20]),
+                                     count=len(hcs)))
     if any((p["type"], p["name"]) == CAAPH for p in providers):
         hcps = sorted(f"{h['metadata'].get('namespace')}/{h['metadata']['name']}" for h in kube.list(K_HCP))
         if hcps:
