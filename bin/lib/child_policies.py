@@ -93,6 +93,16 @@ def _quantities(raw, defaults, where):
     return out
 
 
+_SUFFIX = {"m": 1e-3, "k": 1e3, "M": 1e6, "G": 1e9, "T": 1e12, "P": 1e15, "E": 1e18,
+           "Ki": 2 ** 10, "Mi": 2 ** 20, "Gi": 2 ** 30, "Ti": 2 ** 40, "Pi": 2 ** 50, "Ei": 2 ** 60}
+
+
+def _amount(v):
+    """Valeur d'une quantité déjà validée par `_quantity_re` (cpu, octets)."""
+    m = re.match(r"^(\d+(?:\.\d+)?)([a-zA-Z]*)$", v)
+    return float(m.group(1)) * _SUFFIX.get(m.group(2), 1)
+
+
 def _limits(raw, where):
     if raw is None:
         raw = {}
@@ -100,7 +110,15 @@ def _limits(raw, where):
         raise ValueError(f"{where}: an object")
     for k in sorted(set(raw) - set(LIMITS)):
         raise ValueError(f"{where}.{k}: unknown key ({', '.join(LIMITS)})")
-    return {k: _quantities(raw.get(k), LIMITS[k], f"{where}.{k}") for k in LIMITS}
+    out = {k: _quantities(raw.get(k), LIMITS[k], f"{where}.{k}") for k in LIMITS}
+    # revue 1-3 m6 : l'API refuse un LimitRange désordonné, et le binding ne
+    # s'appliquerait jamais (délai d'attente au lieu d'une raison)
+    for res in ("cpu", "memory"):
+        if _amount(out["defaultRequest"][res]) > _amount(out["default"][res]):
+            raise ValueError(f"{where}.defaultRequest.{res}: greater than default.{res}")
+        if _amount(out["default"][res]) > _amount(out["max"][res]):
+            raise ValueError(f"{where}.default.{res}: greater than max.{res}")
+    return out
 
 
 def _network(raw, where):
@@ -258,3 +276,10 @@ def objects(spec):
 def team_namespaces(spec):
     """Namespaces que le socle crée (vide quand il est décoché)."""
     return [t["namespace"] for t in spec["teams"]] if spec["base"] else []
+
+
+def used_namespaces(spec):
+    """Namespaces d'équipe où vont des rôles ou des comptes sans que le socle
+    les crée : ils doivent exister dans le cluster enfant (revue 1-3 m6)."""
+    made = set(team_namespaces(spec))
+    return sorted({x["namespace"] for x in spec["roles"] + spec["accounts"]} - made)

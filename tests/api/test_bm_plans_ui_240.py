@@ -55,7 +55,7 @@ FINDING_CODES = ["plan-invalid", "template-missing", "var-missing", "var-invalid
                  "manifest-system-namespace", "manifest-object-taken", "manifest-too-big", "manifest-sa-token-refused",
                  "manifest-crb-admin", "manifest-duplicate", "manifest-no-name", "manifest-too-many",
                  "artefact-name-too-long", "artefact-name-reserved", "artefact-item-not-manifest",
-                 "team-namespace-taken", "manifest-cluster-missing"]
+                 "team-namespace-taken", "team-namespace-missing", "manifest-cluster-missing"]
 
 
 # --- onglet, historique, page d'hôte (source) ----------------------------------

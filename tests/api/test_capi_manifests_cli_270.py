@@ -577,3 +577,29 @@ def test_verify_of_an_absent_item(cli, world, capsys):
     assert world["run"](mgmt_with_cluster(), Child([]), ["manifest-verify", "--name", f"{NS}/{CL}/essai"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["present"] is False and out["ok"] is False
+
+
+def test_roles_without_base_need_an_existing_team_namespace(cli, world, capsys):
+    """Revue 1-3 m6 : socle décoché, un rôle vise un namespace d'équipe
+    absent du cluster enfant : bloqué avant (pas un délai de 900 s)."""
+    kube = mgmt_with_cluster()
+    spec = world["spec"](package=None, version=None, item=None,
+                         policies={"base": False, "teams": [{"namespace": "equipe-a"}],
+                                   "roles": [{"namespace": "equipe-a", "group": "devs", "role": "edit"}]})
+    assert world["run"](kube, Child([]), ["manifest-deploy", "--spec", spec]) == cli.EXIT_BLOCKED
+    assert any("team-namespace-missing" in e[2] for e in events(capsys)) and kube.calls == []
+    assert world["run"](kube, Child([obj("Namespace", "equipe-a")]), ["manifest-deploy", "--spec", spec]) == cli.EXIT_OK
+
+
+def test_remove_with_the_object_list_lost_says_so(cli, world, capsys):
+    """Revue 1-3 m5 : CRS là, ConfigMap supprimé à la main : la liste des
+    objets est perdue, c'est dit (plan de destruction et étape)."""
+    kube = deployed(cli, world, capsys)
+    kube.objs.pop(("configmaps", NS, "art-essai"))
+    child = Child([stamped(NSO), stamped(CMO), stamped(DEP)])
+    assert world["run"](kube, child, ["manifest-remove", "--name", f"{NS}/{CL}/essai", "--dry-run"]) == cli.EXIT_OK
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert any("object list lost" in k for k in out["kept"])
+    assert world["run"](kube, child, ["manifest-remove", "--name", f"{NS}/{CL}/essai"]) == cli.EXIT_OK
+    assert any("object list lost" in e[2] for e in events(capsys))
+    assert child.deleted == [] and kube.get(mf.K_CRS, NS, "art-essai") is None

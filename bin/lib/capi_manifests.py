@@ -169,7 +169,8 @@ def parse(files, load=None):
                 continue
             if not isinstance(doc, dict):
                 raise ValueError(f"{fname}: a document is not an object")
-            if doc.get("kind") == "List" or str(doc.get("kind", "")).endswith("List") and "items" in doc:
+            if doc.get("kind") == "List" or str(doc.get("kind", "")).endswith("List") and "items" in doc \
+                    and _is_kubernetes_group(_group(doc.get("apiVersion"))):
                 items = doc.get("items") or []
                 if not all(isinstance(i, dict) for i in items):
                     raise ValueError(f"{fname}: a List item is not an object")
@@ -185,6 +186,13 @@ def parse(files, load=None):
 def _group(api_version):
     g, sep, _ = str(api_version or "").rpartition("/")
     return g if sep else ""
+
+
+def _is_kubernetes_group(group):
+    """Groupe de Kubernetes lui-même (revue 1-3 m7) : seules ses listes
+    `<Sorte>List` sont dépliées, une ressource d'un autre groupe dont la
+    sorte finit en List reste un objet."""
+    return group in ("", "apps", "batch", "policy", "autoscaling") or group.endswith(".k8s.io")
 
 
 def ref_of(obj):

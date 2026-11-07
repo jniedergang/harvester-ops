@@ -248,3 +248,15 @@ def test_state_without_crs_or_configmap():
 @pytest.mark.parametrize("item,ok", [("a" * 42, True), ("a" * 43, False), ("Essai", False), ("essai-1", True)])
 def test_applicable_item_names(item, ok):
     assert mf.item_name_ok(item) is ok
+
+
+@pytest.mark.parametrize("doc,n", [
+    ({"apiVersion": "v1", "kind": "List", "items": [{"kind": "ConfigMap"}, {"kind": "Secret"}]}, 2),
+    ({"apiVersion": "v1", "kind": "ConfigMapList", "items": [{"kind": "ConfigMap"}]}, 1),
+    ({"apiVersion": "apps/v1", "kind": "DeploymentList", "items": [{"kind": "Deployment"}]}, 1),
+    ({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleList", "items": [{"kind": "Role"}]}, 1),
+    # revue 1-3 m7 : une sorte d'un autre groupe finie en List reste un objet
+    ({"apiVersion": "example.com/v1", "kind": "WidgetList", "items": [{"kind": "A"}, {"kind": "B"}]}, 1),
+])
+def test_only_kubernetes_lists_are_unfolded(doc, n):
+    assert len(mf.parse({"a.yaml": "x"}, load=lambda _t: [doc])) == n

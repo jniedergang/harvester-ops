@@ -17,6 +17,7 @@ const I18N_STORAGE_KEY = 'harvester_ops_language';
 
 const translations = {
   en: {
+    "dpw.f.teamNamespaceMissing": "A team namespace used by roles or accounts does not exist in the child cluster (the base is off)",
     "udw.notOurs": "Not this run's: no mark of the undone run (recreated by hand?). Left untouched.",
     "udw.notOursRun": "Recreated since by run {id}: left untouched.",
     "udw.childData": "The workloads and volumes inside the child cluster go with it.",
@@ -8309,6 +8310,7 @@ const translations = {
   },
 
   fr: {
+    "dpw.f.teamNamespaceMissing": "Un namespace d'équipe utilisé par des rôles ou des comptes n'existe pas dans le cluster enfant (socle décoché)",
     "udw.notOurs": "Pas à ce déroulé : aucune marque de l'exécution défaite (recréé à la main ?). Laissé tel quel.",
     "udw.notOursRun": "Recréé depuis par l'exécution {id} : laissé tel quel.",
     "udw.childData": "Les charges et les volumes du cluster enfant partent avec lui.",
@@ -16602,6 +16604,7 @@ const translations = {
   },
 
   it: {
+    "dpw.f.teamNamespaceMissing": "Un namespace di squadra usato da ruoli o account non esiste nel cluster figlio (base deselezionata)",
     "udw.notOurs": "Non di questo rilascio: nessun segno dell'esecuzione annullata (ricreato a mano?). Lasciato intatto.",
     "udw.notOursRun": "Ricreato in seguito dall'esecuzione {id}: lasciato intatto.",
     "udw.childData": "I carichi e i volumi del cluster figlio se ne vanno con lui.",
@@ -24893,6 +24896,7 @@ const translations = {
   },
 
   es: {
+    "dpw.f.teamNamespaceMissing": "Un namespace de equipo usado por roles o cuentas no existe en el clúster hijo (base desmarcada)",
     "udw.notOurs": "No es de este despliegue: ninguna marca de la ejecución deshecha (¿recreado a mano?). Se deja intacto.",
     "udw.notOursRun": "Recreado después por la ejecución {id}: se deja intacto.",
     "udw.childData": "Las cargas y los volúmenes del clúster hijo se van con él.",
@@ -33184,6 +33188,7 @@ const translations = {
   },
 
   de: {
+    "dpw.f.teamNamespaceMissing": "Ein von Rollen oder Konten genutzter Team-Namespace existiert im Child-Cluster nicht (Basis abgewählt)",
     "udw.notOurs": "Nicht von diesem Lauf: keine Markierung des rückgängig gemachten Laufs (von Hand neu erstellt?). Unverändert gelassen.",
     "udw.notOursRun": "Seitdem von Lauf {id} neu erstellt: unverändert gelassen.",
     "udw.childData": "Die Workloads und Volumes im Child-Cluster verschwinden mit ihm.",

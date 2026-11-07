@@ -159,6 +159,7 @@ const BMPlans = (() => {
     'artefact-name-reserved': () => tr('dpw.f.artefactNameReserved'),
     'artefact-item-not-manifest': () => tr('dpw.f.artefactItemNotManifest'),
     'team-namespace-taken': () => tr('dpw.f.teamNamespaceTaken'),
+    'team-namespace-missing': () => tr('dpw.f.teamNamespaceMissing'),
     'manifest-cluster-missing': () => tr('dpw.f.manifestClusterMissing'),
   };
   const LEVELS = {

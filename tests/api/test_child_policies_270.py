@@ -148,3 +148,22 @@ def test_role_binding_names_are_stable_and_distinct():
     assert cp.role_binding_name("edit", "devs") == cp.role_binding_name("edit", "devs")
     assert cp.role_binding_name("edit", "devs") != cp.role_binding_name("edit", "ops")
     assert len(cp.role_binding_name("admin", "x" * 128)) <= 63
+
+
+@pytest.mark.parametrize("limits,field", [
+    ({"defaultRequest": {"cpu": "600m"}}, "teams[0].limits.defaultRequest.cpu"),          # > default 500m
+    ({"default": {"memory": "8Gi"}}, "teams[0].limits.default.memory"),                   # > max 4Gi
+    ({"max": {"cpu": "200m"}}, "teams[0].limits.default.cpu"),                            # default 500m > max
+    ({"defaultRequest": {"memory": "1Gi"}, "default": {"memory": "1024Mi"}}, None),       # égalité acceptée
+    ({"max": {"cpu": "0.5"}, "default": {"cpu": "500m"}}, None),
+])
+def test_limits_must_be_ordered(limits, field):
+    """Revue 1-3 m6 : defaultRequest <= default <= max, sinon l'API refuse
+    le LimitRange et le binding ne s'applique jamais (délai de 900 s)."""
+    raw = {"base": True, "teams": [{"namespace": "a", "limits": limits}]}
+    if field is None:
+        cp.normalize(raw)
+        return
+    with pytest.raises(ValueError) as e:
+        cp.normalize(raw)
+    assert str(e.value).startswith(field), str(e.value)

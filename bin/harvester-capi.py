@@ -1681,14 +1681,20 @@ def _manifest_owner(kube, spec):
     return found
 
 
-def _team_namespaces_taken(child, spec):
+def _team_namespaces(child, spec):
     """Point 207 : un namespace d'équipe déjà présent dans le cluster enfant
-    sans les étiquettes de la console bloque."""
+    sans les étiquettes de la console bloque ; socle décoché, un namespace
+    de rôle ou de compte absent bloque aussi (revue 1-3 m6)."""
     out = []
     for ns in cp.team_namespaces(spec["policies"]):
         obj = child.get("Namespace", None, ns)
         if obj is not None and not mf.is_ours(obj, spec["item"], spec["cluster"]):
             out.append(mf.finding("team-namespace-taken", namespace=ns))
+    # revue 1-3 m6 : socle décoché, rôles et comptes vont dans un namespace
+    # existant ; absent, le binding ne s'appliquerait jamais
+    for ns in cp.used_namespaces(spec["policies"]):
+        if child.get("Namespace", None, ns) is None:
+            out.append(mf.finding("team-namespace-missing", namespace=ns))
     return out
 
 
@@ -1722,8 +1728,8 @@ def _child_findings(kube, spec, objs):
         found = mf.check(objs, cluster, item, scopes=scopes)
         if not mf.blocking(found):
             found += _taken(child, objs, item, cluster)
-        if "policies" in spec and cp.team_namespaces(spec["policies"]):
-            found += _team_namespaces_taken(child, spec)
+        if "policies" in spec:
+            found += _team_namespaces(child, spec)
     return found
 
 
@@ -1907,10 +1913,16 @@ def cmd_manifest_remove(args):
     refs = [mf.ref_of(o) for o in objs]
     refs += [r for r in mf.pending_of(cmap) if r not in refs]
     present = kube.get(cs.K_CLUSTER, ns, cluster) is not None
+    # revue 1-3 m5 : ConfigMap supprimé à la main, la liste des objets est
+    # perdue ; ses objets étiquetés restent dans le cluster enfant, c'est dit
+    lost = [f"object list lost (ConfigMap {ns}/{name} missing): the labelled objects of {item} "
+            f"stay in {cluster}"] if cmap is None and present else []
     if getattr(args, "dry_run", False) and not (present and refs):
         print(json.dumps({"item": item, "cluster": f"{ns}/{cluster}", "cluster_present": present,
-                          "delete": [], "kept": [], "refused": []}))
+                          "delete": [], "kept": lost, "refused": []}))
         return EXIT_OK
+    if lost:
+        step("remove", "running", lost[0])
     todo = []
     with contextlib.ExitStack() as stack:
         child = None
