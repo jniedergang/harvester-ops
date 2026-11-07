@@ -126,6 +126,30 @@ offline filesystem mirror under both registry names, so OpenTofu never
 downloads them. The Installation tab of Terraform shows its version and the
 signer.
 
+Since 2.6.0 the package carries the images of the **bootstrap registry**
+in `bundles/registry`: CNCF Distribution 3.1 in the SUSE image
+(`registry.suse.com/suse/registry:3.1`) and `registry.suse.com/bci/bci-busybox:16.0`
+(the image of the VM network probe of 2.6.1, not used by 2.6.0), both
+pinned by digest in `scripts/registry-bundle.json`. `package.sh`
+builds them with `harvester-artefacts pack`, which checks every manifest
+and layer against these digests, then writes `registry-images.tar` (the
+archive `ctr images import` reads), `registry-images.json` (the pinned
+names) and their `SHA256SUMS`. The installer checks `SHA256SUMS` and
+places the three files in `/var/lib/harvester-ops/registry-bundle`; a
+checksum mismatch leaves them out, with a warning. The console checks the
+sums again before each deployment (`registry-images-missing` otherwise),
+and `harvester-registry deploy` imports the archive on the nodes of the
+Harvester cluster. Nothing is pulled from the Internet. See
+[artefacts.md](artefacts.md).
+
+The console image also carries `openssl` (CA and certificate of the
+bootstrap registry) and `apache2-utils` (`htpasswd`, for the bcrypt entries
+of its accounts). Two scripts join the others in `/usr/local/bin`:
+`harvester-artefacts` (packages) and `harvester-registry` (registries).
+`harvester-artefacts pack`, `sign`, `verify` and `inspect` also run on any
+connected machine with Python 3 and, for signatures, `ssh-keygen` 8.2 or
+later: copy `bin/harvester-artefacts.py` and `bin/lib/` there.
+
 ### 3. Provide kubeconfigs and SSH keys
 
 For each cluster you intend to manage:
@@ -361,6 +385,17 @@ staged signed archive is the only way back. Two limits: below 2.0.0, read the
 2.0.0 note "Rolling back to 1.101.x" in the CHANGELOG first; below 2.0.2, the
 console cannot run under Docker, so on a Docker host the agent puts the
 current version back.
+
+**Back from 2.6.0 to 2.5.0.** 2.5.0 does not know the registries. It lists
+as **invalid** a plan saved with an enabled Registry phase or with
+`registries` on a cluster entry ("coming in 2.6+: set enabled: false", "unknown
+key"), and a cluster template with `spec.registries`. Nothing crashes, but
+such plans and templates cannot be launched until fixed. Before going
+back, disable the Registry phase and remove the `registries` keys (or keep
+a copy of these plans to put back after a new upgrade). The directories
+`artefacts.d`, `artefacts` and `registries.d` are ignored by 2.5.0; a
+bootstrap registry keeps running on its cluster, no longer shown (delete
+it from 2.6.0 first if it is not wanted).
 
 **Trust.** The agent installs only an archive signed by a key of
 `/opt/harvester-ops/update-signers` (shipped with the installed version), or

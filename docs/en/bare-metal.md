@@ -507,7 +507,8 @@ In 2.4.0 the phases are:
 | **readiness** | Waits until the cluster is usable: nodes Ready, `ManagedChart` objects ready, Longhorn nodes and volumes healthy, a default storage class. Read again every 15 s, 20 minutes by default (`phases.readiness.timeout_minutes`, 1 to 180). |
 | **terraform** | Instantiates each **declaration template** of the plan as an ordinary Terraform declaration, `<plan>-<template>`, then plans and applies it. |
 | capi, clusters | Available since 2.5.0: see "Deployment plans: Cluster API and child clusters" below. |
-| registry, artefacts | In the model, shown greyed with "coming in 2.6+". A plan file that enables one is refused. |
+| registry | Available since 2.6.0: see "Deployment plans: Registry phase (2.6.0)" below. |
+| artefacts | In the model, shown greyed with "coming in 2.7". A plan file that enables it is refused. |
 
 **Where it lives.** The **Plans** tab (`#automation/pxe/plans`, between
 Profiles and Images) lists the plans on the left and opens one on the right:
@@ -774,6 +775,131 @@ diagnosis), `--origin plan=P,template=M,run=ID`, `harvester-capi check
 
 **Seen for real (2.5.0).** See the CHANGELOG of 2.5.0 for the benches,
 timings and what is not verified.
+
+### Deployment plans: Registry phase (2.6.0)
+
+Before the child clusters, a plan can pose or check their registries and
+publish artefact packages into them. Packages, registries and the
+behaviour of child clusters are described in
+[artefacts.md](artefacts.md).
+
+| Phase | What it does |
+|---|---|
+| **registry** | One item per registry of the plan: a **bootstrap** registry is posed on the Harvester cluster (`harvester-registry deploy`, child action `registry-deploy:<cluster>/<name>`), or adopted if this plan posed it; an **external** registry, declared and attached beforehand, is only checked. Then one item per publication (`harvester-artefacts publish`, child action `artefacts-publish:<name>-<version>@<registry>`), after its registry when the registry belongs to the plan. |
+| artefacts | Shown greyed with "coming in 2.7". A plan file that enables it is refused. |
+
+The order of the chain is install, readiness, terraform, **registry**,
+capi, clusters: the clusters need their registry when they are created, and
+the registry may use a storage class made by Terraform.
+
+In a plan file:
+
+```yaml
+phases:
+  registry:
+    enabled: true
+    timeout_minutes: 10            # a bootstrap registry ready within, 1 to 60
+    publish_timeout_minutes: 60    # each publication, 5 to 600
+    registries:
+      - name: seed
+        mode: bootstrap
+        address: "{{registry_ip}}"
+        size_gib: 20               # 5 to 2048
+        storage_class: harv-rep1
+        mirrors: [docker.io, ghcr.io]
+        dns_name: registry.site1.example   # optional
+      - name: client-harbor
+        mode: external             # declared and attached beforehand
+    publish:
+      - {package: socle, version: "2026.11", registry: seed}
+  clusters:
+    enabled: true
+    items:
+      - name: site1-apps
+        template: rke2-small
+        registries: [seed, client-harbor]
+```
+
+- Registry names: 30 characters at most, `bootstrap` reserved; 8 registries
+  and 32 publications at most per plan.
+- A bootstrap registry of the plan carries no account: the console
+  generates them. Plan variables are allowed in the address, the storage
+  class, the mirrors and the DNS name.
+- An external registry takes only `name` and `mode`.
+- A publication names an imported package and a registry of the plan or a
+  declared one.
+- **Registries of the child clusters.** A cluster template and a plan entry
+  take `registries`: names, or `{registry, mirrors, no_fallback}`, in
+  order, with `{{variables}}`. The list of a plan entry replaces the one of
+  its template. An entry names a registry of the Registry phase by its
+  name.
+
+**Checks before acting.** The checks of `harvester-registry deploy
+--dry-run` for each registry to pose (free address, Longhorn room, free
+name, embedded images, tools), `check` for each external registry, and
+`publish --dry-run` for each publication whose registry already exists.
+Their findings appear with their own codes (`registry-address-answers`,
+`registry-room-short`, `publish-tag-differs`...). On top of them:
+
+- Blocking: `registry-name-taken` (a registry of the same name exists and
+  was not posed by this plan), `registry-address-differs` (the registry of
+  this plan answers at another address: a plan never moves a registry),
+  `registry-unknown`, `registry-admin`, `registry-check-failed`,
+  `registry-package-too-big` (the packages to publish pass 90 % of the
+  volume), `artefact-package-missing`, `package-untrusted-strict`,
+  `registry-var-missing`.
+- Information: `registry-exists` (posed by this plan, adopted),
+  `registry-later` (checked when the phase starts, after an install),
+  `publish-later` (the registry is posed by this run: the publication is
+  checked once it is there), `cluster-registry-later` (a child cluster
+  uses a registry of the Registry phase: checked again at the start of the
+  Clusters phase).
+- Warning: `registry-vm-network-unchecked` and
+  `cluster-registry-vm-network-unchecked` (reachability is checked from
+  the Harvester cluster only, not from the VM network; see
+  [artefacts.md](artefacts.md)).
+
+**Adoption.** A bootstrap registry posed by a plan carries its origin (the
+label `harvester-ops.io/plan`, the annotation `harvester-ops.io/plan-run`
+on its objects). A new run of the same plan adopts it, if it answers at the
+same address. A registry of the same name without this origin blocks.
+A deployment of this plan that failed before the registry was ready
+leaves objects without a declaration: they carry the origin too, so the
+checks (replayed with the origin of the plan) do not count them as a taken
+name or an answering address, and the resume deploys over them.
+
+**Following a run.** Step `phase-registry`, then one sub-step per item:
+`reg-<registry>` and `pub-<package>-<version>-<registry>`. The child
+actions are nested under `deploy:` in Activity. A publication that passes
+`publish_timeout_minutes` is stopped. **Resume** checks each finished item
+again: registry ready at the same address, every image and chart present at
+the right digest (one `HEAD` each); a publication that resumes skips the
+layers already sent. **Dry run** poses and publishes nothing.
+
+**Never a deletion.** The chain never deletes a registry, even after a
+failure. A run records `undo: {kind: registry, ref: <cluster>/<name>}` for
+a registry it created, for the undo of the deployment that comes with 2.7.
+Remove a registry from Cluster API > Registries.
+
+**Roles.**
+
+| Gesture | Role |
+|---|---|
+| A plan that poses a bootstrap registry (`registry-admin` otherwise, checked at launch and again when the phase starts) | admin |
+| A plan whose registries already exist, publications, child clusters with registries | operator |
+
+**Command line.** `harvester-plans check` and `apply` cover the phase;
+`harvester-registry deploy --origin plan=P,run=ID` sets the origin.
+
+**Seen for real (2.6.0).** On harvlab2 (Harvester v1.9.0, one nested
+node), a plan with the Registry phase (bootstrap registry of 8 GiB at
+172.16.2.76, client registry, publication of a 31 MiB package) and one
+1+1 child cluster: check in 12 s; registry posed and ready in 37 s,
+publication in 3 s, cluster available in about 10 minutes. A resumed run
+checked the registry and the publication again and skipped them
+(`already done (checked)`); the next runs adopted the registry
+(`registry-exists`). Details: [artefacts.md](artefacts.md), "Seen for
+real".
 
 ### History of the bare-metal actions (2.1.0)
 

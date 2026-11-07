@@ -122,7 +122,7 @@ def test_plan_with_two_clusters_and_the_several_shortcut(context, flask_server):
     form = page.locator("#bm-plans .bmpl-form")
     # Registre et Artefacts restent à venir ; Cluster API et Clusters actifs
     for pid in ("registry", "artefacts"):
-        expect(form.locator(f'.bmpl-phase[data-phase="{pid}"] .bmpl-coming')).to_have_text("coming in 2.6+")
+        expect(form.locator(f'.bmpl-phase[data-phase="{pid}"] .bmpl-coming')).to_have_text("coming in 2.7")
     capi = form.locator('.bmpl-phase[data-phase="capi"]')
     expect(capi.locator(".bmpl-phase-on")).to_be_enabled()
     expect(capi.locator(".bmpl-phase-on")).to_be_checked()

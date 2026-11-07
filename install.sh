@@ -148,7 +148,9 @@ install_scripts() {
     ln -sf "$PREFIX/harvester-replication.py" "$PREFIX/harvester-replication"
     ln -sf "$PREFIX/harvester-folders.py" "$PREFIX/harvester-folders"
     ln -sf "$PREFIX/harvester-plans.py" "$PREFIX/harvester-plans"
-    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer,forklift,capi,network,resources,baremetal,containers,kvm,gpus,bookings,replication,folders,plans}"
+    ln -sf "$PREFIX/harvester-artefacts.py" "$PREFIX/harvester-artefacts"
+    ln -sf "$PREFIX/harvester-registry.py" "$PREFIX/harvester-registry"
+    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer,forklift,capi,network,resources,baremetal,containers,kvm,gpus,bookings,replication,folders,plans,artefacts,registry}"
 }
 
 # -----------------------------------------------------------------------------
@@ -627,6 +629,20 @@ PY
             ok "Terraform provider $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","?"))' "$tf/provider.json") installed"
         else
             ok "Terraform provider: the one installed from the console is kept"
+        fi
+    fi
+    # 2.6.0 : les images du registre d'amorçage, importées sur les nœuds
+    # Harvester par `harvester-registry deploy` ; sommes vérifiées
+    local rb="$src/registry"
+    if [[ -f "$rb/registry-images.tar" ]]; then
+        if (cd "$rb" && sha256sum -c SHA256SUMS >/dev/null 2>&1); then
+            install -d -m 0750 "$STATE_DIR" "$STATE_DIR/registry-bundle"
+            install -m 0640 "$rb/registry-images.tar" "$rb/registry-images.json" "$rb/SHA256SUMS" \
+                "$STATE_DIR/registry-bundle/"
+            chown -R "$owner" "$STATE_DIR/registry-bundle" 2>/dev/null || warn "could not give $STATE_DIR/registry-bundle to $owner"
+            ok "Bootstrap registry images installed"
+        else
+            warn "bootstrap registry images: checksum mismatch, not installed"
         fi
     fi
     # 2.3.0 : le provider libvirt des déclarations KVM, vérifié au build

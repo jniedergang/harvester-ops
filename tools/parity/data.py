@@ -3,8 +3,8 @@
 # Statuts : ok (fait), part (partiel), todo (manquant), plus (console seulement), na (hors périmètre).
 # v : version où c'est arrivé (ok/part) ou prévue (todo).
 
-AS_OF = "2.5.0"
-DATE = "2026-11-05"
+AS_OF = "2.6.0"
+DATE = "2026-11-07"
 
 S = []  # sections
 
@@ -264,10 +264,13 @@ r("plus", "1.54", "Terraform : déclarations gardées par la console", "Terrafor
   "écran en onglets Déclarations, Ressources, Historique, Installation (2.2) ; cible cluster Harvester ou hôte KVM, modèle RKE2 sur VMs libvirt (2.3) ; formulaires réseau, classe de stockage, pool d'adresses (2.4)",
   "screen in tabs Declarations, Resources, History, Installation (2.2); target a Harvester cluster or a KVM host, RKE2 on libvirt VMs template (2.3); network, storage class, IP pool forms (2.4)")
 r("plus", "1.48", "Clusters RKE2 par Cluster API, services par CAAPH", "RKE2 clusters through Cluster API, services through CAAPH",
-  "Rancher les crée aussi, par son pilote de nœud Harvester ; la console le fait sans Rancher ; écran en onglets Clusters, Services, Historique, Installation (2.2)",
-  "Rancher also creates them, with its Harvester node driver; the console does it without Rancher; screen in tabs Clusters, Services, History, Installation (2.2)")
+  "Rancher les crée aussi, par son pilote de nœud Harvester ; la console le fait sans Rancher ; écran en onglets Clusters, Services, Historique, Installation (2.2), plus Registres et Artefacts (2.6)",
+  "Rancher also creates them, with its Harvester node driver; the console does it without Rancher; screen in tabs Clusters, Services, History, Installation (2.2), plus Registries and Artefacts (2.6)")
+r("plus", "2.6", "Paquets d'artefacts signés et registres des clusters enfants", "Signed artefact packages and child-cluster registries",
+  "paquet construit sur une machine connectée (bibliothèque standard seulement) et importé hors ligne, confiance permissive ou stricte, registre d'amorçage sur le cluster Harvester ou registre du client, publication reprenable, miroirs RKE2 posés à la création, charts par CAAPH depuis le registre ; Harvester n'a que le réglage containerd-registry de ses propres nœuds",
+  "package built on a connected machine (standard library only) and imported offline, permissive or strict trust, bootstrap registry on the Harvester cluster or client registry, resumable publishing, RKE2 mirrors set at creation, charts through CAAPH from the registry; Harvester only has the containerd-registry setting of its own nodes")
 r("plus", "1.19", "Installation bare-metal de Harvester par Redfish", "Bare-metal Harvester install over Redfish",
-  "configuration complète de l'installeur, import d'un fichier existant et aperçu (1.77) ; découverte des disques, rôles, pools, cluster déclaré tout seul (1.78) ; écran en onglets Machines, Profils, Images, Historique, dernière découverte gardée (2.1) ; machine qui porte déjà un système gardée, séries de profils comprises (2.2) ; plans de déploiement : disponibilité puis contenu Terraform, suivis et reprenables (2.4)", "complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78); screen in tabs Machines, Profiles, Images, History, last discovery remembered (2.1); a machine that already carries a system is guarded, profile batches included (2.2); deployment plans: readiness then Terraform content, tracked and resumable (2.4)")
+  "configuration complète de l'installeur, import d'un fichier existant et aperçu (1.77) ; découverte des disques, rôles, pools, cluster déclaré tout seul (1.78) ; écran en onglets Machines, Profils, Images, Historique, dernière découverte gardée (2.1) ; machine qui porte déjà un système gardée, séries de profils comprises (2.2) ; plans de déploiement : disponibilité puis contenu Terraform, suivis et reprenables (2.4), Cluster API et clusters enfants (2.5), registres et publication de paquets (2.6)", "complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78); screen in tabs Machines, Profiles, Images, History, last discovery remembered (2.1); a machine that already carries a system is guarded, profile batches included (2.2); deployment plans: readiness then Terraform content, tracked and resumable (2.4), Cluster API and child clusters (2.5), registries and package publishing (2.6)")
 r("plus", "1.6", "Activité : chaque geste suivi, dock des actions", "Activity: every action tracked, action dock")
 r("plus", "1.4", "Notes collaboratives sur les VMs et nœuds", "Collaborative notes on VMs and nodes")
 r("plus", "1.29", "Allouable Longhorn réel par classe", "Real Longhorn allocatable per class")

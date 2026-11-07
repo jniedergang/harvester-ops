@@ -387,13 +387,13 @@ def sim(cli, monkeypatch, tmp_path):
          "network": "default/production", "gateway": "172.16.0.1", "subnet_mask": "255.255.0.0",
          "ip_pool": "capi-vm-pool", "dns": ["172.16.3.6"]}))
     monkeypatch.setattr(cli, "components_from", lambda p: None)
-    monkeypatch.setattr(cli, "_check", lambda kube, spec, desc, identity="console": {
+    monkeypatch.setattr(cli, "_check", lambda kube, spec, desc, identity="console", harvester=None: {
         "findings": [], "blocked": False, "amount": {"vms": 2, "addresses": 3}, "spec": spec,
         "identity": identity, "caphv_version": V})
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     seen = {}
 
-    def render(spec, kc, origin=None):
+    def render(spec, kc, origin=None, registries=None):
         p = Path(kc)
         seen["path"] = p
         seen["mode"] = stat.S_IMODE(p.stat().st_mode)
@@ -433,7 +433,7 @@ def test_create_sets_up_the_identity_before_rendering_and_erases_the_file(cli, s
 
 def test_console_identity_renders_with_the_console_kubeconfig(cli, sim, monkeypatch):
     seen = {}
-    monkeypatch.setattr(cli, "render", lambda spec, kc, origin=None: seen.update(kc=kc, spec=spec) or [])
+    monkeypatch.setattr(cli, "render", lambda spec, kc, origin=None, registries=None: seen.update(kc=kc, spec=spec) or [])
     kube = Kube()
     assert _create(cli, kube, monkeypatch, identity="console") == cli.EXIT_OK
     assert seen["kc"] == "/console/kubeconfig" and seen["spec"]["target_namespace"] == "default"
@@ -809,7 +809,7 @@ def test_preview_renders_like_create(cli, monkeypatch, capsys, tmp_path, identit
          "ip_pool": "capi-vm-pool", "dns": ["172.16.3.6"]}))
     seen = {}
 
-    def render(spec, kc, origin=None):
+    def render(spec, kc, origin=None, registries=None):
         seen["ns"] = spec["target_namespace"]
         seen["kc"] = Path(kc).read_text() if kc != "/console/kubeconfig" else kc
         seen["path"] = kc
@@ -948,3 +948,31 @@ def test_a_vm_namespace_longer_than_63_characters_is_refused(ns, blocked):
     codes = [f["code"] for f in ci.findings(spec, V, "restricted")]
     assert ("vm-namespace-too-long" in codes) is blocked
     assert "vm-namespace-too-long" not in [f["code"] for f in ci.findings(spec, V, "console")]
+
+
+@pytest.mark.parametrize("error, kept", [
+    ("Error from server (NotFound): secrets \"web-registry-amorcage-auth\" not found", False),
+    ("Error from server (Forbidden): secrets \"web-registry-amorcage-auth\" is forbidden", True),
+])
+def test_a_generated_object_already_gone_is_not_reported_kept(cli, capsys, error, kept):
+    """2.6.0, vu sur harvlab2 : CAPI efface lui-même les objets dont le
+    Cluster est le propriétaire (compléments, Secrets des registres) entre
+    la liste et la suppression ; « kept: NotFound » laissait croire à un
+    reste alors que l'objet est parti."""
+    kube = _world_on(NoListKube)
+    gen = {"metadata": {"name": "web-registry-amorcage-auth", "namespace": "web",
+                        "labels": {cc.GENERATED: "true"}}}
+    kube.objs[("secrets", "web", "web-registry-amorcage-auth")] = gen
+    real = kube.delete
+
+    def owner_gc_first(k, ns, name, *a, **kw):
+        if name == "web-registry-amorcage-auth":
+            kube.objs.pop((k, ns, name), None) if not kept else None
+            raise cli.KubeError(error)
+        return real(k, ns, name, *a, **kw)
+    kube.delete = owner_gc_first
+    assert cli.remove_cluster(kube, "web", "web", 60, sleep=lambda s: None) == cli.EXIT_OK
+    err = capsys.readouterr().err
+    assert ("web-registry-amorcage-auth kept" in err) is kept
+    if not kept:
+        assert "1 generated object(s) removed from web" in err

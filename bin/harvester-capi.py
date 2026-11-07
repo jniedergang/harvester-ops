@@ -62,6 +62,8 @@ import capi_identity as ci  # noqa: E402
 import capi_stack as cs  # noqa: E402
 import capi_services as sv  # noqa: E402
 import longhorn_room as lr  # noqa: E402
+import node_images  # noqa: E402
+import registries as rg  # noqa: E402
 from kube import Kube, KubeError, cluster_config  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_BLOCKED, EXIT_CANCELLED = 0, 1, 2, 3
@@ -201,7 +203,7 @@ def _image_facts(images):
     out = {}
     for i in images:
         info = {"ready": i["ready"], "iso": i["iso"], "os": i.get("os"),
-                "storage_class": i.get("storage_class")}
+                "storage_class": i.get("storage_class"), "virtual_size": i.get("virtual_size")}
         ns = i["ref"].split("/", 1)[0]
         out.setdefault(f"{ns}/{i['display_name']}", info)
         out[i["ref"]] = info
@@ -368,8 +370,9 @@ def amount(spec, overcommit=None):
 # Manifestes
 # ---------------------------------------------------------------------------
 
-def render(spec, identity_kubeconfig, origin=None):
-    """Les documents du cluster, corrigés (liste de dict)."""
+def render(spec, identity_kubeconfig, origin=None, registries=None):
+    """Les documents du cluster, corrigés (liste de dict) ; `registries` :
+    configuration de registres de RKE2 (`registry_config`)."""
     argv = ["bash", str(GENERATOR)] + cc.to_argv(spec, identity_kubeconfig)
     p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     if p.returncode != 0:
@@ -380,7 +383,7 @@ def render(spec, identity_kubeconfig, origin=None):
     if y.returncode != 0:
         raise RuntimeError("cannot parse the generated manifests: " + y.stderr.strip()[:200])
     docs = [json.loads(line) for line in y.stdout.splitlines() if line.strip() not in ("", "null")]
-    out = cc.postprocess(docs, spec, origin)
+    out = cc.postprocess(docs, spec, origin, registries)
     for d in out:
         if d.get("kind") == "Namespace":
             d.setdefault("metadata", {}).setdefault("labels", {})[cs.MANAGED] = "true"
@@ -479,30 +482,12 @@ def cmd_install(args):
 
 def push_images(entry, desc):
     """Airgap : chaque image du paquet importée dans le containerd RKE2 de
-    chaque nœud, par SSH (comme l'installation d'avant Turtles)."""
+    chaque nœud, par SSH (comme l'installation d'avant Turtles ;
+    bin/lib/node_images.py depuis la 2.6.0)."""
     if not entry:
         raise SystemExit("--push-images needs --cluster (nodes and SSH come from the configuration)")
-    ssh = entry.get("ssh") or {}
-    nodes = [n.get("ip") for n in entry.get("nodes") or [] if n.get("ip")]
     files = [f for p in desc["providers"] for f in p.get("image_files") or []]
-    step("images", "running", f"{len(files)} image(s) to load on {len(nodes)} node(s)")
-    remote = ("set -eo pipefail; TMP=$(mktemp); cat > \"$TMP\"; "
-              "{ zcat \"$TMP\" 2>/dev/null || cat \"$TMP\"; } | sudo /var/lib/rancher/rke2/bin/ctr "
-              "--address /run/k3s/containerd/containerd.sock --namespace k8s.io images import -; "
-              "rm -f \"$TMP\"")
-    opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-            "-o", "StrictHostKeyChecking=accept-new", "-p", str(ssh.get("port", 22))]
-    if ssh.get("key"):
-        opts += ["-i", ssh["key"]]
-    for node in nodes:
-        for f in files:
-            with open(f, "rb") as fh:
-                p = subprocess.run(["ssh", *opts, f"{ssh.get('user', 'rancher')}@{node}", remote],
-                                   stdin=fh, capture_output=True, timeout=600)
-            if p.returncode != 0:
-                raise RuntimeError(f"{node}: import of {Path(f).name} failed")
-            step("images", "running", f"{node}: {Path(f).name}")
-    step("images", "done", f"{len(files) * len(nodes)} image import(s)")
+    node_images.import_on_nodes(entry, files, step)
 
 
 def cmd_cleanup(args):
@@ -541,12 +526,81 @@ def _vm_namespace_labels(kube, spec):
     return ((o.get("metadata") or {}).get("labels") or {}) if o else None
 
 
-def _check(kube, spec, desc, identity="console"):
+# ---------------------------------------------------------------------------
+# 2.6.0 : registres des clusters enfants (tâche 9)
+# ---------------------------------------------------------------------------
+HIDDEN_CREDS = {"username": "<hidden>", "password": "<hidden>"}
+
+
+def _state():
+    import cluster_decl
+    return cluster_decl.state_dir()
+
+
+def _registry_decls(spec):
+    """{nom: déclaration} des registres de la demande (absents omis)."""
+    out = {}
+    for e in spec.get("registries") or []:
+        d = rg.load(_state(), e["registry"])
+        if d is not None:
+            out[e["registry"]] = d
+    return out
+
+
+def registry_findings(kube, spec, harvester):
+    """Constats des registres d'une demande : déclaration, rattachement au
+    cluster Harvester `harvester` (compte de lecture posé, lu avec l'identité
+    de la personne), usage, miroirs, repli (point 198)."""
+    if not spec.get("registries"):
+        return []
+    decls = _registry_decls(spec)
+    attached = {}
+    for n in decls:
+        try:
+            attached[n] = bool(kube.get("secrets", rg.NAMESPACE, rg.secret_names(n)["pull"]))
+        except KubeError:
+            attached[n] = False
+    return rg.check_child(spec["registries"], decls, harvester, attached,
+                          rg.system_ready_registries(_state(), decls))
+
+
+def registry_config(kube, spec, harvester, hidden=False):
+    """{config, files, secrets} pour capi_cluster.postprocess, None sans
+    registre. Compte de lecture lu dans le Secret `-pull` du cluster
+    Harvester (jamais le compte d'écriture, point 188) ; `hidden` (aperçu,
+    essai) : rien n'est lu, les Secrets portent des valeurs masquées."""
+    if not spec.get("registries"):
+        return None
+    decls = _registry_decls(spec)
+    missing = [e["registry"] for e in spec["registries"] if e["registry"] not in decls]
+    if missing:
+        raise ValueError(f"cluster-registry-unknown: {', '.join(missing)}")
+    names = [n for n, d in decls.items() if "images" in (d.get("usage") or [])]
+    if hidden:
+        creds = {n: dict(HIDDEN_CREDS) for n in names}
+    else:
+        try:
+            creds = rg.pull_creds_for(kube, names)
+        except KeyError as e:
+            raise ValueError(f"cluster-registry-not-attached: {e.args[0]} on {harvester}") from None
+    doc, files, secrets = rg.rke2_config(spec["registries"], decls,
+                                         {"name": spec["name"], "namespace": spec["namespace"]}, creds)
+    return {"files": files, "secrets": secrets, "mirrors": sorted(doc.get("mirrors") or {}),
+            "no_fallback": any(f["path"] == rg.NO_FALLBACK_FILE for f in files)}
+
+
+def registries_step(spec, regs):
+    """Ligne de l'étape `registries` d'une création."""
+    return (f"{len(spec['registries'])} registry(ies): mirrors {', '.join(regs['mirrors']) or '-'}"
+            f"{', no fallback to Internet' if regs['no_fallback'] else ''}")
+
+
+def _check(kube, spec, desc, identity="console", harvester=None):
     inv = inventory(kube, desc)
     if inv.get("unreachable"):
         findings = [cc.finding("cluster-unreachable", "block")]
         return {"findings": findings, "blocked": True, "amount": amount(spec), "spec": spec}
-    findings = cc.check(spec, facts_from(inv))
+    findings = cc.check(spec, facts_from(inv)) + registry_findings(kube, spec, harvester)
     version = ci.caphv_version(inv.get("stack"), desc)
     if identity == "restricted":
         findings += ci.findings(spec, version, identity, _cloud_provider_bindings(kube, spec["name"]),
@@ -597,7 +651,7 @@ def rights_denied(kube, reviews):
     return [r for r, res in zip(reviews, got) if not ((res.get("status") or {}).get("allowed"))]
 
 
-def _check_many(kube, specs, desc, identity="restricted"):
+def _check_many(kube, specs, desc, identity="restricted", harvester=None):
     """`check_many` sur une seule lecture du cluster, droits de la personne
     compris (tout ce que posera la chaîne : namespace, identité, manifestes)."""
     total = {}
@@ -610,6 +664,7 @@ def _check_many(kube, specs, desc, identity="restricted"):
     reviews, extra = [], []
     for s in specs:
         reviews += cc.manifest_reviews(s)
+        extra += [dict(f, cluster=f"{s['namespace']}/{s['name']}") for f in registry_findings(kube, s, harvester)]
         if identity == "restricted":
             extra += [dict(f, cluster=f"{s['namespace']}/{s['name']}")
                       for f in ci.findings(s, version, identity, _cloud_provider_bindings(kube, s["name"]),
@@ -642,7 +697,7 @@ def cmd_check(args):
                    "blocked": True}
             print(json.dumps(out) if args.json else str(e))
             return EXIT_BLOCKED
-        out = _check_many(kube, specs, components_from(args.components), args.identity)
+        out = _check_many(kube, specs, components_from(args.components), args.identity, _harvester(args))
         if args.json:
             print(json.dumps(out))
         else:
@@ -656,7 +711,7 @@ def cmd_check(args):
                "blocked": True}
         print(json.dumps(out) if args.json else str(e))
         return EXIT_BLOCKED
-    out = _check(kube, spec, components_from(args.components), args.identity)
+    out = _check(kube, spec, components_from(args.components), args.identity, _harvester(args))
     if args.json:
         print(json.dumps(out))
     else:
@@ -665,11 +720,17 @@ def cmd_check(args):
     return EXIT_BLOCKED if out["blocked"] else EXIT_OK
 
 
+def _harvester(args):
+    """Nom du cluster Harvester dans la console (rattachement des
+    registres) : `--harvester-name`, sinon `--cluster`."""
+    return getattr(args, "harvester_name", None) or getattr(args, "cluster", None)
+
+
 def cmd_render(args):
     """Aperçu : ce que `create` appliquerait, namespace des VMs imposé comme
     lui ; avec l'identité restreinte, rendu sur le kubeconfig d'essai (le
     vrai jeton n'existe qu'à la création)."""
-    _, kc, _ = kube_from(args)
+    kube, kc, _ = kube_from(args)
     spec = ci.force_target_namespace(spec_from(args.spec), args.identity)
     errs = cc.validate(spec)
     if errs:
@@ -679,7 +740,8 @@ def cmd_render(args):
     restricted = args.identity == "restricted"
     rkc = _work_file(DRY_RUN_KUBECONFIG) if restricted else kc
     try:
-        docs = render(spec, rkc)
+        # aperçu : les comptes des registres ne sont jamais lus (masqués)
+        docs = render(spec, rkc, registries=registry_config(kube, spec, _harvester(args), hidden=True))
     finally:
         if restricted:
             Path(rkc).unlink(missing_ok=True)
@@ -810,7 +872,7 @@ def cmd_create(args):
     restricted = args.identity == "restricted"
     spec = ci.force_target_namespace(spec_from(args.spec), args.identity)
     desc = components_from(args.components)
-    out = _check(kube, spec, desc, args.identity)
+    out = _check(kube, spec, desc, args.identity, _harvester(args))
     blockers = cc.blocking(out["findings"])
     if blockers:
         step("check", "error", "the pre-check refuses: " + ", ".join(f["code"] for f in blockers))
@@ -822,7 +884,7 @@ def cmd_create(args):
     if args.dry_run:
         dry_kc = _work_file(DRY_RUN_KUBECONFIG) if restricted else kc
         try:
-            docs = render(spec, dry_kc, origin)
+            docs = render(spec, dry_kc, origin, registries=registry_config(kube, spec, _harvester(args), hidden=True))
         finally:
             if restricted:
                 Path(dry_kc).unlink(missing_ok=True)
@@ -840,11 +902,16 @@ def cmd_create(args):
     applied = False
     try:
         ident = None
+        # comptes de lecture des registres relus avant tout geste : un Secret
+        # retiré depuis le contrôle arrête la création ici
+        regs = registry_config(kube, spec, _harvester(args))
+        if regs:
+            step("registries", "done", registries_step(spec, regs))
         try:
             if restricted:
                 ns_created = _ensure_namespace(kube, ns)
                 ident = identity_up(kube, spec, out["caphv_version"])
-            docs = render(spec, ident or kc, origin)
+            docs = render(spec, ident or kc, origin, registries=regs)
         finally:
             if ident:
                 Path(ident).unlink(missing_ok=True)
@@ -931,7 +998,14 @@ def remove_cluster(kube, ns, name, timeout, sleep=None, now=None):
         step("delete", "running", f"identity of {ns}/{name} removed ({gone} object(s))")
     nsobj = kube.get("namespaces", None, ns) or {}
     others = [c for c in kube.list(cs.K_CLUSTER, ns)]
-    if not others:
+    if others:
+        # Revue finale 2.6.0 : d'autres clusters gardent le namespace et les
+        # objets partagés, mais les Secrets de registre de CE cluster
+        # (registries.yaml avec le compte de lecture, -auth, -ca, -chart-)
+        # partent, par nom exact : sinon le compte reste sur Harvester et le
+        # registre se dit employé pour toujours
+        _remove_registry_secrets(kube, ns, name)
+    else:
         # Ce que la console a rendu à côté du Cluster : ClusterClass, gabarits,
         # compléments, et le secret d'identité qui porte un kubeconfig Harvester.
         gone = 0
@@ -948,6 +1022,11 @@ def remove_cluster(kube, ns, name, timeout, sleep=None, now=None):
                     kube.delete(kind, ns, obj["metadata"]["name"])
                     gone += 1
                 except KubeError as e:
+                    if "(NotFound)" in str(e):
+                        # 2.6.0, vu en réel : CAPI efface déjà les objets dont
+                        # le Cluster est propriétaire, entre la liste et ici
+                        gone += 1
+                        continue
                     step("delete", "running", f"{kind} {obj['metadata']['name']} kept: {e}")
         if gone:
             step("delete", "running", f"{gone} generated object(s) removed from {ns}")
@@ -956,6 +1035,42 @@ def remove_cluster(kube, ns, name, timeout, sleep=None, now=None):
             step("delete", "running", f"namespace {ns} removed (created by the console)")
     step("delete", "done", f"{ns}/{name} deleted")
     return EXIT_OK
+
+
+def _registry_secrets_of(generated, ns, name):
+    """Secrets de registre rendus pour le cluster `name`, par nom exact
+    (`<c>-registries`, et pour chaque registre étiqueté `-registry-<r>-auth`,
+    `-registry-<r>-ca`, `-chart-<r>`) : un cluster `web2` n'emporte rien de
+    `web`."""
+    wanted = {rg.nodes_secret_name(name)}
+    for s in generated:
+        reg = ((s.get("metadata") or {}).get("labels") or {}).get(rg.LABEL)
+        if reg:
+            wanted |= set(rg.child_secret_names(name, reg).values())
+            wanted.add(sv.registry_secret_names({"cluster": f"{ns}/{name}"}, reg)["auth"])
+    return [s for s in generated if (s.get("metadata") or {}).get("name") in wanted]
+
+
+def _remove_registry_secrets(kube, ns, name):
+    try:
+        found = _registry_secrets_of(kube.list("secrets", ns, selector=f"{cc.GENERATED}=true"), ns, name)
+    except KubeError as e:
+        step("delete", "running", f"registry secrets of {ns}/{name} not listed: {str(e)[:120]}")
+        return
+    gone = 0
+    for s in found:
+        sname = s["metadata"]["name"]
+        try:
+            kube.delete("secrets", ns, sname)
+            gone += 1
+        except KubeError as e:
+            if "(NotFound)" in str(e):
+                gone += 1
+                continue
+            step("delete", "running", f"secrets {sname} kept: {e}")
+    if gone:
+        step("delete", "running", f"{gone} registry secret(s) of {name} removed from {ns} "
+                                  "(other clusters keep the namespace)")
 
 
 def cmd_delete(args):
@@ -1074,10 +1189,60 @@ def cmd_services(args):
     return EXIT_OK
 
 
+def service_source(kube, spec, harvester, read_creds=False):
+    """2.6.0 (tâche 10) : un chart publié dans un registre déclaré. Rend
+    (demande résolue, constats, contexte) ; le contexte porte la
+    déclaration et, pour le déploiement (`read_creds`), le compte de
+    LECTURE lu dans le Secret `-pull` du cluster Harvester."""
+    import artefacts as art
+    import oci_layout as ol
+    if not spec.get("source"):
+        return spec, [], None
+    src = spec["source"]
+    reg, ref = src["registry"], f"{src['package']}-{src['version']}"
+    decl = rg.load(_state(), reg)
+    if decl is None:
+        return spec, [sv.finding("service-registry-unknown", "block", registry=reg)], None
+    found = []
+    if "charts" not in (decl.get("usage") or []):
+        found.append(sv.finding("service-registry-no-charts", "block", registry=reg))
+    try:
+        pull = rg.read_creds(kube, reg, "pull") if harvester in (decl.get("clusters") or []) else None
+    except KubeError:
+        pull = None
+    if pull is None:
+        found.append(sv.finding("service-registry-not-attached", "block", registry=reg, cluster=harvester))
+    try:
+        pkg = art.load_package(_state(), src["package"], src["version"])
+    except art.ArtefactError:
+        return spec, found + [sv.finding("service-package-missing", "block", package=ref)], None
+    item = next((i for i in pkg["index"].get("items") or [] if i.get("name") == src["item"]), None)
+    if item is None or item.get("kind") != "chart":
+        return spec, found + [sv.finding("service-item-not-chart", "block", package=ref, item=src["item"])], None
+    try:
+        meta = ol.chart_meta(Path(pkg["path"]) / item["chart"])
+        resolved = sv.resolve_source(spec, decl["endpoint"], meta, item.get("values") or {})
+    except ValueError as e:
+        return spec, found + [sv.finding("invalid-values", "block", message=str(e)[:200])], None
+    if not any((p.get("package"), p.get("version")) == (src["package"], src["version"])
+               for p in decl.get("published") or []):
+        found.append(sv.finding("service-chart-not-published", "warn", registry=reg, package=ref))
+    ns, _, child = spec["cluster"].partition("/")
+    try:
+        mirrored = kube.get("secrets", ns, rg.child_secret_names(child, reg)["auth"]) is not None
+    except KubeError:
+        mirrored = False
+    if not mirrored:
+        found.append(sv.finding("service-registry-not-mirrored", "warn", registry=reg, cluster=spec["cluster"]))
+    ctx = {"decl": decl, "creds": pull if read_creds else None}
+    return resolved, found, ctx
+
+
 def cmd_service_check(args):
     kube, _, _ = kube_from(args)
     spec = service_spec_from(args.spec)
-    found = sv.check(spec, _service_facts(kube))
+    spec, extra, _ = service_source(kube, spec, _harvester(args))
+    found = sv.check(spec, _service_facts(kube)) + extra
     blocked = bool(sv.blocking(found))
     print(json.dumps({"blocked": blocked, "findings": found,
                       "values": sv.render_values(spec)}))
@@ -1097,7 +1262,8 @@ def cmd_service_deploy(args):
     étiquette, et suit l'installation jusqu'à ce que CAAPH la dise prête."""
     kube, _, _ = kube_from(args)
     spec = service_spec_from(args.spec)
-    found = sv.check(spec, _service_facts(kube))
+    spec, extra, src = service_source(kube, spec, _harvester(args), read_creds=True)
+    found = sv.check(spec, _service_facts(kube)) + extra
     if sv.blocking(found):
         for f in sv.blocking(found):
             step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
@@ -1105,7 +1271,19 @@ def cmd_service_deploy(args):
     ns, _, cluster = spec["cluster"].partition("/")
     step("check", "done", f"{spec['name']} ({spec['chart']} {spec['version'] or 'latest'}) for {spec['cluster']}")
     _ensure_kube_vip(kube, ns, cluster)
-    kube.apply([sv.manifest(spec)])
+    docs, registry = [], None
+    if src:
+        # compte de lecture au format config.json et CA, dans le namespace du
+        # cluster : la CA posée par la création du cluster est reprise
+        decl, reg = src["decl"], spec["source"]["registry"]
+        names = sv.registry_secret_names(spec, reg)
+        ca = decl.get("ca_pem") if decl.get("ca_pem") and kube.get("secrets", ns, names["ca"]) is None else None
+        docs = sv.registry_secrets(spec, reg, decl["endpoint"], src["creds"], ca,
+                                   labels={cc.GENERATED: "true", rg.LABEL: reg})
+        registry = {"name": reg, "ca": bool(decl.get("ca_pem"))}
+        step("registry", "done", f"chart {spec['chart']} {spec['version']} from {reg} ({decl['endpoint']}), "
+                                 "read account")
+    kube.apply(docs + [sv.manifest(spec, registry)])
     kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"labels": {sv.label_of(spec["name"]): "on"}}})
     step("apply", "done", f"service {spec['name']} declared, cluster {cluster} selected")
     deadline = time.time() + args.timeout
@@ -1153,6 +1331,15 @@ def cmd_service_remove(args):
     label = sv.label_of(name)
     kube.delete(sv.K_HCP, ns, name)
     step("remove", "running", f"service {ns}/{name} deleted, releases being uninstalled")
+    # 2.6.0 : identifiants et CA posés pour ce service, s'il était le dernier
+    # à s'en servir (jamais la CA posée par la création du cluster)
+    try:
+        others = [h for h in kube.list(sv.K_HCP, ns) if h["metadata"]["name"] != name]
+        for sname in sv.secrets_to_remove(hcp, others, kube.list("secrets", ns, selector=f"{cc.GENERATED}=true")):
+            kube.delete("secrets", ns, sname)
+            step("remove", "running", f"secret {sname} removed")
+    except KubeError as e:
+        step("remove", "running", f"registry secrets of {name} kept: {str(e)[:120]}")
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         left = [r for r in kube.list(sv.K_HRP, ns)
@@ -1177,6 +1364,9 @@ def main(argv=None):
         sp.add_argument("--cluster", help="cluster name in the configuration")
         sp.add_argument("--kubeconfig", help="kubeconfig file of the Harvester cluster "
                                              "(overrides the one of --cluster)")
+        sp.add_argument("--harvester-name", help="name of the Harvester cluster in the console "
+                                                 "(registries attached to it; default --cluster)")
+        sp.add_argument("--state-dir", help="console state directory (registries, packages)")
 
     for name, fn, extra in (
             ("status", cmd_status, ("components", "json")),
@@ -1233,6 +1423,8 @@ def main(argv=None):
                 sp.add_argument("--origin", default="",
                                 help="plan=P,template=M,run=ID: origin labels set on the Cluster")
     args = ap.parse_args(argv)
+    if getattr(args, "state_dir", None):
+        os.environ["HARVESTER_OPS_STATE_DIR"] = os.path.abspath(args.state_dir)
     try:
         return args.fn(args)
     except ValueError as e:

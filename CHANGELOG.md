@@ -4,6 +4,396 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.6.0] - 2026-11-07 - Artefact packages and registries
+
+### Added
+- **Signed artefact packages** (decisions 121 and 122, points 184 and 185).
+  A package is one `<name>-<version>.tar.gz` (in the format of the update
+  package), with an optional detached `.sig`: `SHA256SUMS` as the first
+  member, the index `artefacts.yaml`, charts, images in OCI layout (shared
+  layers once), manifests. Kinds `chart`, `images`, `manifest`; `policy`
+  and `gitops` are kept and shown "coming (2.7)", never applied.
+- **`harvester-artefacts`**: `pack` builds a package on a connected machine
+  with the Python standard library only (no PyYAML, podman, skopeo or
+  helm), from a JSON description (YAML if PyYAML is present): charts from
+  an OCI registry or a Helm repository (chart checksum of `index.yaml`
+  checked), images for one platform (`linux/amd64` by default,
+  `--platform`), `as` to store an image under another name, manifests.
+  Source credentials come from a private file (`--creds`, 0600), never
+  from an argument, and are never written to the package. `--sign-key`
+  signs at the end. `sign` and `verify` use `ssh-keygen -Y` with the
+  namespace `harvester-artefacts` (a release signature is not valid for a
+  package, and the reverse); `inspect` reads a package without extracting
+  it; `import`, `list`, `remove`, `publish` work in the console. Exit
+  codes: 0, 1 failure, 2 refused, 3 acknowledgement required.
+- **Trust, permissive by default** (point 184). States `valid`,
+  `unknown-key`, `unsigned`, `invalid`, `sums-mismatch`. An unsigned
+  package, or one signed by an unknown key, is accepted after an explicit
+  acknowledgement equal to the state found; a wrong signature or checksum
+  is always refused. The acknowledgement is written to the journal of the
+  import action ("accepted UNSIGNED package ... after acknowledgement by
+  <person>") and to `trust.json` (state, key, person, date, mode).
+  **Settings > Artefacts** (admin): strict mode and the trusted keys
+  (`allowed_signers` lines; ed25519, ECDSA, RSA of 3072 bits or more);
+  `artefacts: {strict: true}` in `config.yaml` locks strict mode on.
+- **Cluster API > Artefacts** (point 194): the packages with a trust badge
+  (Signed, Unknown key, Unsigned), items, images, registries published in;
+  **Import** window (archive and `.sig`, room checked before receiving,
+  warning per state, Accept greyed until the acknowledgement box is
+  ticked, the strict refusal and the setting that imposes it). Packages
+  are kept in `<state>/artefacts.d/<name>-<version>/`.
+- **Declared registries** (points 187, 188): **Cluster API > Registries**
+  lists them with their address, usage (images, charts), mirrors, published
+  packages, what uses them and their live state. A declaration holds no
+  secret (`<state>/registries.d`, revisions). **Declare a client
+  registry** (admin), **Attach** it to a Harvester cluster (operator: write
+  and read accounts as Secrets in `harvester-ops-registry`, never shown
+  again, warning `registry-pull-is-push` when only one account is given),
+  **Check** (probed from the console with each account, nothing written),
+  **Forget**.
+- **Bootstrap registry** (points 181 to 183, 193, 197): CNCF Distribution
+  3.1 in the SUSE image (`registry.suse.com/suse/registry:3.1`, pinned by
+  digest and shipped in the release, imported on the nodes by `ctr`),
+  posed by the console on the Harvester cluster: one pod, a Longhorn
+  volume (20 GiB by default, 5 to 2048, room checked), an address served
+  by the kube-vip of Harvester, TLS always (CA generated, or the client
+  certificate), accounts `push` and `pull` with random passwords, never an
+  anonymous access. The htpasswd authentication of Distribution has no
+  rights, so the pod runs two instances on the same volume: read only on
+  443 (`push` and `pull`), read and write on 5443 (`push` only). Window
+  with Parameters, Checks and Summary; ten checks before acting (address
+  free, outside the pools, not the VIP; name; embedded images; tools;
+  storage class, replicas, Longhorn room). Delete keeps the volume unless
+  its name is typed.
+- **Publishing a package into a registry** (point 186): images then charts,
+  layer by layer through the registry API v2, to
+  `<registry>/<origin host>/<path>:<tag>` and
+  `<registry>/charts/<chart>:<version>`. Checks before any write; a tag
+  already present with another content blocks everything
+  (`publish-tag-differs`); a tag present with the same digest is skipped;
+  layers already there are skipped or mounted; an interrupted publication
+  resumes. **Publish** button and window in the Artefacts tab (operator).
+- **Child clusters on their registries**: an ordered list of registries at
+  creation (**Registries** menu of the creation window, cluster templates
+  and plan entries with `{{variables}}`). The console writes
+  `/etc/rancher/rke2/registries.yaml` and one CA file per registry
+  (`/etc/rancher/rke2/tls/harvester-ops/<registry>/ca.crt`) as files of
+  the control plane and worker templates, taken from the Secret
+  `<cluster>-registries`: mirrors in order, `rewrite` to the layout above,
+  read account and CA per registry. The Secrets
+  `<cluster>-registry-<registry>-auth` and `-ca` (`Opaque`, `ca.crt` only)
+  tell which clusters use a registry; all are labelled to leave with the
+  cluster. The write account never reaches a node. Findings
+  `cluster-registry-unknown`, `-not-attached`, `-mirror-unknown`,
+  `-no-fallback-system`, `-no-images`.
+- **Charts from a registry** in Cluster API > Services (**From a
+  registry**): CAAPH pulls `oci://<registry>/charts` with the read account
+  (Docker `config.json` Secret) and the CA of the registry; package values
+  first, form values over them; `insecureSkipTLSVerify` never set.
+- **Registry phase of the deployment plans** (point 189): between Terraform
+  and Cluster API, poses a bootstrap registry (admin) or checks a client
+  registry, then publishes the chosen packages, one item each
+  (`reg-<registry>`, `pub-<package>-<version>-<registry>`), child actions
+  `registry-deploy:` and `artefacts-publish:` nested under `deploy:`.
+  Timeouts: registry ready 10 minutes (1 to 60), publication 60 minutes (5
+  to 600). A registry posed by the plan is adopted by its next runs (origin
+  label and annotation); one of another origin blocks
+  (`registry-name-taken`); the chain never deletes a registry. New
+  findings: `registry-admin`, `registry-address-differs`,
+  `registry-package-too-big`, `artefact-package-missing`,
+  `registry-var-missing`, `registry-check-failed` (blocking);
+  `registry-exists`, `registry-later`, `publish-later`,
+  `cluster-registry-later` (information). Plans tab: Registry card active,
+  registries and publications editors, registries per cluster entry; the
+  Deploy window shows the registry findings and summary.
+- **`harvester-registry`**: `declare`, `attach` (accounts on standard
+  input), `check`, `list`, `show`, `forget`, `deploy` (with `--dry-run`,
+  `--origin`), `status`, `delete [--delete-data]`.
+- Routes `/api/artefacts` (list, detail, upload, accept, publish, delete,
+  settings) and `/api/registries` (list, detail, declare, forget, attach,
+  check, bootstrap deploy, status and delete), each write with
+  `@requires_auth` and a rate limit. Roles (point 195): reading = viewer;
+  import, remove, keys, strict mode, declaring a client registry, posing
+  or deleting a bootstrap registry = admin; attach, check, publish,
+  registries of a child cluster = operator.
+- The release carries `bundles/registry` (the bootstrap registry images,
+  `SHA256SUMS` checked by `install.sh`, installed to
+  `$STATE_DIR/registry-bundle`); the console image adds `openssl` and
+  `apache2-utils`; `install.sh` links `harvester-artefacts` and
+  `harvester-registry`.
+
+### Changed
+- **The fallback of a child cluster to the Internet is never cut by default
+  (point 198).** containerd tries the mirrors, then the origin registry;
+  this stays so for every registry, bootstrap registry included (the plan
+  first wanted no fallback by default for a bootstrap registry).
+  `no_fallback: true` on an entry (**No fallback to Internet**) cuts it for
+  every mirrored registry of the cluster at once, and is refused
+  (`cluster-registry-no-fallback-system`) while `docker.io` or
+  `registry.rancher.com` is mirrored and no registry of the list carries
+  the RKE2 system images; the creation form greys the box with the reason.
+- **`--plain-http HOST` is required for any `http://` Helm repository or
+  registry read by `pack`, even without credentials.** Redirections are
+  followed by hand (five at most), over http(s) only, and credentials are
+  dropped as soon as the host changes.
+- The phase order of the plans is install, readiness, terraform, registry,
+  capi, clusters, artefacts. The artefacts phase stays greyed, now "coming
+  in 2.7".
+- Cluster API has six tabs: Clusters, Services, Registries, Artefacts,
+  History, Installation.
+- `harvester-capi` takes `--state-dir` and `--harvester-name` on every
+  subcommand; the console passes both. `create` reads only the read
+  account of each registry, before any write; `render` and `create
+  --dry-run` show it as `<hidden>`.
+
+### Fixed
+- Registry credentials are never sent to another host: an upload location,
+  a redirection or a token realm on another host gets no `Authorization`
+  (also for the VDDK image push of 1.75.0).
+- Token realms, redirections and upload locations follow http(s) only (no
+  file, ftp or data), and https never falls back to http unless the
+  registry is spoken to in clear.
+- The platform manifest of a multi-architecture image is checked against
+  the digest of its index entry.
+- Downloaded blobs are bounded by their descriptor size (`size-mismatch`
+  otherwise); manifests, token replies and error bodies are capped.
+- `pack` never leaks the credentials of a Helm repository: no redirect
+  to another host carries them, and they never go over http.
+- Import: the archive that is checked is the one that is extracted. Accept
+  moves the archive and its signature into a directory of its own before
+  any check, and the acknowledgement is bound to the sha256 shown at the
+  pre-check (`archive-changed` otherwise). Before, an upload landing
+  during the import could be extracted under the verdict of another
+  archive, past the strict mode lock. The `sha256` is mandatory with an
+  acknowledgement (`sha256-required`, 400): a client of the API can no
+  longer skip the binding.
+- `attach` refuses a bootstrap registry (`registry-bootstrap`): its
+  accounts are generated by the console, typed values would have locked
+  out publishing and new child clusters.
+- The bootstrap registry Service allocates no NodePort (443 and 5443 were
+  also opened on every Harvester node); the read instance mounts the data
+  read only and never purges the uploads of the write instance.
+- Registry passwords may hold spaces and colons (the colon rule applies to
+  the user name only); every host and account rule is a full match.
+  `harvester-registry deploy` checks `--dns-name` before it reaches the
+  certificate, and refuses a cluster without nodes in the configuration
+  with a message instead of a traceback.
+- Delete of a bootstrap registry, forget of a client registry and removal
+  of a package are refused while a plan, a cluster template, a child
+  cluster or a service uses them (`registry-in-use`, `package-in-use`).
+- Found on the bench: the registries of a child cluster are no longer
+  written through the `privateRegistriesConfig` field of CAPRKE2. In
+  v0.25.2 (and on its main branch) that field recreates its table of
+  registries for each entry and writes every CA to the same
+  `/etc/rancher/rke2/tls/ca.crt`: with two registries, the nodes kept the
+  account and the CA of one of them only.
+- Forgetting a client registry removes its Secrets (both accounts and the
+  CA) from every attached Harvester cluster, with the identity of the
+  person, before the declaration. Before, the client's write account
+  stayed on the Harvester cluster with nothing in the console to show it.
+  Forget is an action of `harvester-registry forget` (parity with the
+  command line), tracked in Activity (`registry-forget:<name>`) before any
+  cluster is touched: one step per Secret removed. A refusal on a cluster
+  ends the action in error with the steps already done, and the
+  declaration stays. An attached cluster no longer in the console is named
+  in a step instead of being skipped in silence. The route answers 202
+  with the action; usage refusals stay immediate (409, with `used_by`).
+- Forget opens a window of the page, with the refusals translated in the
+  five languages, instead of the browser's confirm and alert boxes.
+- The creation check of a child cluster blocks a root disk smaller than
+  the virtual size of the image (`disk-smaller-than-image`, creation
+  window and clusters phase). Longhorn refuses such a volume and the VM
+  stayed in Scheduling until the timeout (2.5.0 defect, seen with the
+  published openSUSE Leap 15.6 image, which now announces 10 GiB).
+- Deleting a child cluster no longer reports "kept: NotFound" for the
+  generated objects that Cluster API removed on its own in the meantime.
+- Deleting one of two child clusters that share a namespace removes its
+  own registry Secrets (`<cluster>-registries` with the read account,
+  `-registry-<registry>-auth`, `-ca`, `-chart-<registry>`), by exact name.
+  The shared objects stay for the other cluster, as in 2.5.0. Before, the
+  read account stayed on the Harvester cluster and the registry was
+  reported in use forever.
+- A bootstrap registry deployment that fails before `ready` leaves its
+  objects without a declaration. The Registries tab now lists them as a
+  **Leftover** row (objects, address, plan), and **Delete** removes them
+  (the route accepts an undeclared name when `harvester-registry
+  leftovers` finds it on that cluster). A plan whose deployment failed is
+  no longer blocked on resume: its checks replay `deploy --dry-run` with
+  the origin of the plan, and the tool counts the leftovers of that plan
+  neither as a taken name nor as an answering address. New
+  `harvester-registry leftovers --cluster C` and route
+  `GET /api/registries/bootstrap/<cluster>/leftovers` (viewer);
+  `leftovers` is a reserved registry name.
+- Registries tab: the window of a bootstrap registry no longer sends a
+  late check after Launch or after it is closed, and Launch is greyed as
+  soon as a value changes, until its checks are back; **Delete** of a
+  bootstrap registry aims at the cluster of the registry, not the one
+  selected in the page; **Check** is greyed for a viewer, with the role in
+  its tooltip.
+- `harvester-artefacts remove` on a machine without PyYAML ends with a
+  clear step ("remove reads the saved plans; run it where the console is
+  installed (PyYAML)") and exit code 1, instead of a traceback.
+- The upload of a package and the short gestures on the console state
+  (trust settings, package removal, forget) record their end time.
+
+### Internal
+- `oci_push.Registry` streams blobs to and from files (1 MiB blocks,
+  digest computed while writing, `.part` renamed only when right), resumes
+  a download by `Range` and an upload by its session, sends chunks beyond
+  64 MiB, mounts blobs across repositories, reads a manifest by `HEAD`,
+  and takes a CA of its own (`ca_pem`).
+- New modules: `oci_layout` (OCI layout on disk, image copy to and from a
+  registry, Helm charts as OCI artefacts, archive for `ctr` that names
+  each image by tag and by digest), `artefacts` (index, safe inspection,
+  verified streamed extraction, trust and decision, settings),
+  `registries` (declarations, RKE2 configuration, findings),
+  `registry_seed` (manifests and Distribution configuration of the
+  bootstrap registry, checks, certificate and htpasswd through injectable
+  runners), `node_images` (`ctr images import` over SSH, now also used by
+  `harvester-capi push_images`, same remote command).
+- `self_update.verify_signature` takes the namespace and the identity
+  (defaults unchanged for the update); the member rules of the archive are
+  shared with the artefacts.
+- `scripts/registry-bundle.json` pins the registry and bci-busybox images
+  by digest (bci-busybox for the probe of 2.6.1); `package.sh` builds `bundles/registry` with `pack`, which
+  checks every manifest and layer against these digests (no cosign check
+  at build time).
+
+### Known limits
+- **Registry reachability is checked from the Harvester cluster only, not
+  from the VM network.** Every check says so with a warning
+  (`registry-vm-network-unchecked` on Check, the bootstrap registry window
+  and the plan checks; `cluster-registry-vm-network-unchecked` on the
+  creation check of a child cluster, one per registry that serves images).
+  A VM network that cannot route to the registry is not detected: the
+  nodes fall back to the Internet, or fail when `no_fallback` is set. The
+  probe pod attached to the VM network comes in 2.6.1; its image,
+  `bci-busybox`, is already in the registry bundle and unused in 2.6.0.
+
+### Upgrade and rollback
+- New state, all additive: `<state>/artefacts.d`, `<state>/artefacts`
+  (settings, trusted keys), `<state>/registries.d`, and
+  `$STATE_DIR/registry-bundle` placed by `install.sh`. No database change.
+  Plans of 2.5.0 load unchanged (no registry phase, no `registries` on
+  cluster entries).
+- Back to 2.5.0: these directories are ignored; child clusters created
+  with registries keep their files on the nodes; a bootstrap registry
+  keeps running on the Harvester cluster and is no longer shown (delete it
+  from 2.6.0 before going back if it is not wanted). 2.5.0 lists as
+  **invalid** a plan saved with an enabled Registry phase or with
+  `registries` on a cluster entry ("coming in 2.6+: set enabled: false", "unknown
+  key"), and a cluster template with `spec.registries`: no crash, but they
+  cannot be launched. Before going back, disable the Registry phase and
+  remove the `registries` keys.
+- The read password of a registry ends up in the cloud-init Secret of
+  each child VM on Harvester (CAPRKE2 inlines `registries.yaml` into the
+  bootstrap Secret, CAPHV copies it), as with `privateRegistriesConfig`:
+  whoever can see the user data of these VMs can read the read account.
+
+### Verified for real
+- **harvlab2** (nested on node2, Harvester v1.9.0, 32 GiB, Longhorn disk
+  of 48 GiB, Cluster API stack of 2.5.0), console of this release, a
+  client registry simulated by Distribution 3.1 on node1 (own CA, two
+  accounts, port opened for the run then closed), the Internet of the
+  child VMs cut by a temporary nftables rule on node2 (family `bridge`,
+  packets from the child pool to outside 172.16.0.0/16 dropped, LAN and
+  registries allowed, removed after).
+- Package `banc-260` 1.0.0 (podinfo chart 6.9.2, the podinfo image and the
+  same image stored as `docker.io/harvops-proof/podinfo:2.6.0`, a name
+  that does not exist on the Internet, one manifest): `pack` 6.5 s,
+  31.3 MiB, shared layers once. Import: changed byte with its signature
+  refused (`invalid-signature`); the same unsigned refused at extraction
+  (`sums-mismatch`); unsigned and unknown key 409 until acknowledged, then
+  imported with the journal line and `trust.json`; strict mode refused
+  both; the signed package `valid` once its key was trusted.
+- Plan with the Registry phase (bootstrap registry of 8 GiB at
+  172.16.2.76, client registry, publication) and one 1+1 child cluster
+  with both registries (client first): check 12 s, registry ready in 37 s,
+  publication 3 s, cluster about 10 minutes. The resumed run checked and
+  skipped the registry items; later runs adopted the registry.
+- With the Internet cut: an image absent from the registries failed once
+  the fallback timed out; the renamed image and the podinfo image were
+  pulled from the registries (registry logs: `pull` account) and pods ran
+  on both nodes; the client registry served first, and the bootstrap
+  registry served once the client one was stopped. The podinfo chart was
+  installed by CAAPH from the bootstrap registry ("From a registry"):
+  release deployed in 15 s, pod running.
+- Registry pod deleted: back in seconds, content intact. Deleted keeping
+  its volume, deployed again over it in 26 s (images still there, new
+  CA), then deleted with its data after the typed name. Delete, forget and
+  remove refused while the cluster and the plan used them.
+- The three registry defects above were found on this bench and fixed;
+  the fixes were exercised on a new cluster (both registries on both
+  nodes, forget removing the accounts).
+- Restricting the write port 5443 to the console address was tried: a
+  second LoadBalancer Service on the same address with the write port and
+  `loadBalancerSourceRanges` shares the address through kube-vip and the
+  range is enforced (another LAN host timed out, port 443 stayed open).
+  Not delivered (it needs the source address of the console as the
+  cluster sees it).
+- Bench setting: the console room check refused two 10 GiB disks on the
+  48 GiB Longhorn disk; `storage-minimal-available-percentage` was lowered
+  from 25 to 15 during each creation, then set back.
+- **Not verified for real**: a client Harbor; a child cluster bootstrapped
+  entirely without the Internet (out of 2.6.0); a bootstrap registry on a
+  cluster of several nodes; several child clusters on one registry;
+  packages of several gigabytes (harv4 not used); the resume of a
+  publication stopped halfway (tests only).
+
+### Tests
+- New: `test_oci_layout_260.py`, `test_artefacts_260.py`,
+  `test_artefacts_fetch_260.py`, `test_harvester_artefacts_cli_260.py`,
+  `test_node_images_260.py`, `test_artefacts_routes_260.py`,
+  `test_artefacts_publish_260.py`, `test_registries_260.py`,
+  `test_registry_routes_260.py`, `test_registry_seed_260.py`,
+  `test_registry_seed_cli_260.py`, `test_registry_seed_podman_260.py`
+  (opt-in, `HARVESTER_OPS_PODMAN_IT=1`: the real registry image with the
+  same hardening as the pod, read account refused on writes and on 5443),
+  `test_capi_registries_260.py` (real generator render with one and two
+  registries), `test_capi_service_registry_260.py`,
+  `test_deploy_plans_260.py`, `test_deploy_registry_260.py`; e2e
+  `test_artefacts_260.py`, `test_registries_260.py`,
+  `test_bm_plans_registry_260.py`, `test_capi_service_registry_260.py`.
+  `test_oci_push_175.py` grows from 14 to 53 cases (Basic auth, Range,
+  chunked sessions with injected cuts, mounts, a second host, TLS with a
+  CA generated by the test); 2.4.0 and 2.5.0 tests updated for the new
+  phase order and message, the tab lists and the navigation inventory.
+- The standard-library promise is proved by running `pack` with
+  `python3 -I -S`. Named mutations, each caught: buffered download, late
+  digest check, credentials kept on a redirect, tag overwritten, any
+  acknowledgement accepted, wrong signature accepted in permissive mode,
+  unlisted member accepted, console namespace accepted, PyYAML imported by
+  `pack`, credentials in argv, `SHA256SUMS` last, write account on the
+  nodes, mirror order, rewrite without host, memory limit removed,
+  password in the htpasswd argv, volume deleted without the flag,
+  anonymous access, Accept active without the box, journal line missing,
+  escaping removed, launch reading the session, configuration in the
+  control plane only, fallback always cut, Secrets without label, write
+  account in the CAAPH Secret, CA missing, registry phase after clusters,
+  registry left coming, registry of another origin adopted, Launch active
+  despite a blocking check, password shown again; for the bench fixes,
+  the per-registry CA file and both configs, the forget detach (route and
+  CLI), the NotFound tolerance of the detach.
+- New cases from the bench: two registries with a CA each
+  (`test_registries_260.py`), root disk against the image virtual size
+  (`test_capi_cluster_logic.py`, `test_capi_cli.py`), generated objects
+  already removed (`test_capi_identity_250.py`), forget removing the
+  accounts (`test_deploy_plans_260.py`, `test_registry_routes_260.py`),
+  end time of the short actions (`test_artefacts_routes_260.py`); the
+  bootstrap registry CLI tests no longer dial the real bench address.
+- From the final review: two clusters in one namespace
+  (`test_capi_registries_260.py`), forget as a tracked action with one step
+  per Secret and a refusal half way (`test_deploy_plans_260.py`,
+  `test_registry_routes_260.py`), leftovers of a failed deployment listed,
+  deleted and taken over by their plan (`test_registry_seed_cli_260.py`,
+  `test_registry_routes_260.py`, `test_deploy_registry_260.py`), the VM
+  network warning in the three checks, the mandatory `sha256` of an
+  acknowledgement, `remove` without PyYAML; e2e: forget window, leftover
+  row, Delete on the cluster of the registry, Check greyed for a viewer,
+  no late check after Launch. Each with a mutation, caught.
+- API suite 11653 passed, 5 skipped; e2e 1256 passed (one known flaky
+  test of the update tab passed alone).
+
 ## [2.5.0] - 2026-11-05 - Deployment plans: Cluster API and child clusters
 
 ### Added

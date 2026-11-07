@@ -142,6 +142,19 @@ else
         "$WORK_DIR/bundles/terraform-provider-libvirt" "embedded in harvester-ops ${VERSION}" >/dev/null || {
         err "libvirt Terraform provider ${TF_LIBVIRT_PROVIDER_VERSION} could not be fetched or verified"; exit 1; }
     ok "libvirt Terraform provider embedded: v${TF_LIBVIRT_PROVIDER_VERSION} (signature and checksum verified)"
+    # 2.6.0 : les images du registre d'amorçage (scripts/registry-bundle.json),
+    # épinglées par empreinte : pack contrôle chaque manifeste et chaque couche
+    # contre l'empreinte de la description, puis l'archive pour ctr, les noms
+    # épinglés et leurs sommes (vérifiées par install.sh)
+    rb_work="$(mktemp -d "${DIST_DIR}/.registry-bundle.XXXXXX")"
+    if ! python3 bin/harvester-artefacts.py pack scripts/registry-bundle.json --out "$rb_work" >/dev/null \
+            || ! python3 -c 'import sys; sys.path.insert(0, "bin/lib"); import node_images as n; n.bundle_from_package(sys.argv[1], sys.argv[2])' \
+                "$rb_work"/harvester-ops-registry-*.tar.gz "$WORK_DIR/bundles/registry"; then
+        rm -rf "$rb_work"
+        err "the bootstrap registry images could not be fetched or verified"; exit 1
+    fi
+    rm -rf "$rb_work"
+    ok "Bootstrap registry images embedded ($(python3 -c 'import json,sys; print(", ".join(json.load(open(sys.argv[1]))["images"].values()))' "$WORK_DIR/bundles/registry/registry-images.json"))"
 fi
 # web/ above already carries web/vendor (wheels). A second
 # `cp -r web/vendor "$WORK_DIR/web/vendor"` used to nest a duplicate

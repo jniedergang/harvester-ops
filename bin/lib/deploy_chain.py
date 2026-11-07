@@ -67,9 +67,12 @@ from dataclasses import dataclass, field
 
 import secret_store
 
-ORDER = ("install", "readiness", "terraform", "capi", "clusters", "registry", "artefacts")
-COMING = ("registry", "artefacts")
-COMING_MESSAGE = "coming in 2.6+"
+# 2.6.0 (point 189) : Registre après Terraform (une classe de stockage qu'il
+# crée peut servir) et avant Cluster API (les clusters ont besoin de leurs
+# registres à la création). La reprise repère les phases par `id`.
+ORDER = ("install", "readiness", "terraform", "registry", "capi", "clusters", "artefacts")
+COMING = ("artefacts",)
+COMING_MESSAGE = "coming in 2.7"
 CHECKED_MESSAGE = "already done (checked)"
 POLL_SECONDS = 15
 SECRET_CLASS = "plan-run"

@@ -1,0 +1,11 @@
+{
+  "name": "harvester-ops-registry",
+  "version": "3.1.1",
+  "description": "Images of the bootstrap registry posed by harvester-ops on a Harvester cluster: CNCF Distribution in the SUSE BCI image, and bci-busybox, kept for the probe from the VM network that comes in 2.6.1 (not used by 2.6.0). Pinned by digest, named by tag.",
+  "items": [
+    {"name": "registry", "kind": "images",
+     "images": ["registry.suse.com/suse/registry:3.1@sha256:40748574613462a186825ce49652be7ddc6fd2dbdc9e4d6b5ca4e62c5235536d"]},
+    {"name": "probe", "kind": "images",
+     "images": ["registry.suse.com/bci/bci-busybox:16.0@sha256:ea13774e71fc4b1b1de91372fb553f915f77836117b75fe2b58eac8b97afe4e7"]}
+  ]
+}

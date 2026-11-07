@@ -1,0 +1,355 @@
+"""v2.6.0 : routes des registres déclarés (tâche 6) : lecture lecteur,
+déclaration administrateur, rattachement et vérification opérateur ;
+identifiants jamais renvoyés ni en argument de l'outil ; limites lisibles."""
+
+import json
+import re
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT / "web"))
+sys.path.insert(0, str(ROOT / "bin" / "lib"))
+
+import app as wapp  # noqa: E402
+import test_deploy_routes_240 as tr  # noqa: E402
+
+env = tr.env
+SECRET = "Pw-Never-Shown-77"
+
+
+def body(**over):
+    b = {"kind": "external", "endpoint": "harbor.client.example:443", "usage": ["images", "charts"],
+         "mirrors": ["docker.io", "ghcr.io"]}
+    b.update(over)
+    return b
+
+
+@pytest.mark.parametrize("path,method,role", [
+    ("/api/registries", "GET", "viewer"),
+    ("/api/registries/harbor", "GET", "viewer"),
+    ("/api/registries/harbor", "PUT", "admin"),
+    ("/api/registries/harbor", "DELETE", "admin"),
+    ("/api/registries/harbor/attach/harvlab2", "POST", "operator"),
+    ("/api/registries/harbor/check/harvlab2", "POST", "operator"),
+    ("/api/registries/bootstrap/harvlab2", "POST", "admin"),
+    ("/api/registries/bootstrap/harvlab2/amorcage", "DELETE", "admin"),
+    ("/api/registries/bootstrap/attach/check", "POST", "admin"),
+    ("/api/artefacts", "GET", "viewer"),
+    ("/api/artefacts/upload", "POST", "admin"),
+    ("/api/artefacts/socle/2026.11/accept", "POST", "admin"),
+    ("/api/artefacts/socle/2026.11", "DELETE", "admin"),
+    ("/api/artefacts/settings", "PUT", "admin"),
+    ("/api/artefacts/socle/2026.11/publish", "POST", "operator"),
+])
+def test_roles_follow_point_195(path, method, role):
+    assert wapp.required_role_for(path, method) == role
+
+
+def test_limits_of_every_new_write_route_are_readable():
+    from limits import parse_many
+    src = (ROOT / "web" / "app.py").read_text()
+    for fn in ("api_registry_put", "api_registry_delete", "api_registry_attach", "api_registry_check"):
+        i = src.index(f"def {fn}(")
+        m = re.findall(r'@_rate_limit\("([^"]+)"\)', src[i - 160:i])
+        assert m, fn
+        parse_many(m[-1])
+
+
+def test_declare_read_update_and_forget(env):
+    c = env["client"]
+    r = c.put("/api/registries/harbor", json=body())
+    assert r.status_code == 201 and r.get_json()["revision"] == 1
+    assert r.get_json()["updated_by"] == "alice"
+    assert c.put("/api/registries/harbor", json=body()).status_code == 409
+    r = c.put("/api/registries/harbor", json=dict(body(mirrors=["quay.io"]), revision=1, clusters=["forged"]))
+    assert r.status_code == 200 and r.get_json()["clusters"] == []          # jamais écrit par le formulaire
+    assert [x["name"] for x in c.get("/api/registries").get_json()["registries"]] == ["harbor"]
+    assert c.get("/api/registries/harbor").get_json()["mirrors"] == ["quay.io"]
+    r = c.delete("/api/registries/harbor")
+    assert r.status_code == 202                     # action suivie de l'outil (revue finale I-3)
+    run = wapp.ACTIONS[r.get_json()["action_id"]]
+    for _ in range(300):
+        if run.status not in ("pending", "running"):
+            break
+        time.sleep(0.05)
+    assert run.status == "done", run.status
+    assert run.action == "registry-forget:harbor"
+    assert c.get("/api/registries/harbor").status_code == 404
+    assert c.delete("/api/registries/harbor").status_code == 404
+
+
+@pytest.mark.parametrize("name,b,status,field", [
+    ("harbor", body(endpoint="https://x"), 400, "endpoint"),
+    ("harbor", body(colour=1), 400, "colour"),
+    ("harbor", body(kind="bootstrap"), 409, None),
+    ("Bad", body(), 400, None),                     # refusé par le contrôle commun des chemins
+    ("r" * 31, body(), 400, "name"),
+    ("bootstrap", body(), 400, "name"),
+])
+def test_declaration_refusals(env, name, b, status, field):
+    r = env["client"].put(f"/api/registries/{name}", json=b)
+    assert r.status_code == status, r.get_json()
+    if field:
+        assert field in r.get_json()["fields"]
+
+
+def test_attach_starts_an_action_with_the_credentials_in_a_private_spec(env, monkeypatch):
+    c = env["client"]
+    c.put("/api/registries/harbor", json=body())
+    seen = []
+
+    class Run:
+        id = "a1a1a1a1a1a1"
+    monkeypatch.setattr(wapp, "_cli_action", lambda cluster, label, cmd, tool, spec=None, **kw:
+                        seen.append((cluster, label, cmd, tool, spec)) or (Run(), None))
+    r = c.post("/api/registries/harbor/attach/harvlab",
+               json={"push": {"username": "push", "password": SECRET}})
+    assert r.status_code == 202, r.get_json()
+    res = r.get_json()
+    assert res["action_id"] == "a1a1a1a1a1a1" and res["warnings"] == ["registry-pull-is-push"]
+    assert SECRET not in json.dumps(res)
+    cluster, label, cmd, tool, spec = seen[0]
+    assert label == "registry-attach:harvlab/harbor" and tool == "harvester-registry"
+    assert SECRET not in " ".join(cmd) and spec["push"]["password"] == SECRET
+    assert cmd[2].startswith("--state-dir=") and cmd[3:6] == ["attach", "harbor", "--cluster"]
+
+
+@pytest.mark.parametrize("name,cluster,b,status", [
+    ("nope", "harvlab", {"push": {"username": "u", "password": "p"}}, 404),
+    ("harbor", "other", {"push": {"username": "u", "password": "p"}}, 404),
+    ("harbor", "harvlab", {"push": {"username": "u"}}, 400),
+    ("harbor", "harvlab", None, 400),
+])
+def test_attach_refusals_start_nothing(env, monkeypatch, name, cluster, b, status):
+    env["client"].put("/api/registries/harbor", json=body())
+    monkeypatch.setattr(wapp, "_cli_action", lambda *a, **k: pytest.fail("no action expected"))
+    r = env["client"].post(f"/api/registries/{name}/attach/{cluster}", json=b)
+    assert r.status_code == status
+
+
+def test_check_of_an_unknown_registry_is_a_blocking_finding(env):
+    r = env["client"].post("/api/registries/nope/check/harvlab")
+    assert r.status_code == 200 and r.get_json()["blocked"] is True
+    assert [f["code"] for f in r.get_json()["findings"]] == ["registry-unknown"]
+
+
+def test_check_runs_the_tool_read_only(env, monkeypatch):
+    env["client"].put("/api/registries/harbor", json=body())
+    got = []
+    monkeypatch.setattr(wapp, "_capi_run_json", lambda cmd, spec=None, timeout=180:
+                        got.append(cmd) or (({"findings": [], "blocked": False}, 0), None))
+    r = env["client"].post("/api/registries/harbor/check/harvlab")
+    assert r.get_json() == {"findings": [], "blocked": False}
+    assert got[0][3:5] == ["check", "harbor"]
+
+
+def test_an_operator_cannot_declare_but_can_attach(env, monkeypatch):
+    monkeypatch.setattr(wapp, "current_role", lambda: "operator")
+    monkeypatch.setattr(wapp, "open_mode", lambda: True)
+    assert env["client"].put("/api/registries/harbor", json=body()).status_code == 403
+    monkeypatch.setattr(wapp, "current_role", lambda: "viewer")
+    assert env["client"].get("/api/registries").status_code == 200
+    assert env["client"].post("/api/registries/harbor/attach/harvlab", json={}).status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Registre d'amorçage (tâche 7)
+# ---------------------------------------------------------------------------
+def boot(**over):
+    b = {"name": "amorcage", "address": "172.16.2.76", "size_gib": 20, "storage_class": "harv-rep1",
+         "mirrors": ["ghcr.io"]}
+    b.update(over)
+    return b
+
+
+@pytest.fixture
+def recorded(monkeypatch):
+    seen = {"actions": [], "reads": []}
+
+    class Run:
+        id = "b2b2b2b2b2b2"
+    monkeypatch.setattr(wapp, "_cli_action", lambda cluster, label, cmd, tool, spec=None, **kw:
+                        seen["actions"].append((cluster, label, cmd, spec)) or (Run(), None))
+    monkeypatch.setattr(wapp, "_capi_run_json", lambda cmd, spec=None, timeout=180:
+                        seen["reads"].append(cmd) or (({"findings": [], "blocked": False}, 0), None))
+    return seen
+
+
+@pytest.mark.parametrize("over,field", [
+    ({"address": "172.16.2"}, "address"),
+    ({"address": "harvlab2-registry"}, "address"),
+    ({"size_gib": 4}, "size_gib"),
+    ({"size_gib": "20"}, "size_gib"),
+    ({"name": "bootstrap"}, "name"),
+    ({"storage_class": "Bad Class"}, "storage_class"),
+    ({"mirrors": ["https://ghcr.io"]}, "mirrors"),
+    ({"cert": "C", "key": "K"}, "cert"),
+])
+def test_bootstrap_refusals_start_nothing(env, recorded, over, field):
+    r = env["client"].post("/api/registries/bootstrap/harvlab", json=boot(**over))
+    assert r.status_code == 400 and field in r.get_json()["fields"]
+    assert not recorded["actions"] and not recorded["reads"]
+
+
+def test_bootstrap_dry_run_only_reads(env, recorded):
+    r = env["client"].post("/api/registries/bootstrap/harvlab", json=boot(dry_run=True))
+    assert r.status_code == 200 and r.get_json()["blocked"] is False
+    cmd = recorded["reads"][0]
+    assert cmd[3:5] == ["deploy", "amorcage"] and cmd[-1] == "--dry-run" and not recorded["actions"]
+
+
+def test_bootstrap_deploy_is_a_tracked_action_with_the_client_key_in_the_private_spec(env, recorded):
+    r = env["client"].post("/api/registries/bootstrap/harvlab",
+                           json=boot(cert="CERT", key="Client-Key-Secret", ca="CA", dns_name="r.home.lo"))
+    assert r.status_code == 202 and r.get_json()["action_id"] == "b2b2b2b2b2b2"
+    cluster, label, cmd, spec = recorded["actions"][0]
+    assert label == "registry-deploy:harvlab/amorcage"
+    assert spec == {"cert": "CERT", "key": "Client-Key-Secret", "ca": "CA"}
+    assert "Client-Key-Secret" not in " ".join(cmd) and "--dns-name" in cmd
+    assert cmd[cmd.index("--mirrors") + 1] == "ghcr.io"
+    env["client"].post("/api/registries/bootstrap/harvlab", json=boot())
+    assert recorded["actions"][1][3] is None                 # CA générée : aucune demande privée
+
+
+def test_bootstrap_delete_needs_the_typed_name_for_the_data(env, recorded, monkeypatch):
+    import registries as rg
+    import registry_seed as rs
+    # usage (clusters enfants, plans) : test_deploy_registry_260
+    monkeypatch.setattr(wapp, "_registry_users", lambda name, clusters: ([], None))
+    d = rs.declaration(dict(boot(), name="amorcage"), "", "harvlab")
+    d.pop("ca_pem")
+    rg.save(env["state"], "amorcage", d)
+    c = env["client"]
+    r = c.delete("/api/registries/bootstrap/harvlab/amorcage", json={"delete_data": True, "confirm": "amorcag"})
+    assert r.status_code == 400 and r.get_json()["code"] == "confirm-name" and not recorded["actions"]
+    r = c.delete("/api/registries/bootstrap/harvlab/amorcage", json={})
+    assert r.status_code == 202 and r.get_json()["data_kept"] is True
+    assert "--delete-data" not in recorded["actions"][0][2]
+    r = c.delete("/api/registries/bootstrap/harvlab/amorcage", json={"delete_data": True, "confirm": "amorcage"})
+    assert r.status_code == 202 and recorded["actions"][1][2][-1] == "--delete-data"
+    assert c.delete("/api/registries/bootstrap/other/amorcage", json={}).status_code == 404
+    assert c.delete("/api/registries/bootstrap/harvlab/nope", json={}).status_code == 404
+
+
+@pytest.mark.parametrize("found,status", [(["amorcage"], 202), (["autre"], 404), ([], 404)])
+def test_bootstrap_delete_of_the_leftovers_of_a_failed_deploy(env, monkeypatch, found, status):
+    """Revue finale 2.6.0 (I-2) : sans déclaration (déploiement échoué
+    avant `ready`), la suppression passe quand l'outil trouve des restes à
+    ce nom sur ce cluster ; sinon 404, rien lancé."""
+    monkeypatch.setattr(wapp, "_registry_users", lambda name, clusters: ([], None))
+    seen = {"actions": [], "reads": []}
+
+    class Run:
+        id = "c3c3c3c3c3c3"
+    monkeypatch.setattr(wapp, "_cli_action", lambda cluster, label, cmd, tool, spec=None, **kw:
+                        seen["actions"].append((label, cmd)) or (Run(), None))
+    monkeypatch.setattr(wapp, "_capi_run_json", lambda cmd, spec=None, timeout=180: seen["reads"].append(cmd) or (
+        ({"cluster": "harvlab", "leftovers": [{"registry": n, "objects": [f"deployments/{n}"]} for n in found]}, 0),
+        None))
+    r = env["client"].delete("/api/registries/bootstrap/harvlab/amorcage", json={})
+    assert r.status_code == status, r.get_json()
+    assert seen["reads"][0][3] == "leftovers"
+    if status == 202:
+        label, cmd = seen["actions"][0]
+        assert label == "registry-delete:harvlab/amorcage" and cmd[3:5] == ["delete", "amorcage"]
+    else:
+        assert not seen["actions"]
+
+
+def test_bootstrap_leftovers_are_read_through_the_tool(env, recorded):
+    r = env["client"].get("/api/registries/bootstrap/harvlab/leftovers")
+    assert r.status_code == 200 and recorded["reads"][0][3:6] == ["leftovers", "--cluster", "harvlab"]
+    assert wapp.required_role_for("/api/registries/bootstrap/harvlab/leftovers", "GET") == "viewer"
+
+
+def test_bootstrap_delete_in_use_is_refused_with_the_users(env, recorded, monkeypatch):
+    """Revue finale m-9 : le contrôle d'usage de la route elle-même."""
+    import registries as rg
+    import registry_seed as rs
+    d = rs.declaration(dict(boot(), name="amorcage"), "", "harvlab")
+    d.pop("ca_pem")
+    rg.save(env["state"], "amorcage", d)
+    monkeypatch.setattr(wapp, "_registry_users", lambda name, clusters: (["cluster:harvlab/web"], None))
+    r = env["client"].delete("/api/registries/bootstrap/harvlab/amorcage", json={})
+    assert r.status_code == 409 and r.get_json()["code"] == "registry-in-use"
+    assert r.get_json()["used_by"] == ["cluster:harvlab/web"] and not recorded["actions"]
+
+
+def test_bootstrap_status_reads_through_the_tool(env, recorded):
+    r = env["client"].get("/api/registries/bootstrap/harvlab/amorcage")
+    assert r.status_code == 200 and recorded["reads"][0][3:5] == ["status", "amorcage"]
+
+
+def test_bootstrap_limits_are_readable():
+    from limits import parse_many
+    src = (ROOT / "web" / "app.py").read_text()
+    for fn in ("api_registry_bootstrap_deploy", "api_registry_bootstrap_delete"):
+        i = src.index(f"def {fn}(")
+        parse_many(re.findall(r'@_rate_limit\("([^"]+)"\)', src[i - 160:i])[-1])
+
+
+def test_attach_of_a_bootstrap_registry_is_refused(env, monkeypatch):
+    """Revue I-3 : 409 registry-bootstrap, aucune action lancée."""
+    import registries as rg
+    import registry_seed as rs
+    d = rs.declaration(dict(boot(), name="amorcage"), "", "harvlab")
+    d.pop("ca_pem")
+    rg.save(env["state"], "amorcage", d)
+    monkeypatch.setattr(wapp, "_cli_action", lambda *a, **k: pytest.fail("no action expected"))
+    r = env["client"].post("/api/registries/amorcage/attach/harvlab",
+                           json={"push": {"username": "u", "password": "p"}})
+    assert r.status_code == 409 and r.get_json()["code"] == "registry-bootstrap"
+
+
+def test_forget_is_an_action_of_the_tool_created_before_any_cluster_is_touched(env, monkeypatch):
+    """Revue finale 2.6.0 (I-3) : oublier part en action suivie de
+    `harvester-registry forget`, avec le kubeconfig de la personne pour
+    chaque cluster rattaché ; la route ne retire rien elle-même, et la
+    déclaration reste jusqu'à ce que l'outil ait tout retiré."""
+    import kube as kube_mod
+    from registries import update
+    c = env["client"]
+    c.put("/api/registries/harbor", json=body())
+    update(wapp._bm_profiles_state(), "harbor", lambda d: d.update(clusters=["harvlab", "harvlab2"]))
+
+    class K:
+        def __init__(self, kc, timeout=None):
+            assert kc.startswith("/kc-of-the-person/")
+
+        def list(self, kind, ns=None, selector=None):
+            return []
+
+        def delete(self, *a, **k):
+            pytest.fail("the route deletes nothing itself")
+    monkeypatch.setattr(kube_mod, "Kube", K)
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda cl: f"/kc-of-the-person/{cl}")
+    seen = []
+
+    class Run:
+        id = "f0f0f0f0f0f0"
+    monkeypatch.setattr(wapp, "_cli_action", lambda cluster, label, cmd, tool, spec=None, **kw:
+                        seen.append((label, cmd, tool, kw)) or (Run(), None))
+    r = c.delete("/api/registries/harbor")
+    assert r.status_code == 202, r.get_data(as_text=True)
+    assert r.get_json()["action_id"] == "f0f0f0f0f0f0"
+    label, cmd, tool, kw = seen[0]
+    assert label == "registry-forget:harbor" and tool == "harvester-registry"
+    assert cmd[3:5] == ["forget", "harbor"]
+    assert [a for a in cmd if a.startswith("--kubeconfig-for=")] == [
+        "--kubeconfig-for=harvlab=/kc-of-the-person/harvlab", "--kubeconfig-for=harvlab2=/kc-of-the-person/harvlab2"]
+    assert kw.get("check_busy") is False
+    assert c.get("/api/registries/harbor").status_code == 200, "the tool forgets, not the route"
+
+
+def test_forget_in_use_is_refused_with_the_users_and_starts_nothing(env, monkeypatch):
+    c = env["client"]
+    c.put("/api/registries/harbor", json=body())
+    monkeypatch.setattr(wapp, "_registry_users", lambda name, clusters: (["plan:site"], None))
+    monkeypatch.setattr(wapp, "_cli_action", lambda *a, **k: pytest.fail("no action expected"))
+    r = c.delete("/api/registries/harbor")
+    assert r.status_code == 409
+    assert r.get_json()["code"] == "registry-in-use" and r.get_json()["used_by"] == ["plan:site"]

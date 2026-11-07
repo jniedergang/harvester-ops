@@ -4,7 +4,7 @@
  * Onglet Plans de Bare-metal (#automation/pxe/plans) :
  *   - la liste des plans à gauche, le plan choisi à droite : nom,
  *     description, variables, une carte par phase avec son interrupteur
- *     (Registre et Artefacts grisés : à venir en 2.6+), délai de
+ *     (Artefacts grisé : à venir en 2.7 ; Registre depuis la 2.6.0), délai de
  *     disponibilité, modèles Terraform choisis dans une liste et ordonnés
  *     par boutons monter/descendre, dépendances ; 2.5.0 : pile Cluster API
  *     (délai, versions du paquet actif) et clusters enfants (modèle, nom à
@@ -102,6 +102,31 @@ const BMPlans = (() => {
     'fleet-sizes': () => tr('dpw.f.fleetSizes'),
     'rights-missing': () => tr('dpw.f.rightsMissing'),
     'rights-unchecked': () => tr('dpw.f.rightsUnchecked'),
+    // 2.6.0 : phase Registre
+    'registry-name-taken': () => tr('dpw.f.registryNameTaken'),
+    'registry-unknown': () => tr('dpw.f.registryUnknown'),
+    'registry-admin': () => tr('dpw.f.registryAdmin'),
+    'registry-check-failed': () => tr('dpw.f.registryCheckFailed'),
+    'registry-package-too-big': () => tr('dpw.f.registryPackageTooBig'),
+    'registry-address-differs': () => tr('dpw.f.registryAddressDiffers'),
+    'artefact-package-missing': () => tr('dpw.f.artefactPackageMissing'),
+    'package-untrusted-strict': () => tr('dpw.f.packageUntrustedStrict'),
+    'registry-var-missing': () => tr('dpw.f.registryVarMissing'),
+    'registry-exists': () => tr('dpw.f.registryExists'),
+    'registry-later': () => tr('dpw.f.registryLater'),
+    'publish-later': () => tr('dpw.f.publishLater'),
+    'cluster-registry-later': () => tr('dpw.f.clusterRegistryLater'),
+    'registry-address-answers': () => tr('dpw.f.registryAddressAnswers'),
+    'registry-address-in-pool': () => tr('dpw.f.registryAddressInPool'),
+    'registry-address-vip': () => tr('dpw.f.registryAddressVip'),
+    'registry-room-short': () => tr('dpw.f.registryRoomShort'),
+    'registry-not-attached': () => tr('dpw.f.registryNotAttached'),
+    'registry-unreachable': () => tr('dpw.f.registryUnreachable'),
+    'publish-tag-differs': () => tr('dpw.f.publishTagDiffers'),
+    'cluster-registry-not-attached': () => tr('dpw.f.clusterRegistryNotAttached'),
+    'cluster-registry-no-fallback-system': () => tr('dpw.f.clusterRegistryNoFallbackSystem'),
+    'registry-vm-network-unchecked': () => tr('dpw.f.registryVmNetworkUnchecked'),
+    'cluster-registry-vm-network-unchecked': () => tr('dpw.f.clusterRegistryVmNetworkUnchecked'),
   };
   const LEVELS = {
     blocking: () => tr('dpw.lvl.blocking'), warning: () => tr('dpw.lvl.warning'), info: () => tr('dpw.lvl.info'),
@@ -111,6 +136,7 @@ const BMPlans = (() => {
   const text = (map, key) => (map[key] ? map[key]() : String(key == null ? '' : key));
   const findingText = (f) => text(FINDINGS, f && f.code);
   const blockingOf = (findings) => (findings || []).filter(f => f && f.level === 'blocking');
+  const bytesOf = (n) => (window.XferProgress ? XferProgress.bytes(n) : `${n} B`);
 
   async function api(method, url, body) {
     const r = await fetch(url, {
@@ -172,7 +198,11 @@ const BMPlans = (() => {
   let tplData = { templates: [], kinds: [] };
   let ctplData = { templates: [] };       // 2.5.0 : modèles de cluster
   let bundleProviders = null;             // fournisseurs du paquet actif (null : non lu)
-  const AVAILABLE_DEFAULT = ['readiness', 'terraform', 'capi', 'clusters'];
+  const AVAILABLE_DEFAULT = ['readiness', 'terraform', 'registry', 'capi', 'clusters'];
+  // 2.6.0 : phase Registre, bornes du serveur (minutes)
+  const REGISTRY_TIMEOUT = [1, 60, 10];
+  const PUBLISH_TIMEOUT = [5, 600, 60];
+  let regData = { registries: [], packages: [] };
   const MAX_CLUSTERS = 16;
   const CAPI_TIMEOUT = [1, 60, 10];
   const CLUSTERS_TIMEOUT = [5, 180, 30];
@@ -187,6 +217,12 @@ const BMPlans = (() => {
       api('GET', '/api/baremetal/capi-templates').catch(() => ({ ok: false, d: {} })),
       api('GET', '/api/capi/bundles').catch(() => ({ ok: false, d: {} })),
     ]);
+    // 2.6.0 : registres déclarés et paquets importés (listes de la phase Registre)
+    const [rg, ar] = await Promise.all([
+      api('GET', '/api/registries').catch(() => ({ ok: false, d: {} })),
+      api('GET', '/api/artefacts').catch(() => ({ ok: false, d: {} })),
+    ]);
+    regData = { registries: rg.ok ? (rg.d.registries || []) : [], packages: ar.ok ? (ar.d.packages || []) : [] };
     if (p.ok) plansData = Object.assign({ plans: [], phases: [], available: [], builtins: [] }, p.d);
     if (t.ok) tplData = Object.assign({ templates: [], kinds: [] }, t.d);
     if (c.ok) ctplData = Object.assign({ templates: [] }, c.d);
@@ -231,7 +267,7 @@ const BMPlans = (() => {
       </div>
       ${templatesHtml()}
       ${capiTemplatesHtml()}`;
-    if (edit) { paintTemplates(); paintClusters(); }
+    if (edit) { paintTemplates(); paintClusters(); paintRegistries(); }
   }
 
   // --- éditeur d'un plan ---------------------------------------------------
@@ -247,7 +283,11 @@ const BMPlans = (() => {
       items: (((d.phases || {}).terraform || {}).templates || []).map(x => ({
         template: x.template, depends_on: (x.depends_on || []).slice() })),
       clusters: (((d.phases || {}).clusters || {}).items || []).map(x => ({
-        template: x.template, name: x.name || '', depends_on: (x.depends_on || []).slice() })),
+        template: x.template, name: x.name || '', depends_on: (x.depends_on || []).slice(),
+        registries: (x.registries || []).map(r => (typeof r === 'string' ? r : r.registry)).join(', ') })),
+      registries: (((d.phases || {}).registry || {}).registries || []).map(r => Object.assign({}, r,
+        { mirrors: (r.mirrors || []).join(', ') })),
+      publish: (((d.phases || {}).registry || {}).publish || []).map(p => Object.assign({}, p)),
       shortcut: null,
     };
     lastMsg = '';
@@ -269,7 +309,7 @@ const BMPlans = (() => {
   function editorHtml() {
     const d = edit.doc;
     const phases = plansData.phases && plansData.phases.length ? plansData.phases
-      : ['readiness', 'terraform', 'capi', 'clusters', 'registry', 'artefacts'];
+      : ['readiness', 'terraform', 'registry', 'capi', 'clusters', 'artefacts'];
     const available = plansData.available && plansData.available.length ? plansData.available : AVAILABLE_DEFAULT;
     const tip = (t) => `class="tip" data-tip="${esc(t)}"`;
     return `
@@ -326,6 +366,27 @@ const BMPlans = (() => {
           ${provs && provs.length ? provs.map(v => `<code class="bmpl-capi-provider">${esc(v)}</code>`).join(' ')
             : `<span class="badge warn">${esc(tr('bmpl.capiNoBundle'))}</span>`}
           <p class="form-hint">${icon('info', { size: 12 })} ${esc(tr('bmpl.t.capiNoUpgrade'))}</p></div>`;
+    } else if (pid === 'registry') {
+      body = `<label class="tip" data-tip="${esc(tr('bmpl.t.registryTimeout'))}">${esc(tr('bmpl.f.registryTimeout'))}
+          <input type="number" name="registry_timeout" min="${REGISTRY_TIMEOUT[0]}" max="${REGISTRY_TIMEOUT[1]}" step="1"
+                 value="${esc(ph && ph.timeout_minutes != null ? ph.timeout_minutes : REGISTRY_TIMEOUT[2])}"></label>
+        <label class="tip" data-tip="${esc(tr('bmpl.t.publishTimeout'))}">${esc(tr('bmpl.f.publishTimeout'))}
+          <input type="number" name="publish_timeout" min="${PUBLISH_TIMEOUT[0]}" max="${PUBLISH_TIMEOUT[1]}" step="1"
+                 value="${esc(ph && ph.publish_timeout_minutes != null ? ph.publish_timeout_minutes : PUBLISH_TIMEOUT[2])}"></label>
+        <h4 style="grid-column:1/-1;margin:6px 0 0;">${esc(tr('bmpl.registries'))}</h4>
+        <ol class="bmpl-regs" style="grid-column:1/-1;"></ol>
+        <div class="apply-bar" style="grid-column:1/-1;">
+          <button type="button" class="btn btn-secondary btn-sm btn-ico tip bmpl-reg-add" data-mode="bootstrap"
+                  data-tip="${esc(tr('bmpl.t.regAddBootstrap'))}">${icon('add')} ${esc(tr('bmpl.regAddBootstrap'))}</button>
+          <button type="button" class="btn btn-secondary btn-sm btn-ico tip bmpl-reg-add" data-mode="external"
+                  data-tip="${esc(tr('bmpl.t.regAddExternal'))}">${icon('add')} ${esc(tr('bmpl.regAddExternal'))}</button>
+        </div>
+        <h4 style="grid-column:1/-1;margin:6px 0 0;">${esc(tr('bmpl.publications'))}</h4>
+        <ol class="bmpl-pubs" style="grid-column:1/-1;"></ol>
+        <div class="apply-bar" style="grid-column:1/-1;">
+          <button type="button" class="btn btn-secondary btn-sm btn-ico tip bmpl-pub-add"
+                  data-tip="${esc(tr('bmpl.t.pubAdd'))}">${icon('add')} ${esc(tr('bmpl.pubAdd'))}</button>
+        </div>`;
     } else if (pid === 'clusters') {
       body = `<label class="tip" data-tip="${esc(tr('bmpl.t.clustersTimeout'))}">${esc(tr('bmpl.f.clustersTimeout'))}
           <input type="number" name="clusters_timeout" min="${CLUSTERS_TIMEOUT[0]}" max="${CLUSTERS_TIMEOUT[1]}" step="1"
@@ -429,6 +490,8 @@ const BMPlans = (() => {
                 data-tip="${esc(tr('bmpl.t.clusterTemplate'))}">${tplOpts(it.template)}</select>
         <input class="bmpl-cl-name tip" data-i="${i}" spellcheck="false" maxlength="80" value="${esc(it.name)}"
                placeholder="{{cluster}}-apps" aria-label="${esc(tr('bmpl.f.clusterName'))}" data-tip="${esc(tr('bmpl.t.clusterName'))}">
+        <input class="bmpl-cl-regs tip" data-i="${i}" spellcheck="false" maxlength="200" value="${esc(it.registries || '')}"
+               placeholder="${esc(tr('bmpl.clusterRegsPlaceholder'))}" aria-label="${esc(tr('bmpl.f.clusterRegs'))}" data-tip="${esc(tr('bmpl.t.clusterRegs'))}">
         ${it.template && !known.has(it.template) ? `<span class="badge fail tip" data-tip="${esc(tr('bmpl.t.ctplMissing'))}">${esc(tr('bmpl.tplMissing'))}</span>` : ''}
         <button type="button" class="btn btn-sm btn-secondary tip bmpl-cl-up" data-i="${i}" ${i === 0 ? 'disabled' : ''}
                 aria-label="${esc(tr('bmpl.t.up'))}" data-tip="${esc(tr('bmpl.t.up'))}">${icon('arrowUp', { size: 12 })}</button>
@@ -453,6 +516,46 @@ const BMPlans = (() => {
     const several = document.querySelector('#bm-plans .bmpl-cl-several');
     const full = items.length + (sc ? sc.count : 0) >= MAX_CLUSTERS;
     [add, several].forEach(b => { if (b) b.disabled = full || !tpls.length; });
+  }
+
+  // 2.6.0 : registres du plan et publications des paquets (phase Registre)
+  function paintRegistries() {
+    const ol = document.querySelector('#bm-plans .bmpl-regs');
+    if (!ol) return;
+    const rows = edit.registries;
+    const inp = (i, k, v, tip, ph, type) => `<input class="bmpl-reg-f tip" data-i="${i}" data-k="${k}" spellcheck="false"
+        ${type ? `type="${type}" min="5" max="2048"` : ''} value="${esc(v == null ? '' : v)}" placeholder="${esc(ph || '')}"
+        aria-label="${esc(tip)}" data-tip="${esc(tip)}">`;
+    ol.innerHTML = rows.length ? rows.map((r, i) => `<li class="bmpl-reg" data-i="${i}">
+        ${inp(i, 'name', r.name, tr('bmpl.t.regName'), 'amorcage')}
+        <span class="badge ${r.mode === 'bootstrap' ? 'info' : 'dim'}">${esc(r.mode === 'bootstrap' ? tr('bmpl.regBootstrap') : tr('bmpl.regExternal'))}</span>
+        ${r.mode === 'bootstrap' ? `${inp(i, 'address', r.address, tr('bmpl.t.regAddress'), '{{registre_ip}}')}
+          ${inp(i, 'size_gib', r.size_gib == null ? 20 : r.size_gib, tr('bmpl.t.regSize'), '20', 'number')}
+          ${inp(i, 'storage_class', r.storage_class, tr('bmpl.t.regClass'), 'harv-rep1')}
+          ${inp(i, 'mirrors', r.mirrors, tr('bmpl.t.regMirrors'), 'ghcr.io, docker.io')}`
+          : `<span class="form-hint">${esc((regData.registries || []).some(x => x.name === r.name) ? tr('bmpl.regDeclared') : tr('bmpl.regUndeclared'))}</span>`}
+        <button type="button" class="btn btn-sm btn-danger tip bmpl-reg-rm" data-i="${i}"
+                aria-label="${esc(tr('bmpl.t.regRemove'))}" data-tip="${esc(tr('bmpl.t.regRemove'))}">${icon('close', { size: 12 })}</button>
+      </li>`).join('') : `<li class="form-hint bmpl-no-reg">${esc(tr('bmpl.noRegistry'))}</li>`;
+    const pol = document.querySelector('#bm-plans .bmpl-pubs');
+    if (!pol) return;
+    const regNames = [...new Set(rows.map(r => r.name).filter(Boolean).concat((regData.registries || []).map(x => x.name)))];
+    const pkgs = regData.packages || [];
+    pol.innerHTML = edit.publish.length ? edit.publish.map((p, i) => {
+      const key = `${p.package}@${p.version}`;
+      const known = pkgs.some(x => `${x.name}@${x.version}` === key);
+      return `<li class="bmpl-pub" data-i="${i}">
+        <select class="bmpl-pub-pkg tip" data-i="${i}" aria-label="${esc(tr('bmpl.t.pubPackage'))}" data-tip="${esc(tr('bmpl.t.pubPackage'))}">
+          ${known || !p.package ? '' : `<option value="${esc(key)}" selected>${esc(`${p.package} ${p.version}`)} (${esc(tr('bmpl.pkgMissing'))})</option>`}
+          ${pkgs.map(x => `<option value="${esc(`${x.name}@${x.version}`)}"${`${x.name}@${x.version}` === key ? ' selected' : ''}>${esc(`${x.name} ${x.version}`)}</option>`).join('')}</select>
+        <select class="bmpl-pub-reg tip" data-i="${i}" aria-label="${esc(tr('bmpl.t.pubRegistry'))}" data-tip="${esc(tr('bmpl.t.pubRegistry'))}">
+          ${regNames.map(n => `<option value="${esc(n)}"${n === p.registry ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>
+        <button type="button" class="btn btn-sm btn-danger tip bmpl-pub-rm" data-i="${i}"
+                aria-label="${esc(tr('bmpl.t.pubRemove'))}" data-tip="${esc(tr('bmpl.t.pubRemove'))}">${icon('close', { size: 12 })}</button>
+      </li>`;
+    }).join('') : `<li class="form-hint bmpl-no-pub">${esc(tr('bmpl.noPublication'))}</li>`;
+    const add = document.querySelector('#bm-plans .bmpl-pub-add');
+    if (add) add.disabled = !pkgs.length || !regNames.length;
   }
 
   // Raccourci « Plusieurs » : le serveur le développe à l'enregistrement
@@ -489,9 +592,22 @@ const BMPlans = (() => {
         phases.capi = { enabled: on('capi'), timeout_minutes: Number(form.querySelector('[name="capi_timeout"]').value) };
       } else if (pid === 'clusters') {
         phases.clusters = { enabled: on('clusters'), timeout_minutes: Number(form.querySelector('[name="clusters_timeout"]').value),
-          items: edit.clusters.map(it => Object.assign({ template: it.template, name: it.name.trim() },
-            it.depends_on.length ? { depends_on: it.depends_on.slice() } : {})) };
+          items: edit.clusters.map(it => {
+            const regs = (it.registries || '').split(',').map(x => x.trim()).filter(Boolean);
+            return Object.assign({ template: it.template, name: it.name.trim() },
+              it.depends_on.length ? { depends_on: it.depends_on.slice() } : {}, regs.length ? { registries: regs } : {});
+          }) };
         if (edit.shortcut) Object.assign(phases.clusters, edit.shortcut);
+      } else if (pid === 'registry') {
+        phases.registry = { enabled: on('registry'),
+          timeout_minutes: Number(form.querySelector('[name="registry_timeout"]').value),
+          publish_timeout_minutes: Number(form.querySelector('[name="publish_timeout"]').value),
+          registries: edit.registries.map(r => (r.mode === 'bootstrap'
+            ? Object.assign({ name: r.name.trim(), mode: 'bootstrap', address: (r.address || '').trim(), size_gib: Number(r.size_gib) || 20,
+              storage_class: (r.storage_class || '').trim(),
+              mirrors: (r.mirrors || '').split(',').map(x => x.trim()).filter(Boolean) }, r.dns_name ? { dns_name: r.dns_name } : {})
+            : { name: r.name.trim(), mode: 'external' })),
+          publish: edit.publish.filter(p => p.package && p.registry).map(p => ({ package: p.package, version: p.version, registry: p.registry })) };
       } else {
         phases[pid] = { enabled: on(pid) };
       }
@@ -516,7 +632,8 @@ const BMPlans = (() => {
       return;
     }
     // 2.5.0 : délais des phases Cluster API et Clusters, bornes du serveur
-    for (const [field, [lo, hi]] of [['capi_timeout', CAPI_TIMEOUT], ['clusters_timeout', CLUSTERS_TIMEOUT]]) {
+    for (const [field, [lo, hi]] of [['capi_timeout', CAPI_TIMEOUT], ['clusters_timeout', CLUSTERS_TIMEOUT],
+      ['registry_timeout', REGISTRY_TIMEOUT], ['publish_timeout', PUBLISH_TIMEOUT]]) {
       const el = form.querySelector(`[name="${field}"]`);
       const v = el ? Number(el.value) : lo;
       if (!Number.isInteger(v) || v < lo || v > hi) {
@@ -1116,6 +1233,16 @@ const BMPlans = (() => {
               : d.origin_match ? `<span class="badge ok">${esc(tr('dpw.declReused'))}</span>`
                 : `<span class="badge fail">${esc(tr('dpw.declTaken'))}</span>`}</td></tr>`).join('')}</tbody></table>`
           : `<p class="form-hint">${esc(tr('dpw.noDecl'))}</p>`}
+        ${(sum.registries || []).length ? `<table class="data-table dpw-registries">
+          <thead><tr><th>${esc(tr('dpw.col.registry'))}</th><th>${esc(tr('dpw.col.address'))}</th><th>${esc(tr('dpw.col.size'))}</th><th>${esc(tr('dpw.col.state'))}</th></tr></thead>
+          <tbody>${sum.registries.map(r => `<tr><td><code class="dpw-registry-name">${esc(r.name)}</code>
+            <span class="badge dim">${esc(r.mode === 'bootstrap' ? tr('bmpl.regBootstrap') : tr('bmpl.regExternal'))}</span></td>
+            <td><code>${esc(r.address || '')}</code></td><td>${r.size_gib ? esc(`${r.size_gib} GiB`) : ''}</td>
+            <td>${r.exists ? `<span class="badge ok">${esc(tr('dpw.registryPresent'))}</span>` : `<span class="badge info">${esc(tr('dpw.registryNew'))}</span>`}</td></tr>`).join('')}</tbody></table>` : ''}
+        ${(sum.publish || []).length ? `<table class="data-table dpw-publish">
+          <thead><tr><th>${esc(tr('dpw.col.package'))}</th><th>${esc(tr('dpw.col.registry'))}</th><th>${esc(tr('dpw.col.size'))}</th></tr></thead>
+          <tbody>${sum.publish.map(p => `<tr><td><code class="dpw-package-name">${esc(`${p.package} ${p.version}`)}</code></td>
+            <td><code>${esc(p.registry)}</code></td><td>${p.size == null ? esc(tr('bmpl.pkgMissing')) : esc(bytesOf(p.size))}</td></tr>`).join('')}</tbody></table>` : ''}
         ${sum.capi ? `<p class="dpw-capi">${esc(tr('dpw.capiSummary'))} ${(sum.capi.providers || []).map(v => `<code>${esc(v)}</code>`).join(' ')}
           <span class="badge ${sum.capi.ready ? 'ok' : 'info'}">${esc(sum.capi.ready ? tr('dpw.capiReady') : tr('dpw.capiInstall'))}</span></p>` : ''}
         ${(sum.clusters || []).length ? `<table class="data-table dpw-clusters">
@@ -1449,6 +1576,23 @@ const BMPlans = (() => {
         if (fs) fs.hidden = !fs.hidden;
         return;
       }
+      // 2.6.0 : phase Registre
+      if ((el = e.target.closest('.bmpl-reg-add'))) {
+        edit.registries.push(el.dataset.mode === 'bootstrap'
+          ? { name: `amorcage${edit.registries.length ? `-${edit.registries.length + 1}` : ''}`, mode: 'bootstrap', address: '',
+            size_gib: 20, storage_class: '', mirrors: '' }
+          : { name: '', mode: 'external' });
+        paintRegistries();
+        return;
+      }
+      if ((el = e.target.closest('.bmpl-reg-rm'))) { edit.registries.splice(i(el), 1); paintRegistries(); return; }
+      if (e.target.closest('.bmpl-pub-add')) {
+        const p0 = (regData.packages || [])[0];
+        const r0 = (edit.registries[0] || {}).name || ((regData.registries || [])[0] || {}).name;
+        if (p0 && r0) { edit.publish.push({ package: p0.name, version: p0.version, registry: r0 }); paintRegistries(); }
+        return;
+      }
+      if ((el = e.target.closest('.bmpl-pub-rm'))) { edit.publish.splice(i(el), 1); paintRegistries(); return; }
       if (e.target.closest('.bmpl-sc-ok')) { takeShortcut(box.querySelector('.bmpl-cl-shortcut')); return; }
       if (e.target.closest('.bmpl-sc-clear')) { edit.shortcut = null; paintClusters(); return; }
       if (e.target.closest('.bmpl-add-tpl-go')) {
@@ -1463,6 +1607,27 @@ const BMPlans = (() => {
         if (!it) return;
         it.depends_on = it.depends_on.filter(x => x !== cdep.value);
         if (cdep.checked) it.depends_on.push(cdep.value);
+        return;
+      }
+      const rf = e.target.closest('#bm-plans .bmpl-reg-f');
+      if (rf && edit) {
+        const r = edit.registries[Number(rf.dataset.i)];
+        if (r) r[rf.dataset.k] = rf.dataset.k === 'size_gib' ? Number(rf.value) : rf.value;
+        if (rf.dataset.k === 'name') paintRegistries();
+        return;
+      }
+      const pp = e.target.closest('#bm-plans .bmpl-pub-pkg, #bm-plans .bmpl-pub-reg');
+      if (pp && edit) {
+        const p = edit.publish[Number(pp.dataset.i)];
+        if (!p) return;
+        if (pp.classList.contains('bmpl-pub-reg')) p.registry = pp.value;
+        else { const [n, v] = pp.value.split('@'); p.package = n; p.version = v; }
+        return;
+      }
+      const cregs = e.target.closest('#bm-plans .bmpl-cl-regs');
+      if (cregs && edit) {
+        const it = edit.clusters[Number(cregs.dataset.i)];
+        if (it) it.registries = cregs.value;
         return;
       }
       const ctpl = e.target.closest('#bm-plans .bmpl-cl-tpl');

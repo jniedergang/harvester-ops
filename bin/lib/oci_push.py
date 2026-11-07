@@ -23,6 +23,7 @@ import base64
 import gzip
 import hashlib
 import json
+import os
 import re
 import ssl
 import tarfile
@@ -52,7 +53,47 @@ REF_RE = re.compile(r"^(?P<reg>[a-z0-9.-]+(?::\d{1,5})?)/"
 
 
 class RegistryError(Exception):
-    pass
+    """Panne de registre explicable ; `code` nomme les cas que l'appelant
+    distingue (`publish-tag-differs`, `no-platform`, `digest-mismatch`)."""
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
+CHUNK = 1 << 20                  # bloc de lecture et d'écriture en flux
+UPLOAD_CHUNK = 64 << 20          # au-delà, envoi par morceaux (PATCH) reprenable
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# revue 2.6.0 : corps lus en mémoire bornés (manifeste comme containerd,
+# réponse d'un serveur de jetons, corps d'une erreur)
+MANIFEST_MAX = 4 << 20
+TOKEN_MAX = 64 << 10
+
+
+class _Limited:
+    """Lecture d'au plus `n` octets d'un fichier ouvert (un morceau d'envoi)."""
+
+    def __init__(self, f, n, on_bytes=None):
+        self.f, self.n, self.left, self.on_bytes = f, n, n, on_bytes
+        self.start = f.tell()
+
+    def tell(self):
+        return 0
+
+    def seek(self, _pos):
+        """Relecture complète (nouvel essai après un 401)."""
+        self.f.seek(self.start)
+        self.left = self.n
+
+    def read(self, size=-1):
+        if self.left <= 0:
+            return b""
+        size = self.left if size is None or size < 0 else min(size, self.left)
+        b = self.f.read(size)
+        self.left -= len(b)
+        if b and self.on_bytes:
+            self.on_bytes(len(b))
+        return b
 
 
 def digest_of(data):
@@ -81,14 +122,40 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class Registry:
     """Client minimal de l'API de registre v2 (distribution)."""
 
-    def __init__(self, host, creds=None, plain_http=False, timeout=120):
+    def __init__(self, host, creds=None, plain_http=False, timeout=120, ca_pem=None):
+        """`ca_pem` : CA propre au registre (PEM), à la place des CA du
+        système (registre d'amorçage, registre du client à CA privée)."""
         self.host = host
         self.creds = creds or None
         self.base = f"{'http' if plain_http else 'https'}://{host}"
         self.timeout = timeout
         self.auth = {}
-        self.opener = urllib.request.build_opener(
-            _NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+        try:
+            ctx = ssl.create_default_context(cadata=ca_pem) if ca_pem else ssl.create_default_context()
+        except (ssl.SSLError, ValueError) as e:
+            raise RegistryError(f"{host}: unreadable registry CA ({e})") from None
+        # revue 2.6.0 : HTTP(S) seulement, sans file:, ftp: ni data: (un
+        # royaume ou une redirection hostile ne lit pas un fichier local)
+        self.opener = urllib.request.OpenerDirector()
+        for handler in (urllib.request.ProxyHandler(), urllib.request.HTTPHandler(),
+                        urllib.request.HTTPSHandler(context=ctx), urllib.request.HTTPDefaultErrorHandler(),
+                        _NoRedirect(), urllib.request.HTTPErrorProcessor()):
+            self.opener.add_handler(handler)
+        self.schemes = ("https", "http") if plain_http else ("https",)
+
+    def _check_scheme(self, url, what):
+        """Royaume d'un jeton ou cible d'une redirection : https, ou http
+        pour un registre en clair ; jamais un passage de https à http."""
+        scheme = urllib.parse.urlparse(url).scheme.lower()
+        if scheme not in self.schemes:
+            raise RegistryError(f"{self.host}: {what} with scheme {scheme or '?'!r} refused "
+                                f"({' or '.join(self.schemes)} only)")
+        return url
+
+    def _own(self, url):
+        """Vrai si `url` vise le registre même (schéma et hôte:port)."""
+        a, b = urllib.parse.urlparse(url), urllib.parse.urlparse(self.base)
+        return (a.scheme, a.netloc) == (b.scheme, b.netloc)
 
     def _basic(self):
         if not self.creds:
@@ -103,17 +170,22 @@ class Registry:
         q = {"service": p.get("service", "")}
         if scope:
             q["scope"] = scope
-        req = urllib.request.Request(p["realm"] + "?" + urllib.parse.urlencode(q))
+        req = urllib.request.Request(self._check_scheme(p["realm"], "token realm") + "?" + urllib.parse.urlencode(q))
         if self._basic():
             req.add_header("Authorization", self._basic())
         try:
             with self.opener.open(req, timeout=self.timeout) as r:
-                body = json.load(r)
+                raw = r.read(TOKEN_MAX + 1)
+            if len(raw) > TOKEN_MAX:
+                raise RegistryError(f"{self.host}: token reply too large", code="too-large")
+            body = json.loads(raw)
         except urllib.error.HTTPError as e:
             e.close()
             raise RegistryError(f"{self.host}: authentication refused (HTTP {e.code})") from None
         except urllib.error.URLError as e:
             raise RegistryError(f"{self.host}: authentication failed ({e.reason})") from None
+        except ValueError:
+            raise RegistryError(f"{self.host}: unreadable token reply") from None
         except OSError as e:
             raise RegistryError(f"{self.host}: authentication failed ({e})") from None
         tok = body.get("token") or body.get("access_token")
@@ -122,38 +194,77 @@ class Registry:
         return "Bearer " + tok
 
     def _http_error(self, method, url, e):
-        text = e.read()[:200].decode(errors="replace")
+        text = e.read(200).decode(errors="replace")
         e.close()
         return RegistryError(f"{method} {self.host}{urllib.parse.urlparse(url).path}: HTTP {e.code} {text}")
 
-    def request(self, method, url, scope, data=None, headers=None, ok=()):
+    def _read(self, r, stream_to, cap=MANIFEST_MAX):
+        if stream_to is None:
+            data = r.read(cap + 1)
+            if len(data) > cap:
+                raise RegistryError(f"{self.host}: reply too large (more than {cap} bytes)", code="too-large")
+            return data
+        if hasattr(stream_to, "start"):
+            stream_to.start(r.status)
+        while True:
+            b = r.read(CHUNK)
+            if not b:
+                return b""
+            stream_to.write(b)
+
+    def request(self, method, url, scope, data=None, headers=None, ok=(),
+                stream_to=None, body_file=None, body_size=None, cap=MANIFEST_MAX):
         """(code, en-têtes, corps). Un 401 fait prendre un jeton ou poser
         Basic, une fois ; une redirection est suivie sans identifiant. Toute
         panne, y compris celle de la cible d'une redirection, devient une
-        RegistryError qui nomme l'hôte, jamais un identifiant."""
+        RegistryError qui nomme l'hôte, jamais un identifiant.
+
+        En flux : `stream_to` (objet à `write`) reçoit la réponse par blocs
+        de 1 Mio, le corps rendu est alors vide ; `body_file` (fichier ouvert,
+        lu à partir de sa position) est envoyé avec `Content-Length:
+        body_size`, relu depuis la même position si un 401 oblige à
+        recommencer."""
         if not url.startswith("http"):
             url = self.base + url
+        # revue 2.6.0 : une adresse d'un autre hôte (Location d'un envoi) ne
+        # reçoit jamais d'identifiant, et son 401 n'en fait pas chercher
+        own = self._own(url)
+        start = body_file.tell() if body_file is not None and hasattr(body_file, "tell") else None
         for attempt in (0, 1):
             h = dict(headers or {})
-            if self.auth.get(scope):
+            if self.auth.get(scope) and own:
                 h["Authorization"] = self.auth[scope]
-            req = urllib.request.Request(url, data=data, method=method, headers=h)
+            body = data
+            if body_file is not None:
+                if attempt and start is not None:
+                    body_file.seek(start)
+                body = body_file
+                h["Content-Length"] = str(body_size)
+            req = urllib.request.Request(url, data=body, method=method, headers=h)
             try:
                 with self.opener.open(req, timeout=self.timeout) as r:
-                    return r.status, r.headers, r.read()
+                    return r.status, r.headers, self._read(r, stream_to, cap)
             except urllib.error.HTTPError as e:
                 try:
                     if e.code in (301, 302, 303, 307, 308) and method in ("GET", "HEAD") and e.headers.get("Location"):
-                        loc = urllib.parse.urljoin(url, e.headers["Location"])
+                        loc = self._check_scheme(urllib.parse.urljoin(url, e.headers["Location"]), "redirect")
+                        rh = {k: v for k, v in (headers or {}).items() if k.lower() in ("range", "accept")}
                         try:
-                            with self.opener.open(urllib.request.Request(loc, method=method), timeout=self.timeout) as r:
-                                return r.status, r.headers, r.read()
+                            with self.opener.open(urllib.request.Request(loc, method=method, headers=rh),
+                                                  timeout=self.timeout) as r:
+                                return r.status, r.headers, self._read(r, stream_to, cap)
                         except urllib.error.HTTPError as e2:
+                            if e2.code in ok:
+                                e2.close()
+                                return e2.code, e2.headers, b""
                             raise self._http_error(method, loc, e2) from None
                         except urllib.error.URLError as e2:
                             raise RegistryError(f"{method} {self.host}: {e2.reason}") from None
                         except OSError as e2:
                             raise RegistryError(f"{method} {self.host}: {e2}") from None
+                    if e.code == 401 and not own:
+                        raise RegistryError(f"{self.host}: authentication refused by "
+                                            f"{urllib.parse.urlparse(url).netloc}, not the registry") from None
                     if e.code == 401 and attempt == 0:
                         ch = e.headers.get("WWW-Authenticate", "")
                         if ch.lower().startswith("bearer"):
@@ -183,7 +294,7 @@ class Registry:
         return body, mt
 
     def blob(self, repo, digest):
-        _, _, body = self.request("GET", f"/v2/{repo}/blobs/{digest}", f"repository:{repo}:pull")
+        _, _, body = self.request("GET", f"/v2/{repo}/blobs/{digest}", f"repository:{repo}:pull", cap=UPLOAD_CHUNK)
         if digest_of(body) != digest:
             raise RegistryError(f"{self.host}/{repo}: blob {digest[:19]} does not match its digest")
         return body
@@ -212,6 +323,157 @@ class Registry:
         _, h, _ = self.request("PUT", f"/v2/{repo}/manifests/{tag}", f"repository:{repo}:pull,push",
                                data=body, headers={"Content-Type": media_type})
         return h.get("Docker-Content-Digest") or digest_of(body)
+
+    def manifest_digest(self, repo, ref):
+        """Empreinte du manifeste désigné par `ref`, ou None s'il n'existe
+        pas (HEAD ; GET si le registre ne donne pas Docker-Content-Digest)."""
+        code, h, _ = self.request("HEAD", f"/v2/{repo}/manifests/{ref}", f"repository:{repo}:pull",
+                                  headers={"Accept": ACCEPT}, ok=(404,))
+        if code == 404:
+            return None
+        d = h.get("Docker-Content-Digest")
+        if d and DIGEST_RE.match(d):
+            return d
+        body, _ = self.manifest(repo, ref)
+        return digest_of(body)
+
+    def blob_to_file(self, repo, digest, path, on_bytes=None, size=None):
+        """Blob écrit dans `path` en flux : `path.part` d'abord, empreinte
+        calculée pendant l'écriture, renommé seulement si elle est juste
+        (sinon supprimé, RegistryError `digest-mismatch`). Un `.part` laissé
+        par une copie interrompue est repris où il s'arrête (Range) ; si le
+        registre renvoie tout le blob (200), la copie repart de zéro.
+        `size` (taille du descripteur) : la copie s'arrête dès qu'elle la
+        dépasse, et un blob plus court est refusé (`size-mismatch`)."""
+        if not DIGEST_RE.match(digest or ""):
+            raise RegistryError(f"{self.host}/{repo}: {digest!r} is not a sha256 digest")
+        part = str(path) + ".part"
+        h, have = hashlib.sha256(), 0
+        try:
+            with open(part, "rb") as f:
+                for b in iter(lambda: f.read(CHUNK), b""):
+                    h.update(b)
+                    have += len(b)
+        except FileNotFoundError:
+            pass
+        try:
+            with open(part, "ab" if have else "wb") as f:
+                sink = _BlobSink(f, h, have, on_bytes, size, f"{self.host}/{repo}: blob {digest[:19]}")
+                self.request("GET", f"/v2/{repo}/blobs/{digest}", f"repository:{repo}:pull",
+                             headers={"Range": f"bytes={have}-"} if have else None, ok=(416,),
+                             stream_to=sink)
+            if size is not None and sink.total != size:
+                raise RegistryError(f"{self.host}/{repo}: blob {digest[:19]} is shorter than its {size} bytes",
+                                    code="size-mismatch")
+            if "sha256:" + sink.h.hexdigest() != digest:
+                raise RegistryError(f"{self.host}/{repo}: blob {digest[:19]} does not match its digest",
+                                    code="digest-mismatch")
+            os.replace(part, path)
+        except BaseException:
+            try:
+                os.unlink(part)
+            except OSError:
+                pass
+            raise
+        return path
+
+    def _upload_url(self, loc):
+        return self._check_scheme(urllib.parse.urljoin(self.base + "/", loc), "upload location")
+
+    def push_blob_file(self, repo, digest, path, size, mount_from=None, on_bytes=None,
+                       chunk=UPLOAD_CHUNK):
+        """Envoi d'un blob depuis un fichier, sans le garder en mémoire.
+        Rend False s'il est déjà présent, "mounted" s'il a été monté depuis
+        le dépôt `mount_from` du même registre (201), True s'il a été
+        envoyé. Jusqu'à `chunk` octets : un seul PUT ; au-delà, des PATCH
+        successifs, et une coupure en cours de route reprend à l'octet que
+        le registre dit avoir reçu (GET de la session d'envoi)."""
+        if self.has_blob(repo, digest):
+            return False
+        scope = f"repository:{repo}:pull,push"
+        url = f"/v2/{repo}/blobs/uploads/"
+        if mount_from and mount_from != repo:
+            url += "?" + urllib.parse.urlencode({"mount": digest, "from": mount_from})
+        code, h, _ = self.request("POST", url, scope, data=b"", headers={"Content-Length": "0"})
+        if code == 201:
+            return "mounted"
+        loc = h.get("Location")
+        if not loc:
+            raise RegistryError(f"{self.host}/{repo}: no upload location")
+        loc = self._upload_url(loc)
+        with open(path, "rb") as f:
+            if size > chunk:
+                loc = self._patch_chunks(repo, scope, loc, f, size, chunk, on_bytes)
+                f.seek(size)
+                body, n = None, 0
+            else:
+                body, n = _Limited(f, size, on_bytes), size
+            sep = "&" if "?" in loc else "?"
+            hdr = {"Content-Type": "application/octet-stream"}
+            if body is None:
+                self.request("PUT", f"{loc}{sep}digest={urllib.parse.quote(digest)}", scope,
+                             data=b"", headers=dict(hdr, **{"Content-Length": "0"}))
+            else:
+                self.request("PUT", f"{loc}{sep}digest={urllib.parse.quote(digest)}", scope,
+                             headers=hdr, body_file=body, body_size=n)
+        return True
+
+    def _patch_chunks(self, repo, scope, loc, f, size, chunk, on_bytes, retries=3):
+        """Morceaux `Content-Range: début-fin` ; après une panne réseau, la
+        session dit (`Range: 0-<dernier octet>`) où reprendre."""
+        offset, failures = 0, 0
+        while offset < size:
+            n = min(chunk, size - offset)
+            f.seek(offset)
+            try:
+                _, h, _ = self.request("PATCH", loc, scope, body_file=_Limited(f, n, on_bytes), body_size=n,
+                                       headers={"Content-Type": "application/octet-stream",
+                                                "Content-Range": f"{offset}-{offset + n - 1}"})
+            except RegistryError:
+                failures += 1
+                if failures > retries:
+                    raise
+                code, sh, _ = self.request("GET", loc, scope, ok=(404,))
+                if code == 404:
+                    raise
+                offset = _range_end(sh.get("Range")) + 1
+                loc = self._upload_url(sh.get("Location") or loc)
+                continue
+            offset += n
+            loc = self._upload_url(h.get("Location") or loc)
+        return loc
+
+
+def _range_end(value):
+    """'0-1023' -> 1023 ; absent ou vide -> -1 (rien de reçu)."""
+    m = re.match(r"^(?:bytes=)?0-(\d+)$", (value or "").strip())
+    return int(m.group(1)) if m else -1
+
+
+class _BlobSink:
+    """Destination d'un GET de blob : écrit et hache ; si le registre a
+    ignoré la demande de reprise (statut 200 et non 206), vide d'abord le
+    fichier partiel."""
+
+    def __init__(self, f, h, have, on_bytes, size=None, what="blob"):
+        self.f, self.h, self.have, self.on_bytes = f, h, have, on_bytes
+        self.size, self.what, self.total = size, what, have
+
+    def start(self, status):
+        if self.have and status != 206:
+            self.f.seek(0)
+            self.f.truncate()
+            self.h = hashlib.sha256()
+            self.total = 0
+
+    def write(self, b):
+        self.total += len(b)
+        if self.size is not None and self.total > self.size:
+            raise RegistryError(f"{self.what} is larger than its {self.size} bytes", code="size-mismatch")
+        self.h.update(b)
+        self.f.write(b)
+        if self.on_bytes:
+            self.on_bytes(len(b))
 
 
 def archive_layer(path):

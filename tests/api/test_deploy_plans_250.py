@@ -187,11 +187,12 @@ def test_enabled_phase_from_240_is_strict():
     assert ("phases.capi.providers", "unknown key") in e.value.errors
 
 
-def test_coming_reduced_to_registry_and_artefacts():
-    """M-coming : `capi` laissé dans COMING fait échouer ce test."""
-    assert dc.COMING == ("registry", "artefacts")
-    assert dp.AVAILABLE == ("readiness", "terraform", "capi", "clusters")
-    assert dc.COMING_MESSAGE == dp.COMING == "coming in 2.6+"
+def test_coming_reduced_to_artefacts():
+    """M-coming : `capi` ou (2.6.0) `registry` laissé dans COMING fait
+    échouer ce test."""
+    assert dc.COMING == ("artefacts",)
+    assert dp.AVAILABLE == ("readiness", "terraform", "registry", "capi", "clusters")
+    assert dc.COMING_MESSAGE == dp.COMING == "coming in 2.7"
     assert not set(dc.COMING) & set(dp.AVAILABLE)
     assert set(dc.COMING) | set(dp.AVAILABLE) == set(dp.PHASES)
 

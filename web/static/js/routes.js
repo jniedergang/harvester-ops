@@ -48,7 +48,7 @@
   // sans onglet, l'adresse ouvre le premier. 2.1.0 : Bare-metal ; 2.2.0 :
   // Cluster API et Terraform ; 2.4.0 : Plans de Bare-metal
   const AUTOMATION_PANES = {
-    capi: ['clusters', 'services', 'history', 'installation'],
+    capi: ['clusters', 'services', 'registries', 'artefacts', 'history', 'installation'],
     terraform: ['declarations', 'resources', 'history', 'installation'],
     pxe: ['machines', 'profiles', 'plans', 'images', 'history'],
   };

@@ -1249,9 +1249,25 @@ def required_role_for(path, method):
     # le dit pas) : un opérateur annule son propre geste sur une VM KVM
     if method == "DELETE" and path.startswith("/api/action/"):
         return "operator"
+    if path.startswith(("/api/registries", "/api/artefacts")):
+        return _artefacts_required_role(path)
     if path.startswith(ADMIN_ONLY_PREFIXES) or path.endswith(ADMIN_ONLY_SUFFIXES):
         return "admin"
     return "operator"
+
+
+# 2.6.0 : paquets d'artefacts et registres (point 195). Importer ou supprimer
+# un paquet, les clés et le mode strict, déclarer un registre du client, poser
+# ou supprimer un registre d'amorçage = admin ; rattacher un registre à un
+# cluster (ses identifiants), le vérifier et publier un paquet = opérateur.
+def _artefacts_required_role(path):
+    parts = path.split("/")
+    if path.startswith("/api/registries/") and len(parts) == 6 and parts[3] != "bootstrap" \
+            and parts[4] in ("attach", "check"):
+        return "operator"
+    if path.startswith("/api/artefacts/") and len(parts) == 6 and parts[5] == "publish":
+        return "operator"
+    return "admin"
 
 
 # v1.96.0 : hôtes KVM. Déclarer un hôte (et en relever les empreintes, ce qui
@@ -17390,13 +17406,16 @@ def _capi_components_dir():
     return dest
 
 
-def _capi_cmd(kc, sub):
+def _capi_cmd(kc, sub, cluster=None):
     """La commande de l'outil pour un kubeconfig, ou None s'il n'est pas
-    déployé. Seul endroit qui la construit (routes et chaîne d'un plan)."""
+    déployé. Seul endroit qui la construit (routes et chaîne d'un plan).
+    2.6.0 : répertoire d'état (registres, paquets) et nom du cluster
+    Harvester (`cluster`, registres qui lui sont rattachés)."""
     script = _capi_script()
     if script is None:
         return None
-    return [sys.executable, str(script), sub, "--kubeconfig", kc]
+    return [sys.executable, str(script), sub, "--kubeconfig", kc, f"--state-dir={_bm_profiles_state()}"] + (
+        [f"--harvester-name={cluster}"] if cluster else [])
 
 
 def _capi_bundle_providers():
@@ -17423,7 +17442,7 @@ def _capi_base(cluster, sub):
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
-    return _capi_cmd(kc, sub), None
+    return _capi_cmd(kc, sub, cluster), None
 
 
 def _capi_run_json(cmd, spec=None, timeout=180):
@@ -17486,7 +17505,7 @@ def api_capi_inventory(cluster):
     pile. Mis en cache quelques secondes (`?fresh=1` pour relire)."""
     cached = _CAPI_INVENTORY_CACHE.get(cluster)
     if cached and time.time() - cached[0] < _CAPI_INVENTORY_TTL and not request.args.get("fresh"):
-        return jsonify(cached[1])
+        return jsonify(dict(cached[1], registries=_capi_registry_choices(cluster)))
     cmd, err = _capi_base(cluster, "inventory")
     if err:
         return err
@@ -17501,7 +17520,28 @@ def api_capi_inventory(cluster):
     # clusters (check --many), pas au formulaire
     out.pop("longhorn", None)
     _CAPI_INVENTORY_CACHE[cluster] = (time.time(), out)
-    return jsonify(out)
+    return jsonify(dict(out, registries=_capi_registry_choices(cluster)))
+
+
+def _capi_registry_choices(cluster):
+    """2.6.0 (tâche 9) : registres proposés au formulaire de création, lus
+    dans l'état à chaque fois (jamais en cache) : déclarés, rattachés ou non
+    à ce cluster Harvester, et s'ils portent les images système de RKE2
+    (point 198 : coupure du repli permise pour docker.io seulement alors)."""
+    import registries as _rgm
+    state = _bm_profiles_state()
+    out = []
+    decls = {}
+    for d in _rgm.list_decls(state):
+        full = _rgm.load(state, d["name"])
+        if full is not None:
+            decls[d["name"]] = full
+    ready = _rgm.system_ready_registries(state, decls)
+    for n, d in sorted(decls.items()):
+        out.append({"name": n, "kind": d["kind"], "endpoint": d.get("endpoint"), "usage": d.get("usage") or [],
+                    "mirrors": d.get("mirrors") or [], "attached": cluster in (d.get("clusters") or []),
+                    "system_images": n in ready})
+    return out
 
 
 @app.route("/api/capi/<cluster>/cluster-check", methods=["POST"])
@@ -17633,7 +17673,7 @@ def _capi_launch(cluster, kc, sub, args, spec=None, parent=None, cluster_user=No
     `cluster_user` sont figés au déclenchement. Même commande que les routes
     (_capi_cmd), même action suivie (_capi_action). (action, None) ou
     (None, {"error", ...})."""
-    cmd = _capi_cmd(kc, sub)
+    cmd = _capi_cmd(kc, sub, cluster)
     if cmd is None:
         return None, {"error": f"{CAPI_SCRIPT} not deployed"}
     with app.app_context():                    # réponse d'occupation (jsonify) hors requête
@@ -21691,7 +21731,7 @@ def api_capi_services(cluster):
     key = (cluster, (current_cluster_identity() or {}).get("user"), current_user())
     hit = _CAPI_SERVICES_CACHE.get(key)
     if hit and request.args.get("fresh") != "1" and time.time() - hit[0] < 5:
-        return jsonify(hit[1])
+        return jsonify(dict(hit[1], registry_charts=_capi_registry_charts(cluster)))
     kc = _kubectl_for_cluster(cluster)
     if kc and _cluster_reachable(kc) is False:
         return jsonify({"unreachable": True, "caaph": False, "clusters": [],
@@ -21704,7 +21744,37 @@ def api_capi_services(cluster):
         return err
     out = res[0]
     _CAPI_SERVICES_CACHE[key] = (time.time(), out)
-    return jsonify(out)
+    return jsonify(dict(out, registry_charts=_capi_registry_charts(cluster)))
+
+
+def _capi_registry_charts(cluster):
+    """2.6.0 (tâche 10) : charts publiés dans les registres rattachés à ce
+    cluster Harvester qui servent des charts, lus dans l'état (paquets
+    rangés) : de quoi remplir « Depuis un registre »."""
+    import artefacts as _artm
+    import oci_layout as _olm
+    import registries as _rgm
+    state = _bm_profiles_state()
+    out = []
+    for summary in _rgm.list_decls(state):
+        d = _rgm.load(state, summary["name"])
+        if not d or cluster not in (d.get("clusters") or []) or "charts" not in (d.get("usage") or []):
+            continue
+        for p in d.get("published") or []:
+            try:
+                pkg = _artm.load_package(state, p.get("package"), p.get("version"))
+            except (_artm.ArtefactError, TypeError):
+                continue
+            for it in pkg["index"].get("items") or []:
+                if it.get("kind") != "chart":
+                    continue
+                try:
+                    meta = _olm.chart_meta(Path(pkg["path"]) / it["chart"])
+                except ValueError:
+                    continue
+                out.append({"registry": d["name"], "package": pkg["name"], "version": pkg["version"],
+                            "item": it["name"], "chart": meta["name"], "chart_version": meta["version"]})
+    return out
 
 
 @app.route("/api/capi/<cluster>/service-check", methods=["POST"])
@@ -32283,6 +32353,13 @@ DEPLOY_FINDING_LEVELS = {
     "cluster-var-missing": "blocking", "cluster-name-taken": "blocking", "capi-check-failed": "blocking",
     "cluster-failed": "warning",
     "capi-later": "info", "cluster-exists": "info", "refs-later": "info",
+    # 2.6.0 : phase Registre
+    "registry-name-taken": "blocking", "registry-unknown": "blocking", "registry-admin": "blocking",
+    "registry-check-failed": "blocking", "registry-package-too-big": "blocking",
+    "registry-address-differs": "blocking", "artefact-package-missing": "blocking",
+    "package-untrusted-strict": "blocking", "registry-var-missing": "blocking",
+    "registry-exists": "info", "registry-later": "info", "publish-later": "info",
+    "cluster-registry-later": "info",
 }
 # Constats de `harvester-capi check --many` repris dans la phase clusters :
 # niveau de l'outil -> niveau d'un lancement
@@ -32579,13 +32656,15 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
     if (phases.get("readiness") or {}).get("enabled"):
         findings.append(_deploy_finding("readiness-later", "readiness",
                                         "readiness is checked again when the phase starts"))
-    capi = _deploy_capi_prepare(kc, plan, values, install, findings, role=role)
+    reg = _deploy_registry_prepare(kc, plan, values, install, findings, role=role)
+    capi = _deploy_capi_prepare(kc, plan, values, install, findings, role=role, later=reg["created_here"])
     estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) \
-        + (30 if install else 0) + capi["estimate"]
+        + (30 if install else 0) + reg["estimate"] + capi["estimate"]
     summary = {"declarations": decls, "estimate_minutes": estimate, "capi": capi["capi"],
-               "clusters": capi["summary"]}
+               "clusters": capi["summary"], "registries": reg["summary"], "publish": reg["publish"]}
     ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
-           "update_differing": bool(update_differing), "clusters": capi["entries"]}
+           "update_differing": bool(update_differing), "clusters": capi["entries"],
+           "registries": reg["entries"]}
     return findings, summary, ctx
 
 
@@ -32635,11 +32714,13 @@ def _deploy_check_detail(f):
     return (f"{f['cluster']}: " if f.get("cluster") else "") + (text or f.get("code", ""))
 
 
-def _deploy_check_many(kc, specs):
+def _deploy_check_many(kc, specs, cluster=None):
     """`harvester-capi check --many` (identité restreinte) : (sortie, None)
-    ou (None, message)."""
+    ou (None, message). `cluster` : nom du cluster Harvester (registres qui
+    lui sont rattachés, 2.6.0)."""
     out, _rc, err = _deploy_capi_json(kc, "check", _deploy_capi_args() + [
-        "--many", "--spec", "-", "--identity", "restricted", "--json"], spec=specs, timeout=180)
+        "--many", "--spec", "-", "--identity", "restricted", "--json"]
+        + ([f"--harvester-name={cluster}"] if cluster else []), spec=specs, timeout=180)
     return (out, None) if err is None and isinstance(out, dict) else (None, err or "unreadable")
 
 
@@ -32653,7 +32734,178 @@ def _deploy_capi_install_refused(role):
 CAPI_INSTALL_ADMIN = "capi-install-admin"
 
 
-def _deploy_capi_prepare(kc, plan, values, install, findings, role=None):
+def _deploy_registry_json(kc, sub, args, timeout=120):
+    """Sous-commande de harvester-registry ou harvester-artefacts (`sub` :
+    `registry:<sous-commande>` ou `artefacts:<sous-commande>`) qui répond en
+    JSON, hors requête comme dans la requête : (sortie, code, None) ou
+    (None, None, message)."""
+    tool, _, verb = sub.partition(":")
+    cmd = _registry_cmd(verb) if tool == "registry" else _art_cmd(verb)
+    if cmd is None:
+        return None, None, f"{tool} tool not deployed"
+    with app.app_context():
+        got, err = _capi_run_json(cmd + list(args) + ["--kubeconfig", kc], timeout=timeout)
+    if err:
+        body = err[0].get_json(silent=True) or {}
+        return None, None, str(body.get("error") or "failed")[:300]
+    return got[0], got[1], None
+
+
+def _deploy_tool_findings(out, phase, prefix=""):
+    """Constats d'un outil (block/warn/ok) au format d'un lancement."""
+    rows = []
+    for f in (out or {}).get("findings") or []:
+        facts = f.get("facts") or {}
+        text = ", ".join(f"{k}={v}" for k, v in facts.items() if v not in (None, ""))
+        rows.append({"code": f.get("code") or "check", "level": DEPLOY_CHECK_LEVELS.get(f.get("level"), "blocking"),
+                     "phase": phase, "detail": (prefix + text) or f.get("code", "")})
+    return rows
+
+
+def _deploy_package_size(name, version):
+    """Taille d'un paquet rangé (octets), None s'il est absent."""
+    try:
+        root = Path(_art.load_package(_art_state(), name, version)["path"])
+    except _art.ArtefactError:
+        return None
+    return sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
+
+
+def _deploy_registry_prepare(kc, plan, values, install, findings, role=None):
+    """Constats et contexte de la phase Registre (2.6.0, tâche 11), lecture
+    seule : registres d'amorçage à poser (constats de `deploy --dry-run` :
+    adresse libre, place Longhorn, nom libre, paquet interne, outils ; rôle
+    administrateur, point 195), repris s'ils portent l'origine de ce plan,
+    registres du client vérifiés (`check` : rattachement, joignable, CA,
+    comptes), paquets à publier (présents, confiance en mode strict, place
+    sur le volume du registre, tag d'une autre empreinte relevé par HEAD).
+    Rend {"summary", "publish", "entries", "created_here", "estimate"}."""
+    out = {"summary": [], "publish": [], "entries": [], "created_here": set(), "estimate": 0}
+    ph = (plan["phases"].get("registry") or {})
+    if not ph.get("enabled"):
+        return out
+    cluster = values.get("cluster")
+    state = _bm_profiles_state()
+    try:
+        regs = _dpl.render_plan_registries(plan, values)
+    except _dpl.ProfileError as e:
+        for where, why in e.errors:
+            code = "registry-var-missing" if "missing variable" in why else "var-invalid"
+            findings.append(_deploy_finding(code, "registry", f"{where}: {why}"))
+        return out
+    out["entries"] = regs
+    strict = _art_settings()["strict"]
+    sizes = {}
+    for p in _dpl.plan_publications(plan):
+        size = _deploy_package_size(p["package"], p["version"])
+        sizes.setdefault(p["registry"], 0)
+        sizes[p["registry"]] += size or 0
+        row = dict(p, size=size)
+        out["publish"].append(row)
+        if size is None:
+            findings.append(_deploy_finding("artefact-package-missing", "registry",
+                                            f"{p['package']}-{p['version']} is not imported"))
+            continue
+        trust = (_art.load_package(state, p["package"], p["version"]).get("trust") or {}).get("state")
+        if strict and trust != "valid":
+            findings.append(_deploy_finding("package-untrusted-strict", "registry",
+                                            f"{p['package']}-{p['version']}: {trust}, refused in strict mode"))
+        out["estimate"] += 2 + int((size or 0) / (20 << 20) / 60)
+    names = {r["name"] for r in regs}
+    ready = set()
+    for r in regs:
+        d = _rg.load(state, r["name"])
+        row = {"name": r["name"], "mode": r["mode"], "address": r.get("address") or (d or {}).get("endpoint"),
+               "size_gib": r.get("size_gib") or (d or {}).get("size_gib"), "exists": d is not None}
+        out["summary"].append(row)
+        if r["mode"] == "external":
+            if d is None:
+                findings.append(_deploy_finding("registry-unknown", "registry", f"{r['name']} is not declared"))
+                continue
+            if install or not kc:
+                findings.append(_deploy_finding("registry-later", "registry",
+                                                f"{r['name']}: checked when the phase starts"))
+                continue
+            res, _rc, err = _deploy_registry_json(kc, "registry:check", [r["name"], "--cluster", cluster])
+            if err:
+                findings.append(_deploy_finding("registry-check-failed", "registry", f"{r['name']}: {err}"))
+                continue
+            findings += _deploy_tool_findings(res, "registry", f"{r['name']}: ")
+            if not res.get("blocked"):
+                ready.add(r["name"])
+            continue
+        room = r["size_gib"] * (1 << 30) * 0.9
+        if sizes.get(r["name"], 0) > room:
+            findings.append(_deploy_finding("registry-package-too-big", "registry",
+                                            f"{r['name']}: {sizes[r['name']] >> 20} MiB of packages for a volume "
+                                            f"of {r['size_gib']} GiB"))
+        if d is not None:
+            if d.get("kind") != "bootstrap" or d.get("cluster") != cluster:
+                findings.append(_deploy_finding("registry-name-taken", "registry",
+                                                f"{r['name']} exists and was not made here by this plan"))
+                continue
+            st = None
+            if not install and kc:
+                st, _rc, err = _deploy_registry_json(kc, "registry:status", [r["name"], "--cluster", cluster])
+                if err:
+                    findings.append(_deploy_finding("registry-check-failed", "registry", f"{r['name']}: {err}"))
+                    continue
+            if st is not None and (st.get("origin") or {}).get("plan") != plan["name"]:
+                findings.append(_deploy_finding("registry-name-taken", "registry",
+                                                f"{r['name']} exists and was not made by this plan"))
+                continue
+            if d.get("address") != r.get("address"):
+                findings.append(_deploy_finding("registry-address-differs", "registry",
+                                                f"{r['name']} answers at {d.get('address')}, the plan asks for "
+                                                f"{r.get('address')}: the plan never moves a registry"))
+                continue
+            findings.append(_deploy_finding("registry-exists", "registry", f"{r['name']} exists: it is adopted"))
+            ready.add(r["name"])
+            continue
+        out["created_here"].add(r["name"])
+        out["estimate"] += 3
+        if role is not None and ROLE_RANK.get(role, 0) < ROLE_RANK["admin"]:
+            findings.append(_deploy_finding("registry-admin", "registry", f"{r['name']}: posing a bootstrap "
+                                            "registry needs the 'admin' role (point 195)"))
+        if install or not kc:
+            findings.append(_deploy_finding("registry-later", "registry",
+                                            f"{r['name']}: address and room are checked when the phase starts"))
+            continue
+        args = [r["name"], "--cluster", cluster, "--address", r["address"], "--size-gib", str(r["size_gib"]),
+                "--storage-class", r["storage_class"], "--mirrors", ",".join(r.get("mirrors") or []), "--dry-run",
+                # revue finale I-2 : les restes d'un déploiement échoué de ce
+                # plan ne bloquent pas sa reprise
+                "--origin", f"plan={plan['name']}"]
+        res, _rc, err = _deploy_registry_json(kc, "registry:deploy", args)
+        if err:
+            findings.append(_deploy_finding("registry-check-failed", "registry", f"{r['name']}: {err}"))
+            continue
+        findings += _deploy_tool_findings(res, "registry", f"{r['name']}: ")
+    for p in out["publish"]:
+        if p["registry"] not in names and _rg.load(state, p["registry"]) is None:
+            findings.append(_deploy_finding("registry-unknown", "registry",
+                                            f"{p['registry']} (publication of {p['package']}-{p['version']})"))
+            continue
+        if p["size"] is None:
+            continue
+        if p["registry"] in names and p["registry"] not in ready:
+            findings.append(_deploy_finding("publish-later", "registry", f"{p['package']}-{p['version']} to "
+                                            f"{p['registry']}: checked once the registry is there"))
+            continue
+        if install or not kc:
+            continue
+        res, _rc, err = _deploy_registry_json(kc, "artefacts:publish", [p["package"], p["version"], "--cluster",
+                                                                        cluster, "--registry", p["registry"],
+                                                                        "--dry-run"])
+        if err:
+            findings.append(_deploy_finding("registry-check-failed", "registry",
+                                            f"{p['package']}-{p['version']}: {err}"))
+            continue
+        findings += _deploy_tool_findings(res, "registry", f"{p['package']}-{p['version']} to {p['registry']}: ")
+    return out
+
+
+def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=()):
     """Constats et contexte des phases capi et clusters (2.5.0), lecture
     seule : paquet actif, version de Harvester et pile (décisions 117,
     171), modèles et rendu de chaque entrée, clusters déjà présents (repris
@@ -32719,6 +32971,10 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None):
         try:
             name = _dpl.render_cluster_name(e["name"], values)
             spec = _dpl.render_capi_template(t, values, name)
+            if e.get("registries"):
+                # 2.6.0 : les registres de l'entrée remplacent ceux du modèle
+                spec["registries"] = _dpl.render_registries(e["registries"], values,
+                                                            f"clusters[{e['name']}].registries")
         except _dpl.ProfileError as ex:
             for where, why in ex.errors:
                 code = "cluster-var-missing" if "missing variable" in why else "var-invalid"
@@ -32754,7 +33010,7 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None):
         out["summary"].append(row)
     if install or not kc or not absent or not providers:
         return out
-    res, err = _deploy_check_many(kc, [e["spec"] for e in absent])
+    res, err = _deploy_check_many(kc, [e["spec"] for e in absent], values.get("cluster"))
     if err:
         findings.append(_deploy_finding("capi-check-failed", "clusters", f"check: {err}"))
         return out
@@ -32767,6 +33023,11 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None):
         level = DEPLOY_CHECK_LEVELS.get(f.get("level"), "blocking")
         code = f.get("code") or "check"
         e = by_ref.get(f.get("cluster") or "")
+        if code in ("cluster-registry-unknown", "cluster-registry-not-attached") and \
+                (f.get("facts") or {}).get("registry") in set(later):
+            # registre posé par la phase Registre de ce plan : rejoué au
+            # début de la phase Clusters (`before`)
+            code, level = "cluster-registry-later", "info"
         if tf_on and e and code in DEPLOY_REF_KEYS and any(
                 _bmp.variables_in(e["raw"].get(k)) for k in DEPLOY_REF_KEYS[code]):
             code, level = "refs-later", "info"
@@ -33217,7 +33478,7 @@ def _deploy_clusters_phase(run, cluster, kc_ref, dctx):
                 absent.append(e["spec"])
         if not absent:
             return None
-        res, err = _deploy_check_many(kc, absent)
+        res, err = _deploy_check_many(kc, absent, cluster)
         if err:
             return _dch.PhaseOutcome("error", message=f"check failed ({err})"[:200])
         blocking = [f for f in res.get("findings") or [] if f.get("level") == "block"]
@@ -33313,6 +33574,183 @@ def _deploy_clusters_phase(run, cluster, kc_ref, dctx):
                       item_key="cluster", item_step="k8s-")
 
 
+def _deploy_wait_until(action_id, timeout_s, run, sleep=None):
+    """État final d'une action fille attendue au plus `timeout_s` ; au-delà,
+    elle est annulée (publication d'un paquet : délai du plan, revue m-12)."""
+    sleep = sleep or time.sleep
+    end = time.time() + timeout_s
+    while True:
+        with ACTIONS_LOCK:
+            child = ACTIONS.get(action_id)
+        if child is None:
+            return "error", None
+        if child.status in ("done", "error", "cancelled", "interrupted"):
+            return child.status, child
+        if time.time() > end:
+            child._cancel = True
+            return "timeout", child
+        sleep(DEPLOY_CHILD_POLL)
+
+
+def _deploy_registry_phase(run, cluster, kc_ref, dctx):
+    """Phase Registre (2.6.0, tâche 11, point 189) : un élément par registre
+    (`reg-<nom>`), puis un par publication (`pub-<paquet>-<version>-<registre>`)
+    qui dépend de son registre s'il est du plan. Registre d'amorçage :
+    `harvester-registry deploy --origin` en action fille (administrateur),
+    ou repris s'il porte l'origine de ce plan ; jamais supprimé par la
+    chaîne. Registre du client : `check`. Publication :
+    `harvester-artefacts publish` en action fille, délai
+    `publish_timeout_minutes`. `before` rejoue les constats (adresse libre,
+    place, paquets présents, confiance en mode strict)."""
+    plan = dctx["plan"]
+    ph = plan["phases"].get("registry") or {}
+    timeout_s = int(ph.get("timeout_minutes") or _dpl.REGISTRY_TIMEOUT[2]) * 60
+    publish_s = int(ph.get("publish_timeout_minutes") or _dpl.PUBLISH_TIMEOUT[2]) * 60
+    regs = {f"reg-{r['name']}": r for r in dctx.get("registries") or []}
+    pubs = {f"pub-{p['package']}-{p['version']}-{p['registry']}": p for p in _dpl.plan_publications(plan)}
+    dry = bool(run.dry_run)
+    state = _bm_profiles_state()
+
+    def status(kc, name):
+        st, _rc, err = _deploy_registry_json(kc, "registry:status", [name, "--cluster", cluster])
+        return st if err is None else None
+
+    def ours(st):
+        return bool(st and st.get("present") and (st.get("origin") or {}).get("plan") == plan["name"])
+
+    def before(ctx, state_):
+        if _deploy_capi_install_refused(getattr(run, "launch_role", None)) and any(
+                r["mode"] == "bootstrap" and _rg.load(state, r["name"]) is None for r in regs.values()):
+            return _dch.PhaseOutcome("error", message="registry-admin")
+        for p in pubs.values():
+            if _deploy_package_size(p["package"], p["version"]) is None:
+                return _dch.PhaseOutcome("error", message=f"artefact-package-missing ({p['package']}-{p['version']})")
+            trust = (_art.load_package(state, p["package"], p["version"]).get("trust") or {}).get("state")
+            if _art_settings()["strict"] and trust != "valid":
+                return _dch.PhaseOutcome("error", message=f"package-untrusted-strict ({p['package']}-{p['version']})")
+        kc = kc_ref()
+        for r in regs.values():
+            if r["mode"] != "bootstrap" or _rg.load(state, r["name"]) is not None:
+                continue
+            res, _rc, err = _deploy_registry_json(kc, "registry:deploy", [
+                r["name"], "--cluster", cluster, "--address", r["address"], "--size-gib", str(r["size_gib"]),
+                "--storage-class", r["storage_class"], "--mirrors", ",".join(r.get("mirrors") or []), "--dry-run",
+                "--origin", f"plan={plan['name']}"])
+            if err:
+                return _dch.PhaseOutcome("error", message=f"check failed ({err})"[:200])
+            blocking = [f for f in res.get("findings") or [] if f.get("level") == "block"]
+            if blocking:
+                return _dch.PhaseOutcome("error", message="blocked by the pre-check: " + ", ".join(
+                    sorted({f.get("code") or "check" for f in blocking})))
+        return None
+
+    def run_registry(ctx, r, prev):
+        kc = kc_ref()
+        name = r["name"]
+        data = {"kind": r["mode"], "created": False, "actions": []}
+        d = _rg.load(state, name)
+        if r["mode"] == "external":
+            res, _rc, err = _deploy_registry_json(kc, "registry:check", [name, "--cluster", cluster])
+            if err:
+                return _dch.ItemOutcome("error", f"check failed ({err})"[:200], data=data)
+            if res.get("blocked"):
+                codes = sorted({f.get("code") for f in res.get("findings") or [] if f.get("level") == "block"})
+                return _dch.ItemOutcome("error", "blocked: " + ", ".join(codes), data=data)
+            data["endpoint"] = d.get("endpoint") if d else None
+            return _dch.ItemOutcome("done", "checked", data=data)
+        if d is not None:
+            st = status(kc, name)
+            if not ours(st) or d.get("cluster") != cluster:
+                return _dch.ItemOutcome("error", "registry-name-taken", data=data)
+            if prev.get("created"):
+                data.update({k: prev[k] for k in ("created", "undo") if k in prev})
+            data["endpoint"] = d.get("endpoint")
+            if d.get("address") != r["address"]:
+                return _dch.ItemOutcome("error", "registry-address-differs", data=data)
+            return _dch.ItemOutcome("done" if st.get("ready") or dry else "error",
+                                    "already present, adopted" if st.get("ready") or dry else "present, not ready",
+                                    data=data)
+        if dry:
+            return _dch.ItemOutcome("done", "checked (dry run): would be posed", data=data)
+        args = [name, "--cluster", cluster, "--kubeconfig", kc, "--address", r["address"],
+                "--size-gib", str(r["size_gib"]), "--storage-class", r["storage_class"],
+                "--mirrors", ",".join(r.get("mirrors") or []), "--timeout", str(timeout_s),
+                "--origin", f"plan={plan['name']},run={run.id}"]
+        if r.get("dns_name"):
+            args += ["--dns-name", r["dns_name"]]
+        cmd = _registry_cmd("deploy")
+        if cmd is None:
+            return _dch.ItemOutcome("error", f"{REGISTRY_SCRIPT} not deployed", data=data)
+        with app.app_context():
+            child, err = _cli_action(cluster, f"registry-deploy:{cluster}/{name}", cmd + args, "harvester-registry",
+                                     parent=run.id, cluster_user=run.cluster_user,
+                                     setup=lambda c: setattr(c, "required_role", "admin"))
+        if err:
+            body = err[0].get_json(silent=True) if hasattr(err[0], "get_json") else None
+            return _dch.ItemOutcome("error", str((body or {}).get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        st_, _c = _deploy_wait_child(child.id)
+        after = _rg.load(state, name)
+        if after is not None and ours(status(kc, name)):
+            data.update(created=True, endpoint=after.get("endpoint"),
+                        undo={"kind": "registry", "ref": f"{cluster}/{name}"})
+        if st_ == "done" and data["created"]:
+            return _dch.ItemOutcome("done", "posed", data=data)
+        return _dch.ItemOutcome("error", f"deployment failed (action {child.id})", data=data)
+
+    def run_publish(ctx, p):
+        data = {"actions": []}
+        if dry:
+            return _dch.ItemOutcome("done", "would publish (dry run)", data=data)
+        child, err = _artefacts_publish_launch(cluster, kc_ref(), (p["package"], p["version"]), p["registry"], None,
+                                               parent=run.id, cluster_user=run.cluster_user,
+                                               person=(run.result or {}).get("by") or None)
+        if err:
+            return _dch.ItemOutcome("error", str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        st_, c = _deploy_wait_until(child.id, publish_s, run)
+        res = ((c.result or {}).get("output") if c else None) or {}
+        data.update({k: res[k] for k in ("images", "charts", "pushed_blobs", "skipped_blobs", "mounted_blobs",
+                                         "bytes") if isinstance(res.get(k), int)})
+        if st_ == "done":
+            return _dch.ItemOutcome("done", "published", data=data)
+        if st_ == "timeout":
+            return _dch.ItemOutcome("error", f"not published within {publish_s // 60} min (action {child.id})",
+                                    data=data)
+        return _dch.ItemOutcome("error", f"publication failed (action {child.id})", data=data)
+
+    def run_item(ctx, state_, item):
+        prev = next((it for it in ((state_.get("previous") or {}).get("items") or [])
+                     if it.get("id") == item.id), {})
+        if item.id in regs:
+            return run_registry(ctx, regs[item.id], prev)
+        return run_publish(ctx, pubs[item.id])
+
+    def verify_item(ctx, state_, prev):
+        kc = kc_ref()
+        if prev.get("id") in regs:
+            r = regs[prev["id"]]
+            if r["mode"] == "external":
+                res, _rc, err = _deploy_registry_json(kc, "registry:check", [r["name"], "--cluster", cluster])
+                return err is None and not res.get("blocked")
+            d = _rg.load(state, r["name"])
+            st = status(kc, r["name"])
+            return bool(d and ours(st) and st.get("ready") and d.get("address") == r["address"])
+        p = pubs.get(prev.get("id"))
+        if p is None:
+            return False
+        # publié : le manifeste de chaque artefact est là, à la bonne empreinte
+        res, _rc, err = _deploy_registry_json(kc, "artefacts:publish", [p["package"], p["version"], "--cluster",
+                                                                        cluster, "--registry", p["registry"],
+                                                                        "--dry-run"])
+        return err is None and not res.get("blocked") and all(t.get("state") == "present"
+                                                               for t in res.get("todo") or [])
+    items = [_dch.Item(i) for i in regs] + [
+        _dch.Item(i, (f"reg-{p['registry']}",) if f"reg-{p['registry']}" in regs else ()) for i, p in pubs.items()]
+    return _dch.Phase("registry", items=items, run_item=run_item, verify_item=verify_item, before=before,
+                      item_key="id", item_step="")
+
+
 def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=None, store=None):
     """Phases du déroulé, branchées sur les mécanismes existants."""
     plan = dctx["plan"]
@@ -33334,6 +33772,8 @@ def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=
                                                   expected=(install or {}).get("hostnames")))
         elif pid == "terraform":
             phases.append(_deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, created))
+        elif pid == "registry":
+            phases.append(_deploy_registry_phase(run, cluster, kc_ref, dctx))
         elif pid == "capi":
             phases.append(_deploy_capi_phase(run, cluster, kc_ref, plan))
         elif pid == "clusters":
@@ -33979,6 +34419,781 @@ def _deploy_with_install(plan_name, plan_variables, cluster, vip, rows, kind, re
 # revue B2-I1 : au chargement (console comme ligne de commande, sans risque
 # pour un déroulé vivant : son verrou est tenu)
 _deploy_mark_orphans()
+
+
+# ---------------------------------------------------------------------------
+# 2.6.0 : paquets d'artefacts dans la console (bin/lib/artefacts.py,
+# bin/harvester-artefacts.py)
+#
+# Téléversement en flux vers <état>/artefacts/incoming/ (archive puis .sig),
+# pré-vérification (inspection et confiance) rendue avec l'acquittement
+# demandé ; l'import (décision, extraction vérifiée, trust.json, ligne du
+# journal) est fait par l'outil, en action suivie.
+# ---------------------------------------------------------------------------
+import artefacts as _art  # noqa: E402
+
+ARTEFACTS_SCRIPT = "harvester-artefacts.py"
+_ART_SIG_MAX = 64 * 1024
+
+
+def _art_state():
+    return _bm_profiles_state()
+
+
+def _art_incoming():
+    d = _art_state() / "artefacts" / "incoming"
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return d
+
+
+def _art_cmd(sub):
+    script = BIN_DIR / ARTEFACTS_SCRIPT
+    if not script.is_file():
+        return None
+    return [sys.executable, str(script), f"--state-dir={_art_state()}", sub]
+
+
+def _art_settings():
+    return _art.settings(_art_state(), load_config_ro())
+
+
+def _art_precheck(archive):
+    """Inspection et confiance d'une archive reçue, sans l'extraire :
+    {"ok", "name", "version", "trust", "acknowledge_needed", "strict",
+    "code"} ; jamais de chemin ni de sortie brute de ssh-keygen."""
+    sig = Path(str(archive) + ".sig")
+    try:
+        info = _art.inspect_package(archive)
+        trust = _art.verify_trust(archive, str(sig) if sig.is_file() else None, str(_art.signers_path(_art_state())))
+    except _art.ArtefactError as e:
+        return {"ok": False, "code": e.code, "error": str(e)}
+    conf = _art_settings()
+    accepted, code = _art.decide(trust, conf["strict"])
+    need = trust["state"] if code.startswith("acknowledge-") else None
+    h = hashlib.sha256()
+    with open(archive, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return {"ok": accepted or need is not None, "name": info["name"], "version": info["version"],
+            "sha256": h.hexdigest(),
+            "description": info["index"].get("description", ""), "items": len(info["index"]["items"]),
+            "size": info["size"], "files": info["files"], "trust": trust, "strict": conf["strict"],
+            "locked": conf["locked"], "acknowledge_needed": need, "code": code}
+
+
+def _art_public(pkg):
+    """Paquet rangé pour une réponse : index, images (noms, empreintes,
+    tailles), confiance ; sans le chemin sur le disque."""
+    import oci_layout as _ol
+    images = []
+    lay_dir = Path(pkg["path"]) / "images"
+    if (lay_dir / "index.json").is_file():
+        lay = _ol.Layout(lay_dir)
+        for e in lay.entries():
+            ann = e.get("annotations") or {}
+            size = None
+            try:
+                man = json.loads(lay.read_blob(e["digest"]))
+                size = sum(int(x.get("size") or 0) for x in [man.get("config") or {}] + (man.get("layers") or []))
+            except (OSError, ValueError, KeyError):
+                pass
+            images.append({"name": ann.get(_ol.A_NAME), "digest": e.get("digest"), "size": size,
+                           "platform": "/".join((e.get("platform") or {}).values()) or None})
+    trust = {k: pkg["trust"].get(k) for k in ("state", "principal", "key_fingerprint", "person", "date", "mode")}
+    index = _art.check_index(pkg["index"])[0] or pkg["index"]          # sortes à venir marquées `later`
+    return {"name": pkg["name"], "version": pkg["version"], "index": index, "images": images,
+            "trust": trust, "published": _art_published(pkg["name"], pkg["version"])}
+
+
+def _art_published(name, version):
+    """Registres où ce paquet a été publié (déclarations, noms seulement)."""
+    out = []
+    for s in _rg.list_decls(_art_state()):
+        d = _rg.load(_art_state(), s["name"]) if not s.get("invalid") else None
+        for p in (d or {}).get("published") or []:
+            if p.get("package") == name and p.get("version") == version:
+                out.append({"registry": d["name"], "at": p.get("at")})
+    return out
+
+
+@app.route("/api/artefacts", methods=["GET"])
+@requires_auth
+def api_artefacts_list():
+    conf = _art_settings()
+    return jsonify({"packages": _art.list_packages(_art_state()), "strict": conf["strict"],
+                    "locked": conf["locked"]})
+
+
+@app.route("/api/artefacts/settings", methods=["GET"])
+@requires_auth
+def api_artefacts_settings_get():
+    return jsonify(_art_settings())
+
+
+@app.route("/api/artefacts/settings", methods=["PUT"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_artefacts_settings_put():
+    """Mode strict et clés de confiance : `strict` (bool), `add_signer`
+    (une ligne allowed_signers), `remove_signer` (empreinte d'une clé)."""
+    b = request.get_json(silent=True)
+    if not isinstance(b, dict) or set(b) - {"strict", "add_signer", "remove_signer"}:
+        return jsonify({"error": "expected strict, add_signer or remove_signer"}), 400
+    state = _art_state()
+    try:
+        if "add_signer" in b or "remove_signer" in b:
+            try:
+                text = _art.signers_path(state).read_text()
+            except OSError:
+                text = ""
+            keys, _ = _art.parse_signers(text)
+            lines = [k["line"] for k in keys if k["fingerprint"] != b.get("remove_signer")]
+            if b.get("remove_signer") and len(lines) == len(keys):
+                return jsonify({"error": "no trusted key with this fingerprint", "code": "not-found"}), 404
+            if b.get("add_signer"):
+                lines.append(str(b["add_signer"]).strip())
+            _art.save_signers(state, "\n".join(lines) + "\n")
+        if "strict" in b:
+            if not isinstance(b["strict"], bool):
+                return jsonify({"error": "strict: true or false"}), 400
+            _art.save_settings(state, b["strict"], load_config_ro())
+    except _art.ArtefactError as e:
+        return jsonify({"error": str(e), "code": e.code}), 409 if e.code == "strict-locked" else 400
+    conf = _art_settings()
+    steps = []
+    if "strict" in b:
+        steps.append(("strict", f"strict mode {'on' if conf['strict'] else 'off'} (by {current_user() or '?'})"))
+    if b.get("add_signer"):
+        added = _art.parse_signer_line(str(b["add_signer"]).strip())
+        steps.append(("signers", f"trusted key added: {added['principal']} {added['fingerprint']}"))
+    if b.get("remove_signer"):
+        steps.append(("signers", f"trusted key removed: {b['remove_signer']}"))
+    aid = _art_done_action("artefacts-settings", steps)
+    return jsonify(dict(conf, action_id=aid))
+
+
+@app.route("/api/artefacts/upload", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_artefacts_upload():
+    """Archive d'un paquet (ou sa .sig) reçue en flux ; rend la
+    pré-vérification et l'acquittement demandé."""
+    name = (request.args.get("name") or "").strip()
+    is_sig = name.endswith(".sig")
+    base = name[:-4] if is_sig else name
+    m = _art.ARCHIVE_RE.match(base)
+    if not m or not _art.VERSION_RE.match(m.group("version")):
+        return jsonify({"error": "expected <name>-<version>.tar.gz or its .sig", "code": "not-a-package"}), 400
+    try:
+        length = int(request.headers.get("Content-Length") or 0)
+    except ValueError:
+        length = 0
+    if length <= 0:
+        return jsonify({"error": "empty upload"}), 400
+    inc = _art_incoming()
+    if is_sig:
+        if length > _ART_SIG_MAX:
+            return jsonify({"error": "signature file too large"}), 413
+        data = request.stream.read(length)
+        (inc / name).write_bytes(data)
+        os.chmod(inc / name, 0o600)
+        arch = inc / base
+        return jsonify({"ok": True, "staged": _art_precheck(arch) if arch.exists() else None})
+    st = os.statvfs(inc)
+    need = 2 * length + (1 << 30)              # archive puis extraction (contraintes communes du plan)
+    if st.f_bavail * st.f_frsize < need:
+        return jsonify({"error": "not enough room to receive and extract the package", "need": need}), 507
+    (inc / (name + ".sig")).unlink(missing_ok=True)          # une ancienne signature ne vaut pas pour celle-ci
+    part = inc / (name + ".part")
+    label = f"artefacts-import:{base[:-len('.tar.gz')]}"
+    run = ActionRun(uuid.uuid4().hex[:12], label, "", ["upload", name])
+    run.cluster_user = current_user()
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    run.emit({"type": "step", "step_id": "upload", "status": "running",
+              "message": f"receiving {name} ({_vp.fmt_bytes(length)})", "ts": time.time()})
+    try:
+        res = _receive_archive(run, request.stream, length, part)
+        os.replace(part, inc / name)
+    except (_UploadCancelled, ValueError, OSError) as e:
+        part.unlink(missing_ok=True)
+        run.status, run.exit_code = "error", 1
+        run.error_summary = "cancelled" if isinstance(e, _UploadCancelled) else _error_text(e)
+        run.emit({"type": "step", "step_id": "upload", "status": "error",
+                  "message": run.error_summary, "ts": time.time()})
+        run.ended_at = time.time()
+        run.close()
+        return jsonify({"error": run.error_summary, "action_id": run.id}), 409
+    run.emit({"type": "step", "step_id": "upload", "status": "done",
+              "message": _vp.summary("upload", res), "ts": time.time()})
+    chk = _art_precheck(inc / name)
+    msg = (f"{chk.get('name')}-{chk.get('version')}: {chk['trust']['state']}"
+           + (f", acknowledgement needed ({chk['acknowledge_needed']})" if chk.get("acknowledge_needed") else "")
+           if "trust" in chk else f"{chk.get('code')}: {chk.get('error')}")
+    run.emit({"type": "step", "step_id": "check", "status": "done" if chk.get("ok") else "error",
+              "message": msg, "ts": time.time()})
+    run.result = chk
+    run.status, run.exit_code = ("done", 0) if chk.get("ok") else ("error", 2)
+    if not chk.get("ok"):
+        run.error_summary = msg
+    run.ended_at = time.time()
+    run.close()
+    return jsonify({"ok": True, "action_id": run.id, "staged": chk})
+
+
+def _art_done_action(label, steps):
+    """Geste court sur l'état de la console, tracé dans l'Activité."""
+    run = ActionRun(uuid.uuid4().hex[:12], label, "", [label.split(":")[0]])
+    run.cluster_user = current_user()
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    for sid, msg in steps:
+        run.emit({"type": "step", "step_id": sid, "status": "done", "message": msg, "ts": time.time()})
+    run.status, run.exit_code = "done", 0
+    run.ended_at = time.time()
+    run.close()
+    return run.id
+
+
+def _art_name_version(name, version):
+    if not _art.NAME_RE.match(name or "") or not _art.VERSION_RE.match(version or ""):
+        return jsonify({"error": "invalid package name or version", "code": "not-found"}), 400
+    return None
+
+
+_ART_REFUSALS = {"invalid": (422, "invalid-signature"), "sums-mismatch": (422, "sums-mismatch"),
+                 "acknowledge-invalid": (400, "acknowledge-invalid")}
+
+
+@app.route("/api/artefacts/<name>/<version>/accept", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_artefacts_accept(name, version):
+    """Décision sur une archive reçue, puis import par l'outil (action
+    suivie : check, extract, trust ; l'acquittement va au journal)."""
+    bad = _art_name_version(name, version)
+    if bad:
+        return bad
+    b = request.get_json(silent=True) or {}
+    ack = b.get("acknowledge")
+    staged = _art_incoming() / f"{name}-{version}.tar.gz"
+    if not staged.is_file():
+        return jsonify({"error": "no uploaded archive for this package", "code": "not-uploaded"}), 404
+    if ack and not b.get("sha256"):
+        # revue finale m-7 : un acquittement vaut pour l'archive vue à la
+        # pré-vérification, jamais pour « ce qui sera là »
+        return jsonify({"error": "an acknowledgement needs the sha256 shown at the pre-check",
+                        "code": "sha256-required"}), 400
+    # Revue I-2 : l'archive (et sa signature) part dans un répertoire propre
+    # à cette demande AVANT toute vérification ; un téléversement suivant
+    # remplace `incoming/<nom>-<version>.tar.gz` sans jamais toucher ce
+    # qui a été vérifié puis sera extrait.
+    own = Path(tempfile.mkdtemp(prefix="accept-", dir=str(_art_incoming())))
+    arch = own / staged.name
+    os.replace(staged, arch)
+    if Path(str(staged) + ".sig").is_file():
+        os.replace(str(staged) + ".sig", str(arch) + ".sig")
+
+    def give_back():
+        """Refus : l'archive redevient à accepter, sauf si une autre est
+        arrivée entre-temps (elle l'emporte)."""
+        for src, dst in ((arch, staged), (Path(str(arch) + ".sig"), Path(str(staged) + ".sig"))):
+            if src.is_file() and not dst.exists():
+                os.replace(src, dst)
+        shutil.rmtree(own, ignore_errors=True)
+    chk = _art_precheck(arch)
+    if "trust" not in chk:
+        give_back()
+        return jsonify({"error": chk.get("error"), "code": chk.get("code")}), 422
+    if b.get("sha256") and b.get("sha256") != chk["sha256"]:
+        give_back()
+        return jsonify({"error": "the archive changed since it was checked: check it again",
+                        "code": "archive-changed"}), 409
+    accepted, code = _art.decide(chk["trust"], chk["strict"], ack)
+    if not accepted:
+        give_back()
+        if code.startswith("acknowledge-") and code in ("acknowledge-unsigned", "acknowledge-unknown-key"):
+            return jsonify({"error": "this package needs an explicit acknowledgement", "code": "acknowledge-required",
+                            "state": chk["trust"]["state"], "trust": chk["trust"]}), 409
+        if code.startswith("strict-refuses-"):
+            return jsonify({"error": "strict mode refuses this package", "code": "strict-mode",
+                            "state": chk["trust"]["state"], "locked": chk["locked"]}), 409
+        status, c = _ART_REFUSALS.get(code, (422, code))
+        return jsonify({"error": f"refused: {code}", "code": c, "state": chk["trust"]["state"]}), status
+    if (_art.package_dir(_art_state(), name, version)).exists():
+        give_back()
+        return jsonify({"error": f"{name}-{version} is already imported", "code": "exists"}), 409
+    cmd = _art_cmd("import")
+    if cmd is None:
+        give_back()
+        return jsonify({"error": f"{ARTEFACTS_SCRIPT} not deployed"}), 503
+    flag = {"unsigned": ["--accept-unsigned"], "unknown-key": ["--accept-unknown-key"]}.get(ack, [])
+    cmd += [str(arch), *flag, "--person", current_user() or "?"]
+
+    def cleanup():
+        shutil.rmtree(own, ignore_errors=True)
+    run, err = _cli_action("", f"artefacts-import:{name}-{version}", cmd, "harvester-artefacts",
+                           check_busy=False, capture=True, after=cleanup,
+                           setup=lambda r: setattr(r, "required_role", "admin"))
+    if err:
+        give_back()
+        return err
+    return jsonify({"action_id": run.id, "name": name, "version": version, "trust": chk["trust"]["state"]}), 202
+
+
+def _artefacts_publish_launch(cluster, kc, package, registry, items, parent=None, cluster_user=None, person=None):
+    """Lancement de la publication hors requête (chaîne d'un plan, comme
+    _capi_launch) : ne lit ni la requête ni la session ; `kc` et
+    `cluster_user` sont figés au déclenchement. (action, None) ou (None,
+    {"error", ...})."""
+    name, version = package
+    cmd = _art_cmd("publish")
+    if cmd is None:
+        return None, {"error": f"{ARTEFACTS_SCRIPT} not deployed"}
+    cmd += [name, version, "--cluster", cluster, "--registry", registry, "--kubeconfig", kc,
+            "--person", person or cluster_user or "?"]
+    if items:
+        cmd += ["--items", ",".join(items)]
+    with app.app_context():                    # réponse d'occupation (jsonify) hors requête
+        run, err = _cli_action(cluster, f"artefacts-publish:{name}-{version}@{registry}", cmd,
+                               "harvester-artefacts", capture=True, parent=parent, cluster_user=cluster_user,
+                               after=lambda: READ_SHARE.invalidate("_activity"))
+    if err:
+        body = err[0].get_json(silent=True) if hasattr(err[0], "get_json") else None
+        return None, body or {"error": "refused"}
+    return run, None
+
+
+@app.route("/api/artefacts/<name>/<version>/publish", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_artefacts_publish(name, version):
+    """Publie un paquet importé dans un registre rattaché au cluster :
+    constats d'abord (tag d'une autre empreinte, registre sans cet usage ou
+    non rattaché, mode strict activé depuis un import acquitté), sans rien
+    écrire ; puis action suivie `artefacts-publish:<paquet>@<registre>`."""
+    bad = _art_name_version(name, version)
+    if bad:
+        return bad
+    b = request.get_json(silent=True)
+    if not isinstance(b, dict):
+        return jsonify({"error": "a JSON object is expected"}), 400
+    cluster, registry, items = str(b.get("cluster") or ""), str(b.get("registry") or ""), b.get("items")
+    if not _valid_k8s_name(cluster) or not _registry_name_ok(registry):
+        return jsonify({"error": "cluster and registry are required"}), 400
+    if items is not None and (not isinstance(items, list) or not all(isinstance(i, str) and _art.ITEM_RE.match(i)
+                                                                    for i in items)):
+        return jsonify({"error": "items: a list of item names"}), 400
+    try:
+        _art.load_package(_art_state(), name, version)
+    except _art.ArtefactError:
+        return jsonify({"error": f"no package {name}-{version}", "code": "not-found"}), 404
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    cmd = _art_cmd("publish")
+    if cmd is None:
+        return jsonify({"error": f"{ARTEFACTS_SCRIPT} not deployed"}), 503
+    check = cmd + [name, version, "--cluster", cluster, "--registry", registry, "--kubeconfig", kc, "--dry-run"]
+    if items:
+        check += ["--items", ",".join(items)]
+    res, err = _capi_run_json(check, timeout=120)
+    if err:
+        return err
+    plan = res[0]
+    if b.get("dry_run"):
+        # 2.6.0 (tâche 12) : constats et liste de ce qui partirait, montrés
+        # avant le bouton Publier ; rien n'est écrit
+        return jsonify({"blocked": bool(plan.get("blocked")), "findings": plan.get("findings") or [],
+                        "todo": plan.get("todo") or []})
+    if plan.get("blocked"):
+        return jsonify({"error": "the publication is blocked", "code": "publish-blocked",
+                        "findings": plan.get("findings") or []}), 409
+    run, err = _artefacts_publish_launch(cluster, kc, (name, version), registry, items,
+                                         cluster_user=(current_cluster_identity() or {}).get("user"),
+                                         person=current_user())
+    if err:
+        return jsonify(err), 409
+    return jsonify({"action_id": run.id, "todo": plan.get("todo") or [], "findings": plan.get("findings") or []}), 202
+
+
+@app.route("/api/artefacts/<name>/<version>", methods=["GET"])
+@requires_auth
+def api_artefacts_get(name, version):
+    bad = _art_name_version(name, version)
+    if bad:
+        return bad
+    try:
+        pkg = _art.load_package(_art_state(), name, version)
+    except _art.ArtefactError:
+        return jsonify({"error": f"no package {name}-{version}", "code": "not-found"}), 404
+    return jsonify(_art_public(pkg))
+
+
+@app.route("/api/artefacts/<name>/<version>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_artefacts_delete(name, version):
+    bad = _art_name_version(name, version)
+    if bad:
+        return bad
+    try:
+        # revue m-15 : refusé tant qu'un plan enregistré le publie
+        _art.remove_package(_art_state(), name, version, used_by=_dpl.package_users(_art_state(), name, version))
+    except _art.ArtefactError as e:
+        return jsonify({"error": str(e), "code": e.code}), 404 if e.code == "not-found" else 409
+    aid = _art_done_action(f"artefacts-remove:{name}-{version}",
+                           [("remove", f"{name}-{version} removed by {current_user() or '?'}")])
+    return jsonify({"ok": True, "action_id": aid})
+
+
+# ---------------------------------------------------------------------------
+# 2.6.0 : registres déclarés (bin/lib/registries.py, bin/harvester-registry.py)
+#
+# Déclarations sans secret dans l'état de la console (comme les plans) ;
+# identifiants saisis au rattachement et posés en Secrets sur le cluster
+# Harvester par l'outil (action suivie, demande dans un fichier privé effacé
+# à la fin, jamais en argument). Voir
+# docs/design/2026-11-05-artefacts-registre-260-plan.md (tâches 6 à 8).
+# ---------------------------------------------------------------------------
+import registries as _rg  # noqa: E402
+
+REGISTRY_SCRIPT = "harvester-registry.py"
+
+
+def _registry_cmd(sub):
+    script = BIN_DIR / REGISTRY_SCRIPT
+    if not script.is_file():
+        return None
+    return [sys.executable, str(script), f"--state-dir={_bm_profiles_state()}", sub]
+
+
+def _registry_name_ok(name):
+    return bool(_dpl.NAME_RE.match(name or "")) and len(name) <= _rg.NAME_MAX
+
+
+@app.route("/api/registries", methods=["GET"])
+@requires_auth
+def api_registries_list():
+    return jsonify({"registries": _rg.list_decls(_bm_profiles_state())})
+
+
+@app.route("/api/registries/<name>", methods=["GET"])
+@requires_auth
+def api_registry_get(name):
+    """Déclaration d'un registre, et qui l'emploie (plans et modèles ;
+    `?cluster=` ajoute les clusters enfants et services de ce cluster
+    Harvester, lus avec l'identité de la personne)."""
+    d = _rg.load(_bm_profiles_state(), name) if _registry_name_ok(name) else None
+    if d is None:
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    c = request.args.get("cluster") or ""
+    if c and _valid_k8s_name(c) and c in (d.get("clusters") or []):
+        used, why = _registry_users(name, [c])
+        d["used_by"] = used
+        if why:
+            d["used_by_error"] = why
+    else:
+        d["used_by"] = _dpl.registry_users(_bm_profiles_state(), name)
+    return jsonify(d)
+
+
+@app.route("/api/registries/<name>", methods=["PUT"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_registry_put(name):
+    """Déclare (ou modifie, à la révision lue) un registre du client. Un
+    registre d'amorçage n'est déclaré que par son déploiement."""
+    if not _registry_name_ok(name):
+        return jsonify({"error": f"invalid name (RFC 1123, {_rg.NAME_MAX} characters at most)",
+                        "fields": ["name"]}), 400
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return _bm_errors_json([("registry", "not a mapping")], "invalid registry declaration")
+    rev, err = _deploy_revision(data)
+    if err:
+        return err
+    doc = _deploy_doc(data)
+    current = _rg.load(_bm_profiles_state(), name)
+    if doc.get("kind") == "bootstrap" or (current or {}).get("kind") == "bootstrap":
+        return jsonify({"error": "a bootstrap registry is declared by its deployment",
+                        "code": "registry-bootstrap"}), 409
+    # la liste des clusters rattachés et des paquets publiés appartient aux
+    # gestes qui les écrivent, jamais au formulaire
+    for k in ("clusters", "published"):
+        doc[k] = (current or {}).get(k) or []
+    doc["updated_by"] = current_user() or ""
+    try:
+        out = _rg.save(_bm_profiles_state(), name, doc, rev)
+    except _dpl.PlanConflict as e:
+        return jsonify({"error": "the registry changed in the meantime", "code": "conflict",
+                        "current_revision": e.current_revision}), 409
+    except _dpl.ProfileError as e:
+        return _bm_errors_json(e.errors, "invalid registry declaration")
+    return jsonify(out), 201 if out["revision"] == 1 else 200
+
+
+@app.route("/api/registries/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_registry_delete(name):
+    """Oublie un registre : action suivie `registry-forget:<nom>` de
+    `harvester-registry forget` (revue finale I-3, parité CLI), créée avant
+    de toucher un cluster. L'outil retire les Secrets de chaque cluster
+    Harvester rattaché avec le kubeconfig de la personne, une étape par
+    Secret, puis la déclaration ; un refus en cours de route finit l'action
+    en erreur avec ce qui est déjà parti. L'usage est lu ici d'abord, pour
+    rendre le refus et la liste à la fenêtre."""
+    if not _registry_name_ok(name):
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    d = _rg.load(_bm_profiles_state(), name)
+    if d is None:
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    if d.get("kind") == "bootstrap":
+        return jsonify({"error": "a bootstrap registry leaves with its deployment (Delete)",
+                        "code": "registry-bootstrap"}), 409
+    used, why = _registry_users(name, d.get("clusters"))
+    if why:
+        return jsonify({"error": why, "code": "registry-usage-unknown"}), 409
+    if used:
+        return jsonify({"error": f"registry-in-use: {', '.join(used)}", "code": "registry-in-use",
+                        "used_by": used}), 409
+    cmd = _registry_cmd("forget")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    kcs = []
+    for c in d.get("clusters") or []:
+        kc = _kubectl_for_cluster(c) if _valid_k8s_name(c) else None
+        if kc:
+            kcs.append(f"--kubeconfig-for={c}={kc}")
+    run, err = _cli_action("", f"registry-forget:{name}", cmd + [name] + kcs, "harvester-registry",
+                           check_busy=False)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "registry": name}), 202
+
+
+def _registry_users(name, clusters):
+    """(qui emploie ce registre, None) ou ([], raison) : plans et modèles
+    de cluster enregistrés, puis clusters enfants et services de chaque
+    cluster Harvester rattaché (Secrets étiquetés au nom du registre, lus
+    avec l'identité de la personne). Un cluster retiré de la console est
+    sauté ; un cluster illisible rend l'usage inconnu (revue m-15)."""
+    from kube import Kube as _Kube, KubeError as _KubeError
+    used = _dpl.registry_users(_bm_profiles_state(), name)
+    for c in clusters or []:
+        kc = _kubectl_for_cluster(c) if _valid_k8s_name(c) else None
+        if not kc:
+            continue
+        try:
+            used += [f"cluster:{c}/{ns}" for ns in _rg.child_users(_Kube(kc, timeout=30), name)]
+        except _KubeError as e:
+            return [], f"cannot read {c}: {str(e)[:160]}"
+    return sorted(set(used)), None
+
+
+def _registry_target(name, cluster):
+    """(déclaration, kubeconfig de la personne) ou une réponse d'erreur."""
+    d = _rg.load(_bm_profiles_state(), name) if _registry_name_ok(name) else None
+    if d is None:
+        return None, None, (jsonify({"error": "no such registry", "code": "registry-unknown"}), 404)
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return None, None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
+    return d, kc, None
+
+
+@app.route("/api/registries/<name>/attach/<cluster>", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_registry_attach(name, cluster):
+    """Pose les Secrets du registre sur le cluster Harvester (identifiants
+    dans le corps, jamais renvoyés) : action suivie."""
+    d, kc, err = _registry_target(name, cluster)
+    if err:
+        return err
+    if d.get("kind") == "bootstrap":
+        # revue I-3 : comptes générés par la console, jamais tapés
+        return jsonify({"error": "the accounts of a bootstrap registry are generated by the console",
+                        "code": "registry-bootstrap"}), 409
+    try:
+        creds = _rg.check_creds(request.get_json(silent=True))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    cmd = _registry_cmd("attach")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    run, err = _cli_action(cluster, f"registry-attach:{cluster}/{name}",
+                           cmd + [name, "--cluster", cluster, "--kubeconfig", kc], "harvester-registry",
+                           spec=creds)
+    if err:
+        return err
+    warn = ["registry-pull-is-push"] if creds["pull"]["username"] == creds["push"]["username"] else []
+    return jsonify({"action_id": run.id, "registry": name, "cluster": cluster, "warnings": warn}), 202
+
+
+@app.route("/api/registries/<name>/check/<cluster>", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_registry_check(name, cluster):
+    """Constats d'un registre sur un cluster : Secrets posés, puis sondes de
+    lecture et d'écriture depuis la console, sans rien écrire."""
+    if not _registry_name_ok(name) or _rg.load(_bm_profiles_state(), name) is None:
+        return jsonify({"registry": name, "cluster": cluster,
+                        "findings": _rg.check(None, {}, name), "blocked": True})
+    d, kc, err = _registry_target(name, cluster)
+    if err:
+        return err
+    cmd = _registry_cmd("check")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    res, err = _capi_run_json(cmd + [name, "--cluster", cluster, "--kubeconfig", kc], timeout=90)
+    if err:
+        return err
+    return jsonify(res[0])
+
+
+_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+@app.route("/api/registries/bootstrap/<cluster>", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_registry_bootstrap_deploy(cluster):
+    """Pose un registre d'amorçage sur le cluster Harvester : `dry_run`
+    rend les constats sans rien écrire ; sinon action suivie
+    `registry-deploy:<cluster>/<nom>`. Un certificat du client part dans la
+    demande privée de l'outil, jamais en argument."""
+    b = request.get_json(silent=True)
+    if not isinstance(b, dict):
+        return jsonify({"error": "a JSON object is expected"}), 400
+    name, address = str(b.get("name") or ""), str(b.get("address") or "")
+    size, klass = b.get("size_gib", 20), str(b.get("storage_class") or "")
+    mirrors = b.get("mirrors") or []
+    errors = []
+    if not _registry_name_ok(name) or name in _rg.RESERVED:
+        errors.append(("name", f"RFC 1123, {_rg.NAME_MAX} characters at most"))
+    if not _IPV4_RE.match(address):
+        errors.append(("address", "an IPv4 address"))
+    if isinstance(size, bool) or not isinstance(size, int) or not 5 <= size <= 2048:
+        errors.append(("size_gib", "an integer from 5 to 2048"))
+    if not _valid_k8s_name(klass):
+        errors.append(("storage_class", "a storage class name"))
+    if b.get("dns_name") and not _rg.HOST_RE.match(str(b["dns_name"])):
+        errors.append(("dns_name", "a host name"))
+    if not isinstance(mirrors, list) or not all(isinstance(m, str) and _rg.HOST_RE.match(m) for m in mirrors):
+        errors.append(("mirrors", "a list of registry hosts"))
+    tls = {k: b[k] for k in ("cert", "key", "ca") if b.get(k)}
+    if tls and set(tls) != {"cert", "key", "ca"}:
+        errors.append(("cert", "a client certificate needs cert, key and ca"))
+    if errors:
+        return _bm_errors_json(errors, "invalid bootstrap registry")
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    cmd = _registry_cmd("deploy")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    cmd += [name, "--cluster", cluster, "--kubeconfig", kc, "--address", address, "--size-gib", str(size),
+            "--storage-class", klass, "--mirrors", ",".join(mirrors)]
+    if b.get("dns_name"):
+        cmd += ["--dns-name", str(b["dns_name"])]
+    if b.get("dry_run"):
+        res, err = _capi_run_json(cmd + ["--dry-run"], timeout=120)
+        if err:
+            return err
+        return jsonify(res[0])
+    run, err = _cli_action(cluster, f"registry-deploy:{cluster}/{name}", cmd, "harvester-registry",
+                           spec=tls or None)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "registry": name, "cluster": cluster}), 202
+
+
+@app.route("/api/registries/bootstrap/<cluster>/<name>", methods=["GET"])
+@requires_auth
+def api_registry_bootstrap_status(cluster, name):
+    if not _registry_name_ok(name):
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    cmd = _registry_cmd("status")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    res, err = _capi_run_json(cmd + [name, "--cluster", cluster, "--kubeconfig", kc], timeout=60)
+    if err:
+        return err
+    return jsonify(res[0])
+
+
+def _registry_leftovers(cluster, kc):
+    """(restes de déploiements échoués sur ce cluster, None) ou (None,
+    réponse d'erreur) : `harvester-registry leftovers`, avec l'identité de
+    la personne."""
+    cmd = _registry_cmd("leftovers")
+    if cmd is None:
+        return None, (jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503)
+    res, err = _capi_run_json(cmd + ["--cluster", cluster, "--kubeconfig", kc], timeout=60)
+    if err:
+        return None, err
+    return list((res[0] or {}).get("leftovers") or []), None
+
+
+@app.route("/api/registries/bootstrap/<cluster>/leftovers", methods=["GET"])
+@requires_auth
+def api_registry_bootstrap_leftovers(cluster):
+    """Restes d'un déploiement échoué (objets de la console sans
+    déclaration) : l'onglet les montre avec Supprimer (revue finale I-2)."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    left, err = _registry_leftovers(cluster, kc)
+    if err:
+        return err
+    return jsonify({"cluster": cluster, "leftovers": left})
+
+
+@app.route("/api/registries/bootstrap/<cluster>/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_registry_bootstrap_delete(cluster, name):
+    """Retire le registre d'amorçage ; son volume est gardé sauf
+    `delete_data` avec le nom retapé (point 193)."""
+    b = request.get_json(silent=True) or {}
+    if not _registry_name_ok(name):
+        return jsonify({"error": "no such bootstrap registry on this cluster", "code": "registry-unknown"}), 404
+    d = _rg.load(_bm_profiles_state(), name)
+    if d is not None and (d.get("kind") != "bootstrap" or d.get("cluster") != cluster):
+        return jsonify({"error": "no such bootstrap registry on this cluster", "code": "registry-unknown"}), 404
+    delete_data = bool(b.get("delete_data"))
+    if delete_data and b.get("confirm") != name:
+        return jsonify({"error": "type the registry name to delete its data", "code": "confirm-name"}), 400
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if d is None:
+        # revue finale I-2 : déploiement échoué avant `ready`, objets restés
+        # sans déclaration ; la suppression les retire s'ils sont là
+        left, err = _registry_leftovers(cluster, kc)
+        if err:
+            return err
+        if name not in [x.get("registry") for x in left]:
+            return jsonify({"error": "no such bootstrap registry on this cluster", "code": "registry-unknown"}), 404
+    used, why = _registry_users(name, [cluster])
+    if why or used:
+        return jsonify({"error": why or f"registry-in-use: {', '.join(used)}",
+                        "code": "registry-usage-unknown" if why else "registry-in-use", "used_by": used}), 409
+    cmd = _registry_cmd("delete")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    cmd += [name, "--cluster", cluster, "--kubeconfig", kc] + (["--delete-data"] if delete_data else [])
+    run, err = _cli_action(cluster, f"registry-delete:{cluster}/{name}", cmd, "harvester-registry")
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "registry": name, "data_kept": not delete_data}), 202
 
 
 if __name__ == "__main__":

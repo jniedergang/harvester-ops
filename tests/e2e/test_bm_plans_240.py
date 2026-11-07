@@ -132,8 +132,8 @@ def test_plans_tab_edits_a_plan_and_shows_a_conflict(context, flask_server):
     for pid in ("capi", "clusters", "registry", "artefacts"):
         card = form.locator(f'.bmpl-phase[data-phase="{pid}"]')
         expect(card.locator(".bmpl-phase-on")).to_be_disabled()
-        expect(card.locator(".bmpl-coming")).to_have_text("coming in 2.6+")
-        assert "2.6" in card.locator(".bmpl-coming").get_attribute("data-tip")
+        expect(card.locator(".bmpl-coming")).to_have_text("coming in 2.7")
+        assert "2.7" in card.locator(".bmpl-coming").get_attribute("data-tip")
     page.evaluate("document.querySelector('.bmpl-phase[data-phase=capi] .bmpl-phase-on').click()")
     expect(form.locator('.bmpl-phase[data-phase="capi"] .bmpl-phase-on')).not_to_be_checked()
     # modèles : ordre par boutons, ajout depuis la liste

@@ -418,6 +418,118 @@ L'identité restreinte a besoin de l'adresse de Harvester. Elle est lue sur
 deux n'a d'adresse, vérifiez ces services sur le cluster (`kubectl -n
 kube-system get svc rke2-traefik ingress-expose`).
 
+## Paquets d'artefacts et registres (2.6.0)
+
+### Un cluster enfant ne tire pas de son registre
+
+Regardez sur un nœud du cluster enfant (plan de contrôle et worker) :
+
+- `/etc/rancher/rke2/registries.yaml` : les miroirs et le compte du
+  registre écrits à la création (compte de lecture seulement).
+- `/var/lib/rancher/rke2/agent/etc/containerd/certs.d/<origine>/hosts.toml` :
+  un bloc par miroir, dans l'ordre. Une ligne `server` veut dire que le
+  repli vers le registre d'origine est actif (c'est le défaut).
+- `/var/lib/rancher/rke2/agent/containerd/containerd.log` : chaque tirage
+  nomme le point d'accès essayé et la raison de l'échec (certificat, 401,
+  introuvable).
+
+Causes habituelles :
+
+- Les registres ont été choisis après la création du cluster. Ils sont lus
+  au démarrage de RKE2 et posés à la création seulement : un cluster
+  existant ne change pas.
+- Le registre ne sert pas d'images (usage charts seulement), ou l'origine
+  n'est pas parmi les miroirs choisis pour ce cluster.
+- Les nœuds ne joignent pas l'adresse du registre (routage depuis le réseau
+  des VMs, pare-feu). La console vérifie le registre depuis elle-même
+  seulement.
+- L'image n'a jamais été publiée, ou sous un autre nom : les images vivent
+  à `<registre>/<hôte d'origine>/<chemin>:<tag>` ; listez-les avec le
+  compte de lecture (`GET /v2/_catalog`).
+- `containerd.log` dit `x509: certificate signed by unknown authority`
+  pour un registre de la liste : son fichier de CA manque sur le nœud.
+  La console écrit un fichier de CA par registre sous
+  `/etc/rancher/rke2/tls/harvester-ops/<registre>/ca.crt`. Vérifiez que la
+  CA de chaque registre a été déclarée.
+
+### Une VM de cluster enfant reste en « Scheduling » (2.6.0)
+
+La PVC de son disque racine reste `Pending` et l'événement de Longhorn dit
+`volume size should be larger than the backing image size` : le disque
+racine est plus petit que la taille virtuelle de l'image. Le contrôle de
+création le bloque désormais (`disk-smaller-than-image`) et donne la
+taille à demander. L'image cloud openSUSE Leap 15.6 publiée annonce
+10 Gio.
+
+### La publication dit « publish-tag-differs »
+
+Un tag du paquet existe déjà dans le registre avec un autre contenu. Rien
+n'a été écrit, pour aucune image. Publiez le contenu sous un nouveau tag
+(une nouvelle version du paquet, ou `as` dans la description). Un registre
+d'amorçage a les suppressions désactivées : ses tags ne peuvent pas être
+retirés. Dans un registre du client, retirez le tag avec les outils de ce
+registre, sciemment.
+
+### Le registre d'amorçage est plein
+
+La 2.6.0 n'a ni ramasse-miettes ni geste d'agrandissement, et ce qui est
+publié reste. Le détail du registre montre l'occupation du volume. Déployez
+un second registre avec un plus gros volume, ou, quand plus rien n'emploie
+celui-ci, supprimez-le avec ses données (nom tapé) et déployez-le à
+nouveau. Dans un plan, `registry-package-too-big` bloque des paquets qui
+dépassent 90 % du volume.
+
+### Un déploiement de registre d'amorçage a échoué et un nouvel essai dit « registry-name-taken »
+
+Un déploiement qui n'est pas prêt à temps laisse ses objets et son volume
+sur le cluster, et n'enregistre aucune déclaration. L'onglet Registres le
+montre sur une ligne **Restes**. Lancez **Supprimer** sur cette ligne (ou
+`harvester-registry delete NOM --cluster C`, avec `--delete-data` pour
+retirer aussi le volume), corrigez la cause donnée par l'étape `ready`,
+puis déployez à nouveau. Un plan de déploiement qui l'a posé n'a rien à
+faire : sa reprise reprend ces restes et redéploie.
+
+### Le pod du registre reste en « ErrImageNeverPull »
+
+L'image du registre est importée au déploiement sur les nœuds listés dans
+la configuration de la console. Un nœud ajouté plus tard au cluster ne l'a
+pas, et le pod y a été placé. Importez l'image sur ce nœud à la main,
+depuis l'hôte de la console :
+
+```bash
+ssh rancher@<nœud> 'sudo /var/lib/rancher/rke2/bin/ctr --address /run/k3s/containerd/containerd.sock \
+  --namespace k8s.io images import -' < /var/lib/harvester-ops/registry-bundle/registry-images.tar
+```
+
+Ajoutez aussi le nœud à la configuration de la console.
+
+### L'import demande un acquittement, ou le mode strict refuse
+
+- `acknowledge-required` (code de sortie 3 en ligne de commande) : le
+  paquet n'est pas signé, ou il est signé par une clé inconnue. Cochez
+  **J'accepte ce paquet en connaissance de cause**, ou ajoutez la clé dans
+  Paramètres > Artefacts, ou passez `--accept-unsigned` /
+  `--accept-unknown-key`.
+- `strict-mode` : le mode strict refuse tout ce qui n'est pas signé par une
+  clé de confiance. S'il est verrouillé par `config.yaml` (`strict-locked`
+  quand on essaie de le désactiver), seul un administrateur de l'hôte peut
+  le changer.
+- `invalid-signature`, `sums-mismatch` : toujours refusés. Reconstruisez ou
+  retéléchargez le paquet.
+- `archive-changed` : un autre envoi a remplacé l'archive après sa
+  vérification. Vérifiez-la à nouveau.
+- `package-untrusted-strict` à la publication : le mode strict a été activé
+  après que le paquet a été accepté par acquittement.
+
+### `harvester-artefacts remove` échoue sur une machine sans PyYAML
+
+`remove` lit les plans enregistrés (un paquet qu'un plan publie ne peut pas
+être retiré), et les plans ont besoin de PyYAML. Sans lui, l'étape dit
+« remove reads the saved plans; run it where the console is installed
+(PyYAML) » et la commande sort avec le code 1, sans rien retirer.
+Lancez-la là où la console est installée. `pack`, `sign`, `verify` et `inspect` restent en
+bibliothèque standard de Python.
+
 ## Reprendre une extinction interrompue
 
 Si le script a été tué (Ctrl-C, perte SSH, ...) avec certains nodes éteints et d'autres encore up :

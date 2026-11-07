@@ -36,6 +36,13 @@ const CapiServices = (() => {
     'invalid-ipam': (v) => tr('svc.fd.invalid-ipam', 'Unknown address mode "{ipam}" (dhcp or pool).', v),
     'invalid-values': (v) => tr('svc.fd.invalid-values', 'The values are not valid YAML: {message}', v),
     'lb-added': (v) => tr('svc.fd.lb-added', 'kube-vip will be added to {cluster}: without it, no LoadBalancer service of the cluster gets an address.', v),
+    'service-registry-unknown': (v) => tr('svc.fd.service-registry-unknown', 'The registry {registry} is not declared in the console.', v),
+    'service-registry-no-charts': (v) => tr('svc.fd.service-registry-no-charts', 'The registry {registry} does not serve charts.', v),
+    'service-registry-not-attached': (v) => tr('svc.fd.service-registry-not-attached', 'The registry {registry} is not attached to {cluster}: CAAPH would have no read account.', v),
+    'service-package-missing': (v) => tr('svc.fd.service-package-missing', 'The package {package} is not imported in the console.', v),
+    'service-item-not-chart': (v) => tr('svc.fd.service-item-not-chart', 'The package {package} has no chart named {item}.', v),
+    'service-chart-not-published': (v) => tr('svc.fd.service-chart-not-published', 'The package {package} is not marked as published in {registry}: publish it first, or the chart may be missing.', v),
+    'service-registry-not-mirrored': (v) => tr('svc.fd.service-registry-not-mirrored', 'The cluster {cluster} does not pull its images from {registry}: the images of the chart will come from their origin.', v),
   };
   const LEVEL_CLASS = { block: 'sev-critical', warn: 'sev-watch', ok: 'sev-info' };
   const LEVEL_RANK = { block: 0, warn: 1, ok: 2 };
@@ -48,6 +55,10 @@ const CapiServices = (() => {
     podinfo: {
       title: () => tr('svc.cat.podinfo', 'Test application (podinfo)'),
       desc: () => tr('svc.cat.podinfo.desc', 'A small web page that says which cluster it runs on: checks the whole chain, from the chart to the load balancer address.'),
+    },
+    registry: {
+      title: () => tr('svc.cat.registry', 'From a registry'),
+      desc: () => tr('svc.cat.registry.desc', 'A chart published from an artefact package in a registry attached to this cluster. CAAPH pulls it with the read account and the CA of the registry.'),
     },
     custom: {
       title: () => tr('svc.cat.custom', 'Any Helm chart'),
@@ -99,8 +110,9 @@ const CapiServices = (() => {
     if (!(d.clusters || []).length) {
       parts.push(`<p class="empty-state">${esc(tr('svc.noCluster', 'No cluster created by Cluster API on {cluster} yet: create one with "{tab}" in the Clusters tab, then deploy services on it.', { cluster, tab: tr('capi.k8s.create', 'Create a cluster') }))}</p>`);
     }
-    const cat = (d.catalog || []).map(c => c.key).concat(['custom']);
+    const cat = (d.catalog || []).map(c => c.key).concat(['registry', 'custom']);
     const canDeploy = d.caaph && (d.clusters || []).length;
+    const charts = d.registry_charts || [];
     parts.push(`<h4>${esc(tr('svc.catalog', 'Catalog'))}</h4>
       <div class="svc-catalog">${cat.map(k => {
         const c = (d.catalog || []).find(x => x.key === k);
@@ -108,9 +120,15 @@ const CapiServices = (() => {
           <div class="svc-card-title">${esc(titleOf(k))}</div>
           <div class="tf-desc">${esc(CATALOG_TEXT[k] ? CATALOG_TEXT[k].desc() : '')}</div>
           <div class="svc-card-foot">
-            <code>${c ? esc(`${c.chart} ${c.version}`) : 'helm'}</code>
-            <button type="button" class="btn btn-sm btn-primary tip" data-svc-deploy="${esc(k)}" ${canDeploy ? '' : 'disabled'}
-                    data-tip="${esc(tr('svc.t.deploy', 'Choose the cluster and the settings, check, then deploy'))}">${Icons.svg('add', { size: 13 })} ${esc(tr('svc.deploy', 'Deploy...'))}</button>
+            <code>${c ? esc(`${c.chart} ${c.version}`) : k === 'registry' ? esc(tr('svc.registryCount', '{n} chart(s)', { n: charts.length })) : 'helm'}</code>
+            ${(() => {
+              const off = !canDeploy || (k === 'registry' && !charts.length);
+              const tip = k === 'registry' && !charts.length
+                ? tr('svc.t.noRegistryChart', 'No chart published in a registry attached to this cluster: publish a package from the Artefacts tab.')
+                : tr('svc.t.deploy', 'Choose the cluster and the settings, check, then deploy');
+              return `<span class="tip" data-tip="${esc(tip)}"><button type="button" class="btn btn-sm btn-primary" data-svc-deploy="${esc(k)}" ${off ? 'disabled' : ''}
+                    data-tip="${esc(tip)}" title="${esc(tip)}" aria-label="${esc(tip)}">${Icons.svg('add', { size: 13 })} ${esc(tr('svc.deploy', 'Deploy...'))}</button></span>`;
+            })()}
           </div></div>`;
       }).join('')}</div>`);
     const services = d.services || [];
@@ -159,6 +177,12 @@ const CapiServices = (() => {
           <option value="pool" ${p.ipam === 'pool' ? 'selected' : ''}>${esc(tr('svc.ipam.pool', 'Harvester IP pool'))}</option></select>`,
         tr('svc.t.ipam', 'The load balancer of the created cluster takes this address from the network DHCP or from a Harvester IP pool.')));
     }
+    if (key === 'registry') {
+      const charts = (lastData && lastData.registry_charts) || [];
+      out.push(field(tr('svc.f.source', 'Published chart'), `<select data-x="source">${charts.map((x, i) => `<option value="${i}">${esc(
+        tr('svc.sourceOption', '{chart} {version} ({registry}, package {package})', { chart: x.chart, version: x.chart_version, registry: x.registry, package: `${x.package}-${x.version}` }))}</option>`).join('')}</select>`,
+        tr('svc.t.source', 'Charts published in the registries attached to this cluster. The values of the package come first, yours are laid over them.')));
+    }
     if (key === 'custom') {
       out.push(field(tr('svc.f.repo', 'Chart repository'), `<input data-x="repo" type="text" placeholder="https://charts.example.org" spellcheck="false">`,
         tr('svc.t.repo', 'Address of the Helm repository (https://, or oci:// for a registry).')));
@@ -172,7 +196,9 @@ const CapiServices = (() => {
     const c = (d.catalog || []).find(x => x.key === key);
     const clusters = d.clusters || [];
     const c0 = preset.cluster && clusters.includes(preset.cluster) ? preset.cluster : clusters[0];
-    const keys = (d.catalog || []).map(x => x.key).concat(['custom']);
+    const charts = d.registry_charts || [];
+    const keys = (d.catalog || []).map(x => x.key).concat(charts.length ? ['registry', 'custom'] : ['custom']);
+    const rc = key === 'registry' ? (charts[0] || {}) : null;
     return `
       <div class="tf-form svc-form">
         <p class="tf-desc" data-x="desc">${esc(CATALOG_TEXT[key] ? CATALOG_TEXT[key].desc() : '')}</p>
@@ -181,9 +207,9 @@ const CapiServices = (() => {
             tr('svc.t.service', 'What to install: a service of the catalog, or any Helm chart.'))}
           ${field(tr('svc.f.cluster', 'Target cluster'), `<select data-x="cluster">${clusters.map(x => `<option ${x === c0 ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>`,
             tr('svc.t.cluster', 'A cluster created by Cluster API on this Harvester (namespace/name).'))}
-          ${field(tr('svc.f.name', 'Name'), `<input data-x="name" type="text" value="${esc(key === 'custom' ? '' : key)}" autocomplete="off" spellcheck="false">`,
+          ${field(tr('svc.f.name', 'Name'), `<input data-x="name" type="text" value="${esc(rc ? rc.chart || '' : key === 'custom' ? '' : key)}" autocomplete="off" spellcheck="false">`,
             tr('svc.t.name', 'Name of the service and of its Helm release. Lower case letters, digits and dashes.'))}
-          ${field(tr('svc.f.namespace', 'Namespace in the cluster'), `<input data-x="namespace" type="text" value="${esc(c ? c.namespace : 'default')}" spellcheck="false">`,
+          ${field(tr('svc.f.namespace', 'Namespace in the cluster'), `<input data-x="namespace" type="text" value="${esc(c ? c.namespace : rc ? rc.chart || 'default' : 'default')}" spellcheck="false">`,
             tr('svc.t.namespace', 'Where the chart is installed in the created cluster; created if needed.'))}
         </div></fieldset>
         <fieldset class="tf-block"><legend>${esc(tr('svc.sec.settings', 'Settings'))}</legend>
@@ -191,7 +217,7 @@ const CapiServices = (() => {
         <details class="tf-block capi-advanced" ${key === 'custom' ? 'open' : ''}>
           <summary class="tip" data-tip="${esc(tr('svc.t.advanced', 'Chart version and values'))}">${esc(tr('capi.new.sec.advanced', 'Advanced options'))}</summary>
           <div class="tf-args">
-            ${field(tr('svc.f.version', 'Chart version'), `<input data-x="version" type="text" value="${esc(c ? c.version : '')}" spellcheck="false">`,
+            ${field(tr('svc.f.version', 'Chart version'), `<input data-x="version" type="text" value="${esc(c ? c.version : rc ? rc.chart_version || '' : '')}" spellcheck="false"${rc ? ' readonly' : ''}>`,
               tr('svc.t.version', 'The tested version is proposed. Empty: the latest, which can change without notice.'))}
             ${field(tr('svc.f.values', 'Values (YAML)'), `<textarea data-x="values" rows="8" class="svc-values" spellcheck="false">${esc(c ? c.values : '')}</textarea>`,
               tr('svc.t.values', 'Chart values. __UPSTREAM__, __HOSTS__ and __IPAM__ take the settings above; {{ .Cluster.metadata.name }} becomes the cluster name.'))}
@@ -219,6 +245,14 @@ const CapiServices = (() => {
     if (body.service === 'custom') {
       body.repo = q('repo').value.trim();
       body.chart = q('chart').value.trim();
+    }
+    if (body.service === 'registry') {
+      // le serveur tire dépôt, chart et version du paquet publié
+      const x = ((lastData && lastData.registry_charts) || [])[Number(q('source').value)] || {};
+      body.source = { registry: x.registry, package: x.package, version: x.version, item: x.item };
+      delete body.service;
+      delete body.version;
+      if (!q('values').dataset.touched) delete body.values;
     }
     return body;
   }
@@ -254,6 +288,13 @@ const CapiServices = (() => {
         q('name').value = q('name').value.toLowerCase().replace(/[^a-z0-9-]/g, '-');
       });
       q('values').addEventListener('input', () => { q('values').dataset.touched = '1'; });
+      if (q('source')) {
+        q('source').addEventListener('change', () => {
+          const x = ((lastData && lastData.registry_charts) || [])[Number(q('source').value)] || {};
+          if (!q('name').dataset.touched) q('name').value = x.chart || '';
+          q('version').value = x.chart_version || '';
+        });
+      }
       q('service').addEventListener('change', () => {
         // Un autre service : le formulaire repart de ses valeurs à lui, en
         // gardant le cluster choisi.

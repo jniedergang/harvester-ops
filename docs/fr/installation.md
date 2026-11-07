@@ -127,6 +127,31 @@ servis par un miroir local hors ligne, sous les deux noms de registre :
 OpenTofu ne les télécharge jamais. L'onglet Installation de Terraform montre
 sa version et son signataire.
 
+Depuis la 2.6.0, la livraison porte les images du **registre d'amorçage**
+dans `bundles/registry` : CNCF Distribution 3.1 dans l'image de SUSE
+(`registry.suse.com/suse/registry:3.1`) et `registry.suse.com/bci/bci-busybox:16.0`
+(l'image de la sonde depuis le réseau des VMs de la 2.6.1, inemployée par
+la 2.6.0), toutes deux épinglées par empreinte dans `scripts/registry-bundle.json`.
+`package.sh` les construit par `harvester-artefacts pack`, qui contrôle
+chaque manifeste et chaque couche contre ces empreintes, puis écrit
+`registry-images.tar` (l'archive que lit `ctr images import`),
+`registry-images.json` (les noms épinglés) et leurs `SHA256SUMS`.
+L'installeur vérifie `SHA256SUMS` et pose les trois fichiers dans
+`/var/lib/harvester-ops/registry-bundle` ; une somme fausse les laisse de
+côté, avec un avertissement. La console revérifie les sommes avant chaque
+déploiement (`registry-images-missing` sinon), et `harvester-registry
+deploy` importe l'archive sur les nœuds du cluster Harvester. Rien n'est
+tiré d'Internet. Voir [artefacts.md](artefacts.md).
+
+L'image de la console porte aussi `openssl` (CA et certificat du registre
+d'amorçage) et `apache2-utils` (`htpasswd`, pour les entrées bcrypt de ses
+comptes). Deux scripts rejoignent les autres dans `/usr/local/bin` :
+`harvester-artefacts` (paquets) et `harvester-registry` (registres).
+`harvester-artefacts pack`, `sign`, `verify` et `inspect` tournent aussi
+sur toute machine connectée qui a Python 3 et, pour les signatures,
+`ssh-keygen` 8.2 ou plus : y copier `bin/harvester-artefacts.py` et
+`bin/lib/`.
+
 ### 3. Fournir les kubeconfigs et clés SSH
 
 Pour chaque cluster à gérer :
@@ -372,6 +397,19 @@ une archive signée préparée est donc le seul chemin de retour. Deux limites :
 avant 2.0.0, lire d'abord la note 2.0.0 « Rolling back to 1.101.x » du
 CHANGELOG ; avant 2.0.2, la console ne tourne pas sous Docker, donc sur un
 hôte Docker l'agent remet la version en cours.
+
+**Revenir de la 2.6.0 à la 2.5.0.** La 2.5.0 ne connaît pas les registres.
+Elle liste comme **invalides** un plan enregistré avec une phase Registre
+active ou des `registries` sur une entrée de cluster (« coming in 2.6+: set
+enabled: false », « unknown key »), et un modèle de cluster avec
+`spec.registries`. Rien ne plante, mais ces plans et modèles ne se lancent
+plus tant qu'ils ne sont pas corrigés. Avant de revenir, désactivez la
+phase Registre et retirez les clés `registries` (ou gardez une copie de
+ces plans pour les remettre après une nouvelle mise à jour). Les
+répertoires `artefacts.d`, `artefacts` et `registries.d` sont ignorés par
+la 2.5.0 ; un registre d'amorçage continue de tourner sur son cluster,
+sans plus être montré (le supprimer d'abord depuis la 2.6.0 s'il n'est pas
+voulu).
 
 **Confiance.** L'agent n'installe qu'une archive signée par une clé de
 `/opt/harvester-ops/update-signers` (livré avec la version installée), ou de

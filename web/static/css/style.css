@@ -4548,7 +4548,8 @@ body.no-tooltips .tip-layer { display: none; }
 /* Les formulaires kube-ovn sont réservés aux administrateurs : ne pas les
    proposer aux autres (le serveur refuse de toute façon). */
 body.roles-active.role-viewer .needs-admin,
-body.roles-active.role-operator .needs-admin { display: none !important; }
+body.roles-active.role-operator .needs-admin,
+body.roles-active.role-viewer .needs-operator { display: none !important; }
 
 /* v1.50.0 : page de connexion (compte local ou Rancher) */
 body.login-page {
@@ -6000,3 +6001,39 @@ html[data-mode="dark"] .tbl-scroll { --tbl-shade: rgba(0, 0, 0, 0.42); }
 .capi-var-wrap { display: flex; gap: 6px; align-items: center; }
 .capi-var-wrap .capi-var { flex: 1; min-width: 0; }
 .bmpl-capi-provider { font-size: 12px; }
+
+/* 2.6.0 : paquets d'artefacts (onglet Artefacts de Cluster API) */
+.art-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .art-layout { grid-template-columns: 1fr; } }
+.art-row { cursor: pointer; }
+.art-row.selected td { background: var(--selection-bg); }
+.art-detail { padding: 12px; }
+.art-detail h4 { margin: 12px 0 4px; }
+.art-items, .art-images { margin: 0; padding-left: 18px; }
+.art-images code { word-break: break-all; }
+.art-staged { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+.art-warning { display: flex; gap: 8px; align-items: flex-start; }
+.art-warning p { margin: 0 0 6px; }
+
+/* 2.6.0 : registres d'un cluster enfant (fenêtre de création, modèles) */
+.capi-reg-list { display: flex; flex-direction: column; gap: 6px; margin: 6px 0 10px; }
+.capi-reg-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg-card, transparent); }
+.capi-reg-name { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.capi-reg-mirrors { display: flex; flex-wrap: wrap; gap: 8px; }
+.capi-reg-mirror { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; }
+.capi-reg-row .capi-var { flex: 1 1 200px; }
+.capi-reg-note { color: var(--warning, var(--accent)); }
+.capi-reg-note[hidden] { display: none; }
+
+/* 2.6.0 : registres (Cluster API > Registres) */
+.reg-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0 0 10px; }
+.reg-facts dt { color: var(--text-dim); }
+.reg-facts dd { margin: 0; overflow-wrap: anywhere; }
+.reg-actions { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.reg-modal .modal { width: min(760px, 96vw); }
+.reg-modal textarea { width: 100%; font-family: var(--font-mono, monospace); font-size: 12px; }
+.reg-row { cursor: pointer; }
+.reg-row.selected { background: var(--bg-hover, rgba(127, 127, 127, .12)); }
+.art-todo { margin: 6px 0; padding-left: 18px; }
+.art-todo li { overflow-wrap: anywhere; }

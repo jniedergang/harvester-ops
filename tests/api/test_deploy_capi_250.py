@@ -226,7 +226,9 @@ def test_chain_terraform_capi_then_clusters(capi):
     assert cap["status"] == "done" and cap["installed"] is True and cap["actions"] == [inst[2].id]
     assert cap["providers"] == ["bootstrap/rke2 v0.25.2", "controlPlane/rke2 v0.25.2",
                                 "infrastructure/harvester v0.10.1", "addon/helm v0.6.4"]
-    assert inst[1] == ["--kubeconfig", w["kc"], "--cluster", "harvlab", "--components", str(BUNDLE),
+    # 2.6.0 : répertoire d'état et nom du cluster Harvester (registres rattachés)
+    assert inst[1] == ["--kubeconfig", w["kc"], f"--state-dir={wapp._bm_profiles_state()}", "--harvester-name=harvlab",
+                       "--cluster", "harvlab", "--components", str(BUNDLE),
                        "--timeout", "600"]                                  # pas de nœuds : pas d'images
     [create] = fake.subs("create")
     a = create[1]
@@ -590,7 +592,8 @@ def test_plan_put_returns_the_warnings_of_a_240_plan(capi):
     assert r.status_code == 201
     assert r.get_json()["warnings"] == ["phases.capi.providers: unknown key, ignored (phase disabled)"]
     assert "warnings" not in c.get("/api/baremetal/plans/old").get_json()
-    assert c.get("/api/baremetal/plans").get_json()["available"] == ["readiness", "terraform", "capi", "clusters"]
+    assert c.get("/api/baremetal/plans").get_json()["available"] == ["readiness", "terraform", "registry", "capi",
+                                                                      "clusters"]
 
 
 def test_bundles_route_lists_the_active_providers(capi, monkeypatch, tmp_path):
@@ -626,7 +629,8 @@ def test_capi_launch_outside_any_request(capi, monkeypatch):
     run, err = got["out"]
     assert err is None and run.cluster_user == "bob" and run.action == "capi-cluster-delete:a/a"
     trn.wait(run.id)
-    assert capi["capi"].subs("delete")[0][1] == ["--kubeconfig", capi["kc"], "--name", "a/a"]
+    assert capi["capi"].subs("delete")[0][1] == ["--kubeconfig", capi["kc"], f"--state-dir={wapp._bm_profiles_state()}",
+                                                 "--harvester-name=harvlab", "--name", "a/a"]
 
 
 def test_capi_launch_without_the_tool(capi, monkeypatch):

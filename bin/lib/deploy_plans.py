@@ -4,8 +4,10 @@ Un plan de déploiement est nommé et réutilisable. Il s'applique à un
 cluster Harvester déclaré, ou s'enchaîne après une installation bare-metal
 (un profil le désigne par son champ `plan`). Il active des phases :
 disponibilité et contenu Terraform en 2.4.0 ; pile Cluster API et clusters
-enfants en 2.5.0 ; registre et artefacts existent déjà dans le format, mais
-seulement désactivés (« coming in 2.6+ »), pour que le format ne change pas.
+enfants en 2.5.0 ; registres et publication des paquets en 2.6.0 (phase
+Registre, entre Terraform et Cluster API) ; artefacts existe déjà dans le
+format, seulement désactivée (« coming in 2.7 »), pour que le format ne
+change pas.
 
 Un modèle de déclaration porte les ressources d'une déclaration Terraform
 (format de web/tf_store.py), chaînes à variables `{{nom}}`. La phase
@@ -61,8 +63,8 @@ TEMPLATE_DIR = "tf-templates.d"
 # l'entrée du plan et de la règle du namespace (décision 164)
 CAPI_TEMPLATE_DIR = "capi-templates.d"
 CAPI_TEMPLATE_FORBIDDEN = ("name", "namespace", "target_namespace")
-PHASES = ("readiness", "terraform", "capi", "clusters", "registry", "artefacts")
-AVAILABLE = ("readiness", "terraform", "capi", "clusters")
+PHASES = ("readiness", "terraform", "registry", "capi", "clusters", "artefacts")
+AVAILABLE = ("readiness", "terraform", "registry", "capi", "clusters")
 BUILTIN_VARS = ("cluster", "vip")
 MAX_TEMPLATES = 32
 TIMEOUT_MIN, TIMEOUT_MAX, TIMEOUT_DEFAULT = 1, 180, 20
@@ -74,7 +76,15 @@ MAX_CLUSTERS = 16
 PATTERN_VAR = "n"
 MAX_DESCRIPTION = 500
 MAX_DECL_NAME = 63
-COMING = "coming in 2.6+"
+COMING = "coming in 2.7"
+# 2.6.0 : phase Registre (registres d'amorçage posés ou relus, registres du
+# client vérifiés, paquets publiés) : (min, max, défaut) en minutes
+REGISTRY_TIMEOUT = (1, 60, 10)
+PUBLISH_TIMEOUT = (5, 600, 60)
+REGISTRY_MODES = ("bootstrap", "external")
+REGISTRY_SIZE = (5, 2048, 20)
+MAX_REGISTRIES = 8
+MAX_PUBLISH = 32
 
 # Noms de clés qui désignent un objet public ou le NOM d'un Secret, pas un
 # secret : la clé publique d'une ressource ssh_key, les clés d'une VM
@@ -346,6 +356,219 @@ def _check_capi_phase(ph, errors):
             "timeout_minutes": _check_timeout(ph, "phases.capi", CAPI_TIMEOUT, errors)}
 
 
+def _check_registry_phase(ph, errors, variables):
+    """Phase registry (2.6.0, tâche 11) : {enabled, timeout_minutes,
+    publish_timeout_minutes, registries: [{name, mode, address, size_gib,
+    storage_class, mirrors, dns_name}], publish: [{package, version,
+    registry}]}. Un registre `external` est déclaré et rattaché d'avance
+    (contrôlé au lancement) ; un `bootstrap` ne porte aucun identifiant
+    (générés par la console). Variables du plan admises dans l'adresse, la
+    classe, les miroirs et le nom DNS."""
+    import artefacts as _art
+    where = "phases.registry"
+    unknown = sorted(set(ph) - {"enabled", "timeout_minutes", "publish_timeout_minutes", "registries", "publish"})
+    errors.extend((f"{where}.{k}", "unknown key") for k in unknown)
+    timeout = _check_timeout(ph, where, REGISTRY_TIMEOUT, errors)
+    lo, hi, d = PUBLISH_TIMEOUT
+    pt = ph.get("publish_timeout_minutes", d)
+    if isinstance(pt, bool) or not isinstance(pt, int) or not lo <= pt <= hi:
+        errors.append((f"{where}.publish_timeout_minutes", f"an integer from {lo} to {hi}"))
+        pt = d
+    known = set(BUILTIN_VARS) | set(variables or [])
+
+    def text(v, w, check=None, required=True):
+        if v is None and not required:
+            return None
+        if not isinstance(v, str) or not v:
+            errors.append((w, "required"))
+            return None
+        bad = [n for n in _bmp.VAR_RE.findall(v) if n not in known]
+        if bad:
+            errors.append((w, f"undeclared variable {bad[0]}"))
+            return None
+        if check and not _bmp.VAR_RE.search(v) and not check(v):
+            errors.append((w, "invalid value"))
+            return None
+        return v
+    regs_in = ph.get("registries") or []
+    if not isinstance(regs_in, list) or len(regs_in) > MAX_REGISTRIES:
+        errors.append((f"{where}.registries", f"a list of {MAX_REGISTRIES} registries at most"))
+        regs_in = []
+    regs, names = [], []
+    for i, r in enumerate(regs_in):
+        w = f"{where}.registries[{i}]"
+        if not isinstance(r, dict):
+            errors.append((w, "not a mapping"))
+            continue
+        mode = r.get("mode")
+        allowed = {"name", "mode"} | ({"address", "size_gib", "storage_class", "mirrors", "dns_name"}
+                                      if mode == "bootstrap" else set())
+        errors.extend((f"{w}.{k}", "unknown key" if mode == "bootstrap" or k not in
+                       {"address", "size_gib", "storage_class", "mirrors", "dns_name"} else "only for a bootstrap registry")
+                      for k in sorted(set(r) - allowed))
+        name = r.get("name")
+        if not isinstance(name, str) or not _cc.REGISTRY_NAME_RE.match(name) or name == "bootstrap":
+            errors.append((f"{w}.name", "RFC 1123, 30 characters at most"))
+            continue
+        if name in names:
+            errors.append((f"{w}.name", f"{name} listed twice"))
+            continue
+        if mode not in REGISTRY_MODES:
+            errors.append((f"{w}.mode", "bootstrap or external"))
+            continue
+        names.append(name)
+        item = {"name": name, "mode": mode}
+        if mode == "bootstrap":
+            item["address"] = text(r.get("address"), f"{w}.address", _cc._is_ipv4)
+            item["storage_class"] = text(r.get("storage_class"), f"{w}.storage_class", _cc.K8S_NAME_RE.match)
+            lo, hi, d = REGISTRY_SIZE
+            size = r.get("size_gib", d)
+            if isinstance(size, bool) or not isinstance(size, int) or not lo <= size <= hi:
+                errors.append((f"{w}.size_gib", f"an integer from {lo} to {hi}"))
+                size = d
+            item["size_gib"] = size
+            mirrors = r.get("mirrors") or []
+            if not isinstance(mirrors, list):
+                errors.append((f"{w}.mirrors", "a list of registry hosts"))
+                mirrors = []
+            item["mirrors"] = [m for j, m in enumerate(mirrors)
+                               if text(m, f"{w}.mirrors[{j}]", _cc.REGISTRY_HOST_RE.match) is not None]
+            dns = text(r.get("dns_name"), f"{w}.dns_name", _cc.REGISTRY_HOST_RE.match, required=False)
+            if dns:
+                item["dns_name"] = dns
+        regs.append(item)
+    pubs_in = ph.get("publish") or []
+    if not isinstance(pubs_in, list) or len(pubs_in) > MAX_PUBLISH:
+        errors.append((f"{where}.publish", f"a list of {MAX_PUBLISH} publications at most"))
+        pubs_in = []
+    pubs, seen = [], set()
+    for i, p in enumerate(pubs_in):
+        w = f"{where}.publish[{i}]"
+        if not isinstance(p, dict) or set(p) - {"package", "version", "registry"}:
+            errors.append((w, "{package, version, registry}"))
+            continue
+        pkg, ver, reg = p.get("package"), str(p.get("version") or ""), p.get("registry")
+        if not isinstance(pkg, str) or not _art.NAME_RE.match(pkg):
+            errors.append((f"{w}.package", "a package name"))
+            continue
+        if not _art.VERSION_RE.match(ver):
+            errors.append((f"{w}.version", "x.y.z or YYYY.MM[.DD][-n]"))
+            continue
+        if not isinstance(reg, str) or not _cc.REGISTRY_NAME_RE.match(reg):
+            errors.append((f"{w}.registry", "a registry name"))
+            continue
+        if (pkg, ver, reg) in seen:
+            errors.append((w, f"{pkg} {ver} to {reg} listed twice"))
+            continue
+        seen.add((pkg, ver, reg))
+        pubs.append({"package": pkg, "version": ver, "registry": reg})
+    return {"enabled": ph.get("enabled", True) is not False, "timeout_minutes": timeout,
+            "publish_timeout_minutes": pt, "registries": regs, "publish": pubs}
+
+
+def plan_registries(plan):
+    """Registres de la phase Registre d'un plan, dans l'ordre ([] si absente)."""
+    return list(((plan.get("phases") or {}).get("registry") or {}).get("registries") or [])
+
+
+def render_plan_registries(plan, values):
+    """Registres de la phase Registre rendus avec les valeurs du lancement
+    (adresse, classe, miroirs, nom DNS), contrôlés une fois rendus ;
+    ProfileError (variable absente, valeur invalide)."""
+    out, errors = [], []
+    for r in plan_registries(plan):
+        w = f"registry[{r['name']}]"
+        item = dict(r)
+        for k in ("address", "storage_class", "dns_name"):
+            if isinstance(r.get(k), str):
+                missing = [n for n in _bmp.VAR_RE.findall(r[k]) if n not in (values or {})]
+                if missing:
+                    errors.append((f"{w}.{k}", f"missing variable {missing[0]}"))
+                    continue
+                item[k] = _bmp.VAR_RE.sub(lambda m: str(values[m.group(1)]), r[k])
+        if r.get("mirrors"):
+            try:
+                item["mirrors"] = render_registries([{"registry": "x", "mirrors": r["mirrors"]}], values,
+                                                    f"{w}.mirrors")[0].get("mirrors", [])
+            except ProfileError as e:
+                errors.extend(e.errors)
+                continue
+        if r["mode"] == "bootstrap":
+            if item.get("address") and not _cc._is_ipv4(item["address"]):
+                errors.append((f"{w}.address", f"{item['address'][:40]}: an IPv4 address"))
+            if item.get("storage_class") and not _cc.K8S_NAME_RE.match(item["storage_class"]):
+                errors.append((f"{w}.storage_class", "a storage class name"))
+            for m in item.get("mirrors") or []:
+                if not _cc.REGISTRY_HOST_RE.match(m):
+                    errors.append((f"{w}.mirrors", f"{m[:60]}: a registry host"))
+            if item.get("dns_name") and not _cc.REGISTRY_HOST_RE.match(item["dns_name"]):
+                errors.append((f"{w}.dns_name", "a host name"))
+        out.append(item)
+    if errors:
+        raise ProfileError(errors, "cannot render the registries")
+    return out
+
+
+def plan_publications(plan):
+    return list(((plan.get("phases") or {}).get("registry") or {}).get("publish") or [])
+
+
+def _plan_docs(state):
+    d = Path(state) / PLAN_DIR
+    try:
+        files = sorted(p for p in d.glob("*.yaml") if p.is_file())
+    except OSError:
+        return []
+    return [(p.stem, _read(p) or {}) for p in files]
+
+
+def _phase(doc, pid):
+    phases = doc.get("phases") if isinstance(doc.get("phases"), dict) else {}
+    ph = phases.get(pid)
+    return ph if isinstance(ph, dict) else {}
+
+
+def _entry_names(regs):
+    return {(e if isinstance(e, str) else (e or {}).get("registry")) for e in regs or []
+            if isinstance(e, (str, dict))}
+
+
+def registry_users(state, name):
+    """Plans et modèles de cluster enregistrés qui désignent ce registre
+    (phase Registre, publications, registres d'une entrée de cluster,
+    registres d'un modèle), activés ou non : `plan:<nom>`, `template:<nom>`."""
+    out = []
+    for stem, doc in _plan_docs(state):
+        reg = _phase(doc, "registry")
+        names = {r.get("name") for r in reg.get("registries") or [] if isinstance(r, dict)}
+        names |= {p.get("registry") for p in reg.get("publish") or [] if isinstance(p, dict)}
+        for it in _phase(doc, "clusters").get("items") or []:
+            if isinstance(it, dict):
+                names |= _entry_names(it.get("registries"))
+        if name in names:
+            out.append(f"plan:{stem}")
+    d = Path(state) / CAPI_TEMPLATE_DIR
+    try:
+        files = sorted(p for p in d.glob("*.yaml") if p.is_file())
+    except OSError:
+        files = []
+    for p in files:
+        spec = (_read(p) or {}).get("spec")
+        if isinstance(spec, dict) and name in _entry_names(spec.get("registries")):
+            out.append(f"template:{p.stem}")
+    return out
+
+
+def package_users(state, name, version):
+    """Plans enregistrés qui publient ce paquet (phase Registre)."""
+    out = []
+    for stem, doc in _plan_docs(state):
+        if any(isinstance(p, dict) and p.get("package") == name and str(p.get("version")) == str(version)
+               for p in _phase(doc, "registry").get("publish") or []):
+            out.append(stem)
+    return out
+
+
 def cluster_name_shape_ok(name):
     """Forme d'un nom de cluster enfant AVANT rendu : chaque variable
     remplacée par une lettre, le résultat suit capi_cluster.NAME_RE. Le nom
@@ -403,7 +626,7 @@ def _check_clusters_phase(ph, errors, variables):
         if not isinstance(entry, dict):
             errors.append((w, "not a mapping"))
             continue
-        unknown = sorted(set(entry) - {"template", "name", "depends_on"})
+        unknown = sorted(set(entry) - {"template", "name", "depends_on", "registries"})
         errors.extend((f"{w}.{k}", "unknown key") for k in unknown)
         tname, name = entry.get("template"), entry.get("name")
         if not isinstance(tname, str) or not NAME_RE.match(tname):
@@ -434,10 +657,24 @@ def _check_clusters_phase(ph, errors, variables):
                 errors.append((f"{w}.depends_on", f"{d} is not listed before this cluster"))
             elif d not in clean:
                 clean.append(d)
+        regs = entry.get("registries")
+        if regs not in (None, []):
+            # 2.6.0 : registres de cette entrée, à la place de ceux du modèle ;
+            # un registre du plan (phase Registre) se désigne par son nom
+            if not registries_shape_ok(regs):
+                errors.append((f"{w}.registries", "a list of registry names or {registry, mirrors, no_fallback}"))
+                regs = None
+            else:
+                undeclared = [v for v in sorted(_bmp.variables_in(regs)) if v not in known]
+                if undeclared:
+                    errors.append((f"{w}.registries", f"undeclared variable {undeclared[0]}"))
+                    regs = None
         seen.append(name)
         item = {"template": tname, "name": name}
         if clean:
             item["depends_on"] = clean
+        if regs:
+            item["registries"] = regs
         out.append(item)
     return {"enabled": ph.get("enabled", True) is not False, "timeout_minutes": timeout, "items": out}
 
@@ -482,16 +719,17 @@ def check_plan_warnings(doc, known_templates=None):
             if enabled:
                 errors.append((f"phases.{pid}", f"{COMING}: set enabled: false"))
                 continue
-            # format de 2.6+ non figé : gardé tel quel, jamais lu
+            # format de 2.7 non figé : gardé tel quel, jamais lu
             phases[pid] = dict(ph, enabled=False)
             continue
-        if pid in ("capi", "clusters") and not enabled:
+        if pid in ("capi", "clusters", "registry") and not enabled:
             # Plan écrit en 2.4.0 : la phase désactivée y gardait des clés
             # libres (format non figé alors). Acceptée, clés inconnues
             # ignorées et retirées au prochain enregistrement, avec un
             # avertissement ; activée, la règle stricte s'applique.
             sub = []
             phases[pid] = (_check_capi_phase(ph, sub) if pid == "capi"
+                           else _check_registry_phase(ph, sub, variables) if pid == "registry"
                            else _check_clusters_phase(ph, sub, variables))
             phases[pid]["enabled"] = False
             for where, why in sub:
@@ -502,6 +740,9 @@ def check_plan_warnings(doc, known_templates=None):
             continue
         if pid == "clusters":
             phases[pid] = _check_clusters_phase(ph, errors, variables)
+            continue
+        if pid == "registry":
+            phases[pid] = _check_registry_phase(ph, errors, variables)
             continue
         if pid == "readiness":
             unknown = sorted(set(ph) - {"enabled", "timeout_minutes"})
@@ -868,6 +1109,45 @@ def _capi_url_refusals(spec, base):
     return out
 
 
+def registries_shape_ok(v):
+    """Forme d'une liste de registres d'un modèle ou d'une entrée de plan
+    (2.6.0) : noms (variables admises) ou {registry, mirrors, no_fallback}."""
+    if not isinstance(v, list):
+        return False
+    for e in v:
+        if isinstance(e, str):
+            continue
+        if not isinstance(e, dict) or set(e) - _cc.REGISTRY_ENTRY_KEYS or not isinstance(e.get("registry"), str):
+            return False
+        if e.get("mirrors") is not None and not (isinstance(e["mirrors"], list)
+                                                 and all(isinstance(m, str) for m in e["mirrors"])):
+            return False
+        if e.get("no_fallback") not in (None, True, False):
+            return False
+    return True
+
+
+def render_registries(entries, values, where):
+    """Liste de registres rendue avec les valeurs du lancement, puis
+    normalisée (capi_cluster.normalize_registry_entries) ; ProfileError."""
+    def sub(v):
+        if isinstance(v, str):
+            missing = [n for n in _bmp.VAR_RE.findall(v) if n not in (values or {})]
+            if missing:
+                raise ProfileError([(where, f"missing variable {missing[0]}")], "missing variable")
+            return _bmp.VAR_RE.sub(lambda m: str(values[m.group(1)]), v)
+        if isinstance(v, list):
+            return [sub(x) for x in v]
+        if isinstance(v, dict):
+            return {k: sub(x) for k, x in v.items()}
+        return v
+    rendered = sub(entries)
+    try:
+        return _cc.normalize_registry_entries(rendered)
+    except ValueError as e:
+        raise ProfileError([(where, str(e))], "invalid registries") from None
+
+
 def check_capi_template(doc):
     """Modèle de cluster normalisé {description, variables, spec}, ou
     ProfileError. `spec` : la demande du formulaire de création (liste
@@ -895,6 +1175,11 @@ def check_capi_template(doc):
             errors.append((f"spec.{k}", "set by the plan, not by the template"))
         elif k not in _cc.KNOWN:
             errors.append((f"spec.{k}", "unknown key"))
+        elif k == "registries" and v not in (None, "", []):
+            if registries_shape_ok(v):
+                clean[k] = v
+            else:
+                errors.append((f"spec.{k}", "a list of registry names or {registry, mirrors, no_fallback}"))
         elif not (isinstance(v, (str, int, bool)) or v is None
                   or isinstance(v, list) and all(isinstance(x, str) for x in v)):
             errors.append((f"spec.{k}", "a string, a number, a boolean or a list of strings"))

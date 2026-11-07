@@ -404,6 +404,111 @@ The restricted identity needs the Harvester address. It is read from
 address, check those services on the cluster (`kubectl -n kube-system get
 svc rke2-traefik ingress-expose`).
 
+## Artefact packages and registries (2.6.0)
+
+### A child cluster does not pull from its registry
+
+Look on a node of the child cluster (control plane and worker):
+
+- `/etc/rancher/rke2/registries.yaml`: the mirrors and the registry
+  account written at creation (read account only).
+- `/var/lib/rancher/rke2/agent/etc/containerd/certs.d/<origin>/hosts.toml`:
+  one block per mirror, in order. A `server` line means the fallback to the
+  origin registry is on (the default).
+- `/var/lib/rancher/rke2/agent/containerd/containerd.log`: each pull names
+  the endpoint it tried and why it failed (certificate, 401, not found).
+
+Usual causes:
+
+- The registries were chosen after the cluster was created. They are read
+  when RKE2 starts and set at creation only: an existing cluster does not
+  change.
+- The registry does not serve images (usage charts only), or the origin is
+  not among the mirrors chosen for this cluster.
+- The nodes cannot reach the registry address (routing from the VM
+  network, firewall). The console checks the registry from itself only.
+- The image was never published, or under another name: images live at
+  `<registry>/<origin host>/<path>:<tag>`; list them with the read account
+  (`GET /v2/_catalog`).
+- `containerd.log` says `x509: certificate signed by unknown authority`
+  for a registry of the list: its CA file is missing on the node. The
+  console writes one CA file per registry under
+  `/etc/rancher/rke2/tls/harvester-ops/<registry>/ca.crt`. Check that the
+  CA of each registry was declared.
+
+### A child cluster VM stays in "Scheduling" (2.6.0)
+
+The PVC of its root disk stays `Pending` and the Longhorn event says
+`volume size should be larger than the backing image size`: the root disk
+is smaller than the virtual size of the image. The creation check now
+blocks it (`disk-smaller-than-image`) and gives the size to ask for. The
+published openSUSE Leap 15.6 cloud image announces 10 GiB.
+
+### Publish says "publish-tag-differs"
+
+A tag of the package already exists in the registry with another content.
+Nothing was written, for any image. Publish the content under a new tag (a
+new package version, or `as` in the description). A bootstrap registry has
+deletes disabled: its tags cannot be removed. In a client registry, remove
+the tag with the tools of that registry, on purpose.
+
+### The bootstrap registry is full
+
+2.6.0 has no garbage collection and no resize gesture, and what is
+published stays. The details of the registry show the volume use. Deploy a
+second registry with a larger volume, or, once nothing uses this one,
+delete it with its data (typed name) and deploy it again. In a plan,
+`registry-package-too-big` blocks packages that pass 90 % of the volume.
+
+### A bootstrap registry deployment failed and a new attempt says "registry-name-taken"
+
+A deployment that does not become ready in time leaves its objects and its
+volume on the cluster, and saves no declaration. The Registries tab shows
+it as a **Leftover** row. Run **Delete** on that row (or
+`harvester-registry delete NAME --cluster C`, with `--delete-data` to
+remove the volume too), fix the cause shown in the `ready` step, then
+deploy again. A deployment plan that posed it needs nothing of this: its
+resume takes the leftover over and deploys again.
+
+### The registry pod stays in "ErrImageNeverPull"
+
+The registry image is imported on the nodes listed in the console
+configuration at deployment. A node added to the cluster later does not
+have it, and the pod was scheduled there. Import the image on that node by
+hand, from the console host:
+
+```bash
+ssh rancher@<node> 'sudo /var/lib/rancher/rke2/bin/ctr --address /run/k3s/containerd/containerd.sock \
+  --namespace k8s.io images import -' < /var/lib/harvester-ops/registry-bundle/registry-images.tar
+```
+
+Add the node to the console configuration as well.
+
+### Import says an acknowledgement is required, or strict mode refuses
+
+- `acknowledge-required` (exit code 3 on the command line): the package is
+  unsigned or signed by an unknown key. Tick **I accept this package
+  knowingly**, or add the key to Settings > Artefacts, or pass
+  `--accept-unsigned` / `--accept-unknown-key`.
+- `strict-mode`: strict mode refuses anything but a trusted key. If it is
+  locked by `config.yaml` (`strict-locked` when you try to turn it off),
+  only an administrator of the host can change it.
+- `invalid-signature`, `sums-mismatch`: always refused. Build or download
+  the package again.
+- `archive-changed`: another upload replaced the archive after it was
+  checked. Check it again.
+- `package-untrusted-strict` at publication: strict mode was turned on
+  after the package was accepted by acknowledgement.
+
+### `harvester-artefacts remove` fails on a machine without PyYAML
+
+`remove` reads the saved plans (a package that a plan publishes cannot be
+removed), and plans need PyYAML. Without it, the step says "remove reads
+the saved plans; run it where the console is installed (PyYAML)" and the
+command exits with 1, removing nothing. Run it where the console is
+installed.
+`pack`, `sign`, `verify` and `inspect` stay on the Python standard library.
+
 ## Recovering from a half-done shutdown
 
 If the script was killed (Ctrl-C, lost SSH, ...) and some nodes are off while others are still up:

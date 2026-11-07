@@ -703,6 +703,10 @@
                   data-tip-i18n="capi.tab.clusters.tip" data-i18n-title="capi.tab.clusters.tip" title="The Kubernetes clusters created by Cluster API on the management cluster: create, scale, delete, kubeconfig"><span class="tab-icon" data-icon="node"></span> <span data-i18n="capi.tab.clusters">Clusters</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="services"
                   data-tip-i18n="capi.tab.services.tip" data-i18n-title="capi.tab.services.tip" title="Deploy services (Helm charts) on the clusters created by Cluster API"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="capi.tab.services">Services</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="registries"
+                  data-tip-i18n="capi.tab.registries.tip" data-i18n-title="capi.tab.registries.tip" title="Registries the child clusters pull their images and charts from: bootstrap registry on Harvester, registries of your organisation"><span class="tab-icon" data-icon="containers"></span> <span data-i18n="capi.tab.registries">Registries</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="artefacts"
+                  data-tip-i18n="capi.tab.artefacts.tip" data-i18n-title="capi.tab.artefacts.tip" title="Signed artefact packages (charts, images, manifests) imported into the console"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="capi.tab.artefacts">Artefacts</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="history"
                   data-tip-i18n="capi.tab.history.tip" data-i18n-title="capi.tab.history.tip" title="Cluster API actions, running and past, with their logs: clusters, services, installation"><span class="tab-icon" data-icon="activity"></span> <span data-i18n="capi.tab.history">History</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="installation"
@@ -762,6 +766,33 @@
             <div class="card-body" id="capi-services-body">
               <p class="form-hint" data-i18n="common.loading">Loading…</p>
             </div>
+          </div>
+        </div>
+
+        <div class="capi-tab-content" data-capi-tab="registries" role="tabpanel">
+          <div class="card">
+            <div class="card-header">
+              <h2><span data-icon="containers" data-icon-size="18"></span> <span data-i18n="reg.title">Registries</span></h2>
+              <div>
+                <button class="btn btn-sm btn-primary tip needs-admin" id="btn-registries-bootstrap" data-i18n-title="reg.t.bootstrap" data-tip-i18n="reg.t.bootstrap" title="Pose a registry on the Harvester cluster: parameters, checks, summary"><span data-icon="add" data-icon-size="14"></span> <span data-i18n="reg.bootstrap">Bootstrap registry</span></button>
+                <button class="btn btn-sm btn-secondary tip needs-admin" id="btn-registries-declare" data-i18n-title="reg.t.declare" data-tip-i18n="reg.t.declare" title="Declare an existing registry of your organisation"><span data-icon="add" data-icon-size="14"></span> <span data-i18n="reg.declareBtn">Declare a client registry</span></button>
+                <button class="btn btn-sm btn-secondary tip" id="btn-registries-refresh" data-i18n="overview.refresh" data-i18n-title="reg.t.refresh" data-tip-i18n="reg.t.refresh" title="Read the registries again">Refresh</button>
+              </div>
+            </div>
+            <div class="card-body" id="registries-body"></div>
+          </div>
+        </div>
+
+        <div class="capi-tab-content" data-capi-tab="artefacts" role="tabpanel">
+          <div class="card">
+            <div class="card-header">
+              <h2><span data-icon="bundle" data-icon-size="18"></span> <span data-i18n="art.title">Artefact packages</span></h2>
+              <div>
+                <button class="btn btn-sm btn-primary tip needs-admin" id="btn-artefacts-import" data-i18n-title="art.t.import" data-tip-i18n="art.t.import" title="Upload a package archive and its signature"><span data-icon="upload" data-icon-size="14"></span> <span data-i18n="art.import">Import</span></button>
+                <button class="btn btn-sm btn-secondary tip" id="btn-artefacts-refresh" data-i18n="overview.refresh" data-i18n-title="art.t.refresh" data-tip-i18n="art.t.refresh" title="Read the packages again">Refresh</button>
+              </div>
+            </div>
+            <div class="card-body" id="artefacts-body"></div>
           </div>
         </div>
 
@@ -1021,6 +1052,7 @@
       <button class="settings-tab"        data-stab="connection" data-i18n="settings.tab.connection">Connection</button>
       <button class="settings-tab needs-admin" data-stab="rancher" data-i18n="settings.tab.rancher">Rancher sign-in</button>
       <button class="settings-tab needs-admin" data-stab="accounts" data-i18n="settings.tab.accounts">Console accounts</button>
+      <button class="settings-tab needs-admin" data-stab="artefacts" data-i18n="settings.tab.artefacts">Artefacts</button>
       <button class="settings-tab"        data-stab="support"    data-i18n="settings.tab.support">Support</button>
       <button class="settings-tab"        data-stab="about"      data-i18n="settings.tab.about">About</button>
     </div>
@@ -1037,6 +1069,12 @@
       </div>
 
       <!-- v1.57.0 : les comptes de la console (administrateurs) -->
+      <div class="settings-tab-content" id="stab-artefacts">
+        <h4 data-i18n="art.settingsTitle">Artefact packages</h4>
+        <p class="form-hint" data-i18n="art.settingsIntro">Which packages the console accepts: strict mode and the keys of your organisation.</p>
+        <div id="artefacts-settings-body"><p class="form-hint">…</p></div>
+      </div>
+
       <div class="settings-tab-content" id="stab-accounts">
         <h4 data-i18n="accounts.title">Console accounts</h4>
         <p class="form-hint" data-i18n="accounts.intro">Who can sign in to this console, and with which role. Accounts from the installer (htpasswd) are managed on the server.</p>
@@ -1383,6 +1421,8 @@
 <script src="/static/js/netmap.js"></script>
 <script src="/static/js/vpc.js"></script>
 <script src="/static/js/capi-services.js"></script>
+<script src="/static/js/artefacts.js"></script>
+<script src="/static/js/registries.js"></script>
 <script src="/static/js/storage-map.js"></script>
 <script src="/static/js/cluster-map.js"></script>
 <script src="/static/js/resource-views.js"></script>
