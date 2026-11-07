@@ -163,3 +163,35 @@ def test_cmd_delete_resumes_on_a_leftover_alone(cli, monkeypatch):
     k2.hc = None
     monkeypatch.setattr(cli, "kube_from", lambda args: (k2, "kc", None))
     assert cli.main(["delete", "--kubeconfig", "kc", "--name", "web/web"]) == cli.EXIT_FAIL    # rien à retirer
+
+
+class SharedNs(Kube):
+    """Le namespace `web` (créé par la console) porte un autre cluster."""
+
+    def __init__(self, cli):
+        super().__init__(cli, stuck=False)
+        self.listed = []
+
+    def get(self, kind, ns, name):
+        if kind == "namespaces":
+            return {"metadata": {"name": name, "labels": {self.cli.cs.MANAGED: "true"}}}
+        return super().get(kind, ns, name)
+
+    def list(self, kind, ns=None, selector=None):
+        self.listed.append(kind)
+        if kind == self.cli.cs.K_CLUSTER and ns == "web":
+            return [{"metadata": {"name": "autre", "namespace": "web"}}]
+        if kind in self.cli.cc.GENERATED_KINDS:
+            return [{"metadata": {"name": "web-template", "namespace": "web"}}]
+        return []
+
+
+def test_the_leftover_path_keeps_a_namespace_shared_with_other_clusters(cli, monkeypatch):
+    """Revue 4-8 m4 : après un HarvesterCluster resté, d'autres clusters du
+    namespace gardent le namespace et les objets partagés."""
+    k = SharedNs(cli)
+    rc, seen, _ = run_remove(cli, k, monkeypatch)
+    assert rc == cli.EXIT_OK and k.hc is None
+    assert ("namespaces", None, "web") not in k.deleted
+    assert [d for d in k.deleted if d[0] in cli.cc.GENERATED_KINDS] == []
+    assert k.deleted[0] == (cc.K_HARVESTERCLUSTER, "web", "web")
