@@ -326,8 +326,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   accounts (`test_deploy_plans_260.py`, `test_registry_routes_260.py`),
   end time of the short actions (`test_artefacts_routes_260.py`); the
   bootstrap registry CLI tests no longer dial the real bench address.
-- API suite 11617 passed, 5 skipped; e2e 1251 passed (before the real
-  bench runs).
+- API suite 11635 passed, 5 skipped; e2e 1251 passed, after the bench
+  fixes.
 
 ## [2.5.0] - 2026-11-05 - Deployment plans: Cluster API and child clusters
 
