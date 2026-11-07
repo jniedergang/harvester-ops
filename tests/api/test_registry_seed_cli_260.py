@@ -78,7 +78,12 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "kube_from", lambda args, need_entry=False: (kube, {"nodes": [{"ip": "10.0.0.1"}]}))
     ready = {"why": None}
     monkeypatch.setattr(cli, "wait_ready", lambda decl, pull, timeout: ready["why"])
-    return {"state": state, "work": work, "kube": kube, "calls": calls, "imports": imports, "ready": ready}
+    # jamais de vraie connexion : l'adresse des essais (172.16.2.76) répond
+    # quand le banc tourne, et la suite échouait alors
+    answers = {"up": False}
+    monkeypatch.setattr(cli, "_answers", lambda address, *a, **kw: answers["up"])
+    return {"state": state, "work": work, "kube": kube, "calls": calls, "imports": imports, "ready": ready,
+            "answers": answers}
 
 
 def deploy(capsys, *extra):
@@ -131,6 +136,13 @@ def test_a_blocking_finding_writes_nothing(world, capsys):
     code, out, err = deploy(capsys, "--size-gib", "2000")
     assert code == 2 and [f["code"] for f in json.loads(out)["findings"]] == ["registry-room-short"]
     assert world["kube"].applied == [] and world["calls"] == [] and world["imports"] == []
+
+
+def test_an_address_that_already_answers_blocks_before_any_write(world, capsys):
+    world["answers"]["up"] = True
+    code, out, err = deploy(capsys)
+    assert code == 2 and "registry-address-answers" in [f["code"] for f in json.loads(out)["findings"]]
+    assert world["kube"].applied == [] and world["imports"] == []
 
 
 def test_dry_run_only_checks(world, capsys):

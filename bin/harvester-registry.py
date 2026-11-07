@@ -239,7 +239,7 @@ def _answers(address, port=443, timeout=2.0):
         return False
 
 
-def deploy_facts(kube, spec, answers=_answers):
+def deploy_facts(kube, spec, answers=None):
     """Ce que registry_seed.check lit du cluster et de l'installation."""
     import longhorn_room as lr
     pools = [cc.pool_info(p) for p in kube.list("ippools.loadbalancer.harvesterhci.io")]
@@ -258,7 +258,7 @@ def deploy_facts(kube, spec, answers=_answers):
         longhorn = None
     taken = rg.load(state(), spec["name"]) is not None or \
         kube.get("deployments", rs.NAMESPACE, spec["name"]) is not None
-    return {"pools": pools, "vip": kube.server_host(), "address_answers": answers(spec["address"]),
+    return {"pools": pools, "vip": kube.server_host(), "address_answers": (answers or _answers)(spec["address"]),
             "longhorn": longhorn, "class_replicas": replicas, "bundle": rs.bundle(state()) is not None,
             "tools_missing": rs.tools_missing(), "name_taken": taken}
 
