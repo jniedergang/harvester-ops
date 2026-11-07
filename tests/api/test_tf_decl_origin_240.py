@@ -75,12 +75,9 @@ def _wait(run_id, timeout=10):
         if run is not None and run.status in ("done", "error"):
             # le lanceur libère la déclaration après la fin de l'action (son
             # finally) : attendre comme la production avant de relancer
-            while time.time() < end:
-                with wapp.TF_DECL_RUNNING_LOCK:
-                    if not wapp.TF_DECL_RUNNING:
-                        return run
-                time.sleep(0.02)
-            raise AssertionError("declaration still running")
+            decl_id = (run.result or {}).get("declaration_id")
+            assert wapp._tf_decl_wait_idle(decl_id, timeout=max(end - time.time(), 1)), "declaration still running"
+            return run
         time.sleep(0.02)
     raise AssertionError("action did not end")
 
