@@ -176,7 +176,7 @@ def test_cli_delete_refuses_a_registry_in_use(regcli, monkeypatch, tmp_path, cap
                                    "size_gib": 8, "storage_class": "s"})
     monkeypatch.setattr(regcli, "kube_from", lambda a, need_entry=False: (kube, None))
     rc = regcli.cmd_delete(argparse.Namespace(name="amorcage", cluster="harvlab2", kubeconfig="/k",
-                                              delete_data=False))
+                                              delete_data=False, ignore_plan=None))
     assert rc == code
     assert (kube.deleted == []) is (code == 2)
     if code:
