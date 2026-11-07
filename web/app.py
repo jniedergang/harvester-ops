@@ -21715,6 +21715,45 @@ import capi_services as _sv  # noqa: E402
 _CAPI_SERVICES_CACHE = {}      # (cluster, identité) -> (horodatage, réponse)
 
 
+CHILD_ADMIN_REQUIRED = "child-admin-required"
+
+
+def _child_admin_allowed(kc, namespace, child):
+    """2.7.0 (point 205, Contraintes : rôles) : qui lit le Secret
+    `<cluster>-kubeconfig` du namespace du cluster enfant en est
+    administrateur. (True | False | None, raison) par `kubectl auth can-i`
+    avec le kubeconfig de la personne (SelfSubjectAccessReview, usurpation
+    et Rancher compris) ; None : la question n'a pas eu de réponse, jamais
+    prise pour un oui. Seul endroit qui pose la question : gestes
+    d'artefacts, jeton, phase Artefacts d'un plan."""
+    if not (isinstance(namespace, str) and _K8S_NAME_RE.match(namespace)
+            and isinstance(child, str) and _K8S_NAME_RE.match(child)):
+        return False, "invalid name"
+    try:
+        r = _kubectl_run(["kubectl", "--kubeconfig", kc, "auth", "can-i", "get",
+                          f"secrets/{child}-kubeconfig", "-n", namespace],
+                         capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired as e:
+        return None, _safe_proc_error(e)
+    out = (r.stdout or "").strip().lower()
+    if out.startswith("yes"):
+        return True, ""
+    if out.startswith("no"):
+        return False, ""
+    return None, ((r.stderr or "").strip().replace(kc, "<kubeconfig>") or f"exit code {r.returncode}")[:300]
+
+
+def _child_admin_refusal(kc, namespace, child):
+    """Réponse de refus (403 / 502), ou None si la personne a le droit."""
+    ok, why = _child_admin_allowed(kc, namespace, child)
+    if ok:
+        return None
+    if ok is None:
+        return jsonify({"error": f"the right on {namespace}/{child} could not be checked: {why}"}), 502
+    return jsonify({"error": f"reading the Secret {child}-kubeconfig in {namespace} is needed (administrator "
+                             "of the child cluster)", "code": CHILD_ADMIN_REQUIRED}), 403
+
+
 def _capi_service_body():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
