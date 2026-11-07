@@ -158,6 +158,16 @@ def _split(m):
     return parts[0] if parts else "", "/".join(parts[1:])
 
 
+SUMS_MAX = 1 << 22               # 4 Mio, des dizaines de milliers de fichiers
+
+
+def _sums_size_ok(m):
+    """Revue 2.6.0 (M6) : une liste tronquée faisait échouer l'import plus
+    loin, sans dire pourquoi ; au-delà de SUMS_MAX, refus nommé."""
+    if m.size > SUMS_MAX:
+        raise ArtefactError("sums-too-large", f"{SUMS} is larger than 4 MiB ({m.size} bytes)")
+
+
 def inspect_package(path):
     """Contrôle d'un paquet sans l'extraire : nom de fichier, membres sûrs
     (mêmes règles que la mise à jour), une seule racine `<nom>-<version>`
@@ -189,7 +199,8 @@ def inspect_package(path):
                     first = rest
                     if rest != SUMS:
                         raise ArtefactError("sums-not-first", f"{SUMS} must be the first file of the package")
-                    sums = parse_sums(tf.extractfile(m).read(1 << 22).decode("utf-8", "replace"))
+                    _sums_size_ok(m)
+                    sums = parse_sums(tf.extractfile(m).read(SUMS_MAX).decode("utf-8", "replace"))
                 elif rest == INDEX:
                     if m.size > 1 << 22:
                         raise ArtefactError("index-invalid", f"{INDEX} is too large")
@@ -247,7 +258,8 @@ def extract_verified(path, dest, on_bytes=None):
                 if sums is None:
                     if rest != SUMS:
                         raise ArtefactError("sums-not-first", f"{SUMS} must be the first file of the package")
-                    data = f.read(1 << 22)
+                    _sums_size_ok(m)
+                    data = f.read(SUMS_MAX)
                     sums = parse_sums(data.decode("utf-8", "replace"))
                     out = dest / SUMS
                     out.write_bytes(data)

@@ -895,9 +895,10 @@ def _check_clusters_phase(ph, errors, variables):
             elif d not in clean:
                 clean.append(d)
         regs = entry.get("registries")
-        if regs not in (None, []):
+        if regs is not None:
             # 2.6.0 : registres de cette entrée, à la place de ceux du modèle ;
-            # un registre du plan (phase Registre) se désigne par son nom
+            # un registre du plan (phase Registre) se désigne par son nom.
+            # 2.7.0 (m-13) : `[]` explicite remplace aussi (aucun registre)
             if not registries_shape_ok(regs):
                 errors.append((f"{w}.registries", "a list of registry names or {registry, mirrors, no_fallback}"))
                 regs = None
@@ -910,7 +911,7 @@ def _check_clusters_phase(ph, errors, variables):
         item = {"template": tname, "name": name}
         if clean:
             item["depends_on"] = clean
-        if regs:
+        if regs is not None:
             item["registries"] = regs
         out.append(item)
     return {"enabled": ph.get("enabled", True) is not False, "timeout_minutes": timeout, "items": out}

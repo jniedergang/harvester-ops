@@ -147,7 +147,8 @@ def finding(code, level, **facts):
 def check(spec, facts):
     """Constats sur une demande : bloquants et avertissements. `facts` :
     clusters (["ns/nom"]), caaph (bool), services (["ns/nom-du-service"]),
-    no_lb (clusters encore sans kube-vip, qui le recevront)."""
+    no_lb (clusters encore sans kube-vip, qui le recevront), service_clusters
+    ({"ns/nom-du-service": ["ns/cluster" qui porte son étiquette]})."""
     out = []
     if not facts.get("caaph"):
         out.append(finding("caaph-missing", "block"))
@@ -161,7 +162,15 @@ def check(spec, facts):
     if spec["cluster"] in set(facts.get("no_lb") or []):
         out.append(finding("lb-added", "ok", cluster=spec["cluster"]))
     ns = spec["cluster"].split("/", 1)[0]
-    if f"{ns}/{spec['name']}" in set(facts.get("services") or []):
+    # 2.7.0 (m-15) : le HelmChartProxy se nomme comme le service dans le
+    # namespace ; un second cluster de ce namespace le reprendrait (ses
+    # identifiants de registre passeraient à l'autre, le Secret du premier
+    # resterait orphelin) : refusé
+    others = [c for c in (facts.get("service_clusters") or {}).get(f"{ns}/{spec['name']}") or []
+              if c != spec["cluster"]]
+    if others:
+        out.append(finding("service-name-taken", "block", name=spec["name"], cluster=others[0]))
+    elif f"{ns}/{spec['name']}" in set(facts.get("services") or []):
         out.append(finding("service-exists", "warn", name=spec["name"]))
     if not URL_RE.match(spec["repo"]):
         out.append(finding("invalid-repo", "block", repo=spec["repo"]))

@@ -282,7 +282,11 @@ class Registry:
                 finally:
                     e.close()
             except urllib.error.URLError as e:
-                raise RegistryError(f"{method} {self.host}: {e.reason}") from None
+                # 2.7.0 (revue 4-8, m-12) : le registre ne répond pas (nom,
+                # connexion, TLS), nommé pour l'appelant
+                raise RegistryError(f"{method} {self.host}: {e.reason}", code="registry-unreachable") from None
+            except (ConnectionError, TimeoutError) as e:
+                raise RegistryError(f"{method} {self.host}: {e}", code="registry-unreachable") from None
             except OSError as e:
                 raise RegistryError(f"{method} {self.host}: {e}") from None
         raise RegistryError(f"{self.host}: authentication refused")

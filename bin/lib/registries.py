@@ -579,7 +579,13 @@ def check_child(entries, decls, cluster, attached, system_ready=(), vm_probe=Non
 
 def system_ready_registries(state, decls):
     """Registres dont un paquet publié porte les images système de RKE2
-    (`<origine>/rancher/rke2-runtime`), relevé dans les paquets rangés."""
+    (`<origine>/rancher/rke2-runtime`), relevé dans les paquets rangés.
+
+    Heuristique (revue finale 2.6.0, m-12) : une seule image cherchée, sans
+    contrôle de la version de RKE2 ni des autres images système. Un registre
+    retenu ici peut donc encore manquer d'une image que les nœuds tirent ;
+    `no_fallback` permis sur cette base reste un pari éclairé, pas une
+    preuve."""
     import artefacts as art
     out = set()
     for n, d in decls.items():

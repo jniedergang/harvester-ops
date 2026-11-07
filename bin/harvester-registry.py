@@ -44,13 +44,13 @@ Voir docs/design/2026-11-05-artefacts-registre-260-plan.md (tâches 6 et 7).
 """
 
 import argparse
+import base64
 import json
 import os
 import secrets
 import shutil
 import socket
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -62,6 +62,7 @@ import deploy_plans as dp  # noqa: E402
 import registries as rg  # noqa: E402
 import registry_seed as rs  # noqa: E402
 import vm_probe  # noqa: E402
+import work_dir  # noqa: E402
 from kube import Kube, KubeError, cluster_config  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
@@ -462,7 +463,12 @@ def cmd_deploy(args):
     except (OSError, ValueError) as e:
         step("tls", "error", str(e))
         return EXIT_REFUSED
-    work = Path(tempfile.mkdtemp(prefix="hops-registry-", dir=os.environ.get("HARVESTER_OPS_WORK_DIR")))
+    try:
+        # 2.7.0 (m11) : espace de travail privé, jamais /tmp (clés de la CA)
+        work = work_dir.mkdtemp("hops-registry-")
+    except ValueError as e:
+        step("tls", "error", str(e))
+        return EXIT_REFUSED
     try:
         step("tls", "running", "client certificate" if client_tls else "CA and server certificate")
         tls = client_tls or rs.make_tls(work, args.address, args.dns_name, args.name)
@@ -516,6 +522,7 @@ def cmd_status(args):
         svc = kube.get("services", rs.NAMESPACE, args.name)
         wsvc = kube.get("services", rs.NAMESPACE, rs.write_service_name(args.name))
         present = {r: kube.get("secrets", rs.NAMESPACE, n) is not None for r, n in rg.secret_names(args.name).items()}
+        tls = kube.get("secrets", rs.NAMESPACE, f"{args.name}-tls")
         used = None
         vol = ((pvc or {}).get("spec") or {}).get("volumeName")
         if vol:
@@ -538,7 +545,14 @@ def cmd_status(args):
                 repos = len(json.loads(body).get("repositories") or [])
             except (op.RegistryError, ValueError):
                 repos = None
+    # seul le certificat public est lu : la clé du Secret ne sort jamais
+    crt = ((tls or {}).get("data") or {}).get("tls.crt")
+    try:
+        not_after = rs.cert_not_after(base64.b64decode(crt).decode()) if crt else None
+    except (ValueError, UnicodeDecodeError):
+        not_after = None
     out({"registry": args.name, "declared": d is not None, "present": dep is not None,
+         "cert_not_after": not_after, "findings": rs.cert_findings(args.name, not_after, time.time()),
          "origin": rs.origin_of(dep) if dep else {},
          "ready": bool(st.get("readyReplicas")), "image": containers[0].get("image") if containers else None,
          "address": ingress.get("ip") or (d or {}).get("address"),

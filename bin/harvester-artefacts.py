@@ -369,7 +369,11 @@ def fetch_chart(sources, c, dest):
                       if x.get("mediaType") in (ol.M_HELM_CHART, "application/tar+gzip")), None)
         if not layer:
             raise ValueError(f"chart {c['name']} {c['version']}: {repo} holds no Helm chart under this name")
-        reg.blob_to_file(rrepo, layer["digest"], dest, size=layer.get("size"))
+        try:
+            size = ol.descriptor_size(layer, f"chart {c['name']} {c['version']}")
+        except op.RegistryError as e:
+            raise ValueError(str(e)) from None
+        reg.blob_to_file(rrepo, layer["digest"], dest, size=size)
         return
     index_url = repo + "/index.yaml"
     if sources.basic(index_url) and not _allowed(index_url, sources.plain):
@@ -719,6 +723,9 @@ def plan_publication(pkg, decl, dst, images, charts, work):
     lay = ol.Layout(Path(pkg["path"]) / "images")
     for n in images:
         e = lay.find(n)
+        if e is None:
+            # revue 4-8 de la 2.6.0 (m-12) : un TypeError plus loin, avant
+            raise Refused([_finding("publish-image-missing", image=n)])
         repo, tag = ol.target_repo(n)
         todo.append({"kind": "image", "name": n, "layout": lay, "entry": e, "repo": repo, "tag": tag})
     clay = ol.Layout(Path(work) / "charts")
@@ -728,7 +735,14 @@ def plan_publication(pkg, decl, dst, images, charts, work):
         todo.append({"kind": "chart", "name": f"{meta['name']}:{meta['version']}", "layout": clay,
                      "entry": clay.find(f"{meta['name']}:{meta['version']}"), "repo": repo, "tag": tag})
     for t in todo:
-        have = dst.manifest_digest(t["repo"], t["tag"])
+        try:
+            have = dst.manifest_digest(t["repo"], t["tag"])
+        except op.RegistryError as e:
+            if e.code != "registry-unreachable":
+                raise
+            # rien n'est encore écrit : un refus lisible (code 2), pas un échec
+            raise Refused([_finding("registry-unreachable", registry=decl["name"],
+                                    endpoint=dst.host, error=str(e)[:200])]) from None
         t["state"] = "new" if have is None else "present" if have == t["entry"]["digest"] else "differs"
         if t["state"] == "differs":
             findings.append(_finding("publish-tag-differs", reference=f"{decl['name']}/{t['repo']}:{t['tag']}",
@@ -803,7 +817,12 @@ def cmd_publish(args):
         out({"findings": findings, "blocked": True})
         return EXIT_REFUSED
     endpoint = decl.get("push_endpoint") or decl["endpoint"]
-    work = Path(tempfile.mkdtemp(prefix="hops-publish-", dir=os.environ.get("HARVESTER_OPS_WORK_DIR")))
+    import work_dir                     # 2.7.0 (m11) : jamais /tmp
+    try:
+        work = work_dir.mkdtemp("hops-publish-")
+    except ValueError as e:
+        step("publish", "error", str(e))
+        return EXIT_REFUSED
     try:
         dst = op.Registry(endpoint, creds, ca_pem=decl.get("ca_pem"))
         step("check", "running", f"{args.name}-{args.version} to {args.registry} ({endpoint})")
