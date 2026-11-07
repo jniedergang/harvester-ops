@@ -301,8 +301,11 @@ def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=Non
                         stop = status
                         result["failed_phase"] = pid
                         result["error_summary"] = err or entry["message"]
-                    elif status in ("error", "cancelled"):
-                        # phase lancée derrière un échec (after_failure_of)
+                    elif status == "cancelled" or (status == "error" and stop != "partial"):
+                        # phase lancée derrière un échec (after_failure_of).
+                        # 2.7.1 (m1) : derrière une phase `partial`, une
+                        # erreur laisse le déroulé `partial` : la phase
+                        # d'avant a fait quelque chose (des clusters créés)
                         stop = status
             results[pid] = entry
             result["phases"].append(entry)

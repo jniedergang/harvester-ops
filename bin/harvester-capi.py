@@ -4,7 +4,7 @@
     harvester-capi status    --cluster C [--components DIR] [--json]
     harvester-capi install   --cluster C --components DIR [--push-images]
     harvester-capi cleanup-legacy --cluster C [--dry-run]
-    harvester-capi uninstall --cluster C [--dry-run] [--remove-images] [--timeout 600] [--json]
+    harvester-capi uninstall --cluster C [--dry-run] [--remove-images] [--timeout 600] [--json] [--id ID]
     harvester-capi inventory --cluster C [--components DIR] --json
     harvester-capi check     --cluster C --spec FICHIER [--components DIR] [--identity I] [--many] [--json]
     harvester-capi render    --cluster C --spec FICHIER [--show-secrets]
@@ -489,6 +489,8 @@ def cmd_status(args):
 
 
 def cmd_install(args):
+    if _refuse_during_uninstall(args, "providers"):
+        return EXIT_BLOCKED
     kube, _, entry = kube_from(args)
     desc = components_from(args.components)
     if desc is None:
@@ -496,7 +498,7 @@ def cmd_install(args):
     if args.push_images:
         push_images(entry, desc)
     try:
-        cs.install(kube, desc, step, wait=not args.no_wait, timeout=args.timeout)
+        cs.install(kube, desc, step, wait=not args.no_wait, timeout=args.timeout, pushed=args.push_images)
     except (RuntimeError, KubeError) as e:
         step("providers", "error", str(e)[:300])
         return EXIT_FAIL
@@ -553,34 +555,99 @@ def deploy_holder(harvester):
         os.close(fd)
 
 
+UNINSTALL_ACTION = "capi-uninstall"
+
+
+def hold_cluster_lock(harvester, note):
+    """(descripteur, None) : verrou du cluster (le même que les déroulés de
+    la console, `<état>/deploy.d/<cluster>.lock`) pris et `note` écrite ;
+    (None, {"run", "plan", ...} du détenteur) s'il est tenu ; (None, None)
+    sans nom de cluster valide (rien à verrouiller). Rendu par la fermeture
+    du descripteur ou la mort du processus."""
+    import fcntl
+    import re
+    if not harvester or not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$", harvester) or ".." in harvester:
+        return None, None
+    d = Path(_state()) / "deploy.d"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
+    fd = os.open(d / f"{harvester}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None, deploy_holder(harvester) or {"run": "?", "plan": "?"}
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, (json.dumps(note) + "\n").encode(), 0)
+    return fd, None
+
+
+def uninstall_refusal(harvester):
+    """Message de refus si un retrait de la pile tient ce cluster (2.7.1,
+    revue 2.7.0 m3 iii), sinon None. Un déroulé de plan qui tient le verrou
+    ne refuse pas : c'est lui qui lance créations et suppressions."""
+    holder = deploy_holder(harvester)
+    if holder and holder.get("action") == UNINSTALL_ACTION:
+        return (f"capi-uninstall-running: the Cluster API providers of this cluster are being removed "
+                f"(action {holder.get('run') or '?'})")
+    return None
+
+
+def _refuse_during_uninstall(args, sid):
+    msg = uninstall_refusal(_harvester(args))
+    if msg:
+        step(sid, "error", msg)
+    return msg
+
+
 def cmd_uninstall(args):
     """Retrait de la pile Turtles posée par la console (2.7.0, décision
     215) : refusé tant qu'un Cluster, un HelmChartProxy (CAAPH retiré) ou un
     déroulé de plan existe ; les CRD restent toujours. `--remove-images` :
-    images des fournisseurs retirés effacées des nœuds par SSH."""
+    images que la console a chargées pour les fournisseurs retirés,
+    effacées des nœuds par SSH, refusé si une autre charge de travail en
+    emploie une (2.7.1). Hors essai, le verrou du cluster est tenu de bout
+    en bout (2.7.1) : ni déroulé, ni création, ni suppression pendant ce
+    temps."""
     kube, _, entry = kube_from(args)
     if args.remove_images and not entry:
         raise SystemExit("--remove-images needs --cluster (nodes and SSH come from the configuration)")
-    running = deploy_holder(_harvester(args))
+    lock_fd = None
+    if args.dry_run:
+        running = deploy_holder(_harvester(args))
+    else:
+        lock_fd, running = hold_cluster_lock(_harvester(args), {"run": args.id or UNINSTALL_ACTION,
+                                                                "plan": "", "action": UNINSTALL_ACTION})
     try:
-        plan = cs.uninstall(kube, step, dry_run=args.dry_run, timeout=args.timeout, running=running)
-    except (RuntimeError, KubeError) as e:
-        step("providers", "error", str(e)[:300])
-        return EXIT_FAIL
-    if args.json:
-        print(json.dumps(plan))
-    if plan["blocked"]:
-        return EXIT_BLOCKED
-    if args.remove_images and plan["images"]:
-        if args.dry_run:
-            step("images", "running", "would remove " + ", ".join(plan["images"]))
-        else:
-            try:
-                node_images.remove_on_nodes(entry, plan["images"], step)
-            except RuntimeError as e:
-                step("images", "error", f"{e}; the providers are removed")
-                return EXIT_FAIL
-    return EXIT_OK
+        try:
+            plan = cs.uninstall(kube, step, dry_run=args.dry_run, timeout=args.timeout, running=running,
+                                remove_images=args.remove_images)
+        except (RuntimeError, KubeError) as e:
+            step("providers", "error", str(e)[:300])
+            return EXIT_FAIL
+        if args.json:
+            print(json.dumps(plan))
+        if plan["blocked"]:
+            return EXIT_BLOCKED
+        if args.remove_images and not plan["images"]:
+            step("images", "done", "no image loaded by the console is recorded on these providers; "
+                                   "nothing removed from the nodes")
+        elif args.remove_images:
+            if args.dry_run:
+                step("images", "running", "would remove " + ", ".join(plan["images"]))
+            else:
+                try:
+                    node_images.remove_on_nodes(entry, plan["images"], step)
+                except RuntimeError as e:
+                    step("images", "error", f"{e}; the providers are removed")
+                    return EXIT_FAIL
+        return EXIT_OK
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
 
 
 def cmd_inventory(args):
@@ -968,6 +1035,8 @@ def identity_down(kube, ns, name):
 
 
 def cmd_create(args):
+    if not args.dry_run and _refuse_during_uninstall(args, "check"):
+        return EXIT_BLOCKED
     kube, kc, _ = kube_from(args)
     origin = cc.parse_origin(args.origin)
     restricted = args.identity == "restricted"
@@ -1244,6 +1313,8 @@ def cmd_delete(args):
     if getattr(args, "dry_run", False):
         print(json.dumps(destroy_plan(kube, ns, name)))
         return EXIT_OK
+    if _refuse_during_uninstall(args, "delete"):
+        return EXIT_BLOCKED
     cl = kube.get(cs.K_CLUSTER, ns, name)
     refused = cc.run_mismatch(cl, getattr(args, "expect_run", None)) if cl is not None else None
     if refused:
@@ -2140,6 +2211,7 @@ def main(argv=None):
                             help="also remove the images of the removed providers from every node (SSH)")
             sp.add_argument("--timeout", type=int, default=600,
                             help="seconds to wait for the deployments of each provider to go")
+            sp.add_argument("--id", default="", help="console action id, written in the cluster lock")
         if "timeout" in extra:
             sp.add_argument("--timeout", type=int,
                             default=900 if name.startswith(("service", "manifest")) else 2400)

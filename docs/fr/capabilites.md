@@ -2512,10 +2512,22 @@ Voir « Paquets d'artefacts et registres (2.6.0) » plus bas.
   ne lèverait son finaliseur) ou un déroulé de plan existe
   (`capi-clusters-present`, `caaph-services-present`,
   `capi-harvesterclusters-present`, `capi-plan-running`). Images des
-  nœuds : en option, décochée ; `--remove-images` prend les images de tous
-  les Deployments des namespaces des fournisseurs (non vérifié en réel).
-  Le verrou des déroulés est vérifié au départ, pas tenu pendant le
-  retrait. Installer repose la pile. Ligne de commande :
+  nœuds : en option, décochée. Depuis la 2.7.1, `--remove-images` ne prend
+  que les images que la console a chargées elle-même pour les fournisseurs
+  retirés : Installer, avec les images poussées sur les nœuds, les inscrit
+  sur chaque `CAPIProvider` (annotation `harvester-ops.io/loaded-images`).
+  Une pile posée sans pousser d'images, ou avant la 2.7.1, n'en a aucune
+  d'inscrite, et rien n'est retiré (relancer Installer pour les inscrire).
+  Avant tout retrait, les pods et les gabarits de pod (Deployment,
+  StatefulSet, DaemonSet, CronJob) de tout le cluster sont relus : si l'un
+  d'eux, hors ceux du fournisseur lui-même, emploie l'une de ces images, la
+  désinstallation est refusée avec la liste (`capi-images-in-use`), et la
+  fenêtre grise l'option. Non vérifié en réel. Depuis la 2.7.1, la
+  désinstallation tient le verrou du cluster de bout en bout : aucun
+  déroulé, Défaire, création ou suppression de cluster, ni Installer ne
+  démarre sur ce cluster pendant ce temps (`capi-uninstall-running`), et la
+  désinstallation ne démarre pas pendant l'un d'eux. Installer repose la
+  pile. Ligne de commande :
   `harvester-capi uninstall [--dry-run] [--remove-images]`. L'ancien retrait
   reste pour une pile posée avant Harvester 1.9.
 - **HarvesterCluster restant (2.7.0)** : un `HarvesterCluster` laissé par un
