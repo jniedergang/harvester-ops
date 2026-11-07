@@ -644,6 +644,10 @@ def cmd_delete(args):
     except KubeError as e:
         step("delete", "error", f"registry-usage-unknown: {str(e)[:200]}")
         return EXIT_REFUSED
+    # 2.7.0 (Défaire, vu en réel) : le plan défait désigne son registre ;
+    # lui seul ne le retient pas (son document reste et le reposerait)
+    ignored = {f"plan:{p}" for p in args.ignore_plan or []}
+    used = [u for u in used if u.split(" (", 1)[0] not in ignored]
     if used:
         step("delete", "error", f"registry-in-use: {', '.join(sorted(set(used)))}")
         out({"registry": args.name, "deleted": False, "used_by": sorted(set(used))})
@@ -740,6 +744,8 @@ def parser():
     s.add_argument("name")
     cluster_args(s)
     s.add_argument("--delete-data", action="store_true")
+    s.add_argument("--ignore-plan", action="append", metavar="PLAN",
+                   help="a plan being undone: it does not count as a user")
     s.set_defaults(fn=cmd_delete)
     s = sub.add_parser("show", allow_abbrev=False)
     s.add_argument("name")

@@ -35496,6 +35496,9 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
             if cmd is None:
                 return _dch.ItemOutcome("error", f"{REGISTRY_SCRIPT} not deployed", data=data)
             cmd += [name, "--cluster", cluster, "--kubeconfig", kc] + (["--delete-data"] if name in delete_data else [])
+            if (run.result or {}).get("plan"):
+                # le plan défait désigne son registre : il ne le retient pas
+                cmd += ["--ignore-plan", run.result["plan"]]
             with app.app_context():
                 child, e2 = _cli_action(cluster, f"registry-delete:{cluster}/{name}", cmd, "harvester-registry",
                                         parent=run.id, cluster_user=run.cluster_user,
@@ -35574,9 +35577,10 @@ def _undo_runner(run, cluster, kc, steps, delete_data, previous, orig_id, lock_f
             prior = set((_action_read(orig_id) or {}).get("result", {}).get("undone_items") or [])
             gone = prior | {i.get("id") for p in (res or {}).get("phases") or [] for i in p.get("items") or []
                             if i.get("status") == "done"}
-            status = final if final != "done" or set(all_ids) <= gone else "partial"
+            gone.discard(None)
+            status = "done" if set(all_ids) <= gone else "partial" if gone else final
             _deploy_result_patch(orig_id, {"undone_by": run.id, "undone_at": run.ended_at, "undone_status": status,
-                                           "undone_items": sorted(i for i in gone if i)})
+                                           "undone_items": sorted(gone)})
             run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
             run.close()
     finally:
@@ -35627,7 +35631,14 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
             return {"error": "a deployment is running on this cluster", "code": "deploy-running",
                     "running": busy.id}, 409
         run_id = uuid.uuid4().hex[:12]
-        lock_fd, holder = _deploy_cluster_lock(cluster, run_id, f"undo:{res.get('plan') or ''}")
+        label = f"undo:{res.get('plan') or ''}"
+        lock_fd, holder = _deploy_cluster_lock(cluster, run_id, label)
+        end = time.time() + 3
+        while lock_fd is None and time.time() < end and _deploy_run_ended_here(holder.get("run")):
+            # comme un déroulé : le défaire précédent a écrit son statut final
+            # et rend son verrou dans l'instant (reprise relancée aussitôt)
+            time.sleep(0.05)
+            lock_fd, holder = _deploy_cluster_lock(cluster, run_id, label)
         if lock_fd is None:
             return {"error": "a deployment or an undo is running on this cluster", "code": "deploy-running",
                     "running": holder.get("run") or ""}, 409

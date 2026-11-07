@@ -246,8 +246,11 @@ def test_registry_data_needs_its_own_typed_name(undo):
     assert r.status_code == 400 and r.get_json()["code"] == "confirm-name"
     run = finish(launch(undo, include=[reg]))
     assert run.status == "done", run.result
-    assert undo["undo"].removals[-1][1][-1] != "--delete-data"
+    assert "--delete-data" not in undo["undo"].removals[-1][1]
     assert items_of(run)[reg]["data_kept"] is True and rg.load(undo["state"], "amorcage") is None
+    # vu en réel : le plan défait désigne son registre, il ne le retient pas
+    args = undo["undo"].removals[-1][1]
+    assert args[args.index("--ignore-plan") + 1] == "site"
     rg.delete(undo["state"], "amorcage")
     rg.save(undo["state"], "amorcage", {"kind": "bootstrap", "endpoint": "172.16.2.76", "usage": ["images"],
                                         "mirrors": [], "clusters": ["harvlab"], "cluster": "harvlab",
@@ -255,7 +258,7 @@ def test_registry_data_needs_its_own_typed_name(undo):
     for k in ("undone_by", "undone_at", "undone_status"):        # un déroulé neuf (C1 b : un défait ne se refait pas)
         undo["orig"].result.pop(k, None)
     finish(launch(undo, include=[reg], delete_data=["amorcage"], confirm_registry={"amorcage": "amorcage"}))
-    assert undo["undo"].removals[-1][1][-1] == "--delete-data"
+    assert "--delete-data" in undo["undo"].removals[-1][1]
 
 
 @pytest.mark.parametrize("body,status,code", [
@@ -361,3 +364,14 @@ def test_a_partial_selection_is_not_a_full_undo(undo):
     run3 = finish(launch(undo, include=["registry-harvlab/amorcage"]))
     assert run3.status == "done" and undo["orig"].result["undone_status"] == "done"
     assert launch(undo).status_code == 409
+
+
+def test_a_failed_undo_after_a_partial_one_keeps_partial(undo):
+    """Vu en réel : un défaire en échec qui suit un défaire en partie
+    écrasait « partial » par « error », alors qu'une partie reste défaite."""
+    finish(launch(undo, include=["chart-web/web/podinfo"]))
+    assert undo["orig"].result["undone_status"] == "partial"
+    undo["undo"].fail_remove.add(undo["decl"]["id"])
+    run = finish(launch(undo, include=["tf-declaration-" + undo["decl"]["id"]]))
+    assert run.result["status"] == "error"
+    assert undo["orig"].result["undone_status"] == "partial"

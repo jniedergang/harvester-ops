@@ -53,7 +53,7 @@ def test_undo_runs_the_console_chain(undo, monkeypatch, capsys):
     d = json.loads(out)
     assert rc == 0 and d["status"] == "done", json.dumps(d["result"]["phases"])[:3000]
     assert "STEP_EVENT|undo-capi-cluster-web/web|done|removed" in err
-    assert undo["undo"].removals[-1][1][-1] == "--delete-data"
+    assert "--delete-data" in undo["undo"].removals[-1][1]
 
 
 def _tf_variant(undo, monkeypatch, note, proven):

@@ -279,3 +279,21 @@ def test_a_plan_resumes_over_the_leftovers_of_its_own_failed_deploy(world, capsy
         code, out, err = deploy(capsys, "--origin", "plan=site,run=0123456789ac")
         assert code == 0, err
         assert rg.load(world["state"], "amorcage")["kind"] == "bootstrap"
+
+
+@pytest.mark.parametrize("users,ignore,code", [
+    (["plan:site"], [], 2),
+    (["plan:site"], ["--ignore-plan", "site"], 0),
+    (["plan:site (possibly, through a variable)"], ["--ignore-plan", "site"], 0),
+    (["plan:site", "plan:autre"], ["--ignore-plan", "site"], 2),            # un autre plan l'emploie
+    (["plan:site", "cluster:harvlab2/web"], ["--ignore-plan", "site"], 2),  # un cluster aussi
+])
+def test_delete_by_the_undo_of_a_plan_ignores_only_that_plan(world, capsys, monkeypatch, users, ignore, code):
+    """2.7.0, vu en réel : le Défaire d'un plan était refusé (registry-in-use)
+    parce que ce même plan désigne le registre ; il ne compte plus ce plan,
+    et seulement lui."""
+    assert deploy(capsys)[0] == 0
+    capsys.readouterr()
+    monkeypatch.setattr(cli, "users", lambda name, clusters, kube_for=None: list(users))
+    assert cli.main(["delete", "amorcage", "--cluster", "harvlab2"] + ignore) == code
+    assert (rg.load(world["state"], "amorcage") is None) is (code == 0)
