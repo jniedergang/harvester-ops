@@ -482,10 +482,12 @@ dépassent 90 % du volume.
 ### Un déploiement de registre d'amorçage a échoué et un nouvel essai dit « registry-name-taken »
 
 Un déploiement qui n'est pas prêt à temps laisse ses objets et son volume
-sur le cluster, et n'enregistre aucune déclaration. Lancez **Supprimer** sur
-le registre (ou `harvester-registry delete NOM --cluster C`, avec
-`--delete-data` pour retirer aussi le volume), corrigez la cause donnée par
-l'étape `ready`, puis déployez à nouveau.
+sur le cluster, et n'enregistre aucune déclaration. L'onglet Registres le
+montre sur une ligne **Restes**. Lancez **Supprimer** sur cette ligne (ou
+`harvester-registry delete NOM --cluster C`, avec `--delete-data` pour
+retirer aussi le volume), corrigez la cause donnée par l'étape `ready`,
+puis déployez à nouveau. Un plan de déploiement qui l'a posé n'a rien à
+faire : sa reprise reprend ces restes et redéploie.
 
 ### Le pod du registre reste en « ErrImageNeverPull »
 

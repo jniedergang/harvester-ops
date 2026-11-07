@@ -463,10 +463,12 @@ delete it with its data (typed name) and deploy it again. In a plan,
 ### A bootstrap registry deployment failed and a new attempt says "registry-name-taken"
 
 A deployment that does not become ready in time leaves its objects and its
-volume on the cluster, and saves no declaration. Run **Delete** on the
-registry (or `harvester-registry delete NAME --cluster C`, with
-`--delete-data` to remove the volume too), fix the cause shown in the
-`ready` step, then deploy again.
+volume on the cluster, and saves no declaration. The Registries tab shows
+it as a **Leftover** row. Run **Delete** on that row (or
+`harvester-registry delete NAME --cluster C`, with `--delete-data` to
+remove the volume too), fix the cause shown in the `ready` step, then
+deploy again. A deployment plan that posed it needs nothing of this: its
+resume takes the leftover over and deploys again.
 
 ### The registry pod stays in "ErrImageNeverPull"
 

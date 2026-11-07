@@ -235,6 +235,50 @@ def test_bootstrap_delete_needs_the_typed_name_for_the_data(env, recorded, monke
     assert c.delete("/api/registries/bootstrap/harvlab/nope", json={}).status_code == 404
 
 
+@pytest.mark.parametrize("found,status", [(["amorcage"], 202), (["autre"], 404), ([], 404)])
+def test_bootstrap_delete_of_the_leftovers_of_a_failed_deploy(env, monkeypatch, found, status):
+    """Revue finale 2.6.0 (I-2) : sans déclaration (déploiement échoué
+    avant `ready`), la suppression passe quand l'outil trouve des restes à
+    ce nom sur ce cluster ; sinon 404, rien lancé."""
+    monkeypatch.setattr(wapp, "_registry_users", lambda name, clusters: ([], None))
+    seen = {"actions": [], "reads": []}
+
+    class Run:
+        id = "c3c3c3c3c3c3"
+    monkeypatch.setattr(wapp, "_cli_action", lambda cluster, label, cmd, tool, spec=None, **kw:
+                        seen["actions"].append((label, cmd)) or (Run(), None))
+    monkeypatch.setattr(wapp, "_capi_run_json", lambda cmd, spec=None, timeout=180: seen["reads"].append(cmd) or (
+        ({"cluster": "harvlab", "leftovers": [{"registry": n, "objects": [f"deployments/{n}"]} for n in found]}, 0),
+        None))
+    r = env["client"].delete("/api/registries/bootstrap/harvlab/amorcage", json={})
+    assert r.status_code == status, r.get_json()
+    assert seen["reads"][0][3] == "leftovers"
+    if status == 202:
+        label, cmd = seen["actions"][0]
+        assert label == "registry-delete:harvlab/amorcage" and cmd[3:5] == ["delete", "amorcage"]
+    else:
+        assert not seen["actions"]
+
+
+def test_bootstrap_leftovers_are_read_through_the_tool(env, recorded):
+    r = env["client"].get("/api/registries/bootstrap/harvlab/leftovers")
+    assert r.status_code == 200 and recorded["reads"][0][3:6] == ["leftovers", "--cluster", "harvlab"]
+    assert wapp.required_role_for("/api/registries/bootstrap/harvlab/leftovers", "GET") == "viewer"
+
+
+def test_bootstrap_delete_in_use_is_refused_with_the_users(env, recorded, monkeypatch):
+    """Revue finale m-9 : le contrôle d'usage de la route elle-même."""
+    import registries as rg
+    import registry_seed as rs
+    d = rs.declaration(dict(boot(), name="amorcage"), "", "harvlab")
+    d.pop("ca_pem")
+    rg.save(env["state"], "amorcage", d)
+    monkeypatch.setattr(wapp, "_registry_users", lambda name, clusters: (["cluster:harvlab/web"], None))
+    r = env["client"].delete("/api/registries/bootstrap/harvlab/amorcage", json={})
+    assert r.status_code == 409 and r.get_json()["code"] == "registry-in-use"
+    assert r.get_json()["used_by"] == ["cluster:harvlab/web"] and not recorded["actions"]
+
+
 def test_bootstrap_status_reads_through_the_tool(env, recorded):
     r = env["client"].get("/api/registries/bootstrap/harvlab/amorcage")
     assert r.status_code == 200 and recorded["reads"][0][3:5] == ["status", "amorcage"]

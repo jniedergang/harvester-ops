@@ -325,8 +325,16 @@ cluster l'emploie (`registry-in-use`, avec les noms).
 
 **Un déploiement en échec laisse ses objets.** Si le registre n'est pas
 prêt à temps, les objets et le volume restent sur le cluster et aucune
-déclaration n'est enregistrée ; un nouvel essai est refusé
-(`registry-name-taken`). **Supprimer** les nettoie.
+déclaration n'est enregistrée ; un nouvel essai depuis la fenêtre est
+refusé (`registry-name-taken`, souvent avec `registry-address-answers`).
+L'onglet Registres montre ces objets sur une ligne **Restes** (trouvés par
+les étiquettes de la console dans `harvester-ops-registry`), avec les
+objets restés et le plan qui les a posés. **Supprimer** sur cette ligne
+les retire ; le volume est gardé sauf si vous retapez le nom, comme pour
+un registre déclaré. Un plan de déploiement qui les a posés n'est pas
+bloqué : sa reprise les reprend (les constats sont rejoués avec l'origine
+du plan) et redéploie. En ligne de commande : `harvester-registry
+leftovers --cluster C`, puis `harvester-registry delete NOM --cluster C`.
 
 **Pas de nettoyage en 2.6.0.** Le ramasse-miettes de Distribution exige un
 registre arrêté ou en lecture seule, et les suppressions sont désactivées.
@@ -481,6 +489,7 @@ harvester-registry deploy  NOM --cluster C --address IP --size-gib N --storage-c
                            [--dns-name N] [--mirrors h1,h2] [--cert F --key F --ca F]
                            [--timeout S] [--dry-run]
 harvester-registry status  NOM --cluster C
+harvester-registry leftovers   --cluster C
 harvester-registry delete  NOM --cluster C [--delete-data]
 ```
 

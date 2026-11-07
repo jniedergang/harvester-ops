@@ -144,7 +144,9 @@ def check_decl(doc):
     return out
 
 
-RESERVED = ("bootstrap",)            # /api/registries/bootstrap/<cluster> est le geste d'amorçage
+# /api/registries/bootstrap/<cluster> est le geste d'amorçage ;
+# /api/registries/bootstrap/<cluster>/leftovers, les restes (revue finale I-2)
+RESERVED = ("bootstrap", "leftovers")
 
 
 def save(state, name, doc, revision=None):

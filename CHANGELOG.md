@@ -211,6 +211,23 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   The shared objects stay for the other cluster, as in 2.5.0. Before, the
   read account stayed on the Harvester cluster and the registry was
   reported in use forever.
+- A bootstrap registry deployment that fails before `ready` leaves its
+  objects without a declaration. The Registries tab now lists them as a
+  **Leftover** row (objects, address, plan), and **Delete** removes them
+  (the route accepts an undeclared name when `harvester-registry
+  leftovers` finds it on that cluster). A plan whose deployment failed is
+  no longer blocked on resume: its checks replay `deploy --dry-run` with
+  the origin of the plan, and the tool counts the leftovers of that plan
+  neither as a taken name nor as an answering address. New
+  `harvester-registry leftovers --cluster C` and route
+  `GET /api/registries/bootstrap/<cluster>/leftovers` (viewer);
+  `leftovers` is a reserved registry name.
+- Registries tab: the window of a bootstrap registry no longer sends a
+  late check after Launch or after it is closed, and Launch is greyed as
+  soon as a value changes, until its checks are back; **Delete** of a
+  bootstrap registry aims at the cluster of the registry, not the one
+  selected in the page; **Check** is greyed for a viewer, with the role in
+  its tooltip.
 - The upload of a package and the short gestures on the console state
   (trust settings, package removal, forget) record their end time.
 

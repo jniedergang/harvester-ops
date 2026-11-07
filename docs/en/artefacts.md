@@ -317,8 +317,16 @@ names).
 
 **A failed deployment leaves its objects.** If the registry does not become
 ready in time, the objects and the volume stay on the cluster and no
-declaration is saved; a new attempt is refused (`registry-name-taken`).
-**Delete** cleans them up.
+declaration is saved; a new attempt from the window is refused
+(`registry-name-taken`, often with `registry-address-answers`). The
+Registries tab lists such objects as a **Leftover** row (found by the
+console labels in `harvester-ops-registry`), with the objects left and the
+plan that posed them. **Delete** on that row removes them; the volume is
+kept unless you type the name, as for a declared registry. A deployment
+plan that posed them is not blocked: its resume takes them over (the
+checks are replayed with the origin of the plan) and deploys again. From
+the command line: `harvester-registry leftovers --cluster C`, then
+`harvester-registry delete NAME --cluster C`.
 
 **No cleanup in 2.6.0.** Distribution needs a stopped or read-only registry
 for its garbage collection, and deletes are disabled. What is published
@@ -467,6 +475,7 @@ harvester-registry deploy  NAME --cluster C --address IP --size-gib N --storage-
                            [--dns-name N] [--mirrors h1,h2] [--cert F --key F --ca F]
                            [--timeout S] [--dry-run]
 harvester-registry status  NAME --cluster C
+harvester-registry leftovers   --cluster C
 harvester-registry delete  NAME --cluster C [--delete-data]
 ```
 

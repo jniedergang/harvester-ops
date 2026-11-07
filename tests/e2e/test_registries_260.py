@@ -33,11 +33,16 @@ CLIENT = {"name": HOSTILE[:30], "kind": "external", "endpoint": "h.example:443",
           "mirrors": [], "clusters": [], "published": 0}
 
 
-def open_registries(context, flask_server, calls, registries=None, deploy_blocked=True):
+def open_registries(context, flask_server, calls, registries=None, deploy_blocked=True, leftovers=(), role=None):
+    if role:
+        context.route(re.compile(r".*/api/whoami$"), lambda r, q: fulfill(
+            r, {"role": role, "roles_active": True, "user": "u", "auth": "local"}))
     page = t220.open_auto(context, flask_server, "#automation/capi")
     regs = registries if registries is not None else [dict(BOOT, published=0)]
     state = {"blocked": deploy_blocked}
     page.route(re.compile(r".*/api/registries$"), lambda r, q: fulfill(r, {"registries": regs}))
+    page.route(re.compile(r".*/api/registries/bootstrap/harv-fake/leftovers$"),
+               lambda r, q: fulfill(r, {"cluster": "harv-fake", "leftovers": list(leftovers)}))
     page.route(re.compile(r".*/api/capi/harv-fake/inventory.*"),
                lambda r, q: fulfill(r, {"storage_classes": [{"name": "harv-rep1"}, {"name": "longhorn"}]}))
 
@@ -89,8 +94,12 @@ def test_bootstrap_launch_is_greyed_with_its_reason_until_no_blocker(context, fl
     expect(m.locator('[data-x="summary"]')).to_contain_text("172.16.2.77")
     launch.click()
     expect(m).to_have_count(0)
+    page.wait_for_timeout(800)                 # au-delà du délai de vérification différée
+    # revue finale m-1 : la création est la dernière demande, aucune
+    # vérification ne part après Lancer ni après la fermeture
     body = calls["boot"][-1]
     assert "dry_run" not in body and body["address"] == "172.16.2.77" and body["storage_class"] == "harv-rep1"
+    assert len([b for b in calls["boot"] if "dry_run" not in b]) == 1
     assert all(t.get_attribute("data-tip") for t in page.locator("#registries-body .tip").all())
 
 
@@ -219,3 +228,50 @@ def test_forget_uses_a_page_dialog_with_translated_refusals_then_follows_the_act
     m.locator("[data-reg-go]").click()
     expect(m.locator('[data-x="feedback"]')).to_contain_text("f1f1f1f1f1f1")
     assert natives == [] and len(calls["forget"]) == 2
+
+
+def test_bootstrap_delete_aims_at_the_cluster_of_the_registry(context, flask_server):
+    """Revue finale m-2 : vu depuis un autre cluster Harvester, Supprimer
+    vise le cluster du registre, pas celui choisi dans la page."""
+    calls = {}
+    other = dict(BOOT, cluster="harv-other", clusters=["harv-other"], published=0)
+    page, _ = open_registries(context, flask_server, calls, registries=[other])
+    page.route(re.compile(r".*/api/registries/bootstrap/harv-other/amorcage$"),
+               lambda r, q: (calls.setdefault("other", []).append(q.method), fulfill(r, {"action_id": "r9"}, 202)))
+    page.locator('.reg-row[data-reg="amorcage"]').click()
+    page.locator("#registries-detail [data-reg-delete]").click()
+    page.locator(".reg-modal [data-reg-go]").click()
+    expect(page.locator(".reg-modal")).to_have_count(0)
+    assert calls.get("other") == ["DELETE"] and "delete" not in calls
+
+
+def test_check_is_greyed_for_a_viewer_with_the_reason(context, flask_server):
+    """Revue finale m-3."""
+    calls = {}
+    page, _ = open_registries(context, flask_server, calls, role="viewer")
+    page.locator('.reg-row[data-reg="amorcage"]').click()
+    chk = page.locator("#registries-detail [data-reg-check]")
+    expect(chk).to_be_disabled()
+    assert "operator role" in chk.get_attribute("data-tip") and "operator role" in chk.get_attribute("title")
+
+
+def test_the_leftovers_of_a_failed_deploy_are_listed_and_deleted(context, flask_server):
+    """Revue finale I-2 : restes d'un déploiement échoué (sans déclaration)
+    listés avec leurs objets, supprimés depuis l'onglet."""
+    calls = {}
+    left = {"registry": "amorcage2", "cluster": "harv-fake", "address": "172.16.2.78", "origin": {"plan": "site"},
+            "objects": ["deployments/amorcage2", "services/amorcage2"]}
+    page, _ = open_registries(context, flask_server, calls, leftovers=[left])
+    page.route(re.compile(r".*/api/registries/bootstrap/harv-fake/amorcage2$"),
+               lambda r, q: (calls.setdefault("left", []).append((q.method, json.loads(q.post_data or "{}"))),
+                             fulfill(r, {"action_id": "r8"}, 202)))
+    row = page.locator('.reg-row[data-reg="amorcage2"]')
+    expect(row).to_contain_text("Leftover")
+    row.click()
+    detail = page.locator("#registries-detail")
+    expect(detail).to_contain_text("services/amorcage2")
+    expect(detail).to_contain_text("failed deployment of the plan site")
+    detail.locator("[data-reg-delete]").click()
+    page.locator(".reg-modal [data-reg-go]").click()
+    expect(page.locator(".reg-modal")).to_have_count(0)
+    assert calls["left"] == [("DELETE", {})]

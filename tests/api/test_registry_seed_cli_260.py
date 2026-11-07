@@ -35,7 +35,7 @@ class FakeKube:
                      "parameters": {"numberOfReplicas": "1"}}]
         if kind == "nodes.longhorn.io":
             return tseed.LH["nodes"]
-        return []
+        return [o for (k, _), o in self.objects.items() if k == kind]
 
     def get(self, kind, ns, name):
         return self.objects.get((kind, name))
@@ -227,3 +227,54 @@ def test_deploy_refuses_a_bad_dns_name_or_a_cluster_without_nodes(world, capsys,
     code, out, err = deploy(capsys, *extra)
     assert code == 2 and why in err and "Traceback" not in err
     assert world["kube"].applied == [] and world["imports"] == []
+
+
+def test_a_failed_deploy_leaves_leftovers_that_are_listed_and_deleted_without_a_declaration(world, capsys):
+    """Revue finale 2.6.0 (I-2) : un déploiement qui n'atteint pas `ready`
+    laisse ses objets sans déclaration ; `leftovers` les trouve par
+    l'étiquette de la console, `delete` les retire (volume gardé)."""
+    world["ready"]["why"] = "no answer yet"
+    assert deploy(capsys)[0] == 1
+    assert rg.load(world["state"], "amorcage") is None
+    assert cli.main(["leftovers", "--cluster", "harvlab2"]) == 0
+    left = json.loads(capsys.readouterr().out)
+    assert [x["registry"] for x in left["leftovers"]] == ["amorcage"]
+    assert left["leftovers"][0]["address"] == "172.16.2.76" and left["leftovers"][0]["origin"] == {}
+    assert "deployments/amorcage" in left["leftovers"][0]["objects"]
+    assert cli.main(["delete", "amorcage", "--cluster", "harvlab2"]) == 0
+    capsys.readouterr()
+    assert ("deployments", "amorcage") not in world["kube"].objects
+    assert ("persistentvolumeclaims", "amorcage-data") in world["kube"].objects
+    assert cli.main(["leftovers", "--cluster", "harvlab2"]) == 0
+    assert json.loads(capsys.readouterr().out)["leftovers"] == []
+
+
+def test_a_declared_registry_is_not_a_leftover(world, capsys):
+    assert deploy(capsys)[0] == 0
+    capsys.readouterr()
+    assert cli.main(["leftovers", "--cluster", "harvlab2"]) == 0
+    assert json.loads(capsys.readouterr().out)["leftovers"] == []
+
+
+@pytest.mark.parametrize("origin,blocked", [
+    ("plan=site", False),                    # ses propres restes : la reprise du plan les reprend
+    ("plan=other", True),
+    ("", True),
+])
+def test_a_plan_resumes_over_the_leftovers_of_its_own_failed_deploy(world, capsys, origin, blocked):
+    """Revue finale 2.6.0 (I-2) : la reprise d'un plan n'est pas bloquée
+    par les restes de son propre déploiement échoué (nom pris, adresse qui
+    répond : la sienne) ; ceux d'une autre origine bloquent toujours."""
+    world["ready"]["why"] = "no answer yet"
+    assert deploy(capsys, "--origin", "plan=site,run=0123456789ab")[0] == 1
+    world["answers"]["up"] = True                       # le Service resté sert l'adresse
+    world["ready"]["why"] = None
+    code, out, err = deploy(capsys, "--dry-run", *(["--origin", origin] if origin else []))
+    codes = [f["code"] for f in json.loads(out)["findings"] if f["level"] == "block"]
+    assert bool(codes) is blocked, codes
+    if blocked:
+        assert set(codes) == {"registry-name-taken", "registry-address-answers"}
+    else:
+        code, out, err = deploy(capsys, "--origin", "plan=site,run=0123456789ac")
+        assert code == 0, err
+        assert rg.load(world["state"], "amorcage")["kind"] == "bootstrap"

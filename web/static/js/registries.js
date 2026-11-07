@@ -69,6 +69,8 @@ const Registries = (() => {
   }
 
   function closeModal() {
+    // revue finale m-1 : une vérification différée ne part plus après la fermeture
+    if (modal && modal._cleanup) modal._cleanup();
     if (modal) modal.remove();
     modal = null;
   }
@@ -106,12 +108,24 @@ const Registries = (() => {
   async function refresh() {
     const box = document.getElementById('registries-body');
     if (!box) return;
-    const r = await json('GET', '/api/registries').catch(() => null);
+    const c = cluster();
+    const [r, lr] = await Promise.all([json('GET', '/api/registries').catch(() => null),
+      c ? json('GET', `/api/registries/bootstrap/${enc(c)}/leftovers`).catch(() => null) : null]);
     list = r && r.ok ? (r.d.registries || []) : null;
     if (!list) { box.innerHTML = `<p class="form-hint">${esc(tr('reg.loadError', 'The registries could not be read.'))}</p>`; return; }
-    const c = cluster();
+    // revue finale I-2 : restes d'un déploiement échoué (objets sans
+    // déclaration), montrés avec Supprimer
+    const left = lr && lr.ok ? (lr.d.leftovers || []) : [];
+    list = list.concat(left.filter(x => !list.some(y => y.name === x.registry)).map(x => ({ name: x.registry, kind: 'leftover',
+      cluster: x.cluster || c, endpoint: x.address || '', objects: x.objects || [], origin: x.origin || {}, usage: [], clusters: [] })));
     const rows = list.map(x => {
       const attached = (x.clusters || []).includes(c);
+      if (x.kind === 'leftover') {
+        return `<tr class="reg-row reg-leftover${selected === x.name ? ' selected' : ''}" data-reg="${esc(x.name)}" tabindex="0">
+        <td><strong>${esc(x.name)}</strong></td>
+        <td><span class="badge warn tip" data-tip="${esc(tr('reg.t.leftover', 'Objects left by a deployment that failed, without a declaration: delete them before a new try'))}">${esc(tr('reg.kind.leftover', 'Leftover'))}</span></td>
+        <td><code>${esc(x.endpoint)}</code></td><td>-</td><td>-</td><td>-</td></tr>`;
+      }
       return `<tr class="reg-row${selected === x.name ? ' selected' : ''}" data-reg="${esc(x.name)}" tabindex="0">
         <td><strong>${esc(x.name)}</strong></td>
         <td>${x.kind === 'bootstrap' ? `<span class="badge info">${esc(tr('reg.kind.bootstrap', 'Bootstrap'))}</span>`
@@ -135,11 +149,31 @@ const Registries = (() => {
     if (selected) showDetail(selected);
   }
 
+  function showLeftover(box, x) {
+    const plan = x.origin && x.origin.plan;
+    box.innerHTML = `
+      <div class="card-header"><h3>${esc(x.name)}</h3><div class="reg-actions">
+        ${btn('data-reg-delete', 'btn-danger', 'trash', tr('reg.delete', 'Delete'), can('admin')
+          ? tr('reg.t.deleteLeftover', 'Remove these objects from the cluster; the volume is kept unless you type the name')
+          : tr('reg.t.adminDelete', 'Deleting needs the admin role'), !can('admin'))}
+      </div></div>
+      <div class="card-body">
+        <p class="form-hint">${esc(plan ? tr('reg.leftoverPlan', 'Left by a failed deployment of the plan {plan}. A resume of this plan takes it over; Delete removes it.', { plan })
+          : tr('reg.leftoverIntro', 'Left by a deployment that failed before the registry was ready: no declaration was saved. Delete removes these objects.'))}</p>
+        <dl class="reg-facts"><dt>${esc(tr('reg.col.endpoint', 'Address'))}</dt><dd><code>${esc(x.endpoint || '-')}</code></dd>
+          <dt>${esc(tr('reg.clusters', 'Attached to'))}</dt><dd><code>${esc(x.cluster)}</code></dd></dl>
+        <h4>${esc(tr('reg.leftoverObjects', 'Objects left'))}</h4>
+        <ul class="reg-used">${(x.objects || []).map(o => `<li><code>${esc(o)}</code></li>`).join('')}</ul>
+      </div>`;
+  }
+
   async function showDetail(name) {
     selected = name;
     document.querySelectorAll('.reg-row').forEach(r => r.classList.toggle('selected', r.dataset.reg === name));
     const box = document.getElementById('registries-detail');
     if (!box) return;
+    const lx = (list || []).find(x => x.name === name && x.kind === 'leftover');
+    if (lx) { showLeftover(box, lx); return; }
     const c = cluster();
     const r = await json('GET', `/api/registries/${enc(name)}?cluster=${enc(c)}`).catch(() => null);
     if (!r || !r.ok) { box.innerHTML = `<p class="form-hint">${esc(tr('reg.loadError', 'The registries could not be read.'))}</p>`; return; }
@@ -153,8 +187,9 @@ const Registries = (() => {
     box.innerHTML = `
       <div class="card-header"><h3>${esc(d.name)}</h3><div class="reg-actions">
         ${btn('data-reg-attach', 'btn-secondary', 'key', tr('reg.attach', 'Attach'), attachWhy, boot || !can('operator'))}
-        ${btn('data-reg-check', 'btn-secondary', 'test', tr('reg.check', 'Check'),
-          tr('reg.t.check', 'Read the accounts on this cluster and probe the registry from the console, without writing'), !attached)}
+        ${btn('data-reg-check', 'btn-secondary', 'test', tr('reg.check', 'Check'), can('operator')
+          ? tr('reg.t.check', 'Read the accounts on this cluster and probe the registry from the console, without writing')
+          : tr('reg.t.checkOperator', 'Checking a registry needs the operator role'), !attached || !can('operator'))}
         ${btn('data-reg-delete', 'btn-danger', 'trash', tr('reg.delete', 'Delete'), boot
           ? tr('reg.t.deleteBoot', 'Remove the bootstrap registry from the cluster; its volume is kept unless you type its name')
           : tr('reg.t.forget', 'Forget this declaration (refused while a plan, a template or a child cluster uses it)'), !can('admin'))}
@@ -362,11 +397,21 @@ const Registries = (() => {
         <li>${esc(tr('reg.sum.accounts', 'Accounts push (write) and pull (read), random passwords kept in Secrets'))}</li>
         <li>${esc(tr('reg.sum.mirrors', 'Mirrors: {mirrors}', { mirrors: b.mirrors.join(', ') || '-' }))}</li></ul>`;
     }
-    m.addEventListener('input', () => { clearTimeout(seq.t); seq.t = setTimeout(runChecks, 500); });
-    m.addEventListener('change', () => { clearTimeout(seq.t); seq.t = setTimeout(runChecks, 200); });
+    // revue finale m-1 : Lancer grisé dès une saisie, jusqu'aux constats de
+    // ces valeurs ; aucune vérification différée après Lancer ou la fermeture
+    const later = (ms) => {
+      clearTimeout(seq.t);
+      seq.n++;
+      m.querySelector('[data-reg-launch]').disabled = true;
+      seq.t = setTimeout(runChecks, ms);
+    };
+    m._cleanup = () => { clearTimeout(seq.t); seq.n++; };
+    m.addEventListener('input', () => later(500));
+    m.addEventListener('change', () => later(200));
     m.querySelector('[data-reg-launch]').addEventListener('click', async (e) => {
       if (e.currentTarget.disabled) return;
       e.currentTarget.disabled = true;
+      m._cleanup();
       const b = body();
       const r = await json('POST', `/api/registries/bootstrap/${enc(c)}`, b);
       const fb = m.querySelector('[data-x="feedback"]');
@@ -417,7 +462,9 @@ const Registries = (() => {
   function openDelete() {
     const name = selected;
     const d = (list || []).find(x => x.name === name) || {};
-    if (d.kind !== 'bootstrap') { openForget(name); return; }
+    if (d.kind !== 'bootstrap' && d.kind !== 'leftover') { openForget(name); return; }
+    // revue finale m-2 : le cluster du registre, pas celui choisi dans la page
+    const where = d.cluster || cluster();
     const m = overlay(tr('reg.deleteTitle', 'Delete a bootstrap registry'), name, `
       <p>${esc(tr('reg.deleteIntro', 'The registry leaves the cluster. Its volume is kept: a new deployment finds its images again.'))}</p>
       <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('reg.t.deleteData', 'Also delete the volume and every image and chart it holds'))}">
@@ -436,7 +483,7 @@ const Registries = (() => {
     go.addEventListener('click', async () => {
       if (go.disabled) return;
       const body = v('data').checked ? { delete_data: true, confirm: v('typed').value } : {};
-      const r = await json('DELETE', `/api/registries/bootstrap/${enc(cluster())}/${enc(name)}`, body);
+      const r = await json('DELETE', `/api/registries/bootstrap/${enc(where)}/${enc(name)}`, body);
       const fb = m.querySelector('[data-x="feedback"]');
       if (!r.ok) { fb.textContent = r.d.error || `HTTP ${r.status}`; return; }
       selected = null;

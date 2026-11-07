@@ -222,6 +222,20 @@ def test_a_registry_of_another_origin_is_never_adopted(reg):
     assert tc.phase(run, "clusters")["status"] == "skipped"
 
 
+def test_the_pre_checks_carry_the_plan_origin_so_a_resume_takes_its_own_leftovers(reg):
+    """Revue finale 2.6.0 (I-2) : le contrôle avant lancement et `before()`
+    rejouent `deploy --dry-run --origin plan=<plan>` : l'outil ne compte
+    pas les restes d'un déploiement échoué de ce plan comme un nom pris ou
+    une adresse qui répond, et la reprise relance le déploiement."""
+    fake = reg["reg"]
+    seed(reg)
+    reg["client"].post("/api/deploy/harvlab/check", json={"plan": "site", "variables": VARS})
+    run = start(reg)
+    assert run.status == "done", run.result
+    dry = [a for s, a in fake.reads if s == "registry:deploy"]
+    assert len(dry) >= 2 and all(a[a.index("--origin") + 1] == "plan=site" and "--dry-run" in a for a in dry)
+
+
 def test_a_failed_publication_stops_before_the_clusters(reg):
     reg["reg"].publish_fails.add(("socle", "2026.11", "amorcage"))
     seed(reg)

@@ -12,6 +12,7 @@
                                [--spec F] [--timeout S] [--dry-run]
     harvester-registry status  NOM --cluster C [--kubeconfig K]
     harvester-registry delete  NOM --cluster C [--kubeconfig K] [--delete-data]
+    harvester-registry leftovers   --cluster C [--kubeconfig K]
 
 Une déclaration (bin/lib/registries.py) ne porte aucun secret : adresse,
 CA publique, usage (images, charts), registres d'origine miroités. Les
@@ -274,8 +275,34 @@ def _answers(address, port=443, timeout=2.0):
         return False
 
 
-def deploy_facts(kube, spec, answers=None):
-    """Ce que registry_seed.check lit du cluster et de l'installation."""
+def _leftover_of(kube, name):
+    """Restes d'un déploiement échoué : objets étiquetés au nom du registre
+    dans le namespace de la console, sans déclaration (revue finale I-2).
+    None si le registre est déclaré ou si rien ne reste."""
+    if rg.load(state(), name) is not None:
+        return None
+    objs, origin, address = [], {}, None
+    for kind, n in (("deployments", name), ("services", name), ("configmaps", f"{name}-config"),
+                    ("secrets", f"{name}-tls"), ("secrets", f"{name}-htpasswd"),
+                    *[("secrets", x) for x in rg.secret_names(name).values()]):
+        o = kube.get(kind, rs.NAMESPACE, n)
+        if o is None or (((o.get("metadata") or {}).get("labels") or {}).get(rs.LABEL) != name):
+            continue
+        objs.append(f"{kind}/{n}")
+        if kind == "deployments":
+            origin = rs.origin_of(o)
+        if kind == "services":
+            address = ((o.get("metadata") or {}).get("annotations") or {}).get(rs.VIP_ANNOTATION)
+    if not objs:
+        return None
+    return {"registry": name, "objects": objs, "origin": origin, "address": address}
+
+
+def deploy_facts(kube, spec, answers=None, origin=None):
+    """Ce que registry_seed.check lit du cluster et de l'installation.
+    `origin` : celle de la chaîne d'un plan ; les restes d'un déploiement
+    échoué de ce même plan ne prennent ni le nom ni l'adresse (sa reprise
+    les recouvre, revue finale I-2)."""
     import longhorn_room as lr
     pools = [cc.pool_info(p) for p in kube.list("ippools.loadbalancer.harvesterhci.io")]
     replicas = {}
@@ -293,7 +320,13 @@ def deploy_facts(kube, spec, answers=None):
         longhorn = None
     taken = rg.load(state(), spec["name"]) is not None or \
         kube.get("deployments", rs.NAMESPACE, spec["name"]) is not None
-    return {"pools": pools, "vip": kube.server_host(), "address_answers": (answers or _answers)(spec["address"]),
+    own = None
+    if taken and (origin or {}).get("plan"):
+        left = _leftover_of(kube, spec["name"])
+        if left and left["origin"].get("plan") == origin["plan"]:
+            own, taken = left, False
+    answering = False if own and own["address"] == spec["address"] else (answers or _answers)(spec["address"])
+    return {"pools": pools, "vip": kube.server_host(), "address_answers": answering,
             "longhorn": longhorn, "class_replicas": replicas, "bundle": rs.bundle(state()) is not None,
             "tools_missing": rs.tools_missing(), "name_taken": taken}
 
@@ -369,7 +402,7 @@ def cmd_deploy(args):
         return EXIT_REFUSED
     step("check", "running", f"{args.name} on {args.cluster} at {args.address}")
     try:
-        findings = rs.check(spec, deploy_facts(kube, spec))
+        findings = rs.check(spec, deploy_facts(kube, spec, origin=origin))
     except KubeError as e:
         findings = [cc.finding("cluster-unreachable", "block", error=str(e)[:200])]
     blocked = bool(cc.blocking(findings))
@@ -467,6 +500,25 @@ def cmd_status(args):
     return EXIT_OK
 
 
+def cmd_leftovers(args):
+    """Restes de déploiements échoués sur un cluster (revue finale I-2) :
+    registres étiquetés par la console dans son namespace, sans
+    déclaration ; l'onglet les montre avec Supprimer."""
+    kube, _ = kube_from(args)
+    try:
+        names = {((o.get("metadata") or {}).get("labels") or {}).get(rs.LABEL)
+                 for kind in ("deployments", "services", "configmaps")
+                 for o in kube.list(kind, rs.NAMESPACE)}
+        found = [x for x in (_leftover_of(kube, n) for n in sorted(n for n in names if n)) if x]
+    except KubeError as e:
+        step("leftovers", "error", str(e)[:300])
+        return EXIT_FAIL
+    for x in found:
+        x["cluster"] = args.cluster
+    out({"cluster": args.cluster, "leftovers": found})
+    return EXIT_OK
+
+
 def cmd_delete(args):
     d = rg.load(state(), args.name)
     if d is not None and d.get("kind") != "bootstrap":
@@ -550,6 +602,9 @@ def parser():
     s.add_argument("name")
     cluster_args(s)
     s.set_defaults(fn=cmd_status)
+    s = sub.add_parser("leftovers", allow_abbrev=False)
+    cluster_args(s)
+    s.set_defaults(fn=cmd_leftovers)
     s = sub.add_parser("delete", allow_abbrev=False)
     s.add_argument("name")
     cluster_args(s)

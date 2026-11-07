@@ -32872,7 +32872,10 @@ def _deploy_registry_prepare(kc, plan, values, install, findings, role=None):
                                             f"{r['name']}: address and room are checked when the phase starts"))
             continue
         args = [r["name"], "--cluster", cluster, "--address", r["address"], "--size-gib", str(r["size_gib"]),
-                "--storage-class", r["storage_class"], "--mirrors", ",".join(r.get("mirrors") or []), "--dry-run"]
+                "--storage-class", r["storage_class"], "--mirrors", ",".join(r.get("mirrors") or []), "--dry-run",
+                # revue finale I-2 : les restes d'un déploiement échoué de ce
+                # plan ne bloquent pas sa reprise
+                "--origin", f"plan={plan['name']}"]
         res, _rc, err = _deploy_registry_json(kc, "registry:deploy", args)
         if err:
             findings.append(_deploy_finding("registry-check-failed", "registry", f"{r['name']}: {err}"))
@@ -33631,7 +33634,8 @@ def _deploy_registry_phase(run, cluster, kc_ref, dctx):
                 continue
             res, _rc, err = _deploy_registry_json(kc, "registry:deploy", [
                 r["name"], "--cluster", cluster, "--address", r["address"], "--size-gib", str(r["size_gib"]),
-                "--storage-class", r["storage_class"], "--mirrors", ",".join(r.get("mirrors") or []), "--dry-run"])
+                "--storage-class", r["storage_class"], "--mirrors", ",".join(r.get("mirrors") or []), "--dry-run",
+                "--origin", f"plan={plan['name']}"])
             if err:
                 return _dch.PhaseOutcome("error", message=f"check failed ({err})"[:200])
             blocking = [f for f in res.get("findings") or [] if f.get("level") == "block"]
@@ -35120,6 +35124,33 @@ def api_registry_bootstrap_status(cluster, name):
     return jsonify(res[0])
 
 
+def _registry_leftovers(cluster, kc):
+    """(restes de déploiements échoués sur ce cluster, None) ou (None,
+    réponse d'erreur) : `harvester-registry leftovers`, avec l'identité de
+    la personne."""
+    cmd = _registry_cmd("leftovers")
+    if cmd is None:
+        return None, (jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503)
+    res, err = _capi_run_json(cmd + ["--cluster", cluster, "--kubeconfig", kc], timeout=60)
+    if err:
+        return None, err
+    return list((res[0] or {}).get("leftovers") or []), None
+
+
+@app.route("/api/registries/bootstrap/<cluster>/leftovers", methods=["GET"])
+@requires_auth
+def api_registry_bootstrap_leftovers(cluster):
+    """Restes d'un déploiement échoué (objets de la console sans
+    déclaration) : l'onglet les montre avec Supprimer (revue finale I-2)."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    left, err = _registry_leftovers(cluster, kc)
+    if err:
+        return err
+    return jsonify({"cluster": cluster, "leftovers": left})
+
+
 @app.route("/api/registries/bootstrap/<cluster>/<name>", methods=["DELETE"])
 @requires_auth
 @_rate_limit("5/minute")
@@ -35127,8 +35158,10 @@ def api_registry_bootstrap_delete(cluster, name):
     """Retire le registre d'amorçage ; son volume est gardé sauf
     `delete_data` avec le nom retapé (point 193)."""
     b = request.get_json(silent=True) or {}
-    d = _rg.load(_bm_profiles_state(), name) if _registry_name_ok(name) else None
-    if d is None or d.get("kind") != "bootstrap" or d.get("cluster") != cluster:
+    if not _registry_name_ok(name):
+        return jsonify({"error": "no such bootstrap registry on this cluster", "code": "registry-unknown"}), 404
+    d = _rg.load(_bm_profiles_state(), name)
+    if d is not None and (d.get("kind") != "bootstrap" or d.get("cluster") != cluster):
         return jsonify({"error": "no such bootstrap registry on this cluster", "code": "registry-unknown"}), 404
     delete_data = bool(b.get("delete_data"))
     if delete_data and b.get("confirm") != name:
@@ -35136,6 +35169,14 @@ def api_registry_bootstrap_delete(cluster, name):
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if d is None:
+        # revue finale I-2 : déploiement échoué avant `ready`, objets restés
+        # sans déclaration ; la suppression les retire s'ils sont là
+        left, err = _registry_leftovers(cluster, kc)
+        if err:
+            return err
+        if name not in [x.get("registry") for x in left]:
+            return jsonify({"error": "no such bootstrap registry on this cluster", "code": "registry-unknown"}), 404
     used, why = _registry_users(name, [cluster])
     if why or used:
         return jsonify({"error": why or f"registry-in-use: {', '.join(used)}",
