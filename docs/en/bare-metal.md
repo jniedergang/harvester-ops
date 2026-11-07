@@ -1006,8 +1006,20 @@ with child actions `capi-service-remove:`, `capi-manifest-remove:`,
   `partial`).
 - **Only what the chain created.** Each target is read again before it is
   removed: it must carry the `harvester-ops.io/plan-run` mark of a run of
-  the chain. Anything else is `undo-not-ours`, left untouched. A
-  declaration is designated by its identifier, never reused.
+  the chain. Anything else is `undo-not-ours`, left untouched. The
+  removal tools read the mark again just before they write
+  (`--expect-run`), so an object recreated in between is refused too. A
+  declaration is designated by its identifier, never reused: it counts as
+  ours by its id alone, so a declaration a later run of the same plan
+  adopted is still destroyed by the undo of the run that created it.
+- **Terraform content under a cluster that stays.** A declaration is never
+  destroyed while a cluster that the Clusters phase of the chain names
+  (created or adopted) is still present, ticked or not, ours or not
+  (`undo-tf-carries-cluster`). The destruction plan names these clusters
+  on the declaration. Remove the cluster first, or untick the declaration.
+- **Registry delete stopped halfway.** The registry Deployment, which
+  carries the run mark, goes last: a delete stopped halfway leaves it, and
+  the undo finishes the removal when run again.
 - **Resume.** Run the undo again on the same run: the items already gone
   are checked absent and skipped.
 - **History.** The original run gets `undone_by`, `undone_at` and
@@ -1016,6 +1028,10 @@ with child actions `capi-service-remove:`, `capi-manifest-remove:`,
   (for example when the registry was left, the default). A run fully undone
   is refused (`undo-already-done`); an undo is never undone
   (`undo-of-undo`): apply the plan again to recreate what it made.
+  Known limit: a deployment whose Clusters phase is partial and whose
+  Artefacts phase then fails ends `error`, although clusters were created;
+  the History still offers Undo, which treats it as partial (to be refined
+  in 2.7.1).
 
 Command line:
 

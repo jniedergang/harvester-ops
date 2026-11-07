@@ -1061,7 +1061,22 @@ sur un cluster), avec les actions filles `capi-service-remove:`,
 - **Seulement ce que la chaîne a créé.** Chaque cible est relue avant son
   retrait : elle doit porter la marque `harvester-ops.io/plan-run` d'une
   exécution de la chaîne. Tout le reste est `undo-not-ours`, laissé tel
-  quel. Une déclaration se désigne par son identifiant, jamais réattribué.
+  quel. Les outils de retrait relisent la marque juste avant d'écrire
+  (`--expect-run`) : un objet recréé entre-temps est refusé aussi. Une
+  déclaration se désigne par son identifiant, jamais réattribué : elle est
+  à nous par ce seul identifiant, donc une déclaration reprise par un
+  déroulé suivant du même plan est détruite par le Défaire de l'exécution
+  qui l'a créée.
+- **Contenu Terraform sous un cluster qui reste.** Une déclaration n'est
+  jamais détruite tant qu'un cluster que la phase Clusters de la chaîne
+  nomme (créé ou repris) est encore là, coché ou non, à nous ou non
+  (`undo-tf-carries-cluster`). Le plan de destruction nomme ces clusters
+  sur la déclaration. Retirez d'abord le cluster, ou décochez la
+  déclaration.
+- **Suppression de registre arrêtée en route.** Le Deployment du
+  registre, qui porte la marque de l'exécution, part en dernier : une
+  suppression arrêtée en route le laisse, et le Défaire finit le retrait
+  quand on le relance.
 - **Reprise.** Relancer le Défaire sur la même exécution : les éléments
   déjà partis sont vérifiés absents et sautés.
 - **Historique.** L'exécution d'origine reçoit `undone_by`, `undone_at` et
@@ -1071,6 +1086,10 @@ sur un cluster), avec les actions filles `capi-service-remove:`,
   exécution entièrement défaite est refusée (`undo-already-done`) ; un
   défaire ne se défait jamais (`undo-of-undo`) : relancer le plan recrée ce
   qu'il avait fait.
+  Limite connue : un déroulé dont la phase Clusters est partielle et dont
+  la phase Artefacts échoue ensuite finit en `error`, bien que des clusters
+  aient été créés ; l'Historique propose toujours Défaire, qui le traite
+  comme partiel (à affiner en 2.7.1).
 
 Ligne de commande :
 

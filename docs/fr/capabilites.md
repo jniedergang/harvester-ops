@@ -2507,10 +2507,15 @@ Voir « Paquets d'artefacts et registres (2.6.0) » plus bas.
   retire les ConfigMaps du paquet et le service de compatibilité. Jamais
   `core/cluster-api` ni Turtles ; les CRD et les namespaces des
   fournisseurs restent. Refusé tant qu'un Cluster (autre que
-  `fleet-local/local`), un `HelmChartProxy` (quand CAAPH part) ou un
-  déroulé de plan existe (`capi-clusters-present`,
-  `caaph-services-present`, `capi-plan-running`). Images des nœuds : en
-  option, décochée. Installer repose la pile. Ligne de commande :
+  `fleet-local/local`), un `HelmChartProxy` (quand CAAPH part), un
+  `HarvesterCluster` resté sans son Cluster (quand CAPHV part : plus rien
+  ne lèverait son finaliseur) ou un déroulé de plan existe
+  (`capi-clusters-present`, `caaph-services-present`,
+  `capi-harvesterclusters-present`, `capi-plan-running`). Images des
+  nœuds : en option, décochée ; `--remove-images` prend les images de tous
+  les Deployments des namespaces des fournisseurs (non vérifié en réel).
+  Le verrou des déroulés est vérifié au départ, pas tenu pendant le
+  retrait. Installer repose la pile. Ligne de commande :
   `harvester-capi uninstall [--dry-run] [--remove-images]`. L'ancien retrait
   reste pour une pile posée avant Harvester 1.9.
 - **HarvesterCluster restant (2.7.0)** : un `HarvesterCluster` laissé par un

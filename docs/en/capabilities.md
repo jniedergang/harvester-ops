@@ -2282,10 +2282,14 @@ Clusters, Services, Registries, Artefacts, History, Installation
   the ConfigMaps of the bundle and the compatibility Service. Never
   `core/cluster-api` nor Turtles; the CRDs and the provider namespaces
   stay. Refused while a Cluster (other than `fleet-local/local`), a
-  `HelmChartProxy` (when CAAPH goes) or a plan run exists
-  (`capi-clusters-present`, `caaph-services-present`,
-  `capi-plan-running`). Images on the nodes: optional, unticked. Install
-  lays the stack again. CLI: `harvester-capi uninstall [--dry-run]
+  `HelmChartProxy` (when CAAPH goes), a `HarvesterCluster` left without
+  its Cluster (when CAPHV goes: nothing would release its finalizer) or a
+  plan run exists (`capi-clusters-present`, `caaph-services-present`,
+  `capi-harvesterclusters-present`, `capi-plan-running`). Images on the
+  nodes: optional, unticked; `--remove-images` takes the images of every
+  Deployment of the provider namespaces (not verified for real). The
+  deployment lock is checked at the start, not held during the removal.
+  Install lays the stack again. CLI: `harvester-capi uninstall [--dry-run]
   [--remove-images]`. The legacy uninstall stays for a stack made before
   Harvester 1.9.
 - **Leftover HarvesterCluster (2.7.0)**: a `HarvesterCluster` left by an

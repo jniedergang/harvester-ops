@@ -620,7 +620,8 @@ clusters enfants » ; la phase du plan et le Défaire :
 5. **Admin : défaire un déploiement.** Bare-metal > Historique, **Défaire**
    sur l'exécution : lire **Contenu** (registre et déclarations non
    prouvées ou modifiées décochés), lire le **Plan de destruction** (un
-   élément dit recréé depuis reste), taper le nom du cluster dans
+   élément dit recréé depuis reste ; une déclaration gardée par un cluster
+   qui reste est signalée), taper le nom du cluster dans
    **Confirmation** (et le nom du registre pour supprimer ses données),
    **Défaire**. Un résultat partiel dit ce qui est resté et pourquoi :
    corriger, puis relancer **Défaire** sur la même exécution ; ce qui est
@@ -628,4 +629,11 @@ clusters enfants » ; la phase du plan et le Défaire :
 6. **Admin : désinstaller la pile Cluster API.** Supprimer d'abord chaque
    cluster enfant. Cluster API > Installation, **Désinstaller** : lire ce
    qui part et ce qui reste, taper le nom du cluster. **Installer** la
-   repose depuis le paquet.
+   repose depuis le paquet. Ne lancez pas de déroulé pendant le retrait :
+   le verrou des déroulés est vérifié au départ mais pas tenu pendant le
+   retrait.
+7. **Bancs d'essai : des adresses à eux.** Chaque banc d'essai a sa propre
+   adresse de registre et son propre pool d'adresses, réservés dans la
+   gestion des adresses et le DNS avant usage. N'empruntez jamais l'adresse
+   d'un autre banc : les deux bancs allumés, deux répartiteurs kube-vip
+   répondraient en ARP pour la même adresse.

@@ -922,7 +922,9 @@ manifest without the Deployment), signed by a key unknown to the console.
 - **Two child clusters on harv4** (bare metal, Harvester v1.9.0): a plan
   with a bootstrap registry, two 1+1 clusters, the manifest `extra` and
   the podinfo chart on both: registry 41 s, publication 3 s, clusters
-  477 s and 499 s, manifests 7 s, charts 14 s, 19 min 20 s in all.
+  477 s and 499 s, manifests 7 s, charts 14 s, 19 min 20 s in all. The
+  harv4 registry used an address borrowed from another bench (that bench
+  was down); harv4 has its own reserved address since.
   Then one undo of the whole run, registry and its data included (two typed names): both charts and manifests removed in 1 to 2 s each, clusters deleted in 169 s and 177 s, registry and volume removed in 2 s, 6 min 15 s in all, run Undone; a decoy ConfigMap `art-extra` labelled like the console in `default` survived. Bench objects removed, the cluster shut down gracefully and node4 powered off.
 - **Found and fixed on the bench:** the registry step of an undo always
   refused by the plan being undone; an undo relaunched at once refused by

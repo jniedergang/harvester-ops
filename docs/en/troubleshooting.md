@@ -548,8 +548,32 @@ a warning; the creation adopts it.
 Something with the name of the item exists but does not carry the
 `harvester-ops.io/plan-run` mark of a run of the undone chain: it was
 recreated since by another run, or by hand. The undo leaves it, and keeps
-what depends on it (its cluster, the Terraform content). Remove it from
-where it was made, or untick the item, then run the undo again.
+what depends on it (its cluster, the Terraform content). Either remove it
+from where it was made, then run the undo again; or keep it, and untick
+the item **and** the Terraform declarations. A Terraform declaration is
+never destroyed while a cluster of the chain is still present (see
+"undo-tf-carries-cluster" below).
+
+A Terraform declaration counts as "ours" by its id alone: ids are never
+reused. So a declaration that a later run of the same plan adopted is
+still destroyed by the undo of the run that created it, once no cluster of
+the chain is left.
+
+### The undo says "undo-tf-carries-cluster"
+
+A cluster that the Clusters phase of the chain names (created or adopted)
+is still present: unticked, recreated by another run, or adopted. It may
+use the network, storage class or image of the declaration, so the
+declaration is kept. The destruction plan names these clusters on the
+declaration. Remove the cluster first (tick it, or delete it where it was
+made), then run the undo again; or untick the declaration to keep it.
+
+### A registry delete stopped halfway
+
+`harvester-registry delete` removes the Deployment, which carries the run
+mark, last, after the console record. A delete that stops halfway (a
+refused right, an API error, a cancel) leaves the Deployment, so the undo
+still recognises the registry and finishes the removal when run again.
 
 ### The undo says "undo-already-done"
 

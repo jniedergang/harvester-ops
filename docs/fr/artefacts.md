@@ -966,7 +966,8 @@ console.
   plan avec un registre d'amorçage, deux clusters 1+1, le manifeste
   `extra` et le chart podinfo sur les deux : registre 41 s, publication
   3 s, clusters 477 s et 499 s, manifestes 7 s, charts 14 s, 19 min 20 s
-  en tout. Puis un seul Défaire de tout le déroulé, registre et données compris (deux noms tapés) : les deux charts et manifestes retirés en 1 à 2 s chacun, clusters supprimés en 169 s et 177 s, registre et volume retirés en 2 s, 6 min 15 s en tout, exécution « Défait » ; un ConfigMap leurre `art-extra` étiqueté comme ceux de la console dans `default` a survécu. Objets du banc retirés, cluster arrêté proprement et node4 éteint.
+  en tout. Le registre de harv4 employait une adresse empruntée à un autre
+  banc (alors arrêté) ; harv4 a depuis sa propre adresse réservée. Puis un seul Défaire de tout le déroulé, registre et données compris (deux noms tapés) : les deux charts et manifestes retirés en 1 à 2 s chacun, clusters supprimés en 169 s et 177 s, registre et volume retirés en 2 s, 6 min 15 s en tout, exécution « Défait » ; un ConfigMap leurre `art-extra` étiqueté comme ceux de la console dans `default` a survécu. Objets du banc retirés, cluster arrêté proprement et node4 éteint.
 - **Trouvé et corrigé sur le banc :** l'étape registre d'un Défaire
   toujours refusée par le plan défait ; un Défaire relancé aussitôt refusé
   par le verrou qu'il rendait ; un Défaire en échec après un Défaire en

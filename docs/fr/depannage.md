@@ -571,8 +571,34 @@ propriétaire n'est qu'un avertissement ; la création l'adopte.
 Quelque chose porte le nom de l'élément sans la marque
 `harvester-ops.io/plan-run` d'une exécution de la chaîne défaite : recréé
 depuis par un autre déroulé, ou à la main. Le Défaire le laisse, et garde
-ce qui en dépend (son cluster, le contenu Terraform). Retirez-le là où il a
-été fait, ou décochez l'élément, puis relancez le Défaire.
+ce qui en dépend (son cluster, le contenu Terraform). Soit retirez-le là où
+il a été fait, puis relancez le Défaire ; soit gardez-le, et décochez
+l'élément **et** les déclarations Terraform. Une déclaration Terraform
+n'est jamais détruite tant qu'un cluster de la chaîne est encore là (voir
+« undo-tf-carries-cluster » ci-dessous).
+
+Une déclaration Terraform est « à nous » par son seul identifiant, jamais
+réattribué. Une déclaration reprise par un déroulé suivant du même plan est
+donc détruite par le Défaire de l'exécution qui l'a créée, dès qu'aucun
+cluster de la chaîne ne reste.
+
+### Le Défaire dit « undo-tf-carries-cluster »
+
+Un cluster que la phase Clusters de la chaîne nomme (créé ou repris) est
+encore là : décoché, recréé par un autre déroulé, ou repris. Il peut
+employer le réseau, la classe de stockage ou l'image de la déclaration :
+elle est gardée. Le plan de destruction nomme ces clusters sur la
+déclaration. Retirez d'abord le cluster (cochez-le, ou supprimez-le là où il
+a été fait), puis relancez le Défaire ; ou décochez la déclaration pour la
+garder.
+
+### Une suppression de registre s'est arrêtée en route
+
+`harvester-registry delete` retire en dernier le Deployment, qui porte la
+marque de l'exécution, après la fiche de la console. Une suppression
+arrêtée en route (droit refusé, erreur d'API, annulation) laisse le
+Deployment : le Défaire reconnaît toujours le registre et finit le retrait
+quand on le relance.
 
 ### Le Défaire dit « undo-already-done »
 

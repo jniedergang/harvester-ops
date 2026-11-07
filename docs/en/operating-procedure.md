@@ -585,10 +585,16 @@ clusters"; the plan phase and the undo: [bare-metal.md](bare-metal.md).
 5. **Admin: undo a deployment.** Bare-metal > History, **Undo** on the run:
    read **Content** (registry and unproven or changed declarations
    unticked), read the **Destruction plan** (an item marked as recreated
-   since stays), type the cluster name in **Confirmation** (and the
+   since stays; a declaration kept by a cluster that stays is said), type the cluster name in **Confirmation** (and the
    registry name to delete its data), **Undo**. A partial result says what
    stayed and why: fix it and run **Undo** again on the same run; what is
    gone is checked and skipped. To recreate, apply the plan again.
 6. **Admin: uninstall the Cluster API stack.** Remove every child cluster
    first. Cluster API > Installation, **Uninstall**: read what goes and what
    stays, type the cluster name. **Install** lays it again from the bundle.
+   Do not start a deployment while the uninstall runs: the deployment lock
+   is checked at the start but not held during the removal.
+7. **Test benches: own addresses.** Each test bench has its own registry
+   address and its own IP pool, reserved in the IP management and the DNS
+   before use. Never borrow the address of another bench: with both benches
+   up, two kube-vip LoadBalancers would answer ARP for the same address.
