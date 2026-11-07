@@ -15,6 +15,8 @@
     harvester-registry leftovers   --cluster C [--kubeconfig K]
     harvester-registry write-access [NOM] --cluster C [--kubeconfig K]
     harvester-registry settings [--write-sources A,B | --clear]
+    harvester-registry renew-cert NOM --cluster C [--days 730] [--new-ca] [--dry-run]
+    harvester-registry harvester-nodes NOM --cluster C [--remove] [--dry-run]
 
 Une déclaration (bin/lib/registries.py) ne porte aucun secret : adresse,
 CA publique, usage (images, charts), registres d'origine miroités. Les
@@ -488,7 +490,11 @@ def cmd_deploy(args):
         node_images.import_on_nodes(entry, [b["tar"]], step, sid="images")
         step("apply", "running", f"namespace {rs.NAMESPACE}: pod, volume of {args.size_gib} GiB, address "
                                  f"{args.address}")
-        kube.apply(rs.manifests(spec, tls, htp, origin, write_sources=sources) + rg.attach_manifests(decl, creds)[1:])
+        # 2.8.0 (point 235) : la clé de la CA de la console est gardée dans
+        # le Secret `<registre>-ca-key` (renouvellement du certificat)
+        keep = [rs.ca_key_secret(args.name, tls["ca"], tls["ca_key"])] if not client_tls else []
+        kube.apply(rs.manifests(spec, tls, htp, origin, write_sources=sources) + rg.attach_manifests(decl, creds)[1:]
+                   + keep)
         step("apply", "running", f"port {rs.WRITE_PORT}: " + (f"reserved to {', '.join(sources)}" if sources else
                                  "open to every address (Settings > Registries restricts it to the console)"))
         step("apply", "done", f"{args.name}: deployment, service, volume, secrets")
@@ -551,8 +557,24 @@ def cmd_status(args):
         not_after = rs.cert_not_after(base64.b64decode(crt).decode()) if crt else None
     except (ValueError, UnicodeDecodeError):
         not_after = None
+    findings = rs.cert_findings(args.name, not_after, time.time())
+    if d and d.get("kind") == "bootstrap" and dep is not None:
+        try:
+            has_key = kube.get("secrets", rs.NAMESPACE, f"{args.name}{rs.CA_KEY_SUFFIX}") is not None
+        except KubeError:
+            has_key = True
+        if not has_key:
+            # 2.8.0 : posé avant la 2.8.0, sa CA n'est pas gardée
+            findings.append(cc.finding("registry-ca-key-missing", "ok", registry=args.name))
+        if d.get("ca_next_pem"):
+            try:
+                pending = ca_pending(kube, d)
+            except KubeError:
+                pending = ["?"]
+            findings.append(cc.finding("registry-ca-transition-pending", "warn", registry=args.name,
+                                       clusters=", ".join(pending) or "-"))
     out({"registry": args.name, "declared": d is not None, "present": dep is not None,
-         "cert_not_after": not_after, "findings": rs.cert_findings(args.name, not_after, time.time()),
+         "cert_not_after": not_after, "findings": findings,
          "origin": rs.origin_of(dep) if dep else {},
          "ready": bool(st.get("readyReplicas")), "image": containers[0].get("image") if containers else None,
          "address": ingress.get("ip") or (d or {}).get("address"),
@@ -674,7 +696,8 @@ def cmd_delete(args):
     objs = [("services", args.name), ("services", rs.write_service_name(args.name)),
             ("configmaps", f"{args.name}-config"),
             ("secrets", f"{args.name}-tls"), ("secrets", f"{args.name}-htpasswd"),
-            ("secrets", names["push"]), ("secrets", names["pull"]), ("secrets", names["ca"])]
+            ("secrets", names["push"]), ("secrets", names["pull"]), ("secrets", names["ca"]),
+            ("secrets", f"{args.name}{rs.CA_KEY_SUFFIX}"), ("secrets", f"{args.name}{rs.CA_NEXT_SUFFIX}")]
     if args.delete_data:
         objs.append(("persistentvolumeclaims", f"{args.name}-data"))
 
@@ -700,6 +723,192 @@ def cmd_delete(args):
     kept = "" if args.delete_data else f"; volume {args.name}-data kept (its images stay for a new deployment)"
     step("delete", "done", f"{args.name} removed{kept}")
     out({"registry": args.name, "deleted": True, "data_kept": not args.delete_data})
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# 2.8.0 : certificat du registre d'amorçage (point 235) et nœuds Harvester
+# (point 236)
+# ---------------------------------------------------------------------------
+def ca_pending(kube, d):
+    """Clusters enfants (namespaces) qui emploient ce registre et dont le
+    Secret des nœuds ne porte pas encore la CA suivante (`renew --what ca`
+    à faire) ; vide : la bascule peut se faire."""
+    want = (d.get("ca_next_pem") or "").strip()
+    out = []
+    for ns in rg.child_users(kube, d["name"]):
+        trusted = False
+        for sec in kube.list("secrets", ns, selector=f"{cc.GENERATED}=true"):
+            data = (sec.get("data") or {}).get(f"ca-{d['name']}.crt")
+            if data and want and want in base64.b64decode(data).decode(errors="replace"):
+                trusted = True
+                break
+        if not trusted:
+            out.append(ns)
+    return sorted(out)
+
+
+def _secret_values(sec):
+    return {k: base64.b64decode(v).decode() for k, v in ((sec or {}).get("data") or {}).items()}
+
+
+def _swap_cert(kube, d, tls, step_id, timeout):
+    """Secret TLS remplacé, pod redémarré, attente de `/v2/` avec la CA
+    donnée : rend (raison d'attente ou None, secondes sans lecture)."""
+    kube.apply([{"apiVersion": "v1", "kind": "Secret", "type": "kubernetes.io/tls",
+                 "metadata": {"name": f"{d['name']}-tls", "namespace": rs.NAMESPACE, "labels": {rs.LABEL: d["name"]}},
+                 "stringData": {"tls.crt": tls["crt"], "tls.key": tls["key"], "ca.crt": tls["ca"]}}])
+    t0 = time.monotonic()
+    kube.patch("deployments", rs.NAMESPACE, d["name"], rs.restart_patch(int(time.time())))
+    step(step_id, "running", f"{d['name']}: certificate replaced, pod restarted")
+    pull = rg.read_creds(kube, d["name"], "pull")
+    why = wait_ready(dict(d, ca_pem=tls["ca"]), pull, timeout)
+    return why, round(time.monotonic() - t0, 1)
+
+
+def cmd_renew_cert(args):
+    """Nouveau certificat serveur signé par la CA gardée (`<r>-ca-key`) ;
+    `--new-ca` pour un registre d'avant 2.8.0 : nouvelle CA en transition
+    (`ca_next_pem`), puis, quand chaque cluster enfant la croit (`harvester-capi
+    renew --what ca`), bascule du certificat (refus
+    `registry-ca-transition-pending` avant). Aucun fichier des nœuds ne change
+    pour un simple renouvellement."""
+    d = rg.load(state(), args.name)
+    if d is None or d.get("kind") != "bootstrap" or d.get("cluster") != args.cluster:
+        step("renew-cert", "error", f"{args.name} is not a bootstrap registry of {args.cluster}")
+        return EXIT_REFUSED
+    if not 1 <= args.days <= rs.CA_DAYS:
+        step("renew-cert", "error", f"--days: 1 to {rs.CA_DAYS}")
+        return EXIT_REFUSED
+    d["name"] = args.name
+    kube, _ = kube_from(args)
+    try:
+        key = kube.get("secrets", rs.NAMESPACE, f"{args.name}{rs.CA_KEY_SUFFIX}")
+        nxt = kube.get("secrets", rs.NAMESPACE, f"{args.name}{rs.CA_NEXT_SUFFIX}")
+    except KubeError as e:
+        step("renew-cert", "error", str(e)[:300])
+        return EXIT_FAIL
+    if key is None and not args.new_ca and not d.get("ca_next_pem"):
+        step("renew-cert", "error", f"registry-ca-key-missing: the CA of {args.name} was not kept (deployed before "
+                                    "2.8.0); renew it with --new-ca")
+        out({"registry": args.name, "code": "registry-ca-key-missing"})
+        return EXIT_REFUSED
+    address, dns = d.get("address") or d["endpoint"], d.get("dns_name")
+    try:
+        work = work_dir.mkdtemp("hops-registry-")
+    except ValueError as e:
+        step("renew-cert", "error", str(e))
+        return EXIT_REFUSED
+    try:
+        if args.new_ca and not d.get("ca_next_pem"):
+            if args.dry_run:
+                out({"registry": args.name, "new_ca": True, "step": "transition"})
+                return EXIT_OK
+            ca = rs.make_ca(work, address, dns, args.name, prefix="next")
+            kube.apply([rs.ca_key_secret(args.name, ca["ca"], ca["ca_key"], rs.CA_NEXT_SUFFIX)])
+            rg.update(state(), args.name, lambda x: x.update(ca_next_pem=ca["ca"]))
+            d["ca_next_pem"] = ca["ca"]
+            step("renew-cert", "running", f"{args.name}: new CA kept in {args.name}{rs.CA_NEXT_SUFFIX}, in transition")
+            nxt = {"data": {"ca.key": base64.b64encode(ca["ca_key"].encode()).decode(),
+                            "ca.crt": base64.b64encode(ca["ca"].encode()).decode()}}
+        if args.new_ca or d.get("ca_next_pem"):
+            pending = ca_pending(kube, d)
+            if pending:
+                step("renew-cert", "error", f"registry-ca-transition-pending: {', '.join(pending)} do not trust the "
+                                            "new CA yet (harvester-capi renew --what ca on each)")
+                out({"registry": args.name, "code": "registry-ca-transition-pending", "clusters": pending})
+                return EXIT_REFUSED
+            signer = _secret_values(nxt)
+        else:
+            signer = _secret_values(key)
+        (Path(work) / "ca.key").write_text(signer["ca.key"])
+        (Path(work) / "ca.crt").write_text(signer["ca.crt"])
+        os.chmod(Path(work) / "ca.key", 0o600)
+        tls = dict(rs.sign_server(work, address, dns, days=args.days), ca=signer["ca.crt"])
+        not_after = rs.cert_not_after(tls["crt"])
+        if args.dry_run:
+            out({"registry": args.name, "not_after": not_after, "new_ca": bool(d.get("ca_next_pem"))})
+            return EXIT_OK
+        why, cut = _swap_cert(kube, d, tls, "renew-cert", args.timeout)
+        if why:
+            step("renew-cert", "error", f"not ready after {args.timeout} s: {why}")
+            return EXIT_FAIL
+        if d.get("ca_next_pem"):
+            # bascule faite : la CA suivante devient celle du registre
+            kube.apply([rs.ca_key_secret(args.name, signer["ca.crt"], signer["ca.key"])])
+            kube.delete("secrets", rs.NAMESPACE, f"{args.name}{rs.CA_NEXT_SUFFIX}")
+            rg.update(state(), args.name, lambda x: (x.update(ca_pem=signer["ca.crt"]), x.pop("ca_next_pem", None)))
+        step("renew-cert", "done", f"{args.name}: certificate valid until "
+                                   f"{time.strftime('%Y-%m-%d', time.gmtime(not_after)) if not_after else '?'}, "
+                                   f"reads cut {cut} s")
+    except (KubeError, RuntimeError, OSError, dp.PlanConflict, dp.ProfileError) as e:
+        step("renew-cert", "error", str(e)[:300])
+        return EXIT_FAIL
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    out({"registry": args.name, "not_after": not_after, "read_cut_seconds": cut})
+    return EXIT_OK
+
+
+SETTING = "containerd-registry"
+ADDITIONAL_CA = "additional-ca"
+
+
+def cmd_harvester_nodes(args):
+    """Fusionne le registre (miroirs, CA, compte de lecture) dans le
+    réglage `containerd-registry` des nœuds Harvester, sans toucher aux
+    autres entrées (`--remove` : retire la seule entrée du registre) ; CA
+    dans `additional-ca`. Valeur précédente rendue masquée (retour arrière).
+    Harvester redémarre RKE2 sur chaque nœud (danger `rke2` du réglage)."""
+    import hv_settings as hs
+    d = rg.load(state(), args.name)
+    if d is None or args.cluster not in (d.get("clusters") or []):
+        step("harvester-nodes", "error", f"registry-not-attached: {args.name} on {args.cluster}")
+        return EXIT_REFUSED
+    d["name"] = args.name
+    kube, _ = kube_from(args)
+    try:
+        cur = kube.get("settings.harvesterhci.io", None, SETTING) or {}
+        ca_cur = kube.get("settings.harvesterhci.io", None, ADDITIONAL_CA) or {}
+        creds = None if args.remove else rg.read_creds(kube, args.name, "pull")
+    except KubeError as e:
+        step("harvester-nodes", "error", str(e)[:300])
+        return EXIT_FAIL
+    if not args.remove and not creds:
+        step("harvester-nodes", "error", f"registry-not-attached: no read account of {args.name} on {args.cluster}")
+        return EXIT_REFUSED
+    before = cur.get("value") or cur.get("default") or ""
+    try:
+        value, found = rg.containerd_merge(before, d, creds, remove=args.remove)
+    except ValueError as e:
+        step("harvester-nodes", "error", str(e)[:300])
+        return EXIT_REFUSED
+    for f in found:
+        step("harvester-nodes", "error" if f["level"] == "block" else "running", f"{f['code']} {json.dumps(f['facts'])}")
+    if cc.blocking(found):
+        return EXIT_REFUSED
+    ca_before = ca_cur.get("value") or ""
+    ca_value = rg.additional_ca_merge(ca_before, d.get("ca_pem") or "", remove=args.remove)
+    result = {"registry": args.name, "cluster": args.cluster, "remove": bool(args.remove),
+              "previous": hs.redact(SETTING, before), "value": hs.redact(SETTING, value),
+              "additional_ca_changed": ca_value != ca_before,
+              "findings": [cc.finding("harvester-rke2-restart", "warn", setting=SETTING)]}
+    step("harvester-nodes", "running", "harvester-rke2-restart: Harvester restarts RKE2 on every node to apply it")
+    if args.dry_run or (value == before and ca_value == ca_before):
+        step("harvester-nodes", "done", "nothing to change" if value == before and ca_value == ca_before
+             else "dry run: nothing written")
+        out(dict(result, changed=value != before or ca_value != ca_before))
+        return EXIT_OK
+    try:
+        if ca_value != ca_before:
+            kube.patch("settings.harvesterhci.io", None, ADDITIONAL_CA, {"value": ca_value})
+        if value != before:
+            kube.patch("settings.harvesterhci.io", None, SETTING, {"value": value})
+    except KubeError as e:
+        step("harvester-nodes", "error", str(e)[:300])
+        return EXIT_FAIL
+    step("harvester-nodes", "done", f"{args.name} {'removed from' if args.remove else 'merged into'} {SETTING}")
+    out(dict(result, changed=True))
     return EXIT_OK
 
 
@@ -771,6 +980,20 @@ def parser():
     s.add_argument("--expect-run", default="", metavar="ID",
                    help="refuse unless the Deployment carries this plan run (the undo of a plan)")
     s.set_defaults(fn=cmd_delete)
+    s = sub.add_parser("renew-cert", allow_abbrev=False)
+    s.add_argument("name")
+    cluster_args(s)
+    s.add_argument("--days", type=int, default=730, help="validity of the new certificate (default 730)")
+    s.add_argument("--new-ca", action="store_true", help="registry deployed before 2.8.0: new CA, in transition")
+    s.add_argument("--timeout", type=int, default=300)
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=cmd_renew_cert)
+    s = sub.add_parser("harvester-nodes", allow_abbrev=False)
+    s.add_argument("name")
+    cluster_args(s)
+    s.add_argument("--remove", action="store_true", help="remove only this registry from the setting")
+    s.add_argument("--dry-run", action="store_true")
+    s.set_defaults(fn=cmd_harvester_nodes)
     s = sub.add_parser("show", allow_abbrev=False)
     s.add_argument("name")
     s.set_defaults(fn=cmd_show)

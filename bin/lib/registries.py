@@ -41,7 +41,7 @@ HOST_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[
 USER_RE = re.compile(r"[^\s:]{1,256}")
 PASSWORD_RE = re.compile(r"[^\r\n\x00]{1,256}")
 KEYS = {"name", "revision", "kind", "software", "endpoint", "push_endpoint", "ca_pem", "usage", "mirrors",
-        "clusters", "insecure_skip_verify", "published", "updated_by"}
+        "clusters", "insecure_skip_verify", "published", "updated_by", "ca_next_pem"}
 BOOTSTRAP_KEYS = {"cluster", "address", "size_gib", "storage_class", "dns_name"}
 NO_FALLBACK_FILE = "/etc/rancher/rke2/config.yaml.d/50-harvester-ops-registry.yaml"
 
@@ -96,12 +96,15 @@ def check_decl(doc):
             _err(errors, key, "host[:port], without scheme nor path")
         else:
             out[key] = v
-    ca = doc.get("ca_pem")
-    if ca not in (None, ""):
-        if not isinstance(ca, str) or "PRIVATE KEY" in ca or not ca_readable(ca):
-            _err(errors, "ca_pem", "an unreadable CA certificate (PEM)")
-        else:
-            out["ca_pem"] = ca
+    for key in ("ca_pem", "ca_next_pem"):
+        ca = doc.get(key)
+        if ca not in (None, ""):
+            if not isinstance(ca, str) or "PRIVATE KEY" in ca or not ca_readable(ca):
+                _err(errors, key, "an unreadable CA certificate (PEM)")
+            else:
+                out[key] = ca
+    if out.get("ca_next_pem") and kind != "bootstrap":
+        _err(errors, "ca_next_pem", "only for a bootstrap registry (renew-cert --new-ca)")
     usage = doc.get("usage", list(USAGES))
     if not isinstance(usage, list) or not all(u in USAGES for u in usage):
         _err(errors, "usage", "a list of images, charts")
@@ -604,11 +607,32 @@ def system_ready_registries(state, decls):
 
 def child_users(kube, name):
     """Clusters enfants (namespaces) qui emploient ce registre : Secrets
-    étiquetés à son nom hors de son propre namespace (compte de lecture
-    d'un cluster enfant, identifiants d'un service)."""
+    étiquetés à son nom hors de son propre namespace (CA d'un cluster
+    enfant, identifiants d'un service, `-auth` d'avant 2.8.0) et, depuis la
+    2.8.0 (revue finale 2.6.0 m-14), Secrets des nœuds qui portent sa
+    marque d'usage `used_label`. Les deux formes sont lues."""
     found = kube.list("secrets", None, selector=f"{LABEL}={name},{cc.GENERATED}=true")
+    found += kube.list("secrets", None, selector=f"{used_label(name)}=used,{cc.GENERATED}=true")
     return sorted({(s.get("metadata") or {}).get("namespace") for s in found
                    if (s.get("metadata") or {}).get("namespace") not in (None, NAMESPACE)})
+
+
+def cluster_uses(kube, ns, cluster_name, registry):
+    """Le cluster enfant emploie-t-il ce registre pour ses images ? Marque
+    d'usage d'un de ses Secrets des nœuds (2.8.0) ou `-auth` d'avant."""
+    for s in kube.list("secrets", ns, selector=f"{used_label(registry)}=used"):
+        if is_nodes_secret_of((s.get("metadata") or {}).get("name"), cluster_name):
+            return True
+    return kube.get("secrets", ns, child_secret_names(cluster_name, registry)["auth"]) is not None
+
+
+def ca_bundle(decl):
+    """CA que les nœuds d'un cluster enfant croient : celle du registre, et
+    pendant une transition (renew-cert --new-ca) la suivante aussi."""
+    cur, nxt = (decl or {}).get("ca_pem") or "", (decl or {}).get("ca_next_pem") or ""
+    if not nxt or nxt.strip() in cur:
+        return cur                      # tel quel : un Secret inchangé ne renouvelle rien
+    return (cur if cur.endswith("\n") or not cur else cur + "\n") + nxt
 
 
 def pull_creds_for(kube, names):
@@ -661,10 +685,13 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None, nodes_sec
     deux registres un seul gardait son compte et sa CA (vu sur harvlab2).
 
     Secrets : `<cluster>-registries` (`registries.yaml`, `ca-<registre>.crt`)
-    pour les nœuds ; `<cluster>-registry-<registre>-auth` (`username`,
-    `password`) et `-ca` (`Opaque`, `ca.crt` seul), étiquetés au nom du
-    registre : ils disent quels clusters l'emploient (`child_users`) et la
-    CA sert aux services tirés du registre (CAAPH). Tous étiquetés
+    pour les nœuds, étiqueté `used_label(<registre>)` pour chaque registre
+    employé (2.8.0, revue finale 2.6.0 m-14 : le mot de passe de lecture
+    n'est plus rangé une seconde fois dans `<cluster>-registry-<r>-auth`,
+    forme encore lue et retirée au premier renouvellement des registres) ;
+    `<cluster>-registry-<registre>-ca` (`Opaque`, `ca.crt` seul), étiqueté
+    au nom du registre : la CA sert aux services tirés du registre (CAAPH).
+    Pendant une transition de CA, `ca_bundle` (ancienne et nouvelle). Tous étiquetés
     `GENERATED` pour partir avec le cluster ; `insecure_skip_verify` jamais
     posé sauf demande explicite (vérification active).
 
@@ -689,16 +716,13 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None, nodes_sec
         sn = child_secret_names(cname, name)
         creds = pull_creds[name]
         conf = {"auth": {"username": creds["username"], "password": creds["password"]}}
-        secrets.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
-                        "metadata": {"name": sn["auth"], "namespace": ns, "labels": dict(labels)},
-                        "stringData": {"username": creds["username"], "password": creds["password"]}})
         tls = {}
         if d.get("ca_pem"):
             tls["ca_file"] = f"{CA_DIR}/{name}/ca.crt"
-            cas[name] = d["ca_pem"]
+            cas[name] = ca_bundle(d)
             secrets.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
                             "metadata": {"name": sn["ca"], "namespace": ns, "labels": dict(labels)},
-                            "stringData": {"ca.crt": d["ca_pem"]}})
+                            "stringData": {"ca.crt": cas[name]}})
         if d.get("insecure_skip_verify"):
             tls["insecure_skip_verify"] = True
         if tls:
@@ -710,8 +734,12 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None, nodes_sec
     files = []
     if doc:
         src = nodes_secret or nodes_secret_name(cname)
+        # revue finale 2.6.0 (m-14) : le mot de passe de lecture n'est rangé
+        # qu'ici ; la marque d'usage est une étiquette par registre
         secrets.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
-                        "metadata": {"name": src, "namespace": ns, "labels": {cc.GENERATED: "true"}},
+                        "metadata": {"name": src, "namespace": ns,
+                                     "labels": dict({cc.GENERATED: "true"},
+                                                    **{used_label(n): "used" for n in used})},
                         # JSON : du YAML valide, lu tel quel par RKE2
                         "stringData": dict({"registries.yaml": json.dumps(doc, indent=2) + "\n"},
                                            **{f"ca-{n}.crt": pem for n, pem in cas.items()})})
@@ -795,3 +823,78 @@ def cluster_registry_names(nodes_secret, auth_secrets=(), decls=None):
         ep = f"https://{(decls.get(n) or {}).get('endpoint')}"
         return order.index(ep) if ep in order else len(order)
     return sorted(dict.fromkeys(names), key=rank)
+
+
+# ---------------------------------------------------------------------------
+# 2.8.0 (point 236) : registre dans le réglage `containerd-registry` des
+# nœuds Harvester. Forme relue sur harvlab2 (plan 2.8.0, « Essais préalables
+# (tâche 1) », point 8) : {Mirrors: {<origine>: {Endpoints, Rewrites}},
+# Configs: {<hôte>: {Auth, TLS}}, Auths} ; Harvester 1.9 retire `Auth` du
+# réglage et range les identifiants dans un Secret `rke.cattle.io/auth-config`
+# de `fleet-local` (hv_forklift.registry_auth_secret).
+# ---------------------------------------------------------------------------
+def containerd_merge(value, decl, creds=None, remove=False):
+    """(nouvelle valeur JSON, constats) : miroirs, configuration et compte de
+    lecture du registre `decl` fusionnés dans la valeur du réglage (ou
+    retirés avec `remove`), les autres entrées intactes. Un registre
+    d'origine déjà miroité par un autre point d'accès avec une réécriture
+    différente : `harvester-nodes-mirror-conflict` (bloquant)."""
+    import capi_cluster as _cc
+    try:
+        doc = json.loads(value) if value else {}
+    except ValueError:
+        raise ValueError(f"{'containerd-registry'}: the current value is not JSON") from None
+    if not isinstance(doc, dict):
+        raise ValueError("containerd-registry: the current value is not an object")
+    doc = json.loads(json.dumps(doc))
+    mirrors = doc.setdefault("Mirrors", {}) or {}
+    doc["Mirrors"] = mirrors
+    configs = doc.setdefault("Configs", {}) or {}
+    doc["Configs"] = configs
+    doc.setdefault("Auths", None)
+    ep = f"https://{decl['endpoint']}"
+    found = []
+    for origin in decl.get("mirrors") or []:
+        m = mirrors.get(origin)
+        if remove:
+            if m and ep in (m.get("Endpoints") or []):
+                m["Endpoints"] = [e for e in m["Endpoints"] if e != ep]
+                if not m["Endpoints"]:
+                    mirrors.pop(origin)
+            continue
+        ours = {"^(.*)$": f"{_origin_repo(origin)}/$1"}
+        if m is None:
+            mirrors[origin] = {"Endpoints": [ep], "Rewrites": ours}
+            continue
+        others = [e for e in m.get("Endpoints") or [] if e != ep]
+        if others and (m.get("Rewrites") or {}) != ours:
+            found.append(_cc.finding("harvester-nodes-mirror-conflict", "block", origin=origin,
+                                     endpoints=", ".join(others)))
+            continue
+        m["Endpoints"] = others + [ep]
+        m["Rewrites"] = ours
+    if remove:
+        configs.pop(decl["endpoint"], None)
+    else:
+        configs[decl["endpoint"]] = {
+            "Auth": {"Username": creds["username"], "Password": creds["password"], "Auth": "", "IdentityToken": ""},
+            "TLS": {"CAFile": "", "CertFile": "", "KeyFile": "",
+                    "InsecureSkipVerify": bool(decl.get("insecure_skip_verify"))}}
+    return json.dumps(doc, separators=(",", ":")), found
+
+
+def additional_ca_merge(value, pem, remove=False):
+    """Réglage `additional-ca` (CA de confiance des nœuds Harvester) : la CA
+    du registre ajoutée si absente, ou retirée ; les autres CA intactes."""
+    value = value or ""
+    pem = (pem or "").strip()
+    if not pem:
+        return value
+    if remove:
+        if pem not in value:
+            return value
+        out = value.replace(pem, "")
+        return "\n".join(line for line in out.splitlines() if line.strip()) + ("\n" if out.strip() else "")
+    if pem in value:
+        return value
+    return (value if value.endswith("\n") or not value else value + "\n") + pem + "\n"

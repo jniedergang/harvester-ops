@@ -37344,6 +37344,78 @@ def api_registry_bootstrap_delete(cluster, name):
     return jsonify({"action_id": run.id, "registry": name, "data_kept": not delete_data}), 202
 
 
+# 2.8.0 : certificat du registre d'amorçage (point 235) et réglage
+# containerd-registry des nœuds Harvester (point 236), administrateur
+# (_artefacts_required_role) ; gestes de harvester-registry (parité CLI).
+def _registry_gesture(name, sub, allowed, label_of, extra_of):
+    if not _registry_name_ok(name):
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "a JSON object is expected"}), 400
+    for k in sorted(set(body) - allowed):
+        return jsonify({"error": f"{k}: unknown key"}), 400
+    cluster = body.get("cluster")
+    if not isinstance(cluster, str) or not _valid_k8s_name(cluster):
+        return jsonify({"error": "cluster: a Harvester cluster name", "fields": ["cluster"]}), 400
+    d = _rg.load(_bm_profiles_state(), name)
+    if d is None:
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    cmd = _registry_cmd(sub)
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    try:
+        extra = extra_of(body)
+    except (TypeError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+    cmd += [name, "--cluster", cluster, "--kubeconfig", kc] + extra
+    if body.get("dry_run") is True:
+        res, err = _capi_run_json(cmd + ["--dry-run"], timeout=120)
+        if err:
+            return err
+        out, rc = res
+        return jsonify(dict(out or {}, blocked=rc != 0)), 200
+    # le résultat JSON de l'outil (valeur précédente masquée, fin de validité)
+    # reste dans l'action : retour arrière du réglage des nœuds
+    run, err = _cli_action(cluster, label_of(cluster), cmd, "harvester-registry", capture=True,
+                           setup=lambda r: setattr(r, "required_role", "admin"))
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "registry": name, "cluster": cluster}), 202
+
+
+@app.route("/api/registries/<name>/renew-cert", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_registry_renew_cert(name):
+    """Renouvelle le certificat serveur d'un registre d'amorçage (CA gardée,
+    ou `new_ca` en deux temps pour un registre d'avant 2.8.0) : action suivie
+    `registry-renew-cert:<cluster>/<nom>`."""
+    def extra(b):
+        days = int(b.get("days", 730))
+        if not 1 <= days <= 3650:
+            raise ValueError("days: 1 to 3650")
+        return ["--days", str(days)] + (["--new-ca"] if b.get("new_ca") is True else [])
+    return _registry_gesture(name, "renew-cert", {"cluster", "days", "new_ca", "dry_run"},
+                             lambda c: f"registry-renew-cert:{c}/{name}", extra)
+
+
+@app.route("/api/registries/<name>/harvester-nodes", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_registry_harvester_nodes(name):
+    """Fusionne le registre dans le réglage containerd-registry des nœuds
+    Harvester (`remove` : le retire) ; Harvester redémarre RKE2 sur chaque
+    nœud. Action suivie `registry-harvester-nodes:<cluster>/<nom>` ; sa
+    valeur précédente, masquée, reste dans le résultat (retour arrière)."""
+    return _registry_gesture(name, "harvester-nodes", {"cluster", "remove", "dry_run"},
+                             lambda c: f"registry-harvester-nodes:{c}/{name}",
+                             lambda b: ["--remove"] if b.get("remove") is True else [])
+
+
 if __name__ == "__main__":
     cfg = load_config().get("web", {})
     host = cfg.get("bind_host", "0.0.0.0")

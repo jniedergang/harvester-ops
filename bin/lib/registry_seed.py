@@ -329,38 +329,83 @@ def _run(runner, argv, **kw):
     return p.stdout
 
 
-def make_tls(work, address, dns_name=None, name="registry", runner=None):
-    """CA de 10 ans et certificat serveur de 2 ans (SAN adresse et nom),
-    extensions exigées par la vérification stricte de Python 3.13 (essais
-    préalables) ; clés dans `work` (0700, à effacer par l'appelant).
-    Rend {"crt", "key", "ca"} en PEM."""
+def name_constraints(address, dns_name=None):
+    """2.8.0 (point 235) : la CA d'un registre d'amorçage ne signe que pour
+    l'adresse IP du registre et son nom DNS s'il est donné (extension
+    critique) : sa clé gardée ne peut rien certifier d'autre."""
+    out = f"nameConstraints=critical,permitted;IP:{address}/255.255.255.255"
+    return out + (f",permitted;DNS:{dns_name}" if dns_name else "")
+
+
+def make_ca(work, address, dns_name=None, name="registry", runner=None, prefix="ca"):
+    """CA de 10 ans contrainte à l'adresse du registre (`name_constraints`) ;
+    `<prefix>.key` et `<prefix>.crt` dans `work` (0600)."""
     work = Path(work)
     old = os.umask(0o077)
     try:
         _run(runner, ["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
-                      "-keyout", str(work / "ca.key"), "-out", str(work / "ca.crt"), "-days", str(CA_DAYS),
-                      "-subj", f"/CN=harvester-ops registry CA {name}",
+                      "-keyout", str(work / f"{prefix}.key"), "-out", str(work / f"{prefix}.crt"),
+                      "-days", str(CA_DAYS), "-subj", f"/CN=harvester-ops registry CA {name}",
                       "-addext", "basicConstraints=critical,CA:TRUE",
                       "-addext", "keyUsage=critical,keyCertSign,cRLSign",
-                      "-addext", "subjectKeyIdentifier=hash"])
+                      "-addext", "subjectKeyIdentifier=hash",
+                      "-addext", name_constraints(address, dns_name)])
+    finally:
+        os.umask(old)
+    return {"ca": (work / f"{prefix}.crt").read_text(), "ca_key": (work / f"{prefix}.key").read_text()}
+
+
+def sign_server(work, address, dns_name=None, ca_prefix="ca", days=CERT_DAYS, runner=None):
+    """Certificat serveur (SAN adresse et nom) signé par la CA `<ca_prefix>`
+    de `work`, extensions exigées par la vérification stricte de Python 3.13
+    (essais préalables). Rend {"crt", "key"} en PEM."""
+    work = Path(work)
+    old = os.umask(0o077)
+    try:
         _run(runner, ["openssl", "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
                       "-keyout", str(work / "tls.key"), "-out", str(work / "tls.csr"), "-subj", f"/CN={address}"])
         san = f"IP:{address}" + (f",DNS:{dns_name}" if dns_name else "")
         (work / "ext.cnf").write_text(f"subjectAltName={san}\nbasicConstraints=critical,CA:FALSE\n"
                                       "keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n"
                                       "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n")
-        _run(runner, ["openssl", "x509", "-req", "-in", str(work / "tls.csr"), "-CA", str(work / "ca.crt"),
-                      "-CAkey", str(work / "ca.key"), "-CAcreateserial", "-out", str(work / "tls.crt"),
-                      "-days", str(CERT_DAYS), "-extfile", str(work / "ext.cnf")])
+        _run(runner, ["openssl", "x509", "-req", "-in", str(work / "tls.csr"), "-CA", str(work / f"{ca_prefix}.crt"),
+                      "-CAkey", str(work / f"{ca_prefix}.key"), "-CAcreateserial", "-out", str(work / "tls.crt"),
+                      "-days", str(days), "-extfile", str(work / "ext.cnf")])
     finally:
         os.umask(old)
-    return {"crt": (work / "tls.crt").read_text(), "key": (work / "tls.key").read_text(),
-            "ca": (work / "ca.crt").read_text()}
+    return {"crt": (work / "tls.crt").read_text(), "key": (work / "tls.key").read_text()}
 
 
-# 2.7.0 (point 213) : le certificat serveur vaut 2 ans (CERT_DAYS) et la
-# console ne le renouvelle pas encore (la CA n'est pas gardée, 2.8.0) :
+def make_tls(work, address, dns_name=None, name="registry", runner=None):
+    """CA de 10 ans (contrainte, 2.8.0) et certificat serveur de 2 ans ;
+    clés dans `work` (0700, à effacer par l'appelant). Rend {"crt", "key",
+    "ca", "ca_key"} en PEM : la clé de la CA est gardée par l'appelant dans
+    le Secret `<registre>-ca-key` (point 235)."""
+    ca = make_ca(work, address, dns_name, name, runner)
+    return dict(sign_server(work, address, dns_name, runner=runner), **ca)
+
+
+CA_KEY_SUFFIX, CA_NEXT_SUFFIX = "-ca-key", "-ca-next"
+
+
+def ca_key_secret(name, ca_pem, ca_key, suffix=CA_KEY_SUFFIX):
+    """Secret `harvester-ops-registry/<registre>-ca-key` (ou `-ca-next`,
+    CA en transition) : clé et certificat de la CA qui signe le certificat
+    du registre. Jamais ailleurs que sur le cluster Harvester du registre."""
+    return {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+            "metadata": {"name": f"{name}{suffix}", "namespace": NAMESPACE,
+                         "labels": {LABEL: name, rg.MANAGED: "true"}},
+            "stringData": {"ca.key": ca_key, "ca.crt": ca_pem}}
+
+
+def restart_patch(stamp):
+    """Patch du Deployment qui redémarre le pod (nouveau certificat lu)."""
+    return {"spec": {"template": {"metadata": {"annotations": {"harvester-ops.io/restarted-at": str(stamp)}}}}}
+
+
+# 2.7.0 (point 213) : le certificat serveur vaut 2 ans (CERT_DAYS) ;
 # avertissement à 60 jours, dans Registres et dans les contrôles d'un plan.
+# 2.8.0 : `harvester-registry renew-cert` le renouvelle (clé de CA gardée).
 CERT_WARN_DAYS = 60
 
 

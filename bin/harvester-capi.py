@@ -1302,11 +1302,17 @@ def _registry_secrets_of(generated, ns, name):
     `web`."""
     wanted = {(s.get("metadata") or {}).get("name") for s in generated
               if rg.is_nodes_secret_of((s.get("metadata") or {}).get("name"), name)}
+    regs = set()
     for s in generated:
-        reg = ((s.get("metadata") or {}).get("labels") or {}).get(rg.LABEL)
-        if reg:
-            wanted |= set(rg.child_secret_names(name, reg).values())
-            wanted.add(sv.registry_secret_names({"cluster": f"{ns}/{name}"}, reg)["auth"])
+        labels = (s.get("metadata") or {}).get("labels") or {}
+        if labels.get(rg.LABEL):
+            regs.add(labels[rg.LABEL])
+        if (s.get("metadata") or {}).get("name") in wanted:
+            # 2.8.0 (m-14) : marques d'usage du Secret des nœuds
+            regs |= set(rg.cluster_registry_names(s))
+    for reg in regs:
+        wanted |= set(rg.child_secret_names(name, reg).values())
+        wanted.add(sv.registry_secret_names({"cluster": f"{ns}/{name}"}, reg)["auth"])
     return [s for s in generated if (s.get("metadata") or {}).get("name") in wanted]
 
 
@@ -1581,7 +1587,7 @@ def service_source(kube, spec, harvester, read_creds=False):
         found.append(sv.finding("service-chart-not-published", "warn", registry=reg, package=ref))
     ns, _, child = spec["cluster"].partition("/")
     try:
-        mirrored = kube.get("secrets", ns, rg.child_secret_names(child, reg)["auth"]) is not None
+        mirrored = rg.cluster_uses(kube, ns, child, reg)
     except KubeError:
         mirrored = False
     if not mirrored:
