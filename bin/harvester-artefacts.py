@@ -650,7 +650,12 @@ def cmd_list(args):
 
 
 def cmd_remove(args):
-    import deploy_plans as dp          # chargé ici : pack reste en bibliothèque standard
+    try:
+        import deploy_plans as dp      # chargé ici : pack reste en bibliothèque standard
+    except ImportError:
+        # revue finale m-8 : l'usage du paquet se lit dans les plans (YAML)
+        step("remove", "error", "remove reads the saved plans; run it where the console is installed (PyYAML)")
+        return EXIT_FAIL
     try:
         art.remove_package(state_dir(), args.name, args.version,
                            used_by=dp.package_users(state_dir(), args.name, args.version))

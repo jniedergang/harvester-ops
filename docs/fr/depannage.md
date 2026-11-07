@@ -524,8 +524,10 @@ Ajoutez aussi le nœud à la configuration de la console.
 ### `harvester-artefacts remove` échoue sur une machine sans PyYAML
 
 `remove` lit les plans enregistrés (un paquet qu'un plan publie ne peut pas
-être retiré), et les plans ont besoin de PyYAML. Lancez-le là où la console
-est installée. `pack`, `sign`, `verify` et `inspect` restent en
+être retiré), et les plans ont besoin de PyYAML. Sans lui, l'étape dit
+« remove reads the saved plans; run it where the console is installed
+(PyYAML) » et la commande sort avec le code 1, sans rien retirer.
+Lancez-la là où la console est installée. `pack`, `sign`, `verify` et `inspect` restent en
 bibliothèque standard de Python.
 
 ## Reprendre une extinction interrompue

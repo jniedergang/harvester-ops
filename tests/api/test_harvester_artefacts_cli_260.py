@@ -418,3 +418,18 @@ def test_the_written_package_puts_its_sums_first(tmp_path):
     pkg = small_package(tmp_path)
     files = [n for n, m in members(pkg) if m.isfile()]
     assert files[0].endswith("/SHA256SUMS") and len(files) == 3
+
+
+def test_remove_without_pyyaml_says_where_to_run_it(tmp_path):
+    """Revue finale m-8 : sans PyYAML (`-I -S`), `remove` finit par une
+    étape d'erreur claire et le code 1, jamais une trace ; rien n'est
+    retiré."""
+    pkg = small_package(tmp_path)
+    env, sdir = console_env(tmp_path)
+    run("import", pkg, "--accept-unsigned", env=env, check=0)
+    p = run("remove", "socle", "2026.11", env=env, check=1)
+    assert "Traceback" not in p.stderr
+    assert ["remove", "error", "remove reads the saved plans; run it where the console is installed (PyYAML)"] \
+        in steps(p.stderr)
+    listed = json.loads(run("list", env=env, check=0).stdout)
+    assert [(x["name"], x["version"]) for x in listed] == [("socle", "2026.11")]

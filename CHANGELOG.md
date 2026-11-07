@@ -230,6 +230,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   bootstrap registry aims at the cluster of the registry, not the one
   selected in the page; **Check** is greyed for a viewer, with the role in
   its tooltip.
+- `harvester-artefacts remove` on a machine without PyYAML ends with a
+  clear step ("remove reads the saved plans; run it where the console is
+  installed (PyYAML)") and exit code 1, instead of a traceback.
 - The upload of a package and the short gestures on the console state
   (trust settings, package removal, forget) record their end time.
 

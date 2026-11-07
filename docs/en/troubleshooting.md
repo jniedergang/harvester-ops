@@ -503,7 +503,10 @@ Add the node to the console configuration as well.
 ### `harvester-artefacts remove` fails on a machine without PyYAML
 
 `remove` reads the saved plans (a package that a plan publishes cannot be
-removed), and plans need PyYAML. Run it where the console is installed.
+removed), and plans need PyYAML. Without it, the step says "remove reads
+the saved plans; run it where the console is installed (PyYAML)" and the
+command exits with 1, removing nothing. Run it where the console is
+installed.
 `pack`, `sign`, `verify` and `inspect` stay on the Python standard library.
 
 ## Recovering from a half-done shutdown
