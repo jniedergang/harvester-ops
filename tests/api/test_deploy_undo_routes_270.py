@@ -433,3 +433,20 @@ def test_each_removal_tool_gets_the_run_it_must_find(undo):
         assert subs[sub][subs[sub].index("--expect-run") + 1] == "c0ffee000001", (sub, subs[sub])
     deletes = [args for sub, args in undo["undo"].cmds if sub == "delete" and "--name" in args]
     assert deletes and deletes[0][deletes[0].index("--expect-run") + 1] == "c0ffee000001"
+
+
+def test_cancelling_an_undo_answers_the_real_flag(undo):
+    """Revue finale 2.7.0 (m-c) : un défaire n'a pas de processus ; son
+    annulation prend effet (`_cancel`) mais la réponse disait
+    `cancel_requested: false`."""
+    run = wapp.ActionRun("feed00000270", "deploy-undo:harvlab", "harvlab", [])
+    run.status = "running"
+    with wapp.ACTIONS_LOCK:
+        wapp.ACTIONS[run.id] = run
+    try:
+        r = undo["client"].delete(f"/api/action/{run.id}")
+        assert r.status_code == 200 and r.get_json()["cancel_requested"] is True, r.get_json()
+        assert run._cancel is True and run.status == "running"          # le défaire s'arrête de lui-même
+    finally:
+        with wapp.ACTIONS_LOCK:
+            wapp.ACTIONS.pop(run.id, None)

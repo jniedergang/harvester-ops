@@ -13540,6 +13540,8 @@ def _action_request_cancel(run):
         # ses boucles, mais rien ne le posait : le bouton du dock ne faisait
         # rien. Elle s'arrête d'elle-même et nettoie ce qu'elle a commencé.
         run._cancel = True
+        # revue finale 2.7.0 (m-c) : la réponse dit que l'arrêt est demandé
+        run.cancel_requested = True
 
 
 def _kill_after_grace(run, wait=None):
