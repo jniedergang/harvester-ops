@@ -104,8 +104,6 @@ def test_admin_binding_is_the_only_cluster_admin_binding_and_only_with_a_group()
     assert b["roleRef"]["name"] == "cluster-admin"
     assert b["subjects"] == [{"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": "oidc:hops-admins"}]
     assert cp.admin_binding("oidc:", None) is None and cp.admin_binding("oidc:", "") is None
-    assert cp.group_with_prefix("equipe-a", "oidc:") == "oidc:equipe-a"
-    assert cp.group_with_prefix("oidc:equipe-a", "oidc:") == "oidc:equipe-a"
 
 
 def test_a_package_cluster_admin_binding_is_still_refused():
@@ -169,3 +167,9 @@ def test_create_delivers_the_admin_group_once_available(cli, monkeypatch):
     assert cli._after_create(Mgmt(annotated()), spec(oidc={k: v for k, v in OIDC.items() if k != "admin_group"}),
                              "harvlab2", {}, 900) == 0
     assert got == []
+
+
+def test_no_group_prefix_helper_is_left_unused():
+    """Revue finale m-9 : l'aide de préfixage, jamais employée, est retirée
+    (zéro redondance) ; les groupes s'écrivent tels que l'API les voit."""
+    assert not hasattr(cp, "group_with_prefix")

@@ -303,11 +303,3 @@ def admin_binding(groups_prefix, admin_group):
             "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "cluster-admin"},
             "subjects": [{"apiGroup": "rbac.authorization.k8s.io", "kind": "Group",
                           "name": f"{groups_prefix}{admin_group}"}]}
-
-
-def group_with_prefix(group, groups_prefix):
-    """Groupe tel que l'API le voit : préfixe du cluster ajouté s'il manque
-    (proposé par la console pour les rôles par groupe, point 229)."""
-    if not groups_prefix or group.startswith(groups_prefix):
-        return group
-    return groups_prefix + group
