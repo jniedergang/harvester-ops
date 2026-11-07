@@ -3,6 +3,7 @@ flux, pré-vérification, acquittement, import par l'outil en action suivie
 (journal), mode strict et verrou de config.yaml, clés de confiance ; aucun
 chemin absolu dans les réponses."""
 
+import hashlib
 import json
 import re
 import shutil
@@ -25,6 +26,12 @@ import test_harvester_artefacts_cli_260 as tcli  # noqa: E402
 env = tr.env
 keys = tcli.keys
 needs_keygen = pytest.mark.skipif(not shutil.which("ssh-keygen"), reason="ssh-keygen needed")
+
+
+def sha(pkg):
+    """Empreinte de l'archive montrée par la pré-vérification (revue m-7 :
+    obligatoire avec un acquittement)."""
+    return hashlib.sha256(Path(pkg).read_bytes()).hexdigest()
 
 
 def upload(c, path, name=None):
@@ -70,9 +77,9 @@ def test_unsigned_package_needs_its_acknowledgement_then_is_imported(env, pkg, t
     r = c.post("/api/artefacts/socle/2026.11/accept", json={})
     assert r.status_code == 409 and r.get_json()["code"] == "acknowledge-required"
     assert r.get_json()["state"] == "unsigned"
-    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unknown-key"})   # faux acquittement
+    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unknown-key", "sha256": sha(pkg)})   # faux acquittement
     assert r.status_code == 409 and r.get_json()["code"] == "acknowledge-required"
-    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned"})
+    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned", "sha256": sha(pkg)})
     assert r.status_code == 202, r.get_json()
     run = wait(r.get_json()["action_id"])
     assert run.status == "done", journal(run)
@@ -84,7 +91,7 @@ def test_unsigned_package_needs_its_acknowledgement_then_is_imported(env, pkg, t
     assert detail.get_json()["index"]["items"][0]["name"] == "ns" and "path" not in detail.get_json()
     no_paths(detail, tmp_path)
     assert not list((env["state"] / "artefacts" / "incoming").glob("socle*"))      # archive retirée
-    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned"})
+    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned", "sha256": sha(pkg)})
     assert r.status_code == 404                                                    # plus rien à accepter
 
 
@@ -110,7 +117,7 @@ def test_signed_packages_follow_the_decision_table(env, keys, pkg, state, ack, s
     upload(c, pkg)
     r = upload(c, sig, name=pkg.name + ".sig")
     assert r.get_json()["staged"]["trust"]["state"] == state
-    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": ack} if ack else {})
+    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": ack, "sha256": sha(pkg)} if ack else {})
     assert r.status_code == status, r.get_json()
     if code:
         assert r.get_json()["code"] == code
@@ -126,7 +133,7 @@ def test_strict_mode_refuses_and_its_lock_comes_from_config(env, pkg, monkeypatc
     r = c.put("/api/artefacts/settings", json={"strict": True})
     assert r.status_code == 200 and r.get_json()["strict"] is True and r.get_json()["action_id"]
     upload(c, pkg)
-    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned"})
+    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned", "sha256": sha(pkg)})
     assert r.status_code == 409 and r.get_json()["code"] == "strict-mode"
     monkeypatch.setattr(wapp, "load_config_ro", lambda: {"clusters": [], "artefacts": {"strict": True}})
     s = c.get("/api/artefacts/settings").get_json()
@@ -186,7 +193,7 @@ def test_a_broken_archive_is_said_at_upload(env, tmp_path):
 def test_delete_is_tracked_and_versions_are_checked(env, pkg):
     c = env["client"]
     upload(c, pkg)
-    wait(c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned"}).get_json()["action_id"])
+    wait(c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned", "sha256": sha(pkg)}).get_json()["action_id"])
     r = c.delete("/api/artefacts/socle/2026.11")
     assert r.status_code == 200 and wait(r.get_json()["action_id"]).action == "artefacts-remove:socle-2026.11"
     assert c.delete("/api/artefacts/socle/2026.11").status_code == 404
@@ -231,7 +238,7 @@ def test_a_swap_after_accept_never_reaches_the_import(env, pkg, tmp_path, monkey
             id = "i1i1i1i1i1i1"
         return Run(), None
     monkeypatch.setattr(wapp, "_cli_action", fake)
-    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned"})
+    r = c.post("/api/artefacts/socle/2026.11/accept", json={"acknowledge": "unsigned", "sha256": sha(pkg)})
     assert r.status_code == 202, r.get_json()
     assert seen["path"] != seen["incoming"] and seen["path"].parent != seen["incoming"].parent
     assert seen["data"] == Path(pkg).read_bytes()
@@ -272,3 +279,15 @@ def test_upload_and_settings_actions_have_an_end(env, pkg, keys):
               .get_json()["action_id"])
     for run in (up, st):
         assert run.ended_at is not None and run.ended_at >= run.started_at
+
+
+@pytest.mark.parametrize("body", [{"acknowledge": "unsigned"}, {"acknowledge": "unsigned", "sha256": ""}])
+def test_an_acknowledgement_without_the_checked_sha256_is_refused(env, pkg, monkeypatch, body):
+    """Revue finale m-7 : l'acquittement est lié à l'empreinte de la
+    pré-vérification, toujours ; sans elle, 400 avant de toucher l'archive."""
+    c = env["client"]
+    upload(c, pkg)
+    monkeypatch.setattr(wapp, "_cli_action", lambda *a, **k: pytest.fail("no import expected"))
+    r = c.post("/api/artefacts/socle/2026.11/accept", json=body)
+    assert r.status_code == 400 and r.get_json()["code"] == "sha256-required"
+    assert (env["state"] / "artefacts" / "incoming" / "socle-2026.11.tar.gz").is_file()

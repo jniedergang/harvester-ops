@@ -150,7 +150,10 @@ peut pas être vérifiée. »), l'empreinte de la clé quand il y en a une, et
 une case **J'accepte ce paquet en connaissance de cause**. **Accepter**
 reste grisé tant que la case n'est pas cochée. L'acquittement est lié à
 l'archive vérifiée : si un autre envoi l'a remplacée entre-temps, la
-console refuse (`archive-changed`) et demande de vérifier à nouveau.
+console refuse (`archive-changed`) et demande de vérifier à nouveau. Par
+l'API, `POST /api/artefacts/<nom>/<version>/accept` avec un
+`acknowledge` doit porter le `sha256` rendu par la pré-vérification
+(`sha256-required`, 400, sinon).
 
 **Journal.** L'étape `trust` de l'action d'import écrit, par exemple,
 `accepted UNSIGNED package socle-2026.11 after acknowledgement by alice`

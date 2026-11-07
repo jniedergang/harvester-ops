@@ -149,7 +149,10 @@ checked."), the key fingerprint when there is one, and a checkbox **I
 accept this package knowingly**. **Accept** stays greyed until the box is
 ticked. The acknowledgement is bound to the archive checked: if another
 upload replaced it in the meantime, the console refuses (`archive-changed`)
-and asks to check again.
+and asks to check again. Through the API, `POST
+/api/artefacts/<name>/<version>/accept` with an `acknowledge` must carry
+the `sha256` returned by the pre-check (`sha256-required`, 400,
+otherwise).
 
 **Journal.** The `trust` step of the import action writes, for example,
 `accepted UNSIGNED package socle-2026.11 after acknowledgement by alice`

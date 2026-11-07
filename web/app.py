@@ -34681,6 +34681,11 @@ def api_artefacts_accept(name, version):
     staged = _art_incoming() / f"{name}-{version}.tar.gz"
     if not staged.is_file():
         return jsonify({"error": "no uploaded archive for this package", "code": "not-uploaded"}), 404
+    if ack and not b.get("sha256"):
+        # revue finale m-7 : un acquittement vaut pour l'archive vue à la
+        # pré-vérification, jamais pour « ce qui sera là »
+        return jsonify({"error": "an acknowledgement needs the sha256 shown at the pre-check",
+                        "code": "sha256-required"}), 400
     # Revue I-2 : l'archive (et sa signature) part dans un répertoire propre
     # à cette demande AVANT toute vérification ; un téléversement suivant
     # remplace `incoming/<nom>-<version>.tar.gz` sans jamais toucher ce
@@ -34702,7 +34707,7 @@ def api_artefacts_accept(name, version):
     if "trust" not in chk:
         give_back()
         return jsonify({"error": chk.get("error"), "code": chk.get("code")}), 422
-    if b.get("sha256") is not None and b.get("sha256") != chk["sha256"]:
+    if b.get("sha256") and b.get("sha256") != chk["sha256"]:
         give_back()
         return jsonify({"error": "the archive changed since it was checked: check it again",
                         "code": "archive-changed"}), 409
