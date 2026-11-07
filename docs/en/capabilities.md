@@ -2286,10 +2286,21 @@ Clusters, Services, Registries, Artefacts, History, Installation
   its Cluster (when CAPHV goes: nothing would release its finalizer) or a
   plan run exists (`capi-clusters-present`, `caaph-services-present`,
   `capi-harvesterclusters-present`, `capi-plan-running`). Images on the
-  nodes: optional, unticked; `--remove-images` takes the images of every
-  Deployment of the provider namespaces (not verified for real). The
-  deployment lock is checked at the start, not held during the removal.
-  Install lays the stack again. CLI: `harvester-capi uninstall [--dry-run]
+  nodes: optional, unticked. Since 2.7.1, `--remove-images` takes only the
+  images the console loaded itself for the removed providers: Install with
+  the images pushed to the nodes records them on each `CAPIProvider`
+  (annotation `harvester-ops.io/loaded-images`). A stack laid without
+  pushing images, or before 2.7.1, has none recorded, and nothing is
+  removed (run Install again to record them). Before anything is removed,
+  the pods and the pod templates (Deployment, StatefulSet, DaemonSet,
+  CronJob) of the whole cluster are read: if any of them, other than the
+  provider's own, uses one of these images, the uninstall is refused with
+  the list (`capi-images-in-use`), and the window greys the option. Not
+  verified for real. Since 2.7.1 the uninstall holds the cluster lock from
+  start to end: no plan run, undo, cluster creation or deletion, or
+  Install starts on this cluster meanwhile (`capi-uninstall-running`), and
+  the uninstall does not start while one of them runs. Install lays the
+  stack again. CLI: `harvester-capi uninstall [--dry-run]
   [--remove-images]`. The legacy uninstall stays for a stack made before
   Harvester 1.9.
 - **Leftover HarvesterCluster (2.7.0)**: a `HarvesterCluster` left by an

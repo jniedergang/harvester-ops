@@ -39,6 +39,7 @@ PROVIDERS = {   # clé -> (namespace, type, nom)
     "helm": ("caaph-system", "addon", "helm"),
 }
 ORDER = ["helm", "harvester", "rke2-control-plane", "rke2-bootstrap"]
+LOADED = "harvester-ops.io/loaded-images"
 
 
 class FakeKube:
@@ -53,11 +54,14 @@ class FakeKube:
                   "status": {"phase": "Ready"}})
         for key in managed:
             ns, typ, name = PROVIDERS[key]
-            self.put(cs.K_CAPIPROVIDER, ns, key, {"metadata": {"labels": {cs.MANAGED: "true"}},
+            # 2.7.1 : images chargées par la console (install --push-images)
+            self.put(cs.K_CAPIPROVIDER, ns, key, {"metadata": {"labels": {cs.MANAGED: "true"},
+                                                               "annotations": {LOADED: f"reg.example/{key}:v1"}},
                                                   "spec": {"name": name, "type": typ, "version": "v1"},
                                                   "status": {"phase": "Ready"}})
             self.put("deployments", ns, f"{key}-controller",
-                     {"spec": {"template": {"spec": {"containers": [{"image": f"reg.example/{key}:v1"}]}}}})
+                     {"metadata": {"labels": {"cluster.x-k8s.io/provider": key}},
+                      "spec": {"template": {"spec": {"containers": [{"image": f"reg.example/{key}:v1"}]}}}})
             self.put("configmaps", ns, "v1", {"metadata": {"labels": {cs.MANAGED: "true"}}})
             self.put("configmaps", ns, "other", {})
         if extra_unlabelled:
@@ -237,7 +241,8 @@ def test_cli_dry_run_json_contract(cli, monkeypatch, capsys, tmp_path):
     rc, out = run_cli(cli, monkeypatch, capsys, k, ["--dry-run", "--json"])
     plan = json.loads(out.out)
     assert rc == cli.EXIT_OK and k.deleted == []
-    assert set(plan) == {"providers", "configmaps", "shim", "images", "refusals", "kept", "blocked"}
+    assert set(plan) == {"providers", "configmaps", "shim", "images", "images_in_use", "refusals", "kept",
+                         "blocked"}
     assert [p["key"] for p in plan["providers"]] == ORDER
     assert set(plan["providers"][0]) == {"key", "namespace", "type", "name", "version"}
 

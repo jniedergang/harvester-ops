@@ -31,6 +31,13 @@ K_CLUSTERCLASS = "clusterclasses.cluster.x-k8s.io"
 K_CRD = "customresourcedefinitions.apiextensions.k8s.io"
 
 MANAGED = "harvester-ops.io/managed"
+# 2.7.1 (revue 2.7.0 m3 ii) : images que la console a chargées elle-même dans
+# le containerd des nœuds pour ce fournisseur (`install --push-images`),
+# séparées par des virgules ; seules candidates de `uninstall --remove-images`
+LOADED_IMAGES = "harvester-ops.io/loaded-images"
+# étiquette que clusterctl pose sur les objets d'un fournisseur (déploiement
+# et pods vus sur harv1 : `infrastructure-harvester`, `helm`...)
+PROVIDER_LABEL = "cluster.x-k8s.io/provider"
 SHIM_LABEL = "harvester-ops.io/shim"
 
 # Espaces d'une installation faite par la console avant Turtles.
@@ -280,22 +287,50 @@ def configmap_manifest(p):
     return cm
 
 
-def provider_manifest(p):
+def loaded_images(o):
+    """Images inscrites comme chargées par la console sur un CAPIProvider
+    (LOADED_IMAGES), [] sans inscription (pile posée avant la 2.7.1)."""
+    ann = ((o or {}).get("metadata") or {}).get("annotations") or {}
+    return [i for i in (ann.get(LOADED_IMAGES) or "").split(",") if i]
+
+
+def normalise_image(ref):
+    """Référence d'image comparable : `docker.io/` et `library/` implicites,
+    `:latest` quand ni étiquette ni empreinte (règles de containerd)."""
+    ref = (ref or "").strip()
+    name, at, digest = ref.partition("@")
+    first = name.split("/", 1)[0]
+    if "/" not in name or not ("." in first or ":" in first or first == "localhost"):
+        name = "docker.io/" + name
+    host, _, path = name.partition("/")
+    if host == "docker.io" and "/" not in path:
+        path = "library/" + path
+    if not at and ":" not in path.rsplit("/", 1)[-1]:
+        path += ":latest"
+    return f"{host}/{path}{at}{digest}"
+
+
+def provider_manifest(p, loaded=None):
     spec = {"name": p["name"], "type": p["type"], "version": p["version"],
             "fetchConfig": {"selector": {"matchLabels": {
                 "provider.cluster.x-k8s.io/name": p["name"],
                 "provider.cluster.x-k8s.io/type": p["type"]}}}}
     if p.get("patches"):
         spec["patches"] = p["patches"]
+    md = {"name": p["key"], "namespace": p["namespace"], "labels": {MANAGED: "true"}}
+    if loaded:
+        md["annotations"] = {LOADED_IMAGES: ",".join(loaded)}
     return {"apiVersion": "turtles-capi.cattle.io/v1alpha1", "kind": "CAPIProvider",
-            "metadata": {"name": p["key"], "namespace": p["namespace"],
-                         "labels": {MANAGED: "true"}},
-            "spec": spec}
+            "metadata": md, "spec": spec}
 
 
-def install(kube, desc, step, wait=True, timeout=300, now=time.time, sleep=time.sleep):
+def install(kube, desc, step, wait=True, timeout=300, now=time.time, sleep=time.sleep, pushed=False):
     """Déclare les fournisseurs du paquet et attend qu'ils soient prêts.
-    Idempotent : relancé sur une pile prête, il ne change rien."""
+    Idempotent : relancé sur une pile prête, il ne change rien. `pushed`
+    (2.7.1) : les images du paquet viennent d'être chargées sur les nœuds,
+    inscrites sur chaque fournisseur (LOADED_IMAGES) ; sinon l'inscription
+    déjà présente est reprise (l'application côté serveur retirerait une
+    annotation absente du manifeste)."""
     providers = desc.get("providers") or []
     status = stack_status(kube, providers)
     if not status["turtles"] or not (status["core"] and status["core"]["ready"]):
@@ -306,7 +341,11 @@ def install(kube, desc, step, wait=True, timeout=300, now=time.time, sleep=time.
         kube.apply([{"apiVersion": "v1", "kind": "Namespace",
                      "metadata": {"name": p["namespace"]}}])
         kube.apply([configmap_manifest(p)])
-        kube.apply([provider_manifest(p)])
+        if pushed and p.get("image_files"):
+            loaded = list(p.get("images") or [])
+        else:
+            loaded = loaded_images(kube.get(K_CAPIPROVIDER, p["namespace"], p["key"]))
+        kube.apply([provider_manifest(p, loaded)])
     if wait:
         deadline = now() + timeout
         pending = {p["key"] for p in providers}
@@ -453,16 +492,44 @@ def _rank(p):
     return UNINSTALL_ORDER.index(key) if key in UNINSTALL_ORDER else len(UNINSTALL_ORDER)
 
 
-def _deployment_images(kube, ns):
-    out = []
-    for d in kube.list("deployments", ns):
-        for c in (((d.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []:
-            if c.get("image") and c["image"] not in out:
-                out.append(c["image"])
-    return out
+# Charges de travail dont les images sont relues avant `--remove-images`, et
+# le chemin de leur spec de pod.
+_IMAGE_USERS = (("pods", ()), ("deployments", ("template",)), ("statefulsets", ("template",)),
+                ("daemonsets", ("template",)), ("cronjobs", ("jobTemplate", "spec", "template")))
 
 
-def uninstall_plan(kube, running=None):
+def _pod_spec_images(o, path):
+    spec = o.get("spec") or {}
+    for key in path:
+        spec = spec.get(key) or {}
+    if path:                                   # gabarit : sa propre spec
+        spec = spec.get("spec") or {}
+    return [c.get("image") for k in ("containers", "initContainers", "ephemeralContainers")
+            for c in spec.get(k) or [] if c.get("image")]
+
+
+def images_in_use(kube, images, own_namespaces):
+    """[{image, used_by}] : les images de `images` qu'emploie une pod ou un
+    gabarit de pod (déploiement, statefulset, daemonset, cronjob) de tout le
+    cluster, hors les objets du fournisseur lui-même (namespace d'un
+    fournisseur retiré ET étiquette PROVIDER_LABEL). Lecture en échec :
+    KubeError, le retrait ne part pas."""
+    wanted = {normalise_image(i): i for i in images}
+    used = {}
+    for kind, path in _IMAGE_USERS:
+        for o in kube.list(kind):
+            md = o.get("metadata") or {}
+            if md.get("namespace") in own_namespaces and PROVIDER_LABEL in (md.get("labels") or {}):
+                continue
+            for img in _pod_spec_images(o, path):
+                hit = wanted.get(normalise_image(img))
+                ref = f"{kind[:-1]} {md.get('namespace')}/{md.get('name')}"
+                if hit and ref not in used.setdefault(hit, []):
+                    used[hit].append(ref)
+    return [{"image": i, "used_by": used[i]} for i in images if used.get(i)]
+
+
+def uninstall_plan(kube, running=None, remove_images=False):
     """Ce que le retrait de la pile Turtles supprimerait, et ses refus.
 
     Seuls les `CAPIProvider` étiquetés `harvester-ops.io/managed: "true"`
@@ -471,10 +538,14 @@ def uninstall_plan(kube, running=None):
     la 2.7.0, même celle du cœur avec un cluster enfant présent) : la
     console refuse elle-même. `running` : {"run", "plan"} d'un déroulé qui
     tient ce cluster, ou None. Rend {"providers", "configmaps", "shim",
-    "images", "refusals", "kept", "blocked"} ; les CRD et les namespaces
-    restent toujours."""
+    "images", "images_in_use", "refusals", "kept", "blocked"} ; les CRD et
+    les namespaces restent toujours. 2.7.1 : `images` = celles que la
+    console a chargées pour les fournisseurs retirés (LOADED_IMAGES), jamais
+    toutes celles de leurs namespaces ; `remove_images` refuse
+    (`capi-images-in-use`) si une autre charge de travail en emploie une."""
     objs = kube.list(K_CAPIPROVIDER, missing_ok=False)     # sans Turtles : KubeError
     providers, kept = [], [{"provider": "turtles", "namespace": None, "reason": "turtles"}]
+    loaded = {}
     for o in objs:
         st = provider_state(o)
         ref = {"key": o["metadata"]["name"], "namespace": st["namespace"], "type": st["type"],
@@ -486,6 +557,7 @@ def uninstall_plan(kube, running=None):
                          "reason": "not-managed"})
         else:
             providers.append(ref)
+            loaded[ref["key"]] = loaded_images(o)
     providers.sort(key=_rank)
     refusals = []
     clusters = sorted(f"{(c.get('metadata') or {}).get('namespace')}/{c['metadata']['name']}"
@@ -515,22 +587,28 @@ def uninstall_plan(kube, running=None):
     configmaps = [f"{ns}/{cm['metadata']['name']}" for ns in namespaces
                   for cm in kube.list("configmaps", ns, selector=f"{MANAGED}=true")]
     images = []
-    for ns in namespaces:
-        images += [i for i in _deployment_images(kube, ns) if i not in images]
+    for p in providers:
+        images += [i for i in loaded.get(p["key"]) or [] if i not in images]
+    in_use = images_in_use(kube, images, set(namespaces)) if images else []
+    if remove_images and in_use:
+        refs = [u for x in in_use for u in x["used_by"]]
+        refusals.append(_finding("capi-images-in-use", images=", ".join(x["image"] for x in in_use),
+                                 used_by=", ".join(refs[:20]), count=len(in_use)))
     removed = {(p["type"], p["name"]) for p in providers}
     caphv_left = any(st["type"] == CAPHV[0] and st["name"] == CAPHV[1] and (st["type"], st["name"]) not in removed
                      for st in (provider_state(o) for o in objs))
     svc = kube.get("services", SHIM_NS, SHIM_NAME)
     shim = bool(svc) and _labels(svc).get(SHIM_LABEL) == "caphv-ingress-expose" and not caphv_left
     return {"providers": providers, "configmaps": configmaps, "shim": shim, "images": images,
-            "refusals": refusals, "kept": kept, "blocked": bool(refusals)}
+            "images_in_use": in_use, "refusals": refusals, "kept": kept, "blocked": bool(refusals)}
 
 
 def _gone(e):
     return "NotFound" in str(e) or "not found" in str(e)
 
 
-def uninstall(kube, step, dry_run=False, timeout=600, running=None, now=time.time, sleep=time.sleep):
+def uninstall(kube, step, dry_run=False, timeout=600, running=None, now=time.time, sleep=time.sleep,
+              remove_images=False):
     """Retire la pile Turtles posée par la console, dans l'ordre de
     UNINSTALL_ORDER : chaque `CAPIProvider` supprimé, puis attente de la
     disparition de ses déploiements (`timeout` secondes par fournisseur ;
@@ -539,7 +617,7 @@ def uninstall(kube, step, dry_run=False, timeout=600, running=None, now=time.tim
     (SHIM_LABEL). Les CRD ne sont JAMAIS supprimées : des objets d'ailleurs
     peuvent encore les employer. Rend le plan (`uninstall_plan`) ; un plan
     refusé n'a rien supprimé."""
-    plan = uninstall_plan(kube, running)
+    plan = uninstall_plan(kube, running, remove_images=remove_images)
     if plan["blocked"]:
         step("uninstall", "error", "refused: " + "; ".join(
             f"{f['code']} ({', '.join(f'{k}={v}' for k, v in f['facts'].items())})" for f in plan["refusals"]))

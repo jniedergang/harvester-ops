@@ -1086,10 +1086,10 @@ sur un cluster), avec les actions filles `capi-service-remove:`,
   exécution entièrement défaite est refusée (`undo-already-done`) ; un
   défaire ne se défait jamais (`undo-of-undo`) : relancer le plan recrée ce
   qu'il avait fait.
-  Limite connue : un déroulé dont la phase Clusters est partielle et dont
-  la phase Artefacts échoue ensuite finit en `error`, bien que des clusters
-  aient été créés ; l'Historique propose toujours Défaire, qui le traite
-  comme partiel (à affiner en 2.7.1).
+  Depuis la 2.7.1, un déroulé dont la phase Clusters est partielle et dont
+  la phase Artefacts échoue ensuite finit en `partial`, et non en `error` :
+  des clusters ont été créés, et Défaire ou une reprise les prennent comme
+  tels.
 
 Ligne de commande :
 

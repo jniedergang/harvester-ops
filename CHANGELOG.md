@@ -4,6 +4,62 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.7.1] - 2026-11-07 - Turtles uninstall safety and 2.7.0 leftovers
+
+### Fixed
+- **Images removed by the Turtles uninstall** (m3 ii of the 2.7.0 final
+  review). `harvester-capi uninstall --remove-images` took the images of
+  every Deployment of the provider namespaces. It now takes only the images
+  the console loaded itself for the removed providers: Install with the
+  images pushed to the nodes records them on each `CAPIProvider`
+  (annotation `harvester-ops.io/loaded-images`), and a later Install
+  without pushing keeps the record. Before anything is removed, the pods
+  and the pod templates (Deployment, StatefulSet, DaemonSet, CronJob) of
+  the whole cluster are read. If one of them, other than the provider's
+  own, uses one of these images, the uninstall is refused with the list
+  (`capi-images-in-use`) and nothing is removed. The plan reports these
+  images (`images_in_use`), and the Uninstall window greys the option with
+  the reason.
+- **Lock held for the whole Turtles uninstall** (m3 iii). The uninstall
+  checked the cluster lock at its start only. It now holds it from start
+  to end, the images included: a plan run, an undo, a cluster creation or
+  deletion and Install are refused on this cluster meanwhile
+  (`capi-uninstall-running`), in the console and on the command line. The
+  console also refuses to start the uninstall while a Cluster API gesture
+  runs on the cluster. A dry run takes no lock.
+- **Deployment result after a partial Clusters phase** (m1). A deployment
+  whose Clusters phase was partial and whose Artefacts phase then failed
+  ended `error`, although clusters were created. It now ends `partial`.
+
+### Changed
+- `harvester-capi uninstall --id ID`: the console action written in the
+  cluster lock.
+
+### Upgrade notes
+- A stack laid before 2.7.1 has no image recorded: `--remove-images`
+  removes nothing and says so. Run Install again, with the images pushed,
+  to record them.
+
+**Back to 2.7.0**: nothing to undo. The annotation
+`harvester-ops.io/loaded-images` is ignored by 2.7.0, whose
+`--remove-images` takes every Deployment image of the provider namespaces
+again.
+
+### Tests
+- API tests for the result after a partial phase, the recorded images, the
+  usage check (pods, init containers, Deployments, CronJobs, DaemonSets,
+  the provider's own pods), the lock held by the command line and the
+  refusals of create, delete, Install, the console gestures, the
+  deployment launch and the undo; e2e tests for the image option of the
+  Uninstall window. A named mutation removing each guard is killed.
+
+### Not verified for real
+- Unit-tested only: the recorded images, the `capi-images-in-use` refusal,
+  the lock held during the uninstall and the `partial` result. No bench
+  pass for this release. Read only on harv1: the usage check finds the
+  pods and Deployments of the four providers and leaves them out as their
+  own, and the stack laid by 2.7.0 has no recorded image.
+
 ## [2.7.0] - 2026-11-07 - Full artefacts and undoing a deployment
 
 ### Added
@@ -192,16 +248,6 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   replayed on a bench: the `undo-tf-carries-cluster` guard, the registry
   delete resumed after stopping halfway, `--expect-run`, the cancel flag
   and the `capi-harvesterclusters-present` refusal.
-
-### Known limits
-- A deployment whose Clusters phase is partial and whose Artefacts phase
-  then fails ends `error`, although clusters were created; the undo treats
-  it as partial (2.7.1).
-- `harvester-capi uninstall --remove-images` takes the images of every
-  Deployment of the provider namespaces (to restrict to the provider
-  Deployments).
-- The deployment lock is checked at the start of the Turtles uninstall,
-  not held during the removal.
 
 ## [2.6.1] - 2026-11-07 - Registry reachability from the VM network, write port restricted to the console
 
