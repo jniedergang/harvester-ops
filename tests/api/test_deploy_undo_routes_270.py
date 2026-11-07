@@ -213,7 +213,7 @@ def test_undo_runs_in_reverse_order_and_marks_the_original(undo):
     assert stored["undone_by"] == run.id
 
 
-def test_a_failed_chart_keeps_its_cluster_terraform_goes_on_then_resume(undo):
+def test_a_failed_chart_keeps_its_cluster_and_terraform_then_resume(undo):
     fake = undo["undo"]
     fake.fail_remove.add("podinfo")
     run = finish(launch(undo))
@@ -222,7 +222,9 @@ def test_a_failed_chart_keeps_its_cluster_terraform_goes_on_then_resume(undo):
     assert got["chart-web/web/podinfo"]["status"] == "error"
     assert got["capi-cluster-web/web"]["status"] == "skipped"
     assert got["capi-cluster-web/web"]["message"].startswith("depends on artefacts:chart-web/web/podinfo")
-    assert got["tf-declaration-" + undo["decl"]["id"]]["status"] == "done"
+    # revue 4-8 I2 : le cluster resté là garde le contenu Terraform
+    assert got["tf-declaration-" + undo["decl"]["id"]]["status"] == "skipped"
+    assert undo["destroys"] == [] and wapp.TF_DECLS.get(undo["decl"]["id"]) is not None
     assert "web" in fake.clusters and undo["orig"].result["undone_status"] == "partial"
     # reprise : relancer le défaire sur la même exécution
     fake.fail_remove.clear()
@@ -231,6 +233,8 @@ def test_a_failed_chart_keeps_its_cluster_terraform_goes_on_then_resume(undo):
     assert run2.status == "done", run2.result
     assert got2["manifest-web/web/regles"]["checked"] is True                # parti : revérifié, sauté
     assert got2["capi-cluster-web/web"]["status"] == "done" and "web" not in fake.clusters
+    assert got2["tf-declaration-" + undo["decl"]["id"]]["status"] == "done"
+    assert wapp.TF_DECLS.get(undo["decl"]["id"]) is None
     assert fake.removals.count(("manifest-remove", "web/web/regles")) == 1
     assert undo["orig"].result["undone_by"] == run2.id
 
@@ -330,9 +334,12 @@ def test_undo_leaves_what_another_run_recreated(undo):
     assert got["chart-web/web/podinfo"]["message"].startswith("undo-not-ours")
     assert got["manifest-web/web/regles"]["message"].startswith("undo-not-ours")
     assert got["capi-cluster-web/web"]["status"] in ("error", "skipped")
-    assert got["registry-harvlab/amorcage"]["message"].startswith("undo-not-ours")
+    assert got["registry-harvlab/amorcage"]["status"] == "skipped"            # I2 : le cluster est resté
     assert "web" in fake.clusters and rg.load(undo["state"], "amorcage") is not None
     assert run.result["status"] != "done"
+    run2 = finish(launch(undo, include=["registry-harvlab/amorcage"]))
+    assert items_of(run2)["registry-harvlab/amorcage"]["message"].startswith("undo-not-ours")
+    assert fake.removals == [] and rg.load(undo["state"], "amorcage") is not None
 
 
 def test_a_run_of_another_cluster(undo):

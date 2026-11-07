@@ -14,7 +14,9 @@ Ordre de retrait (point 211), l'inverse de l'application : artefacts
 (charts, puis manifestes, puis politiques), clusters enfants, registre
 d'amorçage, contenu Terraform. Les artefacts d'un cluster enfant passent
 avant ce cluster : un retrait d'artefact en échec garde son cluster (la
-raison est dite), le reste continue.
+raison est dite), le reste continue. Le registre attend tous les clusters
+choisis, le contenu Terraform attend clusters et registre (revue 4-8 I2) :
+un cluster ou un registre resté là garde ce qui peut le porter.
 
 Exceptions bornées :
 - registre d'amorçage posé par le plan : proposé décoché (point 210) ;
@@ -125,18 +127,29 @@ def plan(undos, include=None):
     """Plan de destruction dans l'ordre de retrait (KINDS_ORDER, stable).
     `include` : identifiants choisis ; None = ceux cochés par défaut. Chaque
     entrée reçoit `depends_on` : un cluster enfant attend le retrait de ses
-    artefacts."""
+    artefacts, le registre celui des clusters, le contenu Terraform celui des
+    clusters et du registre."""
     chosen = [u for u in undos if (u["default"] if include is None else u["id"] in include)]
     chosen.sort(key=lambda u: KINDS_ORDER.index(u["kind"]))
     by_cluster = {}
     for u in chosen:
         if u["kind"] in ARTEFACT_KINDS:
             by_cluster.setdefault(cluster_of(u), []).append(u["id"])
+    # point 211 et revue 4-8 I2 (décision du propriétaire du produit) : le
+    # registre attend les clusters, le contenu Terraform (réseau, classe de
+    # stockage, image) attend les clusters et le registre qu'il peut porter ;
+    # un retrait en échec garde donc ce qui le porte
+    clusters = [f"clusters:{u['id']}" for u in chosen if u["kind"] == "capi-cluster"]
+    registries = [f"registry:{u['id']}" for u in chosen if u["kind"] == "registry"]
     out = []
     for u in chosen:
         deps = []
         if u["kind"] == "capi-cluster":
             deps = [f"artefacts:{i}" for i in by_cluster.get(u["ref"], [])]
+        elif u["kind"] == "registry":
+            deps = list(clusters)
+        elif u["kind"] == "tf-declaration":
+            deps = clusters + registries
         out.append(dict(u, depends_on=deps))
     return out
 

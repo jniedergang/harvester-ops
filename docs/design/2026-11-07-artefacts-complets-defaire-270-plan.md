@@ -600,7 +600,10 @@ Règles :
   `capi-service-remove:`, `capi-manifest-remove:`, `capi-cluster-delete:`,
   `registry-delete:`, `tf-destroy:`. Un élément en échec n'arrête que ce qui
   en dépend (le cluster dont un artefact n'a pas pu être retiré reste, avec
-  la raison) ; la phase est `partial`. Arrêt transmis entre éléments.
+  la raison) ; la phase est `partial`. Le registre attend tous les clusters
+  choisis et chaque déclaration Terraform attend les clusters et le
+  registre choisis (revue 4-8 I2, décision du 07/11/2026 : un cluster ou un
+  registre resté là garde le contenu qui peut le porter). Arrêt transmis entre éléments.
   **Reprise** : relancer le défaire sur la même exécution ; les éléments
   déjà partis sont vérifiés absents et sautés (`verify_item` = lecture
   d'absence).
@@ -623,7 +626,7 @@ Tests :
 | déclaration sans marque, origine du plan | `proven: false`, `default: false` |
 | registre posé par le plan | `default: false` |
 | ordre : artefacts, clusters, registre, Terraform | `KINDS_ORDER` |
-| retrait d'un chart en échec | son cluster `skipped` (« depends on »), Terraform poursuivi, `partial` |
+| retrait d'un chart en échec | son cluster `skipped` (« depends on »), Terraform `skipped` aussi (revue 4-8 I2), `partial` |
 | reprise du défaire : cluster déjà parti | vérifié absent, sauté |
 | route sans `confirm` exact | 400 `confirm-name` |
 | route par un opérateur | 403 |

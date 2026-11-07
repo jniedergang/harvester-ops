@@ -126,7 +126,20 @@ def test_plan_order_and_dependencies():
     assert web["depends_on"] == ["artefacts:chart-web/web/podinfo", "artefacts:manifest-web/web/regles",
                                  "artefacts:policies-web/web/hops-policies"]
     assert next(s for s in steps if s["ref"] == "api/api")["depends_on"] == []
-    assert next(s for s in steps if s["kind"] == "tf-declaration")["depends_on"] == []   # Terraform poursuivi
+    # revue 4-8 I2 (décision du propriétaire du produit) : le contenu Terraform
+    # peut porter les clusters et le registre ; il attend leur retrait
+    assert next(s for s in steps if s["kind"] == "tf-declaration")["depends_on"] == [
+        "clusters:capi-cluster-web/web", "clusters:capi-cluster-api/api"]
+
+
+def test_registry_waits_for_the_clusters_and_terraform_for_both():
+    """Revue 4-8 I2 : registre après les clusters, Terraform après les deux."""
+    steps = du.plan(UNDOS, include={u["id"] for u in UNDOS})
+    reg = next(s for s in steps if s["kind"] == "registry")
+    assert reg["depends_on"] == ["clusters:capi-cluster-web/web", "clusters:capi-cluster-api/api"]
+    tf = next(s for s in steps if s["kind"] == "tf-declaration")
+    assert tf["depends_on"] == ["clusters:capi-cluster-web/web", "clusters:capi-cluster-api/api",
+                                "registry:registry-harvlab/amorcage"]
 
 
 def test_plan_with_an_explicit_choice():
@@ -161,5 +174,8 @@ def test_phases_go_on_after_a_failure_and_skip_dependents():
     out = dch.run(Ctx(), phases, order=du.ORDER, secrets=secret_store.LocalStore())
     st = {i["id"]: i["status"] for p in out["phases"] for i in p.get("items") or []}
     assert st["capi-cluster-web/web"] == "skipped" and st["capi-cluster-api/api"] == "done"
-    assert st["tf-declaration-d1"] == "done"
-    assert out["status"] == "partial" and "capi-cluster-web/web" not in calls
+    # revue 4-8 I2 : un cluster resté là garde le contenu Terraform qui peut le porter
+    assert st["tf-declaration-d1"] == "skipped"
+    # la dernière phase n'a rien fait : `error` pour le moteur, que le
+    # lanceur du défaire rend `partial` (une partie est défaite)
+    assert out["status"] == "error" and "capi-cluster-web/web" not in calls and "tf-declaration-d1" not in calls
