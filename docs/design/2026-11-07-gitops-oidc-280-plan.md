@@ -1070,3 +1070,7 @@ par les tests seulement), plus de deux clusters enfants, Harbor.
 - RKE2, référence de configuration du serveur (`kube-apiserver-arg`, `kube-apiserver-extra-mount`) : https://docs.rke2.io/reference/server_config ; montages des composants : https://docs.rke2.io/advanced
 - Discussion RKE2 sur les arguments de l'API (OIDC) : https://github.com/rancher/rke2/discussions/3861
 - CAPRKE2, types v1beta2 (`serverConfig.kubeAPIServer`, `ComponentConfig`, `files`, `airGapped`) : https://github.com/rancher/cluster-api-provider-rke2/blob/main/controlplane/api/v1beta2/rke2controlplane_types.go ; https://github.com/rancher/cluster-api-provider-rke2/blob/main/bootstrap/api/v1beta2/rke2config_types.go
+
+## Décisions (07/11/2026)
+
+Les recommandations des points 219 à 240 sont retenues, bancs compris (VM rancher-manager démarrée puis arrêtée, import de test retiré de Rancher après, Dex et dépôt Gitea temporaires, règle nftables temporaire sur node2, harv4 à la demande).
