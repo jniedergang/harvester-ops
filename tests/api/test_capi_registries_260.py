@@ -316,6 +316,32 @@ def test_deleting_the_cluster_removes_its_registry_secrets(cli):
     assert not [k for k in kube.objs if k[0] == "secrets"], "M-not-generated: registry secrets left behind"
 
 
+@pytest.mark.parametrize("deleted,kept", [("web", "web2"), ("web2", "web"), ("web", "web-api")])
+def test_deleting_one_of_two_clusters_in_a_namespace_removes_its_registry_secrets(cli, deleted, kept):
+    """Revue finale 2.6.0 (I-1) : deux clusters dans un namespace ; la
+    suppression de l'un retire SES Secrets de registre (registries.yaml,
+    -auth, -ca, -chart-), par nom ; ceux de l'autre restent, et le
+    registre n'est plus compté pour le cluster parti."""
+    import capi_services as sv
+    creds = {"a": {"username": "pull", "password": PULL_PW}}
+    kube = Kube({("namespaces", None, "shared"): {"metadata": {"name": "shared"}},
+                 (cli.cs.K_CLUSTER, "shared", kept): {"metadata": {"name": kept}}})
+    for c in (deleted, kept):
+        for s in rg.rke2_config(["a"], {"a": decl("a")}, {"name": c, "namespace": "shared"}, creds)[2]:
+            kube.objs[("secrets", "shared", s["metadata"]["name"])] = s
+        for s in sv.registry_secrets({"cluster": f"shared/{c}", "name": "podinfo"}, "a", "a.example:443", creds["a"],
+                                     labels={cc.GENERATED: "true", rg.LABEL: "a"}):
+            kube.objs[("secrets", "shared", s["metadata"]["name"])] = s
+    # un Secret rendu partagé (sans nom de cluster) reste : règle de 2.5.0
+    kube.objs[("secrets", "shared", "capi-shared")] = {"metadata": {"name": "capi-shared",
+                                                                   "labels": {cc.GENERATED: "true"}}}
+    assert cli.remove_cluster(kube, "shared", deleted, 60, sleep=lambda s: None) == cli.EXIT_OK
+    left = sorted(n for (k, _, n) in kube.objs if k == "secrets")
+    assert left == sorted(["capi-shared", f"{kept}-registries", f"{kept}-registry-a-auth",
+                           f"{kept}-registry-a-ca", f"{kept}-chart-a"])
+    assert ("namespaces", None, "shared") in kube.objs
+
+
 def test_registry_users_are_read_from_the_labelled_secrets():
     creds = {"a": {"username": "pull", "password": PULL_PW}}
     kube = Kube()

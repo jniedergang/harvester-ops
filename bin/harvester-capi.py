@@ -998,7 +998,14 @@ def remove_cluster(kube, ns, name, timeout, sleep=None, now=None):
         step("delete", "running", f"identity of {ns}/{name} removed ({gone} object(s))")
     nsobj = kube.get("namespaces", None, ns) or {}
     others = [c for c in kube.list(cs.K_CLUSTER, ns)]
-    if not others:
+    if others:
+        # Revue finale 2.6.0 : d'autres clusters gardent le namespace et les
+        # objets partagés, mais les Secrets de registre de CE cluster
+        # (registries.yaml avec le compte de lecture, -auth, -ca, -chart-)
+        # partent, par nom exact : sinon le compte reste sur Harvester et le
+        # registre se dit employé pour toujours
+        _remove_registry_secrets(kube, ns, name)
+    else:
         # Ce que la console a rendu à côté du Cluster : ClusterClass, gabarits,
         # compléments, et le secret d'identité qui porte un kubeconfig Harvester.
         gone = 0
@@ -1028,6 +1035,42 @@ def remove_cluster(kube, ns, name, timeout, sleep=None, now=None):
             step("delete", "running", f"namespace {ns} removed (created by the console)")
     step("delete", "done", f"{ns}/{name} deleted")
     return EXIT_OK
+
+
+def _registry_secrets_of(generated, ns, name):
+    """Secrets de registre rendus pour le cluster `name`, par nom exact
+    (`<c>-registries`, et pour chaque registre étiqueté `-registry-<r>-auth`,
+    `-registry-<r>-ca`, `-chart-<r>`) : un cluster `web2` n'emporte rien de
+    `web`."""
+    wanted = {rg.nodes_secret_name(name)}
+    for s in generated:
+        reg = ((s.get("metadata") or {}).get("labels") or {}).get(rg.LABEL)
+        if reg:
+            wanted |= set(rg.child_secret_names(name, reg).values())
+            wanted.add(sv.registry_secret_names({"cluster": f"{ns}/{name}"}, reg)["auth"])
+    return [s for s in generated if (s.get("metadata") or {}).get("name") in wanted]
+
+
+def _remove_registry_secrets(kube, ns, name):
+    try:
+        found = _registry_secrets_of(kube.list("secrets", ns, selector=f"{cc.GENERATED}=true"), ns, name)
+    except KubeError as e:
+        step("delete", "running", f"registry secrets of {ns}/{name} not listed: {str(e)[:120]}")
+        return
+    gone = 0
+    for s in found:
+        sname = s["metadata"]["name"]
+        try:
+            kube.delete("secrets", ns, sname)
+            gone += 1
+        except KubeError as e:
+            if "(NotFound)" in str(e):
+                gone += 1
+                continue
+            step("delete", "running", f"secrets {sname} kept: {e}")
+    if gone:
+        step("delete", "running", f"{gone} registry secret(s) of {name} removed from {ns} "
+                                  "(other clusters keep the namespace)")
 
 
 def cmd_delete(args):

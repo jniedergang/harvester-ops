@@ -198,6 +198,12 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   published openSUSE Leap 15.6 image, which now announces 10 GiB).
 - Deleting a child cluster no longer reports "kept: NotFound" for the
   generated objects that Cluster API removed on its own in the meantime.
+- Deleting one of two child clusters that share a namespace removes its
+  own registry Secrets (`<cluster>-registries` with the read account,
+  `-registry-<registry>-auth`, `-ca`, `-chart-<registry>`), by exact name.
+  The shared objects stay for the other cluster, as in 2.5.0. Before, the
+  read account stayed on the Harvester cluster and the registry was
+  reported in use forever.
 - The upload of a package and the short gestures on the console state
   (trust settings, package removal, forget) record their end time.
 
