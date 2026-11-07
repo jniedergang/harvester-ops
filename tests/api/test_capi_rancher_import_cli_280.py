@@ -385,7 +385,8 @@ def test_status_lists_marked_clusters(cli, world, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["session"] == SERVER
     assert out["clusters"] == [{"namespace": NS, "cluster": CL, "imported": True, "turtles": False,
-                                "rancher": SERVER, "name": NAME, "cid": CID, "state": "active", "ready": True}]
+                                "rancher": SERVER, "name": NAME, "cid": CID, "state": "active", "ready": True,
+                                "present": True, "origin": {"run": None}}]
 
 
 def test_create_refuses_rancher_external_without_session(cli, world):

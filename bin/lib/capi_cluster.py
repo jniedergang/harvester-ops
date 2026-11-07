@@ -52,7 +52,7 @@ DEFAULTS = {
     "pod_cidr": "10.42.0.0/16", "service_cidr": "10.43.0.0/16",
     "cni_mtu": 1500, "cni_encapsulation": "VXLANCrossSubnet", "cni_bgp": "Disabled",
     "fleet_branch": "main", "target_namespace": "default", "rancher_import": False,
-    "rancher_external": False,
+    "rancher_external": False, "offline": False,
 }
 
 # Option du formulaire -> option du générateur. Tout le reste est refusé :
@@ -73,10 +73,12 @@ LIST_FLAGS = {"dns": "--dns", "ip_pool_refs": "--ip-pool-refs"}
 # Options traitées par la console elle-même, après le générateur.
 # 2.8.0 : `rancher_external` (import dans le Rancher de la session,
 # bin/lib/rancher_import.py) et `oidc` (API du cluster enfant,
-# bin/lib/child_oidc.py).
+# bin/lib/child_oidc.py). `offline` et `offline_artifacts` : cluster amorcé
+# sans Internet (bin/lib/rke2_offline.py).
 CONSOLE_OPTIONS = {"extra_disk_size", "extra_disk_class", "target_namespace",
                    "rancher_import", "extra_networks", "service_cidr", "registries",
-                   "rancher_external", "oidc"}
+                   "rancher_external", "oidc", "offline", "offline_artifacts"}
+OFFLINE_ARTIFACTS = ("fetch", "image")
 KNOWN = set(FLAGS) | set(LIST_FLAGS) | CONSOLE_OPTIONS
 # Options entières : `normalize` les convertit, le rendu d'un modèle de
 # cluster (deploy_plans) donne ce type à une chaîne qui n'est qu'une variable.
@@ -158,6 +160,11 @@ def normalize(raw):
     spec["extra_networks"] = _as_list(spec.get("extra_networks"))
     spec["rancher_import"] = spec.get("rancher_import") in (True, "true", "1", 1, "on")
     spec["rancher_external"] = spec.get("rancher_external") in (True, "true", "1", 1, "on")
+    spec["offline"] = spec.get("offline") in (True, "true", "1", 1, "on")
+    if spec["offline"]:
+        spec.setdefault("offline_artifacts", "fetch")
+    else:
+        spec.pop("offline_artifacts", None)
     if "oidc" in spec and not isinstance(spec["oidc"], dict):
         raise ValueError("oidc: an object (issuer_url, audience, ...)")
     regs = normalize_registry_entries(spec.pop("registries", None))
@@ -228,6 +235,8 @@ def validate(spec):
         need("extra_disk_size", bool(QUANTITY_RE.match(str(size))), "a size such as 20Gi")
         need("extra_disk_class", bool(K8S_NAME_RE.match(spec.get("extra_disk_class") or "")),
              "a storage class")
+    if spec.get("offline"):
+        need("offline_artifacts", spec.get("offline_artifacts") in OFFLINE_ARTIFACTS, "fetch or image")
     seen = set()
     for e in spec.get("registries") or []:
         n = e.get("registry") or ""

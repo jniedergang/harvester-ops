@@ -1415,6 +1415,8 @@ def cluster_brief(kube, ns, name):
     if cl is not None:
         out["origin"] = cc.origin_of(cl)
         out["state"] = cc.cluster_state(cl)
+        # 2.8.0 : import dans un Rancher externe (serveur, nom, identifiant)
+        out["rancher"] = ri.mark_of(cl)
     else:
         # absent : le namespace existe-t-il déjà (consigné par un plan, qui
         # dit ainsi s'il l'a créé) ; seconde lecture, pour ce cas seulement
@@ -1564,6 +1566,12 @@ def service_source(kube, spec, harvester, read_creds=False):
     try:
         meta = ol.chart_meta(Path(pkg["path"]) / item["chart"])
         resolved = sv.resolve_source(spec, decl["endpoint"], meta, item.get("values") or {})
+        if spec["name"] == cg.SERVICE:
+            # 2.8.0 (point 225) : le service `flux` porte toujours le
+            # verrouillage multi-locataire, imposé par-dessus les valeurs
+            import yaml
+            resolved["values"] = yaml.safe_dump(cg.flux_values(yaml.safe_load(resolved["values"] or "") or {}),
+                                                sort_keys=False)
     except ValueError as e:
         return spec, found + [sv.finding("invalid-values", "block", message=str(e)[:200])], None
     if not any((p.get("package"), p.get("version")) == (src["package"], src["version"])
@@ -2713,9 +2721,12 @@ def cmd_rancher_status(args):
         if have:
             row.update(rancher=have["server"], name=have["name"], cid=have["cid"], state=None, ready=None)
             if api and api.server == have["server"]:
-                _, p = api.call("GET", f"{ri.API_V1}/{ri.NAMESPACE}/{have['name']}")
+                st, p = api.call("GET", f"{ri.API_V1}/{ri.NAMESPACE}/{have['name']}")
                 _, m = api.call("GET", f"/v3/clusters/{have['cid']}")
-                row.update(state=(m or {}).get("state"), ready=ri.ready(p, m))
+                row.update(state=(m or {}).get("state"), ready=ri.ready(p, m), present=st == 200)
+                if st == 200:
+                    # 2.8.0 : exécution d'un plan qui l'a importé (Défaire)
+                    row["origin"] = {"run": ((p.get("metadata") or {}).get("annotations") or {}).get(ri.A_RUN)}
         out.append(row)
     print(json.dumps({"session": api.server if api else None, "clusters": out}))
     return EXIT_OK
@@ -3130,9 +3141,11 @@ def cmd_gitops_status(args):
         api = RANCHER(r)
         for plural, obj in _fleet_entries(api, _harvester(args), *(want or (None, None))):
             lab = (obj.get("metadata") or {}).get("labels") or {}
+            ann = (obj.get("metadata") or {}).get("annotations") or {}
             out.append({"tool": "fleet", "namespace": lab.get("harvester-ops.io/child-namespace"),
                         "cluster": lab.get("harvester-ops.io/child"), "entry": lab.get(cg.L_ENTRY),
-                        "kind": obj.get("kind"), "name": obj["metadata"]["name"], "state": cg.state_fleet(obj)})
+                        "kind": obj.get("kind"), "name": obj["metadata"]["name"], "state": cg.state_fleet(obj),
+                        "origin": {"run": ann.get(ri.A_RUN)} if ann.get(ri.A_RUN) else {}})
     print(json.dumps({"entries": out, "session": bool(r)}))
     return EXIT_OK
 

@@ -98,7 +98,9 @@ def test_plan_defaults_and_shorthands():
     (plan_doc(extra=1), "extra", "unknown key"),
     (plan_doc(description="x" * 501), "description", "invalid"),
     (plan_doc(phases=[]), "phases", "not a mapping"),
-    (with_phase("gitops", {"enabled": False}), "phases.gitops", "unknown phase"),
+    (with_phase("vault", {"enabled": False}), "phases.vault", "unknown phase"),
+    # 2.8.0 : gitops disponible, format figé
+    (with_phase("gitops", {"entries": "x"}), "phases.gitops.entries", "not a list"),
     (with_phase("registry", {"mirrors": {}}), "phases.registry.mirrors", "unknown key"),   # 2.6.0 : disponible
     # 2.7.0 : artefacts disponible, format figé (enabled par défaut)
     (with_phase("artefacts", {"items": "x"}), "phases.artefacts.items", "not a list"),

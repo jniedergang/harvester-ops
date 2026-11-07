@@ -15,7 +15,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SECRET_KEYS = ("token", "password", "bmc_password", "bmc_passwords")
+# 2.8.0 : `gitops_secrets` {nom: {identity, known_hosts} | {username,
+# password}}, secrets du plan de la phase GitOps
+SECRET_KEYS = ("token", "password", "bmc_password", "bmc_passwords", "gitops_secrets")
 
 
 def load(name):
@@ -48,7 +50,8 @@ class SecretsError(ValueError):
 def read_secrets(path=None, stdin=None):
     """Secrets en YAML d'un fichier privé (0600, refusé sinon) ou de l'entrée
     standard ; jamais de la ligne de commande. Clés : token, password (OS),
-    bmc_password (commun), bmc_passwords (par hôte de BMC)."""
+    bmc_password (commun), bmc_passwords (par hôte de BMC), gitops_secrets
+    (secrets Git de la phase GitOps, 2.8.0)."""
     import yaml
     if stdin is not None:
         text = stdin.read()

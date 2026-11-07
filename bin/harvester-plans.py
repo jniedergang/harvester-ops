@@ -255,11 +255,21 @@ def _launched(app, body, status):
     return _follow(app, body["action_id"])
 
 
+def _gitops_secrets(app, args):
+    """Secrets du plan de la phase GitOps (clé `gitops_secrets` du fichier
+    de secrets, 2.8.0), contrôlés comme dans la console."""
+    got, err = app._deploy_gitops_secrets(_secrets(args).get("gitops_secrets"))
+    if err:
+        raise Refused(err, "secrets")
+    return got
+
+
 def cmd_check(args, state):
     app = _console(state)
     kc = _cluster_kc(app, args.cluster)
     findings, summary, _ctx = app._deploy_prepare(args.cluster, args.plan, _vars(args), kc=kc,
-                                                  update_differing=bool(args.update_declarations))
+                                                  update_differing=bool(args.update_declarations),
+                                                  gitops_secrets=sorted(_gitops_secrets(app, args)))
     if findings is None:
         raise Refused(f"no such plan: {args.plan}", "not-found")
     blocking = bool(app._deploy_blocking(findings))
@@ -274,7 +284,8 @@ def cmd_apply(args, state):
     kc = _cluster_kc(app, args.cluster)
     body, status = app._deploy_launch_checked(args.cluster, kc, args.plan, _vars(args), bool(args.dry_run),
                                               getpass.getuser(), None,
-                                              update_differing=bool(args.update_declarations))
+                                              update_differing=bool(args.update_declarations),
+                                              gitops_secrets=_gitops_secrets(app, args))
     return _launched(app, body, status)
 
 
@@ -309,7 +320,7 @@ def cmd_resume(args, state):
         cluster, kc, result.get("plan") or "", result.get("variables") or {}, False, getpass.getuser(), None,
         previous=result, resumes=args.action_id, install=install, vip=vip, run_id=run_id, store=store,
         required_role="admin" if install else "operator",
-        update_differing=result.get("update_differing") is True)
+        update_differing=result.get("update_differing") is True, gitops_secrets=_gitops_secrets(app, args))
     if status != 202 and store is not None:
         store.delete_tree("plan-run", run_id)
     return _launched(app, body, status)
@@ -420,6 +431,14 @@ def build_parser():
         sv.add_argument("name")
         sv.add_argument("--file", required=True)
         sv.add_argument("--revision", type=int, help="revision read before editing (absent: creation)")
+    def secrets_args(sp, confirm=True):
+        g = sp.add_mutually_exclusive_group()
+        g.add_argument("--secrets-file", help="YAML secrets file, mode 0600 (gitops_secrets: secrets of the "
+                                              "GitOps phase)")
+        g.add_argument("--secrets-stdin", action="store_true", help="read the YAML secrets on stdin")
+        if confirm:
+            sp.add_argument("--confirm-system", action="append", metavar="HOST=NAME",
+                            help="typed name of a machine that already holds a system")
     for verb in ("check", "apply"):
         sp = sub.add_parser(verb, allow_abbrev=False)
         sp.add_argument("plan")
@@ -429,13 +448,7 @@ def build_parser():
                         help="update an existing declaration of the plan whose values differ")
         if verb == "apply":
             sp.add_argument("--dry-run", action="store_true", help="plan only; trial declarations removed")
-
-    def secrets_args(sp):
-        g = sp.add_mutually_exclusive_group()
-        g.add_argument("--secrets-file", help="YAML secrets file, mode 0600")
-        g.add_argument("--secrets-stdin", action="store_true", help="read the YAML secrets on stdin")
-        sp.add_argument("--confirm-system", action="append", metavar="HOST=NAME",
-                        help="typed name of a machine that already holds a system")
+        secrets_args(sp, confirm=False)
     sp = sub.add_parser("resume", allow_abbrev=False)
     sp.add_argument("action_id")
     secrets_args(sp)

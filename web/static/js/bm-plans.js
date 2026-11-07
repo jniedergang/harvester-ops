@@ -54,11 +54,13 @@ const BMPlans = (() => {
     terraform: () => tr('bmpl.phase.terraform'), capi: () => tr('bmpl.phase.capi'),
     clusters: () => tr('bmpl.phase.clusters'), registry: () => tr('bmpl.phase.registry'),
     artefacts: () => tr('bmpl.phase.artefacts'), plan: () => tr('bmpl.phase.plan'),
+    gitops: () => tr('bmpl.phase.gitops'),
   };
   const PHASE_TIPS = {
     readiness: () => tr('bmpl.phaseTip.readiness'), terraform: () => tr('bmpl.phaseTip.terraform'),
     capi: () => tr('bmpl.phaseTip.capi'), clusters: () => tr('bmpl.phaseTip.clusters'),
     registry: () => tr('bmpl.phaseTip.registry'), artefacts: () => tr('bmpl.phaseTip.artefacts'),
+    gitops: () => tr('bmpl.phaseTip.gitops'),
   };
   const FINDINGS = {
     'plan-invalid': () => tr('dpw.f.planInvalid'),
@@ -872,6 +874,9 @@ const BMPlans = (() => {
           publish: edit.publish.filter(p => p.package && p.registry).map(p => ({ package: p.package, version: p.version, registry: p.registry })) };
       } else if (pid === 'artefacts') {
         phases.artefacts = collectArtefacts(on('artefacts'), Number(form.querySelector('[name="artefacts_timeout"]').value));
+      } else if (pid === 'gitops') {
+        // 2.8.0 : entrées gardées telles que lues (leur carte arrive avec l'interface)
+        phases.gitops = Object.assign({}, (edit.doc.phases || {}).gitops || {}, { enabled: on('gitops') });
       } else {
         phases[pid] = { enabled: on(pid) };
       }
