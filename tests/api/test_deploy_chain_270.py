@@ -45,11 +45,12 @@ def test_after_failure_of(clusters, after, expect_status, ran):
         assert art["status"] == "skipped"
 
 
-def test_a_failure_after_a_tolerated_one_still_stops_the_rest():
+def test_a_failure_after_a_tolerated_one_keeps_the_run_partial():
+    # 2.7.1 (m1) : des clusters ont été créés, le déroulé reste `partial`
     ctx = Ctx()
     out = run(ctx, [items_phase(ctx, "clusters", {"a": "done", "b": "error"}, key="cluster"),
                     items_phase(ctx, "artefacts", {"x": "error"}, after_failure_of=("clusters",))])
-    assert out["status"] == "error" and out["failed_phase"] == "clusters"
+    assert out["status"] == "partial" and out["failed_phase"] == "clusters"
 
 
 def test_cancel_is_never_tolerated():

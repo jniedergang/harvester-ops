@@ -532,6 +532,7 @@ const CAPI = (() => {
     'caaph-services-present': (v) => tr('capi.un.fd.caaph-services-present', v),
     'capi-harvesterclusters-present': (v) => tr('capi.un.fd.capi-harvesterclusters-present', v),
     'capi-plan-running': (v) => tr('capi.un.fd.capi-plan-running', v),
+    'capi-images-in-use': (v) => tr('capi.un.fd.capi-images-in-use', v),
   };
   const UN_REASONS = {
     'core': () => tr('capi.un.reason.core'),
@@ -557,6 +558,8 @@ const CAPI = (() => {
       ${provs ? `<ol data-x="providers">${provs}</ol>` : `<p class="form-hint">${esc(tr('capi.un.none'))}</p>`}
       ${(p.configmaps || []).length ? `<p class="form-hint">${esc(tr('capi.un.configmaps', { n: p.configmaps.length }))}</p>` : ''}
       ${p.shim ? `<p class="form-hint">${esc(tr('capi.un.shim'))}</p>` : ''}
+      ${(p.images_in_use || []).length ? `<p class="form-hint" data-x="images-in-use">${esc(tr('capi.un.imagesInUse', {
+        list: p.images_in_use.map(x => `${x.image} (${(x.used_by || []).join(', ')})`).join('; ') }))}</p>` : ''}
       <h4>${esc(tr('capi.un.kept'))}</h4>
       <ul data-x="kept">${kept}<li>${esc(tr('capi.un.keptCrds'))}</li></ul>`;
   }
@@ -611,6 +614,14 @@ const CAPI = (() => {
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       plan = d;
       q('plan').innerHTML = uninstallPlanHtml(d);
+      // 2.7.1 : seules les images chargées par la console, et aucune employée ailleurs
+      const why = !(d.images || []).length ? tr('capi.un.t.imagesNone')
+        : (d.images_in_use || []).length ? tr('capi.un.t.imagesBusy') : '';
+      if (why) {
+        q('images').checked = false;
+        q('images').disabled = true;
+        q('images').closest('label').dataset.tip = why;
+      }
       sync();
     }).catch((e) => {
       if (gen !== unGen) return;

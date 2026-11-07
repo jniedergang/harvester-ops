@@ -180,7 +180,8 @@ def test_phases_go_on_after_a_failure_and_skip_dependents():
     assert st["tf-declaration-d1"] == "skipped"
     # la dernière phase n'a rien fait : `error` pour le moteur, que le
     # lanceur du défaire rend `partial` (une partie est défaite)
-    assert out["status"] == "error" and "capi-cluster-web/web" not in calls and "tf-declaration-d1" not in calls
+    # 2.7.1 (m1) : une phase déjà partielle laisse le Défaire `partial`
+    assert out["status"] == "partial" and "capi-cluster-web/web" not in calls and "tf-declaration-d1" not in calls
 
 
 def test_declarations_name_every_cluster_of_the_chain_created_or_adopted():

@@ -1028,10 +1028,9 @@ with child actions `capi-service-remove:`, `capi-manifest-remove:`,
   (for example when the registry was left, the default). A run fully undone
   is refused (`undo-already-done`); an undo is never undone
   (`undo-of-undo`): apply the plan again to recreate what it made.
-  Known limit: a deployment whose Clusters phase is partial and whose
-  Artefacts phase then fails ends `error`, although clusters were created;
-  the History still offers Undo, which treats it as partial (to be refined
-  in 2.7.1).
+  Since 2.7.1, a deployment whose Clusters phase is partial and whose
+  Artefacts phase then fails ends `partial`, not `error`: clusters were
+  created, and Undo or a resume takes them as such.
 
 Command line:
 

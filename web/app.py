@@ -17603,7 +17603,7 @@ _UNSET = object()
 
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
                 capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
-                setup=None, parent=None, cluster_user=_UNSET, sink=None):
+                setup=None, parent=None, cluster_user=_UNSET, sink=None, busy_match=None):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
@@ -17622,7 +17622,9 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     d'un plan), posée avant que l'action soit visible ; `cluster_user`
     passé par un appelant hors requête (identité figée au déclenchement),
     sinon lu dans la requête. 2.7.0 : `sink(objet)`, l'objet JSON de stdout
-    rendu en mémoire à l'appelant et jamais gardé (jeton, voir le relais)."""
+    rendu en mémoire à l'appelant et jamais gardé (jeton, voir le relais).
+    2.7.1 : `busy_match(action)`, toute action en cours qu'il retient bloque
+    aussi (contrôlé sous le même verrou que l'inscription)."""
     wd = _capi_work_dir()
     spec_file = None
     if spec is not None:
@@ -17644,7 +17646,7 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     if setup is not None:
         setup(run)
     with ACTIONS_LOCK:
-        busy = (_transfer_busy(tuple(busy_clusters or (cluster,)), label, prefix=busy_prefix)
+        busy = (_transfer_busy(tuple(busy_clusters or (cluster,)), label, prefix=busy_prefix, match=busy_match)
                 if check_busy else None)
         pending = None if busy else _register_action(run, parent)
     _persist_parent(pending)
@@ -17670,10 +17672,43 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     return run, None
 
 
+# 2.7.1 (revue 2.7.0 m3 iii) : le retrait de la pile Turtles tient le
+# cluster de bout en bout. Pendant ce temps, aucun geste Cluster API sur ce
+# cluster (création, suppression, installation...) ni déroulé ; et il ne
+# démarre pas pendant l'un d'eux. L'outil tient aussi le verrou de fichier
+# du cluster (ligne de commande).
+CAPI_UNINSTALL_PREFIX = "capi-uninstall:"
+CAPI_GESTURE_PREFIXES = ("capi-cluster-create:", "capi-cluster-delete:", "capi-install:", "capi-create:",
+                         "capi-delete:", "capi-cleanup-legacy:")
+
+
+def _capi_uninstall_running(cluster):
+    """Retrait de la pile Turtles en cours sur ce cluster (hors essai), ou
+    None. Ne pas appeler sous ACTIONS_LOCK."""
+    with ACTIONS_LOCK:
+        return next((r for r in ACTIONS.values()
+                     if r.action == f"{CAPI_UNINSTALL_PREFIX}{cluster}" and not r.dry_run
+                     and r.status in ("starting", "running")), None)
+
+
+def _capi_uninstall_refusal(cluster, holder=None):
+    """(corps, 409) si un retrait de la pile tient ce cluster : action de
+    cette console, ou `holder` (note du verrou de fichier) d'un autre
+    processus ; sinon None."""
+    run = _capi_uninstall_running(cluster)
+    rid = run.id if run is not None else ((holder or {}).get("run") if (holder or {}).get("action")
+                                          == "capi-uninstall" else None)
+    if rid is None:
+        return None
+    return {"error": "the Cluster API providers of this cluster are being removed",
+            "code": "capi-uninstall-running", "running": rid}, 409
+
+
 def _capi_action(cluster, label, cmd, spec=None, dry_run=False, parent=None, cluster_user=_UNSET):
     return _cli_action(cluster, label, cmd, "harvester-capi", spec, dry_run,
                        after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None),
-                       parent=parent, cluster_user=cluster_user)
+                       parent=parent, cluster_user=cluster_user,
+                       busy_match=lambda r: r.action == f"{CAPI_UNINSTALL_PREFIX}{cluster}")
 
 
 def _capi_launch(cluster, kc, sub, args, spec=None, parent=None, cluster_user=None, label=None,
@@ -22764,20 +22799,28 @@ def _capi_uninstall_turtles(cluster, data):
     if data.get("confirm") != cluster:
         return jsonify({"error": "type the cluster name to uninstall its Cluster API providers",
                         "code": "confirm-name"}), 400
-    busy = _deploy_busy(cluster)
-    holder = {"run": busy.id, "plan": (busy.result or {}).get("plan")} if busy else _deploy_lock_holder(cluster)
-    if holder:
-        return jsonify({"error": "a plan deployment holds this cluster", "code": "capi-plan-running",
-                        "run": holder.get("run"), "plan": holder.get("plan")}), 409
     cmd, err = _capi_base(cluster, "uninstall")
     if err:
         return err
     dry = bool(data.get("dry_run"))
     images = bool(data.get("remove_images"))
     cmd += (["--dry-run"] if dry else []) + (["--cluster", cluster, "--remove-images"] if images else [])
-    run, err = _cli_action(cluster, f"capi-uninstall:{cluster}", cmd, "harvester-capi", dry_run=dry,
-                           after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None),
-                           setup=lambda r: setattr(r, "required_role", "admin"))
+    # 2.7.1 (m3 iii) : contrôle et lancement sous le verrou de lancement des
+    # déroulés ; un geste Cluster API en cours sur ce cluster bloque aussi
+    with _DEPLOY_LAUNCH_LOCK:
+        busy = _deploy_busy(cluster)
+        holder = {"run": busy.id, "plan": (busy.result or {}).get("plan")} if busy else _deploy_lock_holder(cluster)
+        if holder:
+            refused = _capi_uninstall_refusal(cluster, holder)
+            if refused:
+                return jsonify(refused[0]), refused[1]
+            return jsonify({"error": "a plan deployment holds this cluster", "code": "capi-plan-running",
+                            "run": holder.get("run"), "plan": holder.get("plan")}), 409
+        run, err = _cli_action(cluster, f"{CAPI_UNINSTALL_PREFIX}{cluster}", cmd, "harvester-capi", dry_run=dry,
+                               after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None),
+                               setup=lambda r: setattr(r, "required_role", "admin"), id_arg=True,
+                               busy_match=lambda r: r.cluster == cluster
+                               and str(r.action).startswith(CAPI_GESTURE_PREFIXES))
     if err:
         return err
     return jsonify({"action_id": run.id, "mode": "turtles", "dry_run": dry, "remove_images": images}), 201
@@ -23174,16 +23217,19 @@ def _transfer_check(cmd):
     return jsonify(out)
 
 
-def _transfer_busy(clusters, label, prefix=None):
+def _transfer_busy(clusters, label, prefix=None, match=None):
     """Même VM déjà en transfert, ou arrêt/démarrage de l'un des clusters en
     cours : un transfert qui démarre sous un cluster qu'on éteint échoue au
     milieu, et deux transferts de la même VM se marcheraient dessus.
     `prefix` (v1.99.0) : toute action en cours dont le libellé commence
-    ainsi, quel que soit son cluster (un geste à la fois par plan)."""
+    ainsi, quel que soit son cluster (un geste à la fois par plan).
+    `match(action)` (2.7.1) : toute action en cours qu'il retient."""
     for r in list(ACTIONS.values()):
         if r.status not in ("starting", "running") or r.dry_run:
             continue
         if r.action == label and r.cluster == clusters[0]:
+            return r
+        if match is not None and match(r):
             return r
         if prefix and str(r.action).startswith(prefix):
             return r
@@ -23331,9 +23377,11 @@ def _start_transfer(label, cluster, clusters, public_cmd, cmd, result=None):
 
 
 def _busy_response(busy):
-    return jsonify({"error": f"{busy.action} is already running on {busy.cluster} "
-                             f"(action {busy.id})",
-                    "running": busy.id, "running_action": busy.action}), 409
+    body = {"error": f"{busy.action} is already running on {busy.cluster} (action {busy.id})",
+            "running": busy.id, "running_action": busy.action}
+    if str(busy.action).startswith(CAPI_UNINSTALL_PREFIX):
+        body["code"] = "capi-uninstall-running"           # 2.7.1 (revue 2.7.0 m3 iii)
+    return jsonify(body), 409
 
 
 @app.route("/api/vm/<cluster>/<namespace>/<name>/transfer/check", methods=["POST"])
@@ -34964,6 +35012,9 @@ def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, clu
         if busy:
             return {"error": "a deployment is already running on this cluster", "code": "deploy-running",
                     "running": busy.id}, 409
+        refused = _capi_uninstall_refusal(cluster)
+        if refused:
+            return refused
         with ACTIONS_LOCK:
             seq = _transfer_busy([cluster], "", None)
         if seq is not None and seq.action in CLUSTER_SEQUENCES:
@@ -34984,9 +35035,11 @@ def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, clu
             time.sleep(0.02)
             lock_fd, holder = _deploy_cluster_lock(cluster, run_id, dctx["plan"]["name"])
         if lock_fd is None:
-            # un déroulé de l'autre processus (console ou ligne de commande)
-            return {"error": "a deployment is already running on this cluster", "code": "deploy-running",
-                    "running": holder.get("run") or ""}, 409
+            # un déroulé de l'autre processus (console ou ligne de commande),
+            # ou le retrait de la pile Turtles par l'outil (2.7.1)
+            return _capi_uninstall_refusal(cluster, holder) or (
+                {"error": "a deployment is already running on this cluster", "code": "deploy-running",
+                 "running": holder.get("run") or ""}, 409)
         try:
             action_id = _deploy_start(cluster, kc, dctx, dry_run=dry_run, user=user,
                                       cluster_user=cluster_user, previous=previous, resumes=resumes,
@@ -35850,6 +35903,9 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
         if busy:
             return {"error": "a deployment is running on this cluster", "code": "deploy-running",
                     "running": busy.id}, 409
+        refused = _capi_uninstall_refusal(cluster)
+        if refused:
+            return refused
         run_id = uuid.uuid4().hex[:12]
         label = f"undo:{res.get('plan') or ''}"
         lock_fd, holder = _deploy_cluster_lock(cluster, run_id, label)
@@ -35860,8 +35916,9 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
             time.sleep(0.05)
             lock_fd, holder = _deploy_cluster_lock(cluster, run_id, label)
         if lock_fd is None:
-            return {"error": "a deployment or an undo is running on this cluster", "code": "deploy-running",
-                    "running": holder.get("run") or ""}, 409
+            return _capi_uninstall_refusal(cluster, holder) or (
+                {"error": "a deployment or an undo is running on this cluster", "code": "deploy-running",
+                 "running": holder.get("run") or ""}, 409)
         try:
             run = ActionRun(run_id, f"{DEPLOY_UNDO_PREFIX}{cluster}", cluster, [])
             run.cluster_user = cluster_user
