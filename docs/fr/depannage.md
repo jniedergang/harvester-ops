@@ -530,6 +530,55 @@ Ajoutez aussi le nœud à la configuration de la console.
 Lancez-la là où la console est installée. `pack`, `sign`, `verify` et `inspect` restent en
 bibliothèque standard de Python.
 
+## Artefacts dans les clusters enfants et Défaire (2.7.0)
+
+### Un élément retiré a laissé un objet dans le cluster enfant (« kept-relabelled »)
+
+La console ne supprime que les objets qui portent encore ses étiquettes
+(`harvester-ops.io/managed`, `artefact-item`, `artefact-cluster`). Un objet
+dont les étiquettes ont été retirées à la main est gardé et nommé dans
+l'étape. Supprimez-le vous-même s'il n'est plus voulu. Un namespace livré
+qui porte une charge ou un volume de quelqu'un d'autre est gardé aussi
+(`kept-in-use`).
+
+### Le binding d'un manifeste reste « pas encore appliqué »
+
+Cluster API n'applique le ConfigMap que quand le `Cluster` porte
+l'étiquette `harvester-ops.io/art-<élément>: "on"` et que le cluster enfant
+est joignable. Lisez `kubectl get clusterresourcesetbinding -n <ns>
+<cluster> -o yaml` sur le cluster Harvester : un objet que l'API du cluster
+enfant refuse (un quota, un namespace absent, un LimitRange désordonné) y
+est nommé. L'action de déploiement échoue après son délai (900 s par
+défaut) avec l'état du binding.
+
+### Un retrait ou un Défaire attend un finaliseur
+
+La console ne retire jamais un finaliseur. Un `HarvesterCluster` qui reste
+après Supprimer est nommé avec son finaliseur dans l'étape (attente de
+120 s) ; un `Cluster` bloqué en Deleting veut en général dire qu'il manque
+un droit à CAPHV (voir l'entrée 2.5.0 plus haut). Corrigez la cause, puis
+relancez Supprimer ou le Défaire.
+
+### La création d'un cluster dit « harvester-cluster-leftover »
+
+Un `HarvesterCluster` de ce nom reste d'un ancien `Cluster`. Lancez
+**Supprimer** sur le cluster (ou `harvester-capi delete --name ns/nom`) : il
+est retiré quand aucun `Cluster` ne le porte. Un orphelin sans aucun
+propriétaire n'est qu'un avertissement ; la création l'adopte.
+
+### Le Défaire dit « undo-not-ours » pour un élément
+
+Quelque chose porte le nom de l'élément sans la marque
+`harvester-ops.io/plan-run` d'une exécution de la chaîne défaite : recréé
+depuis par un autre déroulé, ou à la main. Le Défaire le laisse, et garde
+ce qui en dépend (son cluster, le contenu Terraform). Retirez-le là où il a
+été fait, ou décochez l'élément, puis relancez le Défaire.
+
+### Le Défaire dit « undo-already-done »
+
+Tout ce que l'exécution a créé est parti. Relancez le plan pour le recréer ;
+un défaire ne se défait jamais.
+
 ## Reprendre une extinction interrompue
 
 Si le script a été tué (Ctrl-C, perte SSH, ...) avec certains nodes éteints et d'autres encore up :

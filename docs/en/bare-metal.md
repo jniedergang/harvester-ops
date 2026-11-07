@@ -508,7 +508,7 @@ In 2.4.0 the phases are:
 | **terraform** | Instantiates each **declaration template** of the plan as an ordinary Terraform declaration, `<plan>-<template>`, then plans and applies it. |
 | capi, clusters | Available since 2.5.0: see "Deployment plans: Cluster API and child clusters" below. |
 | registry | Available since 2.6.0: see "Deployment plans: Registry phase (2.6.0)" below. |
-| artefacts | In the model, shown greyed with "coming in 2.7". A plan file that enables it is refused. |
+| artefacts | In the model, shown greyed with "coming in 2.7" in 2.4.0; available since 2.7.0. |
 
 **Where it lives.** The **Plans** tab (`#automation/pxe/plans`, between
 Profiles and Images) lists the plans on the left and opens one on the right:
@@ -786,7 +786,7 @@ behaviour of child clusters are described in
 | Phase | What it does |
 |---|---|
 | **registry** | One item per registry of the plan: a **bootstrap** registry is posed on the Harvester cluster (`harvester-registry deploy`, child action `registry-deploy:<cluster>/<name>`), or adopted if this plan posed it; an **external** registry, declared and attached beforehand, is only checked. Then one item per publication (`harvester-artefacts publish`, child action `artefacts-publish:<name>-<version>@<registry>`), after its registry when the registry belongs to the plan. |
-| artefacts | Shown greyed with "coming in 2.7". A plan file that enables it is refused. |
+| artefacts | Since 2.7.0: see "Deployment plans: Artefacts phase (2.7.0)" below. |
 
 The order of the chain is install, readiness, terraform, **registry**,
 capi, clusters: the clusters need their registry when they are created, and
@@ -880,7 +880,7 @@ layers already sent. **Dry run** poses and publishes nothing.
 
 **Never a deletion.** The chain never deletes a registry, even after a
 failure. A run records `undo: {kind: registry, ref: <cluster>/<name>}` for
-a registry it created, for the undo of the deployment that comes with 2.7.
+a registry it created; the undo of the deployment (2.7.0) uses it.
 Remove a registry from Cluster API > Registries.
 
 **Roles.**
@@ -902,6 +902,144 @@ checked the registry and the publication again and skipped them
 (`already done (checked)`); the next runs adopted the registry
 (`registry-exists`). Details: [artefacts.md](artefacts.md), "Seen for
 real".
+
+### Deployment plans: Artefacts phase (2.7.0)
+
+The last phase of the chain applies package items to the child clusters:
+the base of policies and the automation accounts, manifests and policies,
+then charts. What each item writes and how it is removed is described in
+[artefacts.md](artefacts.md), "Artefacts on child clusters (2.7.0)".
+
+```yaml
+phases:
+  artefacts:
+    enabled: true
+    timeout_minutes: 15            # per item, 1 to 60
+    policies:                      # base and access, per cluster
+      - clusters: ["{{cluster}}-apps"]
+        base: false                # unticked by default
+        teams: [{namespace: team-a, quota: {pods: "20"}}]
+        roles: [{namespace: team-a, group: devs, role: view}]
+        accounts: [{namespace: team-a, name: ci, role: edit}]
+    items:
+      - {package: socle, version: "2026.11", item: podinfo,
+         registry: "{{registry}}", values: {replicaCount: 2},
+         clusters: ["{{cluster}}-apps"]}
+      - {package: socle, version: "2026.11", item: ingress-rules,
+         clusters: ["{{cluster}}-apps", "tools/tools"], depends_on: []}
+```
+
+- `clusters`: a cluster of the Clusters phase of the same plan (rendered
+  name), or an existing child cluster `<ns>/<name>`
+  (`artefact-cluster-unknown` otherwise).
+- A chart needs `registry` (a registry where the package is published, or
+  published by the Registry phase of the plan); a manifest refuses
+  `registry` and `values`. `values` follow the secret rules of the plans.
+  The kinds `images` ("published by the Registry phase") and `gitops`
+  ("coming in 2.8") are refused.
+- 32 entries and 128 items once the clusters are unfolded, at most.
+- In each cluster: `pol-<cluster>` (base, roles, accounts) first, then the
+  manifests and policies, then the charts, in the order of the entries;
+  `depends_on` between entries is honoured. The items of a cluster wait for
+  its creation; when a cluster fails in the Clusters phase, its items are
+  skipped and the other clusters get theirs (phase `partial`).
+- Before the phase, the console replays the checks of each item whose
+  cluster exists: package and trust (strict mode), CAAPH, chart published
+  (`artefact-not-published`), images published in a registry of the
+  cluster (`artefact-images-not-published`: a warning, blocking when the
+  cluster cuts the fallback), objects (`manifest-check` in the child),
+  applicable name (42 characters), right of the person on
+  `<c>-kubeconfig` (`child-admin-required`), item laid by another origin
+  (`artefact-taken`).
+- An item is marked `created` only when it carries the run of this chain;
+  an item already laid by a run of this plan is adopted, and keeps the run
+  that created it. A resumed run checks the items done (manifests: every
+  object read again in the child, since an equal checksum does not prove
+  they are all there) and skips them.
+- 2.7.0 also marks the Terraform declarations a run creates (`origin.run`,
+  `created`, `undo`), so that the undo can prove what it destroys.
+
+### Undoing a deployment (2.7.0)
+
+**History > Undo** on a finished run (not a dry run) removes what the run
+and its resumes created, in reverse order: artefacts, child clusters, the
+bootstrap registry the plan laid, the Terraform content. Never the
+Harvester installation, never the Cluster API stack. Administrator only.
+
+The window has three tabs, like Deploy:
+
+- **Content**: what the chain created, by kind, with boxes. Unticked by
+  default, with the reason in the tooltip: the bootstrap registry (it and
+  its data outlive the plan, other clusters may pull from it), a
+  declaration whose creation is not proven (a run older than 2.7.0), a
+  declaration changed since it was applied. An item adopted without the
+  mark of the chain is never listed.
+- **Destruction plan**: what will go, read by the console without writing
+  anything: objects of the child cluster (deletions judged by the server),
+  the chart release, the machines, VMs, volumes and load balancers of a
+  cluster (found by name: approximate) and the workloads inside it, the
+  resources of the Terraform state, the registry and its volume. Limits
+  said: volumes still claimed, load balancers whose address came from DHCP
+  (harvester/harvester#11767), objects named after the cloud provider name
+  `kubernetes` (CAPHV #277), the namespace of a chart release (removed only
+  if empty and created for the chart). An object found under the name of
+  an item but **without the run mark of this chain** (recreated since by
+  another run, or by hand) is named here and left untouched.
+- **Confirmation**: the name of the Harvester cluster typed; the data of a
+  registry goes only on a second typed name (its volume is kept
+  otherwise).
+
+The Undo button stays greyed until the destruction plan of the current
+boxes is back and the name matches, and sends one request only.
+
+The undo is an action `deploy-undo:<cluster>` under the same cluster lock
+as `deploy:` (a deployment and an undo never run together on a cluster),
+with child actions `capi-service-remove:`, `capi-manifest-remove:`,
+`capi-cluster-delete:`, `registry-delete:` and `tf-destroy:`.
+
+- **Order and dependencies.** A child cluster waits for the removal of its
+  artefacts; the registry waits for every chosen cluster; each Terraform
+  declaration waits for the chosen clusters and registry, because a
+  network, a storage class or an image of the content can carry them. A
+  failed item only stops what depends on it: a cluster whose chart could
+  not be removed stays, and so does the Terraform content (phase
+  `partial`).
+- **Only what the chain created.** Each target is read again before it is
+  removed: it must carry the `harvester-ops.io/plan-run` mark of a run of
+  the chain. Anything else is `undo-not-ours`, left untouched. A
+  declaration is designated by its identifier, never reused.
+- **Resume.** Run the undo again on the same run: the items already gone
+  are checked absent and skipped.
+- **History.** The original run gets `undone_by`, `undone_at` and
+  `undone_status`, shown as a badge: **Undone** once everything the chain
+  created is gone (over successive undos), **Partially undone** otherwise
+  (for example when the registry was left, the default). A run fully undone
+  is refused (`undo-already-done`); an undo is never undone
+  (`undo-of-undo`): apply the plan again to recreate what it made.
+
+Command line:
+
+```
+harvester-plans undo ACTION_ID --dry-run [--include registry,unproven,modified]
+harvester-plans undo ACTION_ID --confirm CLUSTER [--include ...]
+                     [--delete-registry-data NAME]
+```
+
+`--include` adds the categories unticked by default, each on its own.
+
+**Seen for real (2.7.0).** On harvlab2, a plan with Terraform, a bootstrap
+registry, one 1+1 child cluster and the Artefacts phase (base, account,
+manifest, policy, chart) ran in about 13 minutes (cluster 623 s); stopped
+twice in the Artefacts phase and resumed, the items done were checked and
+skipped. Undo: a first pass left an item recreated outside the plan
+(`undo-not-ours`) and so kept its cluster and the Terraform content; the
+relaunch deleted the cluster (265 s) and the declaration; the registry
+went in a third pass with its volume kept, then the run was refused as
+`undo-already-done`. An undo whose cluster deletion was cancelled from
+the dock finished when relaunched (2 min 11 s). On harv4, two child
+clusters with a manifest and a chart each: deployment 19 min 20 s, undo
+of everything 6 min 15 s. Decoys without the run mark survived every
+undo. Details: [artefacts.md](artefacts.md), "Seen for real (2.7.0)".
 
 ### History of the bare-metal actions (2.1.0)
 

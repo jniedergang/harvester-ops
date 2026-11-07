@@ -559,3 +559,36 @@ bootstrap registry from a plan needs the admin role. Roles: reading is open
 to viewers; importing, keys, strict mode, declaring and posing registries
 are admin; attaching, checking, publishing and creating clusters with
 registries are operator.
+
+## 17. Apply artefacts to child clusters, issue tokens, undo a deployment (2.7.0)
+
+Full reference: [artefacts.md](artefacts.md), "Artefacts on child
+clusters"; the plan phase and the undo: [bare-metal.md](bare-metal.md).
+
+1. **Operator with the right to read `<c>-kubeconfig`: apply.** Cluster API
+   > Artefacts, open the package, **Apply** on a chart, manifest or policy
+   item: choose the child cluster (and the registry for a chart), read
+   **Checks**, then **Apply**. Follow the action in the dock. A refusal
+   `child-admin-required` means you cannot read the admin kubeconfig of the
+   child cluster.
+2. **Check what is applied.** Cluster API > Services: column **Kind**,
+   state of the binding ("applied", "not applied yet"). **Remove** takes an
+   item away; objects changed by hand are kept and named.
+3. **Base of policies and accounts.** In a plan (Artefacts card) or with
+   `harvester-capi manifest-deploy` and a `policies` spec. The base is
+   unticked by default: tick it only for team namespaces the console
+   creates.
+4. **Token for a pipeline.** Cluster API > Clusters, card of the child
+   cluster, **Issue a token** on an automation account: duration 600 to
+   86 400 s; copy it at once, it is never shown again. It works about one
+   minute past its expiry.
+5. **Admin: undo a deployment.** Bare-metal > History, **Undo** on the run:
+   read **Content** (registry and unproven or changed declarations
+   unticked), read the **Destruction plan** (an item marked as recreated
+   since stays), type the cluster name in **Confirmation** (and the
+   registry name to delete its data), **Undo**. A partial result says what
+   stayed and why: fix it and run **Undo** again on the same run; what is
+   gone is checked and skipped. To recreate, apply the plan again.
+6. **Admin: uninstall the Cluster API stack.** Remove every child cluster
+   first. Cluster API > Installation, **Uninstall**: read what goes and what
+   stays, type the cluster name. **Install** lays it again from the bundle.

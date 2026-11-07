@@ -535,7 +535,7 @@ installation bare-metal. En 2.4.0, les phases sont :
 | **terraform** | Fait de chaque **modèle de déclaration** du plan une déclaration Terraform ordinaire, `<plan>-<modèle>`, puis la planifie et l'applique. |
 | capi, clusters | Disponibles depuis la 2.5.0 : voir « Plans de déploiement : Cluster API et clusters enfants » plus bas. |
 | registry (registre) | Disponible depuis la 2.6.0 : voir « Plans de déploiement : phase Registre (2.6.0) » plus bas. |
-| artefacts | Présente dans le modèle, grisée avec « à venir (2.7) ». Un fichier de plan qui l'active est refusé. |
+| artefacts | Présente dans le modèle, grisée avec « à venir (2.7) » en 2.4.0 ; disponible depuis la 2.7.0. |
 
 **Où.** L'onglet **Plans** (`#automation/pxe/plans`, entre Profils et
 Images) liste les plans à gauche et en ouvre un à droite : une carte par
@@ -830,7 +830,7 @@ comportement des clusters enfants sont décrits dans
 | Phase | Ce qu'elle fait |
 |---|---|
 | **registry** (registre) | Un élément par registre du plan : un registre **bootstrap** (d'amorçage) est posé sur le cluster Harvester (`harvester-registry deploy`, action fille `registry-deploy:<cluster>/<nom>`), ou repris si ce plan l'a posé ; un registre **external** (du client), déclaré et rattaché d'avance, est seulement vérifié. Puis un élément par publication (`harvester-artefacts publish`, action fille `artefacts-publish:<nom>-<version>@<registre>`), après son registre quand le registre est du plan. |
-| artefacts | Montrée grisée avec « à venir (2.7) ». Un fichier de plan qui l'active est refusé. |
+| artefacts | Depuis la 2.7.0 : voir « Plans de déploiement : phase Artefacts (2.7.0) » plus bas. |
 
 L'ordre de la chaîne est install, readiness, terraform, **registry**, capi,
 clusters : les clusters ont besoin de leur registre à leur création, et le
@@ -927,8 +927,8 @@ L'**essai à blanc** ne pose et ne publie rien.
 
 **Jamais de suppression.** La chaîne ne supprime jamais un registre, même
 après un échec. Une exécution consigne `undo: {kind: registry, ref:
-<cluster>/<nom>}` pour un registre qu'elle a créé, pour le retour arrière
-du déploiement qui vient avec la 2.7. Un registre se retire depuis Cluster
+<cluster>/<nom>}` pour un registre qu'elle a créé ; le Défaire du
+déploiement (2.7.0) s'en sert. Un registre se retire depuis Cluster
 API > Registres.
 
 **Rôles.**
@@ -950,6 +950,152 @@ a revérifié le registre et la publication puis les a sautés
 (`already done (checked)`) ; les exécutions suivantes ont adopté le
 registre (`registry-exists`). Détail : [artefacts.md](artefacts.md),
 « Vu en réel ».
+
+### Plans de déploiement : phase Artefacts (2.7.0)
+
+La dernière phase de la chaîne applique des éléments de paquet aux clusters
+enfants : le socle de politiques et les comptes d'automatisation, les
+manifestes et les politiques, puis les charts. Ce que chaque élément écrit
+et comment il se retire est décrit dans [artefacts.md](artefacts.md),
+« Artefacts dans les clusters enfants (2.7.0) ».
+
+```yaml
+phases:
+  artefacts:
+    enabled: true
+    timeout_minutes: 15            # par élément, 1 à 60
+    policies:                      # socle et accès, par cluster
+      - clusters: ["{{cluster}}-apps"]
+        base: false                # décoché par défaut
+        teams: [{namespace: equipe-a, quota: {pods: "20"}}]
+        roles: [{namespace: equipe-a, group: devs, role: view}]
+        accounts: [{namespace: equipe-a, name: ci, role: edit}]
+    items:
+      - {package: socle, version: "2026.11", item: podinfo,
+         registry: "{{registre}}", values: {replicaCount: 2},
+         clusters: ["{{cluster}}-apps"]}
+      - {package: socle, version: "2026.11", item: ingress-politiques,
+         clusters: ["{{cluster}}-apps", "outils/outils"], depends_on: []}
+```
+
+- `clusters` : un cluster de la phase Clusters du même plan (nom rendu), ou
+  un cluster enfant existant `<ns>/<nom>` (`artefact-cluster-unknown`
+  sinon).
+- Un chart exige `registry` (un registre où le paquet est publié, ou publié
+  par la phase Registre du plan) ; un manifeste refuse `registry` et
+  `values`. Les `values` suivent les règles de secrets des plans. Les sortes
+  `images` (« publiée par la phase Registre ») et `gitops` (« à venir en
+  2.8 ») sont refusées.
+- 32 entrées et 128 éléments une fois les clusters dépliés, au plus.
+- Dans chaque cluster : `pol-<cluster>` (socle, rôles, comptes) d'abord,
+  puis les manifestes et politiques, puis les charts, dans l'ordre des
+  entrées ; `depends_on` entre entrées est respecté. Les éléments d'un
+  cluster attendent sa création ; un cluster en échec dans la phase
+  Clusters voit ses éléments sautés, les autres clusters reçoivent les
+  leurs (phase `partial`).
+- Avant la phase, la console rejoue les constats de chaque élément dont le
+  cluster existe : paquet et confiance (mode strict), CAAPH, chart publié
+  (`artefact-not-published`), images publiées dans un registre du cluster
+  (`artefact-images-not-published` : avertissement, bloquant quand le
+  cluster coupe le repli), objets (`manifest-check` dans le cluster
+  enfant), nom applicable (42 caractères), droit de la personne sur
+  `<c>-kubeconfig` (`child-admin-required`), élément posé par une autre
+  origine (`artefact-taken`).
+- Un élément n'est marqué `created` que s'il porte l'exécution de cette
+  chaîne ; un élément déjà posé par une exécution de ce plan est repris et
+  garde l'exécution qui l'a créé. Une reprise vérifie les éléments faits
+  (manifestes : chaque objet relu dans le cluster enfant, une empreinte
+  égale ne prouvant pas qu'ils sont tous là) et les saute.
+- La 2.7.0 marque aussi les déclarations Terraform qu'une exécution crée
+  (`origin.run`, `created`, `undo`), pour que le Défaire prouve ce qu'il
+  détruit.
+
+### Défaire un déploiement (2.7.0)
+
+**Historique > Défaire** sur une exécution finie (pas un essai) retire ce
+que l'exécution et ses reprises ont créé, dans l'ordre inverse : artefacts,
+clusters enfants, registre d'amorçage posé par le plan, contenu Terraform.
+Jamais l'installation de Harvester, jamais la pile Cluster API. Réservé aux
+administrateurs.
+
+La fenêtre a trois onglets, comme Déployer :
+
+- **Contenu** : ce que la chaîne a créé, par sorte, avec des cases.
+  Décochés par défaut, la raison en info-bulle : le registre d'amorçage (lui
+  et ses données survivent au plan, d'autres clusters peuvent y tirer), une
+  déclaration dont la création n'est pas prouvée (exécution d'avant la
+  2.7.0), une déclaration modifiée depuis son application. Un élément repris
+  sans la marque de la chaîne n'est jamais listé.
+- **Plan de destruction** : ce qui partira, lu par la console sans rien
+  écrire : objets du cluster enfant (suppressions jugées par le serveur),
+  release du chart, machines, VMs, volumes et répartiteurs d'un cluster
+  (trouvés par leur nom : approximatif) et les charges qu'il porte,
+  ressources de l'état Terraform, registre et son volume. Limites dites :
+  volumes encore réclamés, répartiteurs dont l'adresse vient du DHCP
+  (harvester/harvester#11767), objets au nom du fournisseur de cloud
+  `kubernetes` (CAPHV #277), namespace d'une release (retiré seulement s'il
+  est vide et créé pour le chart). Un objet trouvé sous le nom d'un élément
+  mais **sans la marque d'exécution de cette chaîne** (recréé depuis par un
+  autre déroulé, ou à la main) est nommé ici et laissé tel quel.
+- **Confirmation** : le nom du cluster Harvester tapé ; les données d'un
+  registre ne partent que sur un second nom tapé (son volume est gardé
+  sinon).
+
+Le bouton Défaire reste grisé tant que le plan de destruction des cases
+courantes n'est pas revenu et que le nom ne correspond pas, et n'envoie
+qu'une demande.
+
+Le Défaire est une action `deploy-undo:<cluster>` sous le même verrou de
+cluster que `deploy:` (un déroulé et un défaire ne tournent jamais ensemble
+sur un cluster), avec les actions filles `capi-service-remove:`,
+`capi-manifest-remove:`, `capi-cluster-delete:`, `registry-delete:` et
+`tf-destroy:`.
+
+- **Ordre et dépendances.** Un cluster enfant attend le retrait de ses
+  artefacts ; le registre attend tous les clusters choisis ; chaque
+  déclaration Terraform attend les clusters et le registre choisis, car un
+  réseau, une classe de stockage ou une image du contenu peut les porter.
+  Un élément en échec n'arrête que ce qui en dépend : un cluster dont un
+  chart n'a pas pu être retiré reste, et le contenu Terraform aussi (phase
+  `partial`).
+- **Seulement ce que la chaîne a créé.** Chaque cible est relue avant son
+  retrait : elle doit porter la marque `harvester-ops.io/plan-run` d'une
+  exécution de la chaîne. Tout le reste est `undo-not-ours`, laissé tel
+  quel. Une déclaration se désigne par son identifiant, jamais réattribué.
+- **Reprise.** Relancer le Défaire sur la même exécution : les éléments
+  déjà partis sont vérifiés absents et sautés.
+- **Historique.** L'exécution d'origine reçoit `undone_by`, `undone_at` et
+  `undone_status`, montrés en badge : **Défait** une fois parti tout ce que
+  la chaîne a créé (au fil des défaire successifs), **Défait en partie**
+  sinon (par exemple quand le registre est resté, le cas par défaut). Une
+  exécution entièrement défaite est refusée (`undo-already-done`) ; un
+  défaire ne se défait jamais (`undo-of-undo`) : relancer le plan recrée ce
+  qu'il avait fait.
+
+Ligne de commande :
+
+```
+harvester-plans undo ACTION_ID --dry-run [--include registry,unproven,modified]
+harvester-plans undo ACTION_ID --confirm CLUSTER [--include ...]
+                     [--delete-registry-data NOM]
+```
+
+`--include` ajoute les catégories décochées par défaut, chacune à part.
+
+**Vu en réel (2.7.0).** Sur harvlab2, un plan avec Terraform, un registre
+d'amorçage, un cluster enfant 1+1 et la phase Artefacts (socle, compte,
+manifeste, politique, chart) a tourné en 13 minutes environ (cluster
+623 s) ; arrêté deux fois dans la phase Artefacts puis repris, les
+éléments faits ont été vérifiés et sautés. Défaire : un premier passage a
+laissé un élément recréé hors plan (`undo-not-ours`) et donc gardé son
+cluster et le contenu Terraform ; la relance a supprimé le cluster (265 s)
+et la déclaration ; le registre est parti à un troisième passage, volume
+gardé, puis l'exécution a été refusée en `undo-already-done`. Un Défaire
+dont la suppression du cluster a été annulée depuis le dock a fini une
+fois relancé (2 min 11 s). Sur harv4, deux clusters enfants avec un
+manifeste et un chart chacun : déroulé de 19 min 20 s, Défaire de tout en
+6 min 15 s. Les leurres sans marque d'exécution ont survécu à chaque
+Défaire. Détails : [artefacts.md](artefacts.md), « Vu en réel (2.7.0) ».
 
 ### Historique des actions bare-metal (2.1.0)
 

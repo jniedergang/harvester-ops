@@ -509,6 +509,53 @@ command exits with 1, removing nothing. Run it where the console is
 installed.
 `pack`, `sign`, `verify` and `inspect` stay on the Python standard library.
 
+## Artefacts on child clusters and undo (2.7.0)
+
+### A removed item left an object in the child cluster ("kept-relabelled")
+
+The console deletes only the objects that still carry its labels
+(`harvester-ops.io/managed`, `artefact-item`, `artefact-cluster`). An
+object whose labels were removed by hand is kept and named in the step.
+Delete it yourself if it is no longer wanted. A delivered namespace that
+holds a workload or a volume of someone else is kept too
+(`kept-in-use`).
+
+### The binding of a manifest stays "not applied yet"
+
+Cluster API applies the ConfigMap only when the `Cluster` carries the
+label `harvester-ops.io/art-<item>: "on"` and the child is reachable. Read
+`kubectl get clusterresourcesetbinding -n <ns> <cluster> -o yaml` on the
+Harvester cluster: an object the API of the child refuses (a quota, a
+missing namespace, a LimitRange out of order) is named there. The deploy
+action fails after its timeout (900 s by default) with the binding state.
+
+### A removal or an undo waits on a finalizer
+
+The console never removes a finalizer. A `HarvesterCluster` that stays
+after Delete is named with its finalizer in the step (wait 120 s); a
+`Cluster` stuck in Deleting usually means CAPHV lacks a right (see the 2.5.0
+entry above). Fix the cause, then run Delete or the undo again.
+
+### Creating a cluster says "harvester-cluster-leftover"
+
+A `HarvesterCluster` of that name remains from an older `Cluster`. Run
+**Delete** on the cluster (or `harvester-capi delete --name ns/name`): it
+is removed when no `Cluster` owns it. An orphan without any owner is only
+a warning; the creation adopts it.
+
+### The undo says "undo-not-ours" for an item
+
+Something with the name of the item exists but does not carry the
+`harvester-ops.io/plan-run` mark of a run of the undone chain: it was
+recreated since by another run, or by hand. The undo leaves it, and keeps
+what depends on it (its cluster, the Terraform content). Remove it from
+where it was made, or untick the item, then run the undo again.
+
+### The undo says "undo-already-done"
+
+Everything the run created is gone. Apply the plan again to recreate it;
+an undo is never undone.
+
 ## Recovering from a half-done shutdown
 
 If the script was killed (Ctrl-C, lost SSH, ...) and some nodes are off while others are still up:

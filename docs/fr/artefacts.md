@@ -1,4 +1,4 @@
-# Paquets d'artefacts et registres (2.6.0)
+# Paquets d'artefacts et registres (2.6.0), artefacts dans les clusters enfants (2.7.0)
 
 Les clusters enfants créés par Cluster API tournent souvent là où Internet
 n'est pas joignable. La 2.6.0 apporte de quoi leur donner quand même leurs
@@ -14,10 +14,12 @@ images et leurs charts :
   création ;
 - des **services** (CAAPH) qui installent un chart publié dans un registre.
 
-La phase Artefacts complète des plans de déploiement (charts et manifestes
-appliqués, retrait propre) arrive en 2.7. La phase Registre des plans est
-décrite dans [bare-metal.md](bare-metal.md), section « Plans de
-déploiement : phase Registre (2.6.0) ».
+La 2.7.0 applique aux clusters enfants ce qu'apporte un paquet : les charts
+par CAAPH, les manifestes et politiques par un `ClusterResourceSet` dont la
+console retire elle-même les objets, un socle de politiques et des comptes
+d'automatisation aux jetons courts. Voir « Artefacts dans les clusters
+enfants (2.7.0) » plus bas. Les phases Registre et Artefacts des plans, et
+le Défaire d'un déploiement, sont décrits dans [bare-metal.md](bare-metal.md).
 
 ## Le paquet
 
@@ -581,6 +583,164 @@ Constats : `service-registry-unknown`, `service-registry-no-charts`,
 `service-item-not-chart` (bloquants) ; `service-chart-not-published`,
 `service-registry-not-mirrored` (avertissements).
 
+## Artefacts dans les clusters enfants (2.7.0)
+
+Un élément de paquet arrive dans un cluster enfant `<ns>/<c>` créé par
+Cluster API. Tout ce que la console écrit pour lui vit sur le cluster
+Harvester, dans `<ns>` :
+
+| Sorte d'élément | Écrit sur Harvester | Appliqué par |
+|---|---|---|
+| `chart` | un `HelmChartProxy` du nom de l'élément, étiquette `harvester-ops.io/svc-<élément>: "on"` sur le `Cluster` | CAAPH, depuis un registre où le paquet est publié (comme « Depuis un registre » dans Services) |
+| `manifest`, `policy` | un ConfigMap et un `ClusterResourceSet` nommés `art-<élément>` (`strategy: Reconcile`), étiquette `harvester-ops.io/art-<élément>: "on"` sur le `Cluster` | Cluster API, dans le cluster enfant |
+
+Chacun porte les étiquettes `harvester-ops.io/managed`,
+`harvester-ops.io/artefact-item` et `harvester-ops.io/artefact-package`, les
+annotations `harvester-ops.io/artefact-version` et
+`harvester-ops.io/applied-by` et, depuis un plan, l'origine du plan
+(étiquette `harvester-ops.io/plan`, annotation `harvester-ops.io/plan-run`).
+
+### Manifestes et politiques : un retrait suivi par la console
+
+Cluster API ne retire jamais ce qu'un `ClusterResourceSet` a appliqué, et un
+jeu en `Reconcile` laisse en place un objet sorti de son ConfigMap (vu en
+réel, voir plus bas). La console suit donc le retrait elle-même :
+
+- Chaque objet du contenu reçoit les étiquettes `harvester-ops.io/managed`,
+  `harvester-ops.io/artefact-item` et `harvester-ops.io/artefact-cluster`.
+- **Mise à jour** (nouvelle version de l'élément) : les objets qui quittent
+  le contenu sont écrits dans une annotation du ConfigMap avant tout le
+  reste, le nouveau contenu est appliqué, la console attend que le binding
+  porte la nouvelle empreinte, puis supprime ces objets dans le cluster
+  enfant. Un déroulé arrêté en route termine le travail à la mise à jour ou
+  au retrait suivant.
+- **Retrait** : le `ClusterResourceSet` d'abord (plus de réapplication),
+  l'étiquette du `Cluster`, puis les objets un par un, namespacés d'abord,
+  `Namespace` et portée cluster en dernier, puis le ConfigMap. Chaque
+  suppression est jugée par le serveur (`--dry-run=server`) avant la
+  première.
+- **Seuls partent les objets qui portent encore les étiquettes.** Un objet
+  modifié à la main (étiquettes retirées) est gardé et nommé
+  (`kept-relabelled`). Un `Namespace` livré n'est supprimé que s'il ne porte
+  rien d'étranger (une charge ou un volume qui n'est pas de l'élément) :
+  `kept-in-use`. Une sorte qui n'est plus servie compte comme partie. Un
+  ConfigMap supprimé à la main perd la liste des objets : le retrait le dit
+  et les objets étiquetés restent.
+- Cluster enfant déjà supprimé : seuls le `ClusterResourceSet` et son
+  ConfigMap sont retirés (« objets partis avec lui »).
+
+Objets acceptés dans un manifeste : toute sorte namespacée hors des
+namespaces système du cluster enfant (`kube-system`, `*-system`,
+`cattle-*`, `tigera-operator`...) ; de portée cluster, seulement
+`Namespace`, `ClusterRole`, `ClusterRoleBinding` (jamais vers
+`cluster-admin`, jamais vers un sujet `system:*`), `StorageClass`,
+`PriorityClass` et `IngressClass`. Refusés : CRD, webhooks, politiques
+d'admission, `APIService`, `Node`, `PersistentVolume`, `CSIDriver`,
+`RuntimeClass` (un opérateur s'installe par un chart). Un Secret de type
+`kubernetes.io/service-account-token` est refusé. 500 objets et 900 Kio au
+plus par élément. Une `List` est dépliée, de même que les `<Sorte>List` des
+groupes de Kubernetes ; une sorte d'un autre groupe finie en `List` reste un
+objet. Une `ClusterRole` à règles jokers liée par une `ClusterRoleBinding`
+est acceptée : qui l'applique peut de toute façon lire le kubeconfig
+administrateur du cluster enfant (règle plus bas).
+
+### Socle de politiques, rôles et comptes d'automatisation
+
+La console fournit un socle de politiques, **décoché par défaut**. Coché, il
+pose dans chaque namespace d'équipe (1 à 16 par cluster, jamais un
+namespace système, étiquette `harvester-ops.io/team: "true"`) :
+
+- `ResourceQuota` `hops-quota` : `requests.cpu: "4"`, `requests.memory:
+  8Gi`, `limits.cpu: "8"`, `limits.memory: 16Gi`, `pods: "50"`,
+  `persistentvolumeclaims: "10"`, `requests.storage: 200Gi`,
+  `services.loadbalancers: "2"` ;
+- `LimitRange` `hops-limits` : défaut 500m et 512Mi, demande par défaut 100m
+  et 128Mi, maximum 2 CPU et 4Gi (chaque valeur se règle ; une demande
+  au-dessus de son défaut, ou un défaut au-dessus du maximum, est refusé) ;
+- `NetworkPolicy` : `hops-default-deny` (tous les pods, entrée et sortie),
+  `hops-allow-same-namespace`, `hops-allow-dns` (vers `kube-dns` de
+  `kube-system`, UDP et TCP 53), `hops-allow-ingress` (depuis le contrôleur
+  d'ingress de RKE2, `kube-system`, pods
+  `app.kubernetes.io/name: rke2-ingress-nginx`).
+
+Un namespace d'équipe déjà présent sans les étiquettes de la console bloque
+(`team-namespace-taken`) ; le socle n'écrit jamais dans `default` ni dans un
+namespace qu'il n'a pas créé.
+
+- **Rôles par groupe** : une `RoleBinding` dans un namespace d'équipe vers
+  les rôles intégrés `admin`, `edit` ou `view`, sujet `Group`. Aucune
+  `ClusterRoleBinding`.
+- **Comptes d'automatisation** : 16 par cluster au plus, un
+  `ServiceAccount` dans un namespace d'équipe
+  (`automountServiceAccountToken: false`) et une `RoleBinding`
+  `hops-sa-<nom>` vers `edit` ou `view`. Aucun Secret de jeton n'est jamais
+  créé.
+
+Socle décoché, rôles et comptes vont dans des namespaces d'équipe qui
+doivent déjà exister (`team-namespace-missing` sinon). Le tout est rendu
+comme un élément nommé `hops-policies` (paquet `harvester-ops`, version
+`builtin`), livré et retiré comme un manifeste. Les éléments `policy` d'un
+paquet sont des manifestes ordinaires, contrôlés de la même façon.
+
+### Jetons
+
+**Émettre un jeton** (Cluster API > Clusters, carte du cluster enfant, ou
+`harvester-capi token`) demande au cluster enfant un `TokenRequest` pour un
+compte d'automatisation : de 600 à 86 400 secondes, 3 600 par défaut. Le
+jeton est montré une fois, avec un bouton Copier, puis effacé de la page à
+la fermeture de la fenêtre (un clic à côté ne la ferme plus une fois le
+jeton montré). Il n'est jamais rangé : ni dans une action, une étape, un
+journal, le flux d'événements ou `actions.db` ; la réponse part avec
+`Cache-Control: no-store`. L'API du cluster enfant l'accepte encore environ
+une minute après son expiration (tolérance d'horloge) : « valable N s, plus
+une minute au plus ». Un compte sans les étiquettes de la console est refusé
+(`account-not-managed`).
+
+### Gestes hors plan
+
+- **Onglet Artefacts, Appliquer** sur un élément chart, manifeste ou
+  politique : une fenêtre Paramètres (cluster enfant, registre pour un
+  chart, valeurs), Vérifications et Résumé. Appliquer reste grisé tant que
+  les constats des valeurs courantes ne sont pas revenus, et reste grisé
+  une fois lancé.
+- **Cluster API > Services** : charts, manifestes et politiques dans un
+  seul tableau, colonne **Sorte**, état du binding pour un manifeste,
+  **Retirer**.
+- **Cluster API > Clusters** : comptes d'automatisation d'un cluster enfant
+  et **Émettre un jeton**.
+
+### Rôles
+
+| Geste | Rôle |
+|---|---|
+| Lire les éléments appliqués | viewer |
+| Appliquer ou retirer un élément, socle et comptes, émettre un jeton | operator **et** le droit de lire le Secret `<c>-kubeconfig` du cluster enfant |
+| Défaire un déploiement, désinstaller la pile Cluster API | admin |
+
+Qui lit `<c>-kubeconfig` est administrateur du cluster enfant : le serveur
+contrôle ce droit par une `SelfSubjectAccessReview` faite avec l'identité de
+la personne avant tout lancement (`child-admin-required`, 403).
+
+### Ligne de commande
+
+```
+harvester-capi manifest-check  --spec F
+harvester-capi manifest-deploy --spec F [--timeout 900]
+harvester-capi manifest-remove --name NS/C/ELEMENT [--dry-run]
+harvester-capi manifest-verify --name NS/C/ELEMENT
+harvester-capi manifests [--json]
+harvester-capi policy-render   --spec F
+harvester-capi token --name NS/C --account NS/SA [--seconds N]
+```
+
+Une spec : `{cluster: "ns/c", package, version, item}` ou `{cluster,
+policies: {base, teams, roles, accounts}}`. `token` écrit le jeton sur la
+sortie standard seulement. Les fichiers de travail des outils (et le
+kubeconfig du cluster enfant, 0600, effacé à la fin) vont dans
+`HARVESTER_OPS_WORK_DIR`, ou `<état>/work` (0700) ; jamais `/tmp` nu (un
+sous-répertoire donné par la variable est accepté, propriétaire et mode
+contrôlés).
+
 ## Rôles
 
 | Geste | Rôle |
@@ -622,10 +782,13 @@ nommé). Codes
 de sortie : 0 succès, 1 échec, 2 refus (constat bloquant, registre
 employé...).
 
-## Hors de la 2.6.0
+## Hors de la 2.7.0
 
-- La **phase Artefacts** des plans (charts, manifestes et politiques
-  appliqués, retrait propre) : 2.7.
+- Les éléments **GitOps** (Fleet, Flux) et l'OIDC de l'API des clusters
+  enfants : 2.8.0. La sorte `gitops` reste « à venir (2.8) ».
+- Le renouvellement du certificat d'un registre d'amorçage (sa CA n'est pas
+  gardée), la restriction du port 5443 à l'adresse de la console au-delà de
+  la 2.6.1, le format des Secrets de registre (m-14) : plus tard.
 - Un cluster enfant amorcé **entièrement sans Internet** (RKE2 lui-même et
   ses images système depuis le registre, une image de VM préparée) : plus
   tard.
@@ -722,6 +885,101 @@ imbriqué, 32 Gio), console de cette version, 7 novembre 2026.
 - L'étape TLS de la sonde a aussi été jouée contre un serveur TLS derrière
   un mandataire inverse, sur un réseau local : réponse avec le nom en SNI,
   refus sans lui.
+
+**Vu en réel (2.7.0).** Banc harvlab2 (Harvester v1.9.0, Turtles avec
+Cluster API v1.13.3, CAAPH v0.6.4, CAPHV v0.10.1, fournisseur RKE2
+v0.25.2), console de cette version, 7 novembre 2026. Paquet `banc-270`
+1.0.0 (chart et image podinfo, un manifeste d'un ConfigMap et d'un
+Deployment, un élément `policy` d'une NetworkPolicy, un manifeste `extra`)
+et 1.0.1 (le manifeste sans le Deployment), signé par une clé inconnue de la
+console.
+
+- **Plan** `banc270` sur harvlab2 : Terraform (un réseau de VM et une clé
+  SSH), registre d'amorçage en 172.16.2.76 avec la publication, la pile
+  Cluster API (déjà là, vérifiée), un cluster enfant 1+1, puis la phase
+  Artefacts (socle de deux namespaces d'équipe, dont un avec un quota de
+  4 pods, un rôle `view` pour un groupe, un compte d'automatisation `ci`,
+  le manifeste, la politique, le chart podinfo). Terraform 8 s, registre
+  45 s, publication 2 s, cluster 623 s ; arrêté au début de la phase
+  Artefacts, repris et arrêté après le socle, repris encore : chaque
+  élément précédent `already done (checked)`, les deux derniers appliqués
+  en 1 min 17 s. Dans le cluster enfant : les deux namespaces d'équipe et
+  leurs étiquettes, `hops-quota`, `hops-limits`, les quatre
+  NetworkPolicies, le compte et sa `RoleBinding`, les objets du manifeste
+  aux trois étiquettes, la release podinfo en marche ; sur harvlab2 les
+  trois `ClusterResourceSet` appliqués, leur binding à l'empreinte, le
+  `HelmChartProxy` prêt, chacun portant l'exécution qui l'a créé (trois
+  exécutions différentes de la même chaîne).
+- **Politiques.** Un quatrième pod du namespace d'équipe refusé
+  (`exceeded quota: hops-quota`) ; un conteneur sans ressources a reçu
+  100m/128Mi demandés et 500m/512Mi de limites ; depuis le namespace en
+  refus par défaut, `wget` vers un autre namespace a expiré alors que le
+  DNS répondait, le même depuis le namespace sans refus est passé ; une
+  Ingress du namespace d'équipe a répondu depuis node1 sur les deux nœuds
+  par le contrôleur de RKE2.
+- **Jeton** de 600 s pour `ci` : liste les comptes de son namespace,
+  `Forbidden` dans `kube-system`, `Cache-Control: no-store`, et sa valeur
+  introuvable dans `actions.db`, les journaux et l'état (recherche de la
+  valeur). Un jeton de 600 s émis sur harv4 expirait à 18:27:11 : encore accepté 35 s après, `Unauthorized` 81 s après.
+- **Mise à jour et retrait.** Le plan passé en 1.0.1 : le Deployment sorti
+  du contenu a été supprimé du cluster enfant (déroulé de 1 min 28 s). Les
+  étiquettes du ConfigMap retirées à la main, puis l'élément retiré
+  (1,7 s) : le ConfigMap gardé et nommé `kept-relabelled`, le
+  `ClusterResourceSet` et son ConfigMap partis.
+- **Défaire, et ce qu'il ne doit pas toucher.** Avant le Défaire, trois
+  leurres sans la marque d'exécution : le même élément `app` appliqué de
+  nouveau hors plan (même nom de `ClusterResourceSet` `art-app`), un
+  élément `extra` appliqué hors plan, et un ConfigMap `art-app` étiqueté
+  comme ceux de la console dans `default` de harvlab2. Le plan de
+  destruction (15 s) a nommé `app` comme laissé tel quel. Premier Défaire
+  (20 s) : chart, politique et socle retirés (namespaces d'équipe gardés :
+  `kept-in-use`, ils portaient des pods faits à la main) ; `app`
+  `undo-not-ours`, donc le cluster et le contenu Terraform sont restés
+  (sautés). Les trois leurres ont survécu, avec leurs objets dans le
+  cluster enfant. Les deux éléments leurres retirés hors plan, le Défaire
+  relancé : ce qui était parti vérifié et sauté, cluster supprimé (265 s),
+  déclaration détruite et retirée (2 s) ; l'exécution disait « Défait en
+  partie » (registre laissé). Le Défaire du registre était refusé sur le
+  banc (`registry-in-use` : le plan défait désigne son propre registre),
+  corrigé (`--ignore-plan`), puis retiré en 2 s, volume gardé ;
+  l'exécution est passée « Défait » et un nouveau Défaire a été refusé
+  (`undo-already-done`). Le leurre `default/art-app` était toujours là à
+  la fin. Harvester et la pile Cluster API intacts.
+- **Défaire interrompu.** Un autre déroulé (un cluster, un manifeste,
+  608 s) : la suppression du cluster annulée depuis le dock au bout de
+  30 s, le Défaire fini en partie avec le cluster en Deleting ; relancé,
+  il a vérifié le manifeste et fini la suppression en 2 min 11 s, Défait.
+- **Désinstallation Turtles.** Refusée tant que le cluster enfant et le
+  chart existaient (`capi-clusters-present`, `caaph-services-present`),
+  dans l'action suivie, rien touché. Après le Défaire : essai à blanc, puis
+  retrait en 26 s des quatre `CAPIProvider` de la console, de leurs
+  déploiements et des ConfigMaps du paquet ; `core/cluster-api` et Turtles
+  en marche, CRD et namespaces gardés, le service `ingress-expose` (pas
+  posé par la console sur ce banc) gardé. **Installer** a reposé la pile
+  en 52 s, prête aux mêmes versions.
+- **HarvesterCluster restant.** Avec un propriétaire disparu et un
+  finaliseur : `check` bloquant (`harvester-cluster-leftover`, finaliseur
+  nommé), `delete` a attendu 120 s et nommé le finaliseur, que la console a
+  laissé. Sans propriétaire : un avertissement, puis retiré par `delete`
+  en 6 s.
+- **Deux clusters enfants sur harv4** (bare-metal, Harvester v1.9.0) : un
+  plan avec un registre d'amorçage, deux clusters 1+1, le manifeste
+  `extra` et le chart podinfo sur les deux : registre 41 s, publication
+  3 s, clusters 477 s et 499 s, manifestes 7 s, charts 14 s, 19 min 20 s
+  en tout. Puis un seul Défaire de tout le déroulé, registre et données compris (deux noms tapés) : les deux charts et manifestes retirés en 1 à 2 s chacun, clusters supprimés en 169 s et 177 s, registre et volume retirés en 2 s, 6 min 15 s en tout, exécution « Défait » ; un ConfigMap leurre `art-extra` étiqueté comme ceux de la console dans `default` a survécu. Objets du banc retirés, cluster arrêté proprement et node4 éteint.
+- **Trouvé et corrigé sur le banc :** l'étape registre d'un Défaire
+  toujours refusée par le plan défait ; un Défaire relancé aussitôt refusé
+  par le verrou qu'il rendait ; un Défaire en échec après un Défaire en
+  partie faisait passer l'exécution de « en partie » à « en échec » ; la
+  fenêtre du Défaire nommait la dernière reprise comme créatrice.
+- **Réglage du banc.** Longhorn `storage-minimal-available-percentage` 25
+  -> 15 pendant les créations, remis ; image, paire de clés et pools
+  d'adresses du banc créés pour l'essai puis supprimés.
+
+Non vérifié en réel (2.7.0) : plus de deux clusters enfants, un Rancher
+extérieur au banc qui importe les clusters enfants, une personne Rancher
+restreinte qui émet un jeton (essai par usurpation seulement), l'option
+`--remove-images` de la désinstallation.
 
 Non vérifié en réel (2.6.0) : un Harbor du client, un cluster enfant amorcé
 entièrement sans Internet (hors de la 2.6.0), un registre d'amorçage sur
