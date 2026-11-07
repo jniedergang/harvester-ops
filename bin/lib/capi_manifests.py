@@ -244,8 +244,10 @@ def is_ours(obj, item, cluster):
     return all(labels.get(k) == v for k, v in marks(item, cluster).items())
 
 
-def docs(ns, cluster, item, package, version, objs, origin=None, by=""):
-    """[ConfigMap, ClusterResourceSet] d'un élément appliqué à `<ns>/<cluster>`."""
+def meta_of(item, package, version, cluster, origin=None, by=""):
+    """(étiquettes, annotations) de ce qu'un élément pose sur le cluster de
+    gestion : ConfigMap et CRS d'un manifeste, HelmChartProxy d'un chart
+    (Contraintes communes) ; origine d'un plan comprise."""
     labels = {MANAGED: "true", L_ITEM: item, L_PACKAGE: package, L_CLUSTER: cluster}
     annotations = {A_VERSION: str(version), A_BY: by or ""}
     for k, label in cc.ORIGIN_LABELS.items():
@@ -254,6 +256,23 @@ def docs(ns, cluster, item, package, version, objs, origin=None, by=""):
     for k, ann in cc.ORIGIN_ANNOTATIONS.items():
         if (origin or {}).get(k):
             annotations[ann] = origin[k]
+    return labels, annotations
+
+
+def artefact_of(obj):
+    """Inverse de `meta_of` : {item, package, version, cluster, by, origin}
+    lus sur un objet, ou None s'il ne porte pas l'élément."""
+    md = (obj or {}).get("metadata") or {}
+    lab, ann = md.get("labels") or {}, md.get("annotations") or {}
+    if not lab.get(L_ITEM):
+        return None
+    return {"item": lab[L_ITEM], "package": lab.get(L_PACKAGE) or "", "version": ann.get(A_VERSION) or "",
+            "cluster": lab.get(L_CLUSTER) or "", "by": ann.get(A_BY) or "", "origin": cc.origin_of(obj)}
+
+
+def docs(ns, cluster, item, package, version, objs, origin=None, by=""):
+    """[ConfigMap, ClusterResourceSet] d'un élément appliqué à `<ns>/<cluster>`."""
+    labels, annotations = meta_of(item, package, version, cluster, origin, by)
     name = name_of(item)
 
     def meta():

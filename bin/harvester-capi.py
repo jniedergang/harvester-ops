@@ -1212,14 +1212,32 @@ def _service_facts(kube):
 
 def service_spec_from(path):
     raw = json.load(sys.stdin) if path == "-" else json.loads(Path(path).read_text())
-    return sv.normalize(raw)
+    spec = sv.normalize(raw)
+    if "origin" in spec:
+        spec["origin"] = cc.parse_origin(",".join(f"{k}={v}" for k, v in spec["origin"].items()))
+    return spec
+
+
+def service_meta(spec):
+    """2.7.0 : étiquettes d'élément (et d'origine) d'un chart de paquet, ou
+    None pour un service du catalogue."""
+    src = spec.get("source")
+    if not src:
+        return None
+    return mf.meta_of(spec["name"], src["package"], src["version"], spec["cluster"].partition("/")[2],
+                      spec.get("origin"), spec.get("by", ""))
 
 
 def cmd_services(args):
     kube, _, _ = kube_from(args)
     f = _service_facts(kube)
+    services = sv.state(f["_hcps"], f["_hrps"])
+    by_ref = {(h["metadata"].get("namespace"), h["metadata"].get("name")): h for h in f["_hcps"]}
+    for s in services:
+        # 2.7.0 : chart d'un paquet (élément, version, qui, origine d'un plan)
+        s["artefact"] = mf.artefact_of(by_ref.get((s["namespace"], s["name"])))
     out = {"caaph": f["caaph"], "clusters": f["clusters"], "catalog": sv.catalog(),
-           "services": sv.state(f["_hcps"], f["_hrps"])}
+           "services": services}
     print(json.dumps(out) if args.json else json.dumps(out, indent=1))
     return EXIT_OK
 
@@ -1318,7 +1336,7 @@ def cmd_service_deploy(args):
         registry = {"name": reg, "ca": bool(decl.get("ca_pem"))}
         step("registry", "done", f"chart {spec['chart']} {spec['version']} from {reg} ({decl['endpoint']}), "
                                  "read account")
-    kube.apply(docs + [sv.manifest(spec, registry)])
+    kube.apply(docs + [sv.manifest(spec, registry, service_meta(spec))])
     kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"labels": {sv.label_of(spec["name"]): "on"}}})
     step("apply", "done", f"service {spec['name']} declared, cluster {cluster} selected")
     deadline = time.time() + args.timeout
