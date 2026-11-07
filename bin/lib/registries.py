@@ -19,6 +19,7 @@ Plan : docs/design/2026-11-05-artefacts-registre-260-plan.md (tâche 6).
 """
 
 import base64
+import json
 import re
 import ssl
 
@@ -472,8 +473,16 @@ def child_secret_names(cluster_name, registry):
     return {"auth": f"{cluster_name}-registry-{registry}-auth", "ca": f"{cluster_name}-registry-{registry}-ca"}
 
 
+REGISTRIES_FILE = "/etc/rancher/rke2/registries.yaml"
+CA_DIR = "/etc/rancher/rke2/tls/harvester-ops"
+
+
+def nodes_secret_name(cluster_name):
+    return f"{cluster_name}-registries"
+
+
 def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
-    """(privateRegistriesConfig, files, secrets) d'un cluster enfant (pur).
+    """(registries.yaml, files, secrets) d'un cluster enfant (pur).
 
     `entries` : liste ordonnée de registres (noms ou {registry}) ;
     `decls` : {nom: déclaration} ; `cluster` : {"name", "namespace"} ;
@@ -484,17 +493,26 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
     demandent les entrées (`fallback_asked`), jamais coupé sinon (point 198 ;
     `fallback_findings`, rejoué par `check_child`, refuse la demande avant).
 
-    Secrets : `<cluster>-registry-<registre>-auth` (`username`, `password`)
-    et `-ca` (`Opaque`, `ca.crt` seul : un Secret `kubernetes.io/tls` vide
-    de `tls.crt` casse containerd, essais préalables de la 2.6.0), étiquetés
-    `GENERATED` pour partir avec le cluster ; `insecureSkipVerify` jamais
+    Les nœuds reçoivent `registries.yaml` et une CA par registre par des
+    `files` tirés du Secret `<cluster>-registries`, pas par
+    `privateRegistriesConfig` : CAPRKE2 v0.25.2 (`pkg/rke2/registries.go`,
+    encore sur main) recrée la table `Configs` à chaque registre et écrit
+    toute CA dans le même `/etc/rancher/rke2/tls/ca.crt`, si bien qu'avec
+    deux registres un seul gardait son compte et sa CA (vu sur harvlab2).
+
+    Secrets : `<cluster>-registries` (`registries.yaml`, `ca-<registre>.crt`)
+    pour les nœuds ; `<cluster>-registry-<registre>-auth` (`username`,
+    `password`) et `-ca` (`Opaque`, `ca.crt` seul), étiquetés au nom du
+    registre : ils disent quels clusters l'emploient (`child_users`) et la
+    CA sert aux services tirés du registre (CAAPH). Tous étiquetés
+    `GENERATED` pour partir avec le cluster ; `insecure_skip_verify` jamais
     posé sauf demande explicite (vérification active)."""
     ents = normalize_entries(entries)
     used = {}
     for e in ents:
         if "images" in (decls[e["registry"]].get("usage") or []):
             used.setdefault(e["registry"], e)
-    mirrors, configs, secrets = {}, {}, []
+    mirrors, configs, secrets, cas = {}, {}, [], {}
     ns, cname = cluster["namespace"], cluster["name"]
     for name, e in used.items():
         d = decls[name]
@@ -505,27 +523,39 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
             if ep not in m["endpoint"]:
                 m["endpoint"].append(ep)
         sn = child_secret_names(cname, name)
-        conf = {"authSecret": {"name": sn["auth"], "namespace": ns}}
         creds = pull_creds[name]
+        conf = {"auth": {"username": creds["username"], "password": creds["password"]}}
         secrets.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
                         "metadata": {"name": sn["auth"], "namespace": ns, "labels": dict(labels)},
                         "stringData": {"username": creds["username"], "password": creds["password"]}})
         tls = {}
         if d.get("ca_pem"):
-            tls["tlsConfigSecret"] = {"name": sn["ca"], "namespace": ns}
+            tls["ca_file"] = f"{CA_DIR}/{name}/ca.crt"
+            cas[name] = d["ca_pem"]
             secrets.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
                             "metadata": {"name": sn["ca"], "namespace": ns, "labels": dict(labels)},
                             "stringData": {"ca.crt": d["ca_pem"]}})
         if d.get("insecure_skip_verify"):
-            tls["insecureSkipVerify"] = True
+            tls["insecure_skip_verify"] = True
         if tls:
             conf["tls"] = tls
         configs[d["endpoint"]] = conf
     if no_fallback is None:
         no_fallback = fallback_asked(ents)
+    doc = {"mirrors": mirrors, "configs": configs} if mirrors or configs else {}
     files = []
+    if doc:
+        src = nodes_secret_name(cname)
+        secrets.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+                        "metadata": {"name": src, "namespace": ns, "labels": {cc.GENERATED: "true"}},
+                        # JSON : du YAML valide, lu tel quel par RKE2
+                        "stringData": dict({"registries.yaml": json.dumps(doc, indent=2) + "\n"},
+                                           **{f"ca-{n}.crt": pem for n, pem in cas.items()})})
+        files.append({"path": REGISTRIES_FILE, "owner": "root:root", "permissions": "0600",
+                      "contentFrom": {"secret": {"name": src, "key": "registries.yaml"}}})
+        files += [{"path": f"{CA_DIR}/{n}/ca.crt", "owner": "root:root", "permissions": "0644",
+                   "contentFrom": {"secret": {"name": src, "key": f"ca-{n}.crt"}}} for n in cas]
     if no_fallback and mirrors:
         files.append({"path": NO_FALLBACK_FILE, "owner": "root:root", "permissions": "0600",
                       "content": "disable-default-registry-endpoint: true\n"})
-    prc = {"mirrors": mirrors, "configs": configs} if mirrors or configs else {}
-    return prc, files, secrets
+    return doc, files, secrets

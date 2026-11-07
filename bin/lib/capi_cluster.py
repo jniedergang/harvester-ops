@@ -336,19 +336,18 @@ RKE2_TEMPLATE_KINDS = ("RKE2ControlPlaneTemplate", "RKE2ConfigTemplate")
 def _apply_registries(docs, registries):
     """2.6.0 (tâche 9) : configuration de registres privés de RKE2 posée dans
     les DEUX gabarits, plan de contrôle et workers (un worker sans elle
-    tirerait d'Internet), fichier `config.yaml.d` ajouté aux `files`
-    existants, Secrets (compte de lecture, CA) ajoutés aux documents tels
-    que rendus par registries.rke2_config."""
+    tirerait d'Internet) : `registries.yaml`, une CA par registre et le
+    fichier `config.yaml.d` ajoutés aux `files` existants (jamais
+    `privateRegistriesConfig`, voir registries.rke2_config), Secrets ajoutés
+    aux documents tels que rendus par registries.rke2_config."""
     if not registries:
         return docs
-    prc, files = registries.get("config") or {}, registries.get("files") or []
+    files = registries.get("files") or []
     for d in docs:
         if d.get("kind") not in RKE2_TEMPLATE_KINDS:
             continue
         tpl = d.setdefault("spec", {}).setdefault("template", {})
         inner = tpl["spec"] = tpl.get("spec") or {}
-        if prc:
-            inner["privateRegistriesConfig"] = copy.deepcopy(prc)
         if files:
             have = [f for f in inner.get("files") or [] if f.get("path") not in {x["path"] for x in files}]
             inner["files"] = have + copy.deepcopy(files)
@@ -377,7 +376,7 @@ def postprocess(docs, spec, origin=None, registries=None):
     - **Origine** (2.5.0) : étiquettes et annotation d'un cluster créé par un
       plan, passées par `origin` ({plan, template, run}), jamais par la
       demande, qui reste une liste blanche.
-    - **Registres** (2.6.0) : `registries` = {config, files, secrets} rendu
+    - **Registres** (2.6.0) : `registries` = {files, secrets} rendu
       par registries.rke2_config, passé par l'appelant (jamais lu dans la
       demande brute) ; voir `_apply_registries`.
     """

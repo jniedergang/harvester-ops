@@ -145,8 +145,8 @@ def generated(cli, tmp_path):
     def run(entries, decls):
         spec = demand(registries=entries)
         creds = {n: {"username": f"pull-{n}", "password": PULL_PW} for n in decls}
-        prc, files, secrets = rg.rke2_config(spec["registries"], decls, {"name": "web", "namespace": "web"}, creds)
-        return cli.render(spec, str(kc), registries={"config": prc, "files": files, "secrets": secrets})
+        _, files, secrets = rg.rke2_config(spec["registries"], decls, {"name": "web", "namespace": "web"}, creds)
+        return cli.render(spec, str(kc), registries={"files": files, "secrets": secrets})
     return run
 
 
@@ -164,12 +164,18 @@ def test_the_real_templates_carry_the_registries_on_both_roles(generated, entrie
     docs = generated(entries, decls)
     tpl = _templates(docs)
     assert set(tpl) == set(cc.RKE2_TEMPLATE_KINDS), "control plane AND workers (M-cp-only)"
+    nodes = next(d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"] == "web-registries")
+    prc = json.loads(nodes["stringData"]["registries.yaml"])
+    assert {o: m["endpoint"] for o, m in prc["mirrors"].items()} == mirrors
+    assert all(m["rewrite"] == {"^(.*)$": f"{o}/$1"} for o, m in prc["mirrors"].items())
+    assert "insecure" not in json.dumps(prc)
     for kind, inner in tpl.items():
-        prc = inner["privateRegistriesConfig"]
-        assert {o: m["endpoint"] for o, m in prc["mirrors"].items()} == mirrors, kind
-        assert all(m["rewrite"] == {"^(.*)$": f"{o}/$1"} for o, m in prc["mirrors"].items())
-        assert "insecureSkipVerify" not in json.dumps(prc)
-        got = [f for f in inner.get("files") or [] if f["path"] == rg.NO_FALLBACK_FILE]
+        # CAPRKE2 v0.25.2 ne garde qu'un registre de privateRegistriesConfig
+        assert "privateRegistriesConfig" not in inner, kind
+        paths = [f["path"] for f in inner.get("files") or []]
+        assert rg.REGISTRIES_FILE in paths, kind
+        assert sum(p.startswith(rg.CA_DIR) for p in paths) == sum(1 for d in decls.values() if d.get("ca_pem"))
+        got = [p for p in paths if p == rg.NO_FALLBACK_FILE]
         assert len(got) == files, kind              # M-files-always : jamais sans le demander
     serverconf = next(d for d in docs if d["kind"] == "RKE2ControlPlaneTemplate")["spec"]["template"]["spec"]
     assert serverconf["serverConfig"]["cni"] == "calico", "the generator's own fields are kept"
@@ -179,7 +185,9 @@ def test_the_real_templates_carry_the_registries_on_both_roles(generated, entrie
         assert s["metadata"]["labels"][cc.GENERATED] == "true"
         assert s["metadata"]["namespace"] == "web" and s["type"] == "Opaque"
     blob = json.dumps(docs)
-    assert PUSH_PW not in blob and blob.count(PULL_PW) == len(decls)
+    # compte de lecture : un Secret -auth par registre, plus registries.yaml
+    # (JSON dans le Secret des nœuds, guillemets échappés)
+    assert PUSH_PW not in blob and blob.count(PULL_PW) == 2 * len(decls)
 
 
 def test_existing_files_of_a_template_are_kept():
@@ -242,6 +250,19 @@ def test_create_reads_only_the_read_account(cli, state):
     assert PULL_PW in json.dumps(regs) and PUSH_PW not in json.dumps(regs)
 
 
+@pytest.mark.parametrize("entry,tail", [
+    ("amorcage", "mirrors ghcr.io"),
+    ({"registry": "amorcage", "no_fallback": True}, "mirrors ghcr.io, no fallback to Internet"),
+])
+def test_the_create_step_names_the_mirrors_and_the_fallback(cli, state, entry, tail):
+    """2.6.0, vu sur harvlab2 : la ligne de l'étape lisait une clé retirée
+    et la création finissait en exit 1 sans un mot."""
+    kube = Kube({("secrets", rg.NAMESPACE, "amorcage-pull"): _secret("pull", PULL_PW)})
+    spec = demand(registries=[entry])
+    regs = cli.registry_config(kube, spec, "harvlab2")
+    assert cli.registries_step(spec, regs) == f"1 registry(ies): {tail}"
+
+
 def test_preview_reads_no_account_and_shows_none(cli, state):
     kube = Kube({("secrets", rg.NAMESPACE, "amorcage-pull"): _secret("pull", PULL_PW)})
     regs = cli.registry_config(kube, demand(registries=["amorcage"]), "harvlab2", hidden=True)
@@ -278,7 +299,7 @@ def test_cli_render_masks_the_registry_secrets(cli, state, monkeypatch, capsys):
                               kubeconfig=str(kc), harvester_name="harvlab2")
     assert cli.cmd_render(args) == cli.EXIT_OK
     out = capsys.readouterr().out
-    assert "privateRegistriesConfig" in out and "web-registry-amorcage-auth" in out
+    assert "web-registries" in out and "web-registry-amorcage-auth" in out
     assert PULL_PW not in out
 
 

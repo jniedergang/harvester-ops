@@ -583,9 +583,16 @@ def registry_config(kube, spec, harvester, hidden=False):
             creds = rg.pull_creds_for(kube, names)
         except KeyError as e:
             raise ValueError(f"cluster-registry-not-attached: {e.args[0]} on {harvester}") from None
-    prc, files, secrets = rg.rke2_config(spec["registries"], decls,
+    doc, files, secrets = rg.rke2_config(spec["registries"], decls,
                                          {"name": spec["name"], "namespace": spec["namespace"]}, creds)
-    return {"config": prc, "files": files, "secrets": secrets}
+    return {"files": files, "secrets": secrets, "mirrors": sorted(doc.get("mirrors") or {}),
+            "no_fallback": any(f["path"] == rg.NO_FALLBACK_FILE for f in files)}
+
+
+def registries_step(spec, regs):
+    """Ligne de l'étape `registries` d'une création."""
+    return (f"{len(spec['registries'])} registry(ies): mirrors {', '.join(regs['mirrors']) or '-'}"
+            f"{', no fallback to Internet' if regs['no_fallback'] else ''}")
 
 
 def _check(kube, spec, desc, identity="console", harvester=None):
@@ -899,9 +906,7 @@ def cmd_create(args):
         # retiré depuis le contrôle arrête la création ici
         regs = registry_config(kube, spec, _harvester(args))
         if regs:
-            step("registries", "done", f"{len(spec['registries'])} registry(ies): mirrors "
-                                       f"{', '.join(sorted(regs['config'].get('mirrors') or {})) or '-'}"
-                                       f"{', no fallback to Internet' if regs['files'] else ''}")
+            step("registries", "done", registries_step(spec, regs))
         try:
             if restricted:
                 ns_created = _ensure_namespace(kube, ns)

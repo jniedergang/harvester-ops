@@ -64,18 +64,21 @@ def test_one_bootstrap_registry_mirrors_its_origins_and_cuts_the_fallback_when_a
     assert prc == {"mirrors": {
         "ghcr.io": {"endpoint": ["https://172.16.2.76"], "rewrite": {"^(.*)$": "ghcr.io/$1"}},
         "docker.io": {"endpoint": ["https://172.16.2.76"], "rewrite": {"^(.*)$": "docker.io/$1"}}},
-        "configs": {"172.16.2.76": {"authSecret": {"name": "web-registry-amorcage-auth", "namespace": "web"},
-                                    "tls": {"tlsConfigSecret": {"name": "web-registry-amorcage-ca",
-                                                                "namespace": "web"}}}}}
-    assert files == [{"path": "/etc/rancher/rke2/config.yaml.d/50-harvester-ops-registry.yaml",
-                      "owner": "root:root", "permissions": "0600",
-                      "content": "disable-default-registry-endpoint: true\n"}]
-    auth, ca = secrets
+        "configs": {"172.16.2.76": {"auth": {"username": "pull-amorcage", "password": PULL_PW},
+                                    "tls": {"ca_file": "/etc/rancher/rke2/tls/harvester-ops/amorcage/ca.crt"}}}}
+    assert [f["path"] for f in files] == ["/etc/rancher/rke2/registries.yaml",
+                                          "/etc/rancher/rke2/tls/harvester-ops/amorcage/ca.crt",
+                                          "/etc/rancher/rke2/config.yaml.d/50-harvester-ops-registry.yaml"]
+    assert files[-1] == {"path": "/etc/rancher/rke2/config.yaml.d/50-harvester-ops-registry.yaml",
+                         "owner": "root:root", "permissions": "0600",
+                         "content": "disable-default-registry-endpoint: true\n"}
+    auth, ca, nodes = secrets
+    assert nodes["metadata"]["name"] == "web-registries"
     assert auth["metadata"] == {"name": "web-registry-amorcage-auth", "namespace": "web",
                                 "labels": {cc.GENERATED: "true", rg.LABEL: "amorcage"}}
     assert auth["stringData"] == {"username": "pull-amorcage", "password": PULL_PW}
     assert ca["type"] == "Opaque" and ca["stringData"] == {"ca.crt": ca_pem}       # jamais kubernetes.io/tls
-    assert "insecureSkipVerify" not in json.dumps(prc)
+    assert "insecure" not in json.dumps(prc)
 
 
 @pytest.mark.parametrize("order", [["a", "b"], ["b", "a"]])
@@ -84,7 +87,7 @@ def test_two_registries_for_the_same_origin_keep_the_cluster_order(order):
     prc, files, _ = rg.rke2_config(order, decls, CLUSTER, creds("a", "b"))
     assert prc["mirrors"]["docker.io"]["endpoint"] == [f"https://{n}.example:443" for n in order]
     assert prc["mirrors"]["quay.io"]["endpoint"] == ["https://a.example:443"]
-    assert files == []                                    # registres du client seulement : repli gardé
+    assert rg.NO_FALLBACK_FILE not in [f["path"] for f in files]    # registres du client seulement : repli gardé
 
 
 @pytest.mark.parametrize("kind", ["external", "bootstrap"])
@@ -95,7 +98,7 @@ def test_fallback_is_cut_only_when_asked_never_by_default(kind, no_fallback, fil
     registre d'amorçage (il couperait les images système de RKE2)."""
     prc, f, _ = rg.rke2_config(["z"], {"z": decl("z", kind=kind, mirrors=["ghcr.io"])}, CLUSTER, creds("z"),
                                no_fallback=no_fallback)
-    assert len(f) == files
+    assert [x["path"] for x in f].count(rg.NO_FALLBACK_FILE) == files
 
 
 @pytest.mark.parametrize("mirrors_a,mirrors_b,ready,codes", [
@@ -119,15 +122,15 @@ def test_a_charts_only_registry_stays_out_of_the_node_configuration():
     prc, _, secrets = rg.rke2_config(["ch", "img"], decls, CLUSTER, creds("img"))
     assert list(prc["configs"]) == ["img.example:443"]
     assert all("ch." not in e for m in prc["mirrors"].values() for e in m["endpoint"])
-    assert [s["metadata"]["name"] for s in secrets] == ["web-registry-img-auth"]
+    assert [s["metadata"]["name"] for s in secrets] == ["web-registry-img-auth", "web-registries"]
 
 
 def test_a_registry_without_ca_uses_the_system_cas_and_insecure_only_when_declared():
     prc, _, secrets = rg.rke2_config(["a"], {"a": decl("a")}, CLUSTER, creds("a"))
-    assert prc["configs"]["a.example:443"] == {"authSecret": {"name": "web-registry-a-auth", "namespace": "web"}}
-    assert len(secrets) == 1
+    assert prc["configs"]["a.example:443"] == {"auth": {"username": "pull-a", "password": PULL_PW}}
+    assert [s["metadata"]["name"] for s in secrets] == ["web-registry-a-auth", "web-registries"]
     prc, _, _ = rg.rke2_config(["a"], {"a": decl("a", insecure_skip_verify=True)}, CLUSTER, creds("a"))
-    assert prc["configs"]["a.example:443"]["tls"] == {"insecureSkipVerify": True}
+    assert prc["configs"]["a.example:443"]["tls"] == {"insecure_skip_verify": True}
 
 
 def test_origins_keep_their_host_so_two_paths_never_mix():
@@ -140,7 +143,7 @@ def test_origins_keep_their_host_so_two_paths_never_mix():
 def test_only_secrets_carry_a_password_and_never_the_write_account():
     decls = {"a": decl("a"), "b": decl("b", kind="bootstrap")}
     prc, files, secrets = rg.rke2_config(["a", "b"], decls, CLUSTER, creds("a", "b"))
-    assert PULL_PW not in json.dumps([prc, files])
+    assert PULL_PW not in json.dumps(files)                 # les nœuds le lisent dans un Secret
     assert PUSH_PW not in json.dumps([prc, files, secrets])
 
 
@@ -409,3 +412,32 @@ def test_credentials_rules_apply_the_colon_rule_to_the_username_only(user, passw
 def test_a_host_with_a_trailing_newline_is_refused():
     with pytest.raises(dp.ProfileError):
         rg.check_decl(decl("a", endpoint="h.example:443\n"))
+
+
+def test_two_registries_with_a_ca_each_keep_both_configs_on_the_nodes(ca_pem):
+    """2.6.0, vu sur harvlab2 : CAPRKE2 v0.25.2 (`pkg/rke2/registries.go`,
+    encore sur main) recrée `Configs` à chaque registre et écrit toute CA
+    dans le même `/etc/rancher/rke2/tls/ca.crt` : avec deux registres, un
+    seul gardait son compte et sa CA sur les nœuds. La console écrit donc
+    elle-même `registries.yaml` (fichier tiré d'un Secret) et une CA par
+    registre, sans `privateRegistriesConfig`."""
+    decls = {"client": decl("client", endpoint="172.16.1.11:5443", ca=ca_pem),
+             "amorcage": decl("amorcage", kind="bootstrap", endpoint="172.16.2.76", ca=ca_pem + "\n")}
+    doc, files, secrets = rg.rke2_config(["client", "amorcage"], decls, CLUSTER, creds("client", "amorcage"))
+    assert doc["configs"] == {
+        "172.16.1.11:5443": {"auth": {"username": "pull-client", "password": PULL_PW},
+                             "tls": {"ca_file": "/etc/rancher/rke2/tls/harvester-ops/client/ca.crt"}},
+        "172.16.2.76": {"auth": {"username": "pull-amorcage", "password": PULL_PW},
+                        "tls": {"ca_file": "/etc/rancher/rke2/tls/harvester-ops/amorcage/ca.crt"}}}
+    nodes = next(s for s in secrets if s["metadata"]["name"] == "web-registries")
+    assert nodes["type"] == "Opaque" and nodes["metadata"]["labels"] == {cc.GENERATED: "true"}
+    assert json.loads(nodes["stringData"]["registries.yaml"]) == doc
+    assert nodes["stringData"]["ca-client.crt"] == ca_pem and nodes["stringData"]["ca-amorcage.crt"] == ca_pem + "\n"
+    by_path = {f["path"]: f for f in files}
+    assert by_path["/etc/rancher/rke2/registries.yaml"] == {
+        "path": "/etc/rancher/rke2/registries.yaml", "owner": "root:root", "permissions": "0600",
+        "contentFrom": {"secret": {"name": "web-registries", "key": "registries.yaml"}}}
+    assert by_path["/etc/rancher/rke2/tls/harvester-ops/client/ca.crt"]["contentFrom"] == {
+        "secret": {"name": "web-registries", "key": "ca-client.crt"}}
+    assert "/etc/rancher/rke2/tls/harvester-ops/amorcage/ca.crt" in by_path
+    assert PULL_PW not in json.dumps(files)
