@@ -4,7 +4,8 @@
  * Onglet Plans de Bare-metal (#automation/pxe/plans) :
  *   - la liste des plans à gauche, le plan choisi à droite : nom,
  *     description, variables, une carte par phase avec son interrupteur
- *     (Artefacts grisé : à venir en 2.7 ; Registre depuis la 2.6.0), délai de
+ *     (Registre depuis la 2.6.0 ; Artefacts depuis la 2.7.0 : politiques
+ *     et accès, éléments des paquets importés), délai de
  *     disponibilité, modèles Terraform choisis dans une liste et ordonnés
  *     par boutons monter/descendre, dépendances ; 2.5.0 : pile Cluster API
  *     (délai, versions du paquet actif) et clusters enfants (modèle, nom à
@@ -21,6 +22,11 @@
  * Harvester (cluster déjà choisi) ou pour reprendre un déroulé arrêté
  * (bouton « Reprendre » de l'Historique). L'action `deploy:<cluster>` est
  * suivie dans la fenêtre (étapes, actions filles liées) et dans le dock.
+ *
+ * Fenêtre « Défaire le déploiement » (openUndo, 2.7.0) : depuis l'Historique,
+ * sur un déroulé fini ; Contenu, Plan de destruction, Confirmation (nom du
+ * cluster tapé, second nom pour les données d'un registre) ; « Défaire »
+ * grisé tant que le plan des cases ACTUELLES n'est pas revenu.
  *
  * Aucun secret n'est rangé : ceux d'une installation reprise sont saisis
  * dans la fenêtre et ne vivent que le temps de l'envoi.
@@ -56,7 +62,6 @@ const BMPlans = (() => {
   };
   const FINDINGS = {
     'plan-invalid': () => tr('dpw.f.planInvalid'),
-    'phase-not-available': () => tr('dpw.f.phaseNotAvailable'),
     'template-missing': () => tr('dpw.f.templateMissing'),
     'var-missing': () => tr('dpw.f.varMissing'),
     'var-invalid': () => tr('dpw.f.varInvalid'),
@@ -129,6 +134,32 @@ const BMPlans = (() => {
     'cluster-registry-vm-network-unchecked': () => tr('dpw.f.clusterRegistryVmNetworkUnchecked'),
     'cluster-registry-unreachable-from-vm-network': () => tr('dpw.f.clusterRegistryUnreachableFromVmNetwork'),
     'cluster-registry-vm-network-ok': () => tr('dpw.f.clusterRegistryVmNetworkOk'),
+    'registry-cert-expiring': () => tr('dpw.f.registryCertExpiring'),
+    // 2.7.0 : phase Artefacts (constats de la console et de manifest-check)
+    'artefact-invalid': () => tr('dpw.f.artefactInvalid'),
+    'artefact-not-published': () => tr('dpw.f.artefactNotPublished'),
+    'artefact-taken': () => tr('dpw.f.artefactTaken'),
+    'artefact-check-failed': () => tr('dpw.f.artefactCheckFailed'),
+    'artefact-var-missing': () => tr('dpw.f.artefactVarMissing'),
+    'caaph-missing': () => tr('dpw.f.caaphMissing'),
+    'child-admin-required': () => tr('dpw.f.childAdminRequired'),
+    'artefact-later': () => tr('dpw.f.artefactLater'),
+    'artefact-images-not-published': () => tr('dpw.f.artefactImagesNotPublished'),
+    'manifest-kind-refused': () => tr('dpw.f.manifestKindRefused'),
+    'manifest-kind-unknown': () => tr('dpw.f.manifestKindUnknown'),
+    'manifest-system-namespace': () => tr('dpw.f.manifestSystemNamespace'),
+    'manifest-object-taken': () => tr('dpw.f.manifestObjectTaken'),
+    'manifest-too-big': () => tr('dpw.f.manifestTooBig'),
+    'manifest-sa-token-refused': () => tr('dpw.f.manifestSaTokenRefused'),
+    'manifest-crb-admin': () => tr('dpw.f.manifestCrbAdmin'),
+    'manifest-duplicate': () => tr('dpw.f.manifestDuplicate'),
+    'manifest-no-name': () => tr('dpw.f.manifestNoName'),
+    'manifest-too-many': () => tr('dpw.f.manifestTooMany'),
+    'artefact-name-too-long': () => tr('dpw.f.artefactNameTooLong'),
+    'artefact-name-reserved': () => tr('dpw.f.artefactNameReserved'),
+    'artefact-item-not-manifest': () => tr('dpw.f.artefactItemNotManifest'),
+    'team-namespace-taken': () => tr('dpw.f.teamNamespaceTaken'),
+    'manifest-cluster-missing': () => tr('dpw.f.manifestClusterMissing'),
   };
   const LEVELS = {
     blocking: () => tr('dpw.lvl.blocking'), warning: () => tr('dpw.lvl.warning'), info: () => tr('dpw.lvl.info'),
@@ -200,7 +231,15 @@ const BMPlans = (() => {
   let tplData = { templates: [], kinds: [] };
   let ctplData = { templates: [] };       // 2.5.0 : modèles de cluster
   let bundleProviders = null;             // fournisseurs du paquet actif (null : non lu)
-  const AVAILABLE_DEFAULT = ['readiness', 'terraform', 'registry', 'capi', 'clusters'];
+  const AVAILABLE_DEFAULT = ['readiness', 'terraform', 'registry', 'capi', 'clusters', 'artefacts'];
+  // 2.7.0 : phase Artefacts, bornes du serveur (deploy_plans.ARTEFACTS_TIMEOUT) ;
+  // sortes applicables (images : phase Registre ; gitops : 2.8)
+  const ARTEFACTS_TIMEOUT = [1, 60, 15];
+  const APPLICABLE_KINDS = ['chart', 'manifest', 'policy'];
+  const GROUP_ROLES = ['admin', 'edit', 'view'];
+  const ACCOUNT_ROLES = ['edit', 'view'];
+  // éléments d'un paquet importé : clé `nom@version` -> 'loading' | 'error' | [{name, kind}]
+  const pkgItems = new Map();
   // 2.6.0 : phase Registre, bornes du serveur (minutes)
   const REGISTRY_TIMEOUT = [1, 60, 10];
   const PUBLISH_TIMEOUT = [5, 600, 60];
@@ -269,7 +308,7 @@ const BMPlans = (() => {
       </div>
       ${templatesHtml()}
       ${capiTemplatesHtml()}`;
-    if (edit) { paintTemplates(); paintClusters(); paintRegistries(); }
+    if (edit) { paintTemplates(); paintClusters(); paintRegistries(); paintArtefacts(); }
   }
 
   // --- éditeur d'un plan ---------------------------------------------------
@@ -290,6 +329,18 @@ const BMPlans = (() => {
       registries: (((d.phases || {}).registry || {}).registries || []).map(r => Object.assign({}, r,
         { mirrors: (r.mirrors || []).join(', ') })),
       publish: (((d.phases || {}).registry || {}).publish || []).map(p => Object.assign({}, p)),
+      // 2.7.0 : phase Artefacts ; les clés non éditées (quota, limits,
+      // network d'un namespace d'équipe) sont gardées telles que lues
+      artPolicies: (((d.phases || {}).artefacts || {}).policies || []).map(p => ({
+        clusters: (p.clusters || []).join(', '), base: p.base === true,
+        teams: (p.teams || []).map(t => t.namespace).join(', '),
+        teamObjs: Object.fromEntries((p.teams || []).map(t => [t.namespace, Object.assign({}, t)])),
+        roles: (p.roles || []).map(r => Object.assign({}, r)),
+        accounts: (p.accounts || []).map(a => Object.assign({}, a)) })),
+      artItems: (((d.phases || {}).artefacts || {}).items || []).map(x => ({
+        package: x.package || '', version: String(x.version || ''), item: x.item || '', registry: x.registry || '',
+        valuesText: x.values && typeof x.values === 'object' ? JSON.stringify(x.values, null, 2) : '',
+        clusters: (x.clusters || []).join(', '), depends_on: (x.depends_on || []).slice() })),
       shortcut: null,
     };
     lastMsg = '';
@@ -389,6 +440,23 @@ const BMPlans = (() => {
           <button type="button" class="btn btn-secondary btn-sm btn-ico tip bmpl-pub-add"
                   data-tip="${esc(tr('bmpl.t.pubAdd'))}">${icon('add')} ${esc(tr('bmpl.pubAdd'))}</button>
         </div>`;
+    } else if (pid === 'artefacts') {
+      body = `<label class="tip" data-tip="${esc(tr('bmpl.t.artTimeout'))}">${esc(tr('bmpl.f.artTimeout'))}
+          <input type="number" name="artefacts_timeout" min="${ARTEFACTS_TIMEOUT[0]}" max="${ARTEFACTS_TIMEOUT[1]}" step="1"
+                 value="${esc(ph && ph.timeout_minutes != null ? ph.timeout_minutes : ARTEFACTS_TIMEOUT[2])}"></label>
+        <p class="form-hint bmpl-art-clusters-hint" style="grid-column:1/-1;"></p>
+        <h4 style="grid-column:1/-1;margin:6px 0 0;">${esc(tr('bmpl.artPolicies'))}</h4>
+        <ol class="bmpl-pols" style="grid-column:1/-1;"></ol>
+        <div class="apply-bar" style="grid-column:1/-1;">
+          <button type="button" class="btn btn-secondary btn-sm btn-ico tip bmpl-pol-add"
+                  data-tip="${esc(tr('bmpl.t.polAdd'))}">${icon('add')} ${esc(tr('bmpl.polAdd'))}</button>
+        </div>
+        <h4 style="grid-column:1/-1;margin:6px 0 0;">${esc(tr('bmpl.artItems'))}</h4>
+        <ol class="bmpl-arts" style="grid-column:1/-1;"></ol>
+        <div class="apply-bar" style="grid-column:1/-1;">
+          <button type="button" class="btn btn-secondary btn-sm btn-ico tip bmpl-art-add"
+                  data-tip="${esc(tr('bmpl.t.artAdd'))}">${icon('add')} ${esc(tr('bmpl.artAdd'))}</button>
+        </div>`;
     } else if (pid === 'clusters') {
       body = `<label class="tip" data-tip="${esc(tr('bmpl.t.clustersTimeout'))}">${esc(tr('bmpl.f.clustersTimeout'))}
           <input type="number" name="clusters_timeout" min="${CLUSTERS_TIMEOUT[0]}" max="${CLUSTERS_TIMEOUT[1]}" step="1"
@@ -471,6 +539,10 @@ const BMPlans = (() => {
       const before = edit.clusters.slice(0, i).map(x => x.name);
       it.depends_on = it.depends_on.filter(d => before.includes(d));
     });
+    (edit.artItems || []).forEach((it, i) => {
+      const before = edit.artItems.slice(0, i).map(x => x.item);
+      it.depends_on = it.depends_on.filter(d => before.includes(d));
+    });
   }
 
   // 2.5.0 : clusters enfants, dans l'ordre de création (un à la fois)
@@ -518,6 +590,7 @@ const BMPlans = (() => {
     const several = document.querySelector('#bm-plans .bmpl-cl-several');
     const full = items.length + (sc ? sc.count : 0) >= MAX_CLUSTERS;
     [add, several].forEach(b => { if (b) b.disabled = full || !tpls.length; });
+    paintArtHint();
   }
 
   // 2.6.0 : registres du plan et publications des paquets (phase Registre)
@@ -558,6 +631,192 @@ const BMPlans = (() => {
     }).join('') : `<li class="form-hint bmpl-no-pub">${esc(tr('bmpl.noPublication'))}</li>`;
     const add = document.querySelector('#bm-plans .bmpl-pub-add');
     if (add) add.disabled = !pkgs.length || !regNames.length;
+  }
+
+  // 2.7.0 : phase Artefacts (politiques et accès, éléments de paquets)
+  const listOf = (txt) => String(txt || '').split(',').map(x => x.trim()).filter(Boolean);
+  const planClusterNames = () => (edit ? edit.clusters.map(x => x.name).filter(Boolean) : []);
+
+  /** Éléments d'un paquet importé, lus une fois (`/api/artefacts/<nom>/<version>`). */
+  function ensurePkgItems(name, version) {
+    const key = `${name}@${version}`;
+    if (!name || pkgItems.has(key)) return;
+    pkgItems.set(key, 'loading');
+    api('GET', `/api/artefacts/${enc(name)}/${enc(version)}`).then(r => {
+      pkgItems.set(key, r.ok ? ((r.d.index || {}).items || []).map(i => ({ name: i.name, kind: i.kind })) : 'error');
+    }).catch(() => { pkgItems.set(key, 'error'); }).then(() => {
+      if (edit && document.querySelector('#bm-plans .bmpl-arts')) paintArtefacts();
+    });
+  }
+  /** Sorte d'un élément d'une entrée, null si le paquet n'est pas lu. */
+  function kindOf(it) {
+    const list = pkgItems.get(`${it.package}@${it.version}`);
+    if (!Array.isArray(list)) return null;
+    const f = list.find(x => x.name === it.item);
+    return f ? f.kind : null;
+  }
+  /** Éléments proposés : jamais `images` (phase Registre) ni `gitops` (2.8). */
+  function offeredItems(it) {
+    const list = pkgItems.get(`${it.package}@${it.version}`);
+    return Array.isArray(list) ? list.filter(x => APPLICABLE_KINDS.includes(x.kind)) : null;
+  }
+
+  /** Noms de la phase Clusters proposés aux entrées (suivent la carte Clusters). */
+  function paintArtHint() {
+    const hint = document.querySelector('#bm-plans .bmpl-art-clusters-hint');
+    if (!hint) return;
+    const names = planClusterNames();
+    hint.innerHTML = `${esc(tr('bmpl.artClustersHint'))} ${names.length ? names.map(n => `<code>${esc(n)}</code>`).join(' ')
+      : `<em>${esc(tr('bmpl.artNoPlanCluster'))}</em>`}`;
+  }
+
+  // Repeindre retire le champ qui a le focus : son « change » de sortie
+  // arrive PENDANT l'affectation d'innerHTML ; il ne doit pas repeindre
+  // une seconde fois par-dessus (la valeur est déjà rangée).
+  let artPainting = false;
+  function paintArtefacts() {
+    if (artPainting) return;
+    artPainting = true;
+    try { paintArtefactsNow(); } finally { artPainting = false; }
+  }
+
+  function paintArtefactsNow() {
+    const ol = document.querySelector('#bm-plans .bmpl-arts');
+    if (!ol || !edit) return;
+    paintArtHint();
+    // politiques et accès, une entrée par groupe de clusters
+    const pol = document.querySelector('#bm-plans .bmpl-pols');
+    if (pol) {
+      const roleSel = (cls, i, j, val, roles, tip) => `<select class="${cls} tip" data-i="${i}" data-j="${j}" data-k="role"
+          aria-label="${esc(tip)}" data-tip="${esc(tip)}">${roles.map(r => `<option value="${r}"${r === val ? ' selected' : ''}>${r}</option>`).join('')}</select>`;
+      const nsSel = (cls, i, j, val, teams, tip) => `<select class="${cls} tip" data-i="${i}" data-j="${j}" data-k="namespace"
+          aria-label="${esc(tip)}" data-tip="${esc(tip)}">${(val && !teams.includes(val) ? [val] : []).concat(teams)
+            .map(n => `<option value="${esc(n)}"${n === val ? ' selected' : ''}>${esc(n)}</option>`).join('')
+            || `<option value="">${esc(tr('bmpl.polNoTeam'))}</option>`}</select>`;
+      pol.innerHTML = edit.artPolicies.length ? edit.artPolicies.map((p, i) => {
+        const teams = listOf(p.teams);
+        return `<li class="bmpl-pol" data-i="${i}">
+          <input class="bmpl-pol-f tip" data-i="${i}" data-k="clusters" spellcheck="false" maxlength="400" value="${esc(p.clusters)}"
+                 placeholder="{{cluster}}-apps" aria-label="${esc(tr('bmpl.t.polClusters'))}" data-tip="${esc(tr('bmpl.t.polClusters'))}">
+          <label class="bm-check tip" data-tip="${esc(tr('bmpl.t.polBase'))}"><input type="checkbox" class="bmpl-pol-f" data-i="${i}" data-k="base"
+                 ${p.base ? 'checked' : ''} aria-label="${esc(tr('bmpl.polBase'))}"> ${esc(tr('bmpl.polBase'))}</label>
+          <input class="bmpl-pol-f tip" data-i="${i}" data-k="teams" spellcheck="false" maxlength="1100" value="${esc(p.teams)}"
+                 placeholder="equipe-a, equipe-b" aria-label="${esc(tr('bmpl.t.polTeams'))}" data-tip="${esc(tr('bmpl.t.polTeams'))}">
+          <button type="button" class="btn btn-sm btn-danger tip bmpl-pol-rm" data-i="${i}"
+                  aria-label="${esc(tr('bmpl.t.polRemove'))}" data-tip="${esc(tr('bmpl.t.polRemove'))}">${icon('close', { size: 12 })}</button>
+          <div class="bmpl-pol-sub" style="flex-basis:100%;">
+            <span class="form-hint">${esc(tr('bmpl.polRoles'))}</span>
+            <ul class="bmpl-pol-roles">${p.roles.map((r, j) => `<li class="bmpl-pol-role">
+              ${nsSel('bmpl-pol-role-f', i, j, r.namespace, teams, tr('bmpl.t.polRoleNs'))}
+              <input class="bmpl-pol-role-f tip" data-i="${i}" data-j="${j}" data-k="group" maxlength="128" spellcheck="false"
+                     value="${esc(r.group || '')}" placeholder="devs" aria-label="${esc(tr('bmpl.t.polRoleGroup'))}" data-tip="${esc(tr('bmpl.t.polRoleGroup'))}">
+              ${roleSel('bmpl-pol-role-f', i, j, r.role, GROUP_ROLES, tr('bmpl.t.polRoleRole'))}
+              <button type="button" class="btn btn-sm btn-danger tip bmpl-pol-role-rm" data-i="${i}" data-j="${j}"
+                      aria-label="${esc(tr('bmpl.t.polRoleRemove'))}" data-tip="${esc(tr('bmpl.t.polRoleRemove'))}">${icon('close', { size: 12 })}</button>
+            </li>`).join('')}</ul>
+            <button type="button" class="btn btn-sm btn-secondary btn-ico tip bmpl-pol-role-add" data-i="${i}" ${teams.length ? '' : 'disabled'}
+                    data-tip="${esc(teams.length ? tr('bmpl.t.polRoleAdd') : tr('bmpl.t.polNeedTeam'))}">${icon('add', { size: 12 })} ${esc(tr('bmpl.polRoleAdd'))}</button>
+            <span class="form-hint">${esc(tr('bmpl.polAccounts'))}</span>
+            <ul class="bmpl-pol-accounts">${p.accounts.map((a, j) => `<li class="bmpl-pol-account">
+              ${nsSel('bmpl-pol-acc-f', i, j, a.namespace, teams, tr('bmpl.t.polAccNs'))}
+              <input class="bmpl-pol-acc-f tip" data-i="${i}" data-j="${j}" data-k="name" maxlength="63" spellcheck="false"
+                     value="${esc(a.name || '')}" placeholder="ci" aria-label="${esc(tr('bmpl.t.polAccName'))}" data-tip="${esc(tr('bmpl.t.polAccName'))}">
+              ${roleSel('bmpl-pol-acc-f', i, j, a.role, ACCOUNT_ROLES, tr('bmpl.t.polAccRole'))}
+              <button type="button" class="btn btn-sm btn-danger tip bmpl-pol-acc-rm" data-i="${i}" data-j="${j}"
+                      aria-label="${esc(tr('bmpl.t.polAccRemove'))}" data-tip="${esc(tr('bmpl.t.polAccRemove'))}">${icon('close', { size: 12 })}</button>
+            </li>`).join('')}</ul>
+            <button type="button" class="btn btn-sm btn-secondary btn-ico tip bmpl-pol-acc-add" data-i="${i}" ${teams.length ? '' : 'disabled'}
+                    data-tip="${esc(teams.length ? tr('bmpl.t.polAccAdd') : tr('bmpl.t.polNeedTeam'))}">${icon('add', { size: 12 })} ${esc(tr('bmpl.polAccAdd'))}</button>
+          </div>
+        </li>`;
+      }).join('') : `<li class="form-hint bmpl-no-pol">${esc(tr('bmpl.noPolicy'))}</li>`;
+    }
+    // éléments de paquets
+    const pkgs = regData.packages || [];
+    const regNames = [...new Set(edit.registries.map(r => r.name).filter(Boolean).concat((regData.registries || []).map(x => x.name)))];
+    const items = edit.artItems;
+    items.forEach(it => ensurePkgItems(it.package, it.version));
+    ol.innerHTML = items.length ? items.map((it, i) => {
+      const key = `${it.package}@${it.version}`;
+      const known = pkgs.some(x => `${x.name}@${x.version}` === key);
+      const offered = offeredItems(it);
+      // paquet lu, aucun élément choisi : le premier applicable
+      if (offered && !it.item && offered.length) it.item = offered[0].name;
+      const kind = kindOf(it);
+      const isChart = kind === 'chart' || (kind == null && !!(it.registry || it.valuesText));
+      const itemOpts = offered == null
+        ? `<option value="${esc(it.item)}" selected>${esc(it.item || tr('bmpl.artLoading'))}</option>`
+        : (it.item && !offered.some(x => x.name === it.item) ? `<option value="${esc(it.item)}" selected>${esc(it.item)} (${esc(tr('bmpl.artItemMissing'))})</option>` : '')
+          + offered.map(x => `<option value="${esc(x.name)}"${x.name === it.item ? ' selected' : ''}>${esc(x.name)} (${esc(x.kind)})</option>`).join('');
+      const before = items.slice(0, i).map(x => x.item).filter(Boolean);
+      const deps = before.length ? `<span class="bmpl-deps tip" data-tip="${esc(tr('bmpl.t.artDependsOn'))}">${esc(tr('bmpl.dependsOn'))}
+          ${before.map(b => `<label class="bm-check"><input type="checkbox" class="bmpl-art-dep" data-i="${i}" value="${esc(b)}"
+            ${it.depends_on.includes(b) ? 'checked' : ''}> <code>${esc(b)}</code></label>`).join(' ')}</span>` : '';
+      return `<li class="bmpl-art" data-i="${i}" data-kind="${esc(kind || '')}">
+        <select class="bmpl-art-pkg tip" data-i="${i}" aria-label="${esc(tr('bmpl.t.artPackage'))}" data-tip="${esc(tr('bmpl.t.artPackage'))}">
+          ${known || !it.package ? '' : `<option value="${esc(key)}" selected>${esc(`${it.package} ${it.version}`)} (${esc(tr('bmpl.pkgMissing'))})</option>`}
+          ${pkgs.map(x => `<option value="${esc(`${x.name}@${x.version}`)}"${`${x.name}@${x.version}` === key ? ' selected' : ''}>${esc(`${x.name} ${x.version}`)}</option>`).join('')}</select>
+        <select class="bmpl-art-item tip" data-i="${i}" aria-label="${esc(tr('bmpl.t.artItem'))}" data-tip="${esc(tr('bmpl.t.artItem'))}">${itemOpts}</select>
+        ${kind ? `<span class="badge dim bmpl-art-kind">${esc(kind)}</span>` : ''}
+        ${isChart ? `<select class="bmpl-art-f bmpl-art-reg tip" data-i="${i}" data-k="registry" aria-label="${esc(tr('bmpl.t.artRegistry'))}"
+                data-tip="${esc(tr('bmpl.t.artRegistry'))}"><option value="">${esc(tr('bmpl.artChooseRegistry'))}</option>
+          ${(it.registry && !regNames.includes(it.registry) ? [it.registry] : []).concat(regNames)
+            .map(n => `<option value="${esc(n)}"${n === it.registry ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>` : ''}
+        <input class="bmpl-art-f bmpl-art-clusters tip" data-i="${i}" data-k="clusters" spellcheck="false" maxlength="400" value="${esc(it.clusters)}"
+               placeholder="{{cluster}}-apps, outils/outils" aria-label="${esc(tr('bmpl.t.artClusters'))}" data-tip="${esc(tr('bmpl.t.artClusters'))}">
+        <button type="button" class="btn btn-sm btn-danger tip bmpl-art-rm" data-i="${i}"
+                aria-label="${esc(tr('bmpl.t.artRemove'))}" data-tip="${esc(tr('bmpl.t.artRemove'))}">${icon('close', { size: 12 })}</button>
+        ${isChart ? `<label class="tip" style="flex-basis:100%;" data-tip="${esc(tr('bmpl.t.artValues'))}">${esc(tr('bmpl.f.artValues'))}
+          <textarea class="bmpl-art-f bmpl-art-values" data-i="${i}" data-k="valuesText" rows="3" spellcheck="false"
+                    placeholder='{"replicaCount": 2}'>${esc(it.valuesText)}</textarea></label>` : ''}
+        ${deps}
+      </li>`;
+    }).join('') : `<li class="form-hint bmpl-no-art">${esc(tr('bmpl.noArtefact'))}</li>`;
+    const add = document.querySelector('#bm-plans .bmpl-art-add');
+    if (add) {
+      add.disabled = !pkgs.length;
+      add.dataset.tip = pkgs.length ? tr('bmpl.t.artAdd') : tr('bmpl.t.artNoPackage');
+    }
+  }
+
+  /** Refus de la phase Artefacts avant l'envoi (texte), ou ''. */
+  function artefactsRefusal(on) {
+    for (const it of edit.artItems) {
+      const name = it.item || '?';
+      if (!it.package || !it.item) return tr('bmpl.artItemRequired');
+      if (it.valuesText.trim()) {
+        let v;
+        try { v = JSON.parse(it.valuesText); } catch { v = null; }
+        if (!v || typeof v !== 'object' || Array.isArray(v)) return tr('bmpl.artValuesInvalid', { item: name });
+      }
+      if (on && kindOf(it) === 'chart' && !it.registry) return tr('bmpl.artRegistryRequired', { item: name });
+      if (on && !listOf(it.clusters).length) return tr('bmpl.artClustersRequired', { item: name });
+    }
+    if (on && edit.artPolicies.some(p => !listOf(p.clusters).length)) return tr('bmpl.polClustersRequired');
+    return '';
+  }
+
+  /** Phase Artefacts telle qu'enregistrée (format de deploy_plans). */
+  function collectArtefacts(on, timeout) {
+    return {
+      enabled: on, timeout_minutes: timeout,
+      policies: edit.artPolicies.map(p => {
+        const teams = listOf(p.teams);
+        return { clusters: listOf(p.clusters), base: !!p.base,
+          teams: teams.map(ns => Object.assign({}, p.teamObjs[ns] || {}, { namespace: ns })),
+          roles: p.roles.map(r => ({ namespace: r.namespace, group: (r.group || '').trim(), role: r.role })),
+          accounts: p.accounts.map(a => ({ namespace: a.namespace, name: (a.name || '').trim(), role: a.role })) };
+      }),
+      items: edit.artItems.map(it => {
+        const kind = kindOf(it);
+        const out = { package: it.package, version: it.version, item: it.item, clusters: listOf(it.clusters) };
+        // sorte inconnue (paquet absent) : registre et valeurs gardés tels quels
+        if (it.registry && (kind === 'chart' || kind == null)) out.registry = it.registry;
+        if (it.valuesText.trim() && (kind === 'chart' || kind == null)) out.values = JSON.parse(it.valuesText);
+        if (it.depends_on.length) out.depends_on = it.depends_on.slice();
+        return out;
+      }),
+    };
   }
 
   // Raccourci « Plusieurs » : le serveur le développe à l'enregistrement
@@ -610,6 +869,8 @@ const BMPlans = (() => {
               mirrors: (r.mirrors || '').split(',').map(x => x.trim()).filter(Boolean) }, r.dns_name ? { dns_name: r.dns_name } : {})
             : { name: r.name.trim(), mode: 'external' })),
           publish: edit.publish.filter(p => p.package && p.registry).map(p => ({ package: p.package, version: p.version, registry: p.registry })) };
+      } else if (pid === 'artefacts') {
+        phases.artefacts = collectArtefacts(on('artefacts'), Number(form.querySelector('[name="artefacts_timeout"]').value));
       } else {
         phases[pid] = { enabled: on(pid) };
       }
@@ -635,11 +896,20 @@ const BMPlans = (() => {
     }
     // 2.5.0 : délais des phases Cluster API et Clusters, bornes du serveur
     for (const [field, [lo, hi]] of [['capi_timeout', CAPI_TIMEOUT], ['clusters_timeout', CLUSTERS_TIMEOUT],
-      ['registry_timeout', REGISTRY_TIMEOUT], ['publish_timeout', PUBLISH_TIMEOUT]]) {
+      ['registry_timeout', REGISTRY_TIMEOUT], ['publish_timeout', PUBLISH_TIMEOUT], ['artefacts_timeout', ARTEFACTS_TIMEOUT]]) {
       const el = form.querySelector(`[name="${field}"]`);
       const v = el ? Number(el.value) : lo;
       if (!Number.isInteger(v) || v < lo || v > hi) {
         msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('bmpl.badTimeoutRange', { min: lo, max: hi }))}</div>`;
+        return;
+      }
+    }
+    // 2.7.0 : registre d'un chart et valeurs JSON contrôlés avant l'envoi
+    if (form.querySelector('[name="artefacts_timeout"]')) {
+      const why = artefactsRefusal(!!form.querySelector('.bmpl-phase-on[data-phase="artefacts"]:checked'));
+      if (why) {
+        msg.innerHTML = `<div class="bm-refusal bmpl-art-refusal">${icon('fail', { size: 14 })} ${esc(why)}</div>`;
+        msg.scrollIntoView({ block: 'nearest' });
         return;
       }
     }
@@ -1055,6 +1325,66 @@ const BMPlans = (() => {
   }
 
   // =========================================================================
+  // Suivi d'une action de déroulé (Déployer, Défaire) : étapes et filles liées
+  // =========================================================================
+  function stepLabel(stepId) {
+    const sid = String(stepId || '');
+    if (sid.startsWith('phase-')) return text(PHASES, sid.slice(6));
+    if (sid.startsWith('tf-')) return tr('dpw.stepTemplate', { name: sid.slice(3) });
+    if (sid.startsWith('ready-')) return tr('dpw.stepReady', { code: sid.slice(6) });
+    if (sid.startsWith('k8s-')) return tr('dpw.stepCluster', { name: sid.slice(4) });
+    if (sid === 'capi-providers') return tr('dpw.stepProviders');
+    // 2.7.0 : éléments de la phase Artefacts et du défaire
+    if (sid.startsWith('art-')) return tr('dpw.stepArtefact', { name: sid.slice(4) });
+    if (sid.startsWith('pol-')) return tr('dpw.stepPolicies', { name: sid.slice(4) });
+    if (sid.startsWith('undo-')) return tr('udw.stepUndo', { name: sid.slice(5) });
+    return sid;
+  }
+
+  /** Suit `actionId` dans le bloc `.dpw-follow` de `form` ; `s.sse` gardé
+   *  pour la fermeture de la fenêtre. */
+  function followRun(form, s, actionId, onEnd) {
+    const $ = (sel) => form.querySelector(sel);
+    $('.dpw-follow').hidden = false;
+    $('.dpw-follow-link').innerHTML = actionLink(actionId);
+    const ul = $('.dpw-steps');
+    ul.innerHTML = '';
+    if (typeof Dock !== 'undefined' && Dock.poll) Dock.poll();
+    if (window.BMC && BMC.renderHistory && BMC.tab && BMC.tab() === 'history') BMC.renderHistory();
+    if (!window.SSEReconnect) return;
+    s.sse = SSEReconnect.connect(`/api/stream/${enc(actionId)}`, {
+      on: {
+        step: (ev) => {
+          let d = {};
+          try { d = JSON.parse(ev.data); } catch { return; }
+          if (!form.isConnected) return;
+          let li = [...ul.children].find(x => x.dataset.step === d.step_id);
+          if (!li) {
+            li = document.createElement('li');
+            li.className = 'dpw-step';
+            li.dataset.step = d.step_id || '';
+            ul.appendChild(li);
+          }
+          const cls = d.status === 'done' ? 'ok' : d.status === 'error' ? 'fail' : d.status === 'partial' ? 'warn'
+            : d.status === 'running' ? 'info' : 'dim';
+          li.innerHTML = `<span class="badge ${cls}">${esc(d.status || '')}</span> <strong>${esc(stepLabel(d.step_id))}</strong>
+            ${d.message ? `<span class="dpw-step-msg">${linkIds(d.message)}</span>` : ''}`;
+        },
+        status: (ev) => {
+          let d = {};
+          try { d = JSON.parse(ev.data); } catch { return; }
+          if (form.isConnected) $('.dpw-follow-status').innerHTML = d.status ? `<span class="badge dim">${esc(d.status)}</span>` : '';
+        },
+        end: () => {
+          if (s.sse) { try { s.sse.close(); } catch { /* fermé */ } }
+          if (typeof Dock !== 'undefined' && Dock.poll) Dock.poll();
+          if (onEnd) onEnd();
+        },
+      },
+    });
+  }
+
+  // =========================================================================
   // Fenêtre Déployer (et reprise d'un déroulé)
   // =========================================================================
   /**
@@ -1251,7 +1581,14 @@ const BMPlans = (() => {
           <thead><tr><th>${esc(tr('dpw.col.cluster'))}</th><th>${esc(tr('dpw.col.template'))}</th><th>${esc(tr('dpw.col.vms'))}</th><th>${esc(tr('dpw.col.state'))}</th></tr></thead>
           <tbody>${sum.clusters.map(c => `<tr><td><code class="dpw-cluster-name">${esc(c.name)}</code></td><td><code>${esc(c.template)}</code></td>
             <td>${c.vms == null ? '' : esc(c.vms)}</td>
-            <td>${c.exists ? `<span class="badge ok">${esc(tr('dpw.clusterPresent'))}</span>` : `<span class="badge info">${esc(tr('dpw.clusterNew'))}</span>`}</td></tr>`).join('')}</tbody></table>` : ''}`;
+            <td>${c.exists ? `<span class="badge ok">${esc(tr('dpw.clusterPresent'))}</span>` : `<span class="badge info">${esc(tr('dpw.clusterNew'))}</span>`}</td></tr>`).join('')}</tbody></table>` : ''}
+        ${(sum.artefacts || []).length ? `<h4 class="dpw-artefacts-title">${esc(tr('bmpl.phase.artefacts'))}</h4><table class="data-table dpw-artefacts">
+          <thead><tr><th>${esc(tr('dpw.col.item'))}</th><th>${esc(tr('dpw.col.kind'))}</th><th>${esc(tr('dpw.col.cluster'))}</th>
+            <th>${esc(tr('dpw.col.package'))}</th><th>${esc(tr('dpw.col.registry'))}</th></tr></thead>
+          <tbody>${sum.artefacts.map(a => `<tr data-id="${esc(a.id)}"><td><code class="dpw-artefact-item">${esc(a.type === 'policies' ? tr('dpw.artPolicies') : a.item)}</code></td>
+            <td><span class="badge dim">${esc(a.type)}</span></td><td><code>${esc(a.ref)}</code></td>
+            <td>${a.package ? `<code>${esc(`${a.package} ${a.version || ''}`)}</code>` : ''}</td>
+            <td>${a.registry ? `<code>${esc(a.registry)}</code>` : ''}</td></tr>`).join('')}</tbody></table>` : ''}`;
       paintLaunch();
     }
 
@@ -1296,54 +1633,10 @@ const BMPlans = (() => {
     }
 
     // --- suivi ---------------------------------------------------------------
-    function stepLabel(stepId) {
-      const sid = String(stepId || '');
-      if (sid.startsWith('phase-')) return text(PHASES, sid.slice(6));
-      if (sid.startsWith('tf-')) return tr('dpw.stepTemplate', { name: sid.slice(3) });
-      if (sid.startsWith('ready-')) return tr('dpw.stepReady', { code: sid.slice(6) });
-      if (sid.startsWith('k8s-')) return tr('dpw.stepCluster', { name: sid.slice(4) });
-      if (sid === 'capi-providers') return tr('dpw.stepProviders');
-      return sid;
-    }
     function follow(actionId) {
       s.launched = actionId;
       paintLaunch();
-      $('.dpw-follow').hidden = false;
-      $('.dpw-follow-link').innerHTML = actionLink(actionId);
-      const ul = $('.dpw-steps');
-      ul.innerHTML = '';
-      if (typeof Dock !== 'undefined' && Dock.poll) Dock.poll();
-      if (window.BMC && BMC.renderHistory && BMC.tab && BMC.tab() === 'history') BMC.renderHistory();
-      if (!window.SSEReconnect) return;
-      s.sse = SSEReconnect.connect(`/api/stream/${enc(actionId)}`, {
-        on: {
-          step: (ev) => {
-            let d = {};
-            try { d = JSON.parse(ev.data); } catch { return; }
-            if (!form.isConnected) return;
-            let li = [...ul.children].find(x => x.dataset.step === d.step_id);
-            if (!li) {
-              li = document.createElement('li');
-              li.className = 'dpw-step';
-              li.dataset.step = d.step_id || '';
-              ul.appendChild(li);
-            }
-            const cls = d.status === 'done' ? 'ok' : d.status === 'error' ? 'fail' : d.status === 'partial' ? 'warn'
-              : d.status === 'running' ? 'info' : 'dim';
-            li.innerHTML = `<span class="badge ${cls}">${esc(d.status || '')}</span> <strong>${esc(stepLabel(d.step_id))}</strong>
-              ${d.message ? `<span class="dpw-step-msg">${linkIds(d.message)}</span>` : ''}`;
-          },
-          status: (ev) => {
-            let d = {};
-            try { d = JSON.parse(ev.data); } catch { return; }
-            if (form.isConnected) $('.dpw-follow-status').innerHTML = d.status ? `<span class="badge dim">${esc(d.status)}</span>` : '';
-          },
-          end: () => {
-            if (s.sse) { try { s.sse.close(); } catch { /* fermé */ } }
-            if (typeof Dock !== 'undefined' && Dock.poll) Dock.poll();
-          },
-        },
-      });
+      followRun(form, s, actionId);
     }
 
     async function launch(dryRun) {
@@ -1455,6 +1748,324 @@ const BMPlans = (() => {
   }
 
   // =========================================================================
+  // Fenêtre « Défaire le déploiement » (2.7.0, décision 128)
+  // =========================================================================
+  const UNDO_KINDS = ['chart', 'manifest', 'policies', 'capi-cluster', 'registry', 'tf-declaration'];
+  const UNDO_KIND_TEXT = {
+    chart: () => tr('udw.kind.chart'), manifest: () => tr('udw.kind.manifest'), policies: () => tr('udw.kind.policies'),
+    'capi-cluster': () => tr('udw.kind.capiCluster'), registry: () => tr('udw.kind.registry'),
+    'tf-declaration': () => tr('udw.kind.tfDeclaration'),
+  };
+  const UNDO_LIMITS = {
+    'volumes-claimed': () => tr('udw.limit.volumesClaimed'), 'lb-dhcp': () => tr('udw.limit.lbDhcp'),
+    'ccm-kubernetes': () => tr('udw.limit.ccmKubernetes'), 'release-namespace': () => tr('udw.limit.releaseNamespace'),
+  };
+  const UNDONE = {
+    done: () => tr('udw.badge.done'), partial: () => tr('udw.badge.partial'),
+    error: () => tr('udw.badge.error'), cancelled: () => tr('udw.badge.cancelled'),
+  };
+  const RUNNING_STATES = ['starting', 'running'];
+  // note du serveur (deploy_undo.MODIFIED) : déclaration changée depuis
+  const MODIFIED_NOTE = 'changed since';
+
+  /** Pourquoi un élément est proposé décoché ('' s'il est coché par défaut). */
+  function undoOffReason(u) {
+    if (u.kind === 'registry') return tr('udw.t.registryOff');
+    if (u.proven === false) return tr('udw.t.notProven');
+    if (String(u.note || '').includes(MODIFIED_NOTE)) return tr('udw.t.modified');
+    return u.default === false ? tr('udw.t.off') : '';
+  }
+
+  /** Bouton « Défaire » d'un déroulé fini (pas un essai, pas un défaire :
+   *  point 214, il n'y a pas de défaire du défaire). Administrateur. */
+  function undoButton(a) {
+    if (!a || !String(a.action || '').startsWith('deploy:') || a.dry_run || RUNNING_STATES.includes(a.status)) return '';
+    const res = a.result || {};
+    const admin = can('admin');
+    const done = res.undone_status === 'done';
+    const tp = !admin ? tr('udw.t.adminOnly') : done ? tr('udw.t.alreadyUndone') : tr('udw.t.undoBtn');
+    return ` <button type="button" class="btn btn-sm btn-danger btn-ico tip bm-deploy-undo" data-action-id="${esc(a.id)}"
+      ${admin && !done ? '' : 'disabled'} title="${esc(tp)}" data-tip="${esc(tp)}" aria-label="${esc(tp)}">${icon('undo', { size: 12 })} ${esc(tr('udw.undo'))}</button>`;
+  }
+
+  /** Badge « Défait » / « Défait en partie » d'un déroulé, lien vers le défaire. */
+  function undoneBadge(a) {
+    const res = (a && a.result) || {};
+    if (!a || !String(a.action || '').startsWith('deploy:') || !res.undone_status) return '';
+    const cls = res.undone_status === 'done' ? 'ok' : res.undone_status === 'error' ? 'fail' : 'warn';
+    const tp = tr('udw.t.badge', { id: res.undone_by || '' });
+    return ` <a class="badge ${cls} tip bm-undone" data-undone="${esc(res.undone_status)}" href="#activity/action/${enc(res.undone_by || '')}"
+      data-tip="${esc(tp)}">${esc(text(UNDONE, res.undone_status))}</a>`;
+  }
+
+  function objText(o) {
+    if (o == null) return '';
+    if (typeof o !== 'object') return String(o);
+    if (o.kind || o.name) return `${o.kind || ''} ${o.namespace ? `${o.namespace}/` : ''}${o.name || ''}`.trim();
+    return JSON.stringify(o);
+  }
+
+  /** Ce qui partira pour un élément du plan de destruction (échappé). */
+  function undoDetailsHtml(u) {
+    const d = u.details || {};
+    const li = (arr) => (arr || []).map(x => `<li><code>${esc(objText(x))}</code></li>`).join('');
+    if (d.error) return `<div class="bm-refusal">${icon('fail', { size: 13 })} ${esc(tr('udw.detailError'))} ${esc(d.error)}</div>`;
+    if (d.present === false) return `<p class="form-hint udw-gone">${esc(tr('udw.gone'))}</p>`;
+    if (u.kind === 'chart') {
+      return `<p>${esc(tr('udw.release', { name: d.release || '', ns: d.release_namespace || '' }))}
+        ${d.chart ? `<code>${esc(`${d.chart} ${d.version || ''}`)}</code>` : ''}</p>`;
+    }
+    if (u.kind === 'manifest' || u.kind === 'policies') {
+      return `${d.cluster_present === false ? `<p class="form-hint">${esc(tr('udw.objectsGone'))}</p>` : ''}
+        ${(d.delete || []).length ? `<p>${esc(tr('udw.objectsDeleted', { n: d.delete.length }))}</p><ul class="bm-paths udw-delete">${li(d.delete)}</ul>` : ''}
+        ${(d.kept || []).length ? `<p>${esc(tr('udw.objectsKept'))}</p><ul class="bm-paths udw-kept">${li(d.kept)}</ul>` : ''}
+        ${(d.refused || []).length ? `<div class="bm-refusal">${icon('fail', { size: 13 })} ${esc(tr('udw.objectsRefused'))}<ul class="bm-paths">${li(d.refused)}</ul></div>` : ''}`;
+    }
+    if (u.kind === 'capi-cluster') {
+      return `<p>${esc(tr('udw.clusterGoes', { machines: d.machines || 0, ns: d.target_namespace || '' }))}</p>
+        ${(d.vms || []).length ? `<p class="form-hint">${esc(tr('udw.vms'))}</p><ul class="bm-paths">${li(d.vms)}</ul>` : ''}
+        ${(d.volumes || []).length ? `<p class="form-hint">${esc(tr('udw.volumes'))}</p><ul class="bm-paths">${li(d.volumes)}</ul>` : ''}
+        ${(d.loadbalancers || []).length ? `<p class="form-hint">${esc(tr('udw.loadbalancers'))}</p><ul class="bm-paths">${li(d.loadbalancers)}</ul>` : ''}
+        ${d.namespace_removed ? `<p class="form-hint">${esc(tr('udw.namespaceRemoved'))}</p>` : ''}`;
+    }
+    if (u.kind === 'registry') {
+      return `<p>${esc(tr('udw.registryGoes', { address: d.address || '' }))}</p>
+        <p class="form-hint">${esc(tr('udw.registryVolume', { volume: d.volume || '' }))}</p>`;
+    }
+    return `<p>${esc(tr('udw.declGoes', { name: d.name || u.ref, n: (d.resources || []).length }))}</p>
+      ${(d.resources || []).length ? `<ul class="bm-paths udw-resources">${li(d.resources)}</ul>` : ''}`;
+  }
+
+  /** a : l'action `deploy:<cluster>` à défaire (ligne de l'Historique). */
+  async function openUndo(a) {
+    if (!a || !String(a.action || '').startsWith('deploy:')) return null;
+    const id = `deploy-undo-${a.id}`;
+    if (document.getElementById(`fp-${id}`)) FloatingPanels.close(id);
+    const cluster = String(a.action).split(':').slice(1).join(':');
+    const s = {
+      items: null, chosen: new Set(), plan: null, fetching: false, error: '', timer: null, closed: false,
+      typed: '', deleteData: new Set(), regTyped: {}, launched: null, sse: null,
+    };
+    const stop = () => { clearTimeout(s.timer); s.timer = null; };
+    const tabBtn = (t, label, tp, ic) => `<button type="button" class="sub-tab tip${t === 'content' ? ' active' : ''}" role="tab"
+        aria-selected="${t === 'content'}" data-udw-tab="${t}" data-tip="${esc(tp)}">${icon(ic, { size: 13 })} <span>${esc(label)}</span></button>`;
+    const panel = FloatingPanels.open({
+      id, icon: 'undo', title: `${tr('udw.title')} · ${cluster}`,
+      width: Math.min(860, window.innerWidth - 120), height: Math.max(480, Math.min(780, window.innerHeight - 80)),
+      onClose: () => {
+        // aucune requête après la fermeture (minuterie effacée, garde `closed`)
+        s.closed = true;
+        stop();
+        if (s.sse) { try { s.sse.close(); } catch { /* fermé */ } }
+      },
+      bodyHtml: `
+        <form class="capi-form udw-form" style="padding:14px;" autocomplete="off" novalidate>
+          <p class="form-hint">${esc(tr('udw.hint', { id: a.id, plan: (a.result || {}).plan || '' }))}</p>
+          <div class="sub-tabs sub-tabs-inline udw-tabs" role="tablist" aria-label="${esc(tr('udw.title'))}">
+            ${tabBtn('content', tr('udw.tab.content'), tr('udw.t.tab.content'), 'edit')}
+            ${tabBtn('plan', tr('udw.tab.plan'), tr('udw.t.tab.plan'), 'notes')}
+            ${tabBtn('confirm', tr('udw.tab.confirm'), tr('udw.t.tab.confirm'), 'warn')}
+          </div>
+          <div data-udw-pane="content" role="tabpanel"><div class="udw-content"></div></div>
+          <div data-udw-pane="plan" role="tabpanel" hidden><div class="udw-plan" aria-live="polite"></div></div>
+          <div data-udw-pane="confirm" role="tabpanel" hidden>
+            <fieldset>
+              <legend>${esc(tr('udw.fs.confirm'))}</legend>
+              <label class="tip" style="grid-column:1/-1;" data-tip="${esc(tr('udw.t.typeName'))}">${esc(tr('udw.typeName'))}
+                <code class="udw-cluster-name">${esc(cluster)}</code>
+                <input class="udw-typed" autocomplete="off" spellcheck="false" aria-label="${esc(tr('udw.t.typeName'))}"></label>
+              <div class="udw-registries" style="grid-column:1/-1;"></div>
+            </fieldset>
+          </div>
+          <div class="dpw-msg udw-msg" role="status"></div>
+          <div class="apply-bar udw-actions">
+            <span class="tip udw-launch-wrap" data-tip="">
+              <button type="submit" class="btn btn-danger btn-sm btn-ico udw-launch" disabled data-tip="">${icon('undo')} ${esc(tr('udw.undo'))}</button></span>
+          </div>
+          <div class="dpw-follow" hidden>
+            <h4>${esc(tr('dpw.progress'))} <span class="dpw-follow-link"></span> <span class="dpw-follow-status"></span></h4>
+            <ul class="bm-paths dpw-steps"></ul>
+          </div>
+        </form>`,
+    });
+    const form = panel.el.querySelector('.udw-form');
+    if (form.dataset.bound) return panel;
+    form.dataset.bound = '1';
+    const $ = (sel) => form.querySelector(sel);
+    const sig = () => JSON.stringify([...s.chosen].sort());
+    const selectedRegs = () => (s.items || []).filter(u => u.kind === 'registry' && s.chosen.has(u.id))
+      .map(u => u.ref.split('/').slice(1).join('/'));
+
+    function setTab(t) {
+      form.querySelectorAll('[data-udw-tab]').forEach(b => {
+        const on = b.dataset.udwTab === t;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      form.querySelectorAll('[data-udw-pane]').forEach(p => { p.hidden = p.dataset.udwPane !== t; });
+    }
+
+    function launchState() {
+      if (!can('admin')) return [false, tr('udw.t.adminOnly')];
+      if (s.launched) return [false, tr('dpw.t.launched')];
+      if (s.error) return [false, tr('udw.t.planFailed')];
+      if (s.fetching || !s.plan || s.plan.sig !== sig()) return [false, tr('udw.t.waitPlan')];
+      if (!s.chosen.size) return [false, tr('udw.t.empty')];
+      if (s.typed.trim() !== cluster) return [false, tr('udw.t.typeName')];
+      const reg = selectedRegs().find(n => s.deleteData.has(n) && (s.regTyped[n] || '').trim() !== n);
+      if (reg) return [false, tr('udw.t.typeRegistry', { name: reg })];
+      return [true, tr('udw.t.launch')];
+    }
+    function paintLaunch() {
+      const [ok, why] = launchState();
+      const btn = $('.udw-launch');
+      btn.disabled = !ok;
+      btn.title = why;
+      btn.setAttribute('aria-label', why);
+      btn.dataset.tip = why;
+      $('.udw-launch-wrap').dataset.tip = why;
+    }
+    function paintContent() {
+      const box = $('.udw-content');
+      if (!s.items) {
+        box.innerHTML = s.error ? `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(s.error)}</div>`
+          : `<p class="form-hint">${esc(tr('udw.loading'))}</p>`;
+        return;
+      }
+      if (!s.items.length) { box.innerHTML = `<p class="form-hint udw-nothing">${esc(tr('udw.nothing'))}</p>`; return; }
+      const res = a.result || {};
+      box.innerHTML = (res.undone_by ? `<div class="bm-imported udw-again">${icon('info', { size: 13 })} ${esc(tr('udw.again'))} ${actionLink(res.undone_by)}</div>` : '')
+        + UNDO_KINDS.filter(k => s.items.some(u => u.kind === k)).map(k => `<div class="udw-group" data-kind="${esc(k)}">
+          <h4>${esc(text(UNDO_KIND_TEXT, k))}</h4>
+          <ul class="bm-paths">${s.items.filter(u => u.kind === k).map(u => {
+            const off = undoOffReason(u);
+            const tp = off || tr('udw.t.item');
+            return `<li class="udw-item-row"><label class="bm-check tip" data-tip="${esc(tp)}">
+              <input type="checkbox" class="udw-item" value="${esc(u.id)}" ${s.chosen.has(u.id) ? 'checked' : ''}${s.launched ? ' disabled' : ''}
+                     aria-label="${esc(u.ref)}"> <code class="udw-ref">${esc(u.ref)}</code></label>
+              ${u.proven === false ? `<span class="badge warn">${esc(tr('udw.notProven'))}</span>` : ''}
+              ${String(u.note || '').includes(MODIFIED_NOTE) ? `<span class="badge warn">${esc(tr('udw.modified'))}</span>` : ''}
+              ${off ? `<span class="form-hint udw-off">${esc(off)}</span>` : ''}
+              ${u.run ? `<span class="form-hint">${esc(tr('udw.createdBy'))} ${actionLink(u.run)}</span>` : ''}</li>`;
+          }).join('')}</ul></div>`).join('');
+    }
+    function paintPlan() {
+      const box = $('.udw-plan');
+      if (s.error) { box.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(s.error)}</div>`; return; }
+      if (s.fetching || !s.plan || s.plan.sig !== sig()) { box.innerHTML = `<p class="form-hint udw-wait">${esc(tr('udw.planWait'))}</p>`; return; }
+      const sel = (s.plan.items || []).filter(u => u.selected);
+      box.innerHTML = (sel.length ? `<ol class="udw-steps">${sel.map(u => `<li class="udw-plan-item" data-kind="${esc(u.kind)}">
+          <strong>${esc(text(UNDO_KIND_TEXT, u.kind))}</strong> <code>${esc(u.ref)}</code>${undoDetailsHtml(u)}</li>`).join('')}</ol>`
+        : `<p class="form-hint">${esc(tr('udw.t.empty'))}</p>`)
+        + ((s.plan.limits || []).length ? `<div class="bm-refusal bm-warning udw-limits">${icon('warn', { size: 14 })} ${esc(tr('udw.limits'))}
+          <ul class="bm-paths">${s.plan.limits.map(l => `<li data-code="${esc(l.code)}">${esc(UNDO_LIMITS[l.code] ? UNDO_LIMITS[l.code]() : l.detail || l.code)}</li>`).join('')}</ul></div>` : '');
+    }
+    function paintRegs() {
+      const regs = selectedRegs();
+      [...s.deleteData].forEach(n => { if (!regs.includes(n)) s.deleteData.delete(n); });
+      $('.udw-registries').innerHTML = regs.map(n => `<div class="udw-reg" data-registry="${esc(n)}">
+        <label class="bm-check tip" data-tip="${esc(tr('udw.t.deleteData'))}"><input type="checkbox" class="udw-del-data" value="${esc(n)}"
+          ${s.deleteData.has(n) ? 'checked' : ''}> ${esc(tr('udw.deleteData'))} <code>${esc(n)}</code></label>
+        ${s.deleteData.has(n) ? `<label class="tip" data-tip="${esc(tr('udw.t.typeRegistry', { name: n }))}">${esc(tr('udw.typeRegistry'))}
+          <input class="udw-reg-typed" data-registry="${esc(n)}" autocomplete="off" spellcheck="false" value="${esc(s.regTyped[n] || '')}"
+                 aria-label="${esc(tr('udw.t.typeRegistry', { name: n }))}"></label>` : ''}</div>`).join('');
+    }
+    const paintAll = () => { paintContent(); paintPlan(); paintRegs(); paintLaunch(); };
+
+    async function fetchPlan(initial) {
+      stop();
+      if (s.closed || s.launched) return;
+      const mine = sig();
+      s.fetching = true;
+      s.error = '';
+      paintPlan();
+      paintLaunch();
+      const body = { action_id: a.id };
+      if (!initial) body.include = [...s.chosen];
+      let r;
+      try { r = await api('POST', `/api/deploy/${enc(cluster)}/undo/plan`, body); }
+      catch (e) { r = { ok: false, status: 0, d: { error: e.message } }; }
+      if (s.closed || !form.isConnected) return;
+      if (!initial && mine !== sig()) return;          // les cases ont changé depuis
+      s.fetching = false;
+      if (!r.ok) {
+        s.error = r.d.error || String(r.status);
+        paintAll();
+        return;
+      }
+      if (initial) {
+        s.items = r.d.items || [];
+        s.chosen = new Set(s.items.filter(u => u.selected).map(u => u.id));
+      }
+      s.plan = Object.assign({ sig: sig() }, r.d);
+      paintAll();
+    }
+    const later = () => {
+      stop();
+      s.plan = null;
+      paintPlan();
+      paintLaunch();
+      if (!s.closed) s.timer = setTimeout(() => fetchPlan(false), 450);
+    };
+
+    async function launch() {
+      const [ok] = launchState();
+      if (!ok) return;
+      stop();
+      const msg = $('.udw-msg');
+      const regs = selectedRegs().filter(n => s.deleteData.has(n));
+      const body = { action_id: a.id, confirm: s.typed.trim(), include: [...s.chosen], delete_data: regs };
+      if (regs.length) body.confirm_registry = Object.fromEntries(regs.map(n => [n, (s.regTyped[n] || '').trim()]));
+      const r = await api('POST', `/api/deploy/${enc(cluster)}/undo`, body);
+      if (s.closed || !form.isConnected) return;
+      if (r.ok && r.d.action_id) {
+        s.launched = r.d.action_id;
+        msg.innerHTML = okLine(tr('udw.started'));
+        paintAll();
+        followRun(form, s, r.d.action_id, () => {
+          if (window.BMC && BMC.renderHistory && BMC.tab && BMC.tab() === 'history') BMC.renderHistory();
+        });
+        return;
+      }
+      if (r.d.code === 'deploy-running' && r.d.running) {
+        msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('dpw.running'))} ${actionLink(r.d.running)}</div>`;
+        return;
+      }
+      msg.innerHTML = refusal(r.d, r.status);
+    }
+
+    form.addEventListener('click', (e) => {
+      const t = e.target.closest('[data-udw-tab]');
+      if (t) setTab(t.dataset.udwTab);
+    });
+    form.addEventListener('change', (e) => {
+      const c = e.target.closest('.udw-item');
+      if (c) {
+        if (c.checked) s.chosen.add(c.value); else s.chosen.delete(c.value);
+        paintRegs();
+        later();
+        return;
+      }
+      const d = e.target.closest('.udw-del-data');
+      if (d) {
+        if (d.checked) s.deleteData.add(d.value); else s.deleteData.delete(d.value);
+        paintRegs();
+        paintLaunch();
+      }
+    });
+    form.addEventListener('input', (e) => {
+      if (e.target.classList.contains('udw-typed')) { s.typed = e.target.value; paintLaunch(); return; }
+      const rt = e.target.closest('.udw-reg-typed');
+      if (rt) { s.regTyped[rt.dataset.registry] = rt.value; paintLaunch(); }
+    });
+    form.addEventListener('submit', (ev) => { ev.preventDefault(); launch(); });
+
+    paintAll();
+    await fetchPlan(true);
+    return panel;
+  }
+
+  // =========================================================================
   // Historique : « Reprendre » sur un déroulé arrêté
   // =========================================================================
   /** 2.5.0 : un cluster enfant créé par un plan, lien vers Cluster API > Clusters. */
@@ -1518,6 +2129,69 @@ const BMPlans = (() => {
     return ctl;
   }
 
+  /** Saisies de la carte Artefacts ; vrai si l'événement la concernait. */
+  function artefactsChange(t) {
+    const pf = t.closest('#bm-plans .bmpl-pol-f');
+    if (pf) {
+      const p = edit.artPolicies[Number(pf.dataset.i)];
+      if (!p) return true;
+      if (pf.dataset.k === 'base') { p.base = pf.checked; return true; }
+      p[pf.dataset.k] = pf.value;
+      if (pf.dataset.k === 'teams') {
+        // rôles et comptes d'un namespace retiré : leur liste se repeint
+        const teams = listOf(p.teams);
+        p.roles.concat(p.accounts).forEach(x => { if (!teams.includes(x.namespace)) x.namespace = teams[0] || ''; });
+        paintArtefacts();
+      }
+      return true;
+    }
+    const sub = t.closest('#bm-plans .bmpl-pol-role-f, #bm-plans .bmpl-pol-acc-f');
+    if (sub) {
+      const p = edit.artPolicies[Number(sub.dataset.i)];
+      const row = p && (sub.classList.contains('bmpl-pol-role-f') ? p.roles : p.accounts)[Number(sub.dataset.j)];
+      if (row) row[sub.dataset.k] = sub.value;
+      return true;
+    }
+    const af = t.closest('#bm-plans .bmpl-art-f');
+    if (af) {
+      const it = edit.artItems[Number(af.dataset.i)];
+      if (it) it[af.dataset.k] = af.value;
+      return true;
+    }
+    const pkg = t.closest('#bm-plans .bmpl-art-pkg');
+    if (pkg) {
+      const it = edit.artItems[Number(pkg.dataset.i)];
+      if (!it) return true;
+      const k = pkg.value.lastIndexOf('@');
+      Object.assign(it, { package: pkg.value.slice(0, k), version: pkg.value.slice(k + 1), item: '', registry: '', valuesText: '' });
+      fixDeps();
+      paintArtefacts();
+      return true;
+    }
+    const sel = t.closest('#bm-plans .bmpl-art-item');
+    if (sel) {
+      const it = edit.artItems[Number(sel.dataset.i)];
+      if (!it) return true;
+      const old = it.item;
+      it.item = sel.value;
+      // une autre sorte : registre et valeurs ne valent que pour un chart
+      if (kindOf(it) !== 'chart') { it.registry = ''; it.valuesText = ''; }
+      edit.artItems.forEach(x => { x.depends_on = x.depends_on.map(d => (d === old ? it.item : d)); });
+      fixDeps();
+      paintArtefacts();
+      return true;
+    }
+    const dep = t.closest('#bm-plans .bmpl-art-dep');
+    if (dep) {
+      const it = edit.artItems[Number(dep.dataset.i)];
+      if (!it) return true;
+      it.depends_on = it.depends_on.filter(x => x !== dep.value);
+      if (dep.checked) it.depends_on.push(dep.value);
+      return true;
+    }
+    return false;
+  }
+
   // =========================================================================
   function init() {
     document.addEventListener('click', (e) => {
@@ -1526,6 +2200,13 @@ const BMPlans = (() => {
         e.preventDefault();
         const a = window.BMC && BMC.historyAction ? BMC.historyAction(rs.dataset.actionId) : null;
         if (a) openDeploy({ resume: a });
+        return;
+      }
+      const ud = e.target.closest('.bm-deploy-undo');
+      if (ud && !ud.disabled) {
+        e.preventDefault();
+        const a = window.BMC && BMC.historyAction ? BMC.historyAction(ud.dataset.actionId) : null;
+        if (a) openUndo(a);
         return;
       }
       const box = e.target.closest('#bm-plans');
@@ -1595,6 +2276,38 @@ const BMPlans = (() => {
         return;
       }
       if ((el = e.target.closest('.bmpl-pub-rm'))) { edit.publish.splice(i(el), 1); paintRegistries(); return; }
+      // 2.7.0 : phase Artefacts
+      if (e.target.closest('.bmpl-pol-add')) {
+        edit.artPolicies.push({ clusters: planClusterNames()[0] || '', base: false, teams: '', teamObjs: {}, roles: [], accounts: [] });
+        paintArtefacts();
+        return;
+      }
+      if ((el = e.target.closest('.bmpl-pol-rm'))) { edit.artPolicies.splice(i(el), 1); paintArtefacts(); return; }
+      if ((el = e.target.closest('.bmpl-pol-role-add, .bmpl-pol-acc-add'))) {
+        const p = edit.artPolicies[i(el)];
+        const ns = p ? listOf(p.teams)[0] : '';
+        if (!p || !ns) return;
+        if (el.classList.contains('bmpl-pol-role-add')) p.roles.push({ namespace: ns, group: '', role: 'view' });
+        else p.accounts.push({ namespace: ns, name: '', role: 'view' });
+        paintArtefacts();
+        return;
+      }
+      if ((el = e.target.closest('.bmpl-pol-role-rm, .bmpl-pol-acc-rm'))) {
+        const p = edit.artPolicies[i(el)];
+        if (p) (el.classList.contains('bmpl-pol-role-rm') ? p.roles : p.accounts).splice(Number(el.dataset.j), 1);
+        paintArtefacts();
+        return;
+      }
+      if (e.target.closest('.bmpl-art-add')) {
+        const p0 = (regData.packages || [])[0];
+        if (p0) {
+          edit.artItems.push({ package: p0.name, version: p0.version, item: '', registry: '', valuesText: '',
+            clusters: planClusterNames()[0] || '', depends_on: [] });
+          paintArtefacts();
+        }
+        return;
+      }
+      if ((el = e.target.closest('.bmpl-art-rm'))) { edit.artItems.splice(i(el), 1); fixDeps(); paintArtefacts(); return; }
       if (e.target.closest('.bmpl-sc-ok')) { takeShortcut(box.querySelector('.bmpl-cl-shortcut')); return; }
       if (e.target.closest('.bmpl-sc-clear')) { edit.shortcut = null; paintClusters(); return; }
       if (e.target.closest('.bmpl-add-tpl-go')) {
@@ -1603,6 +2316,7 @@ const BMPlans = (() => {
       }
     });
     document.addEventListener('change', (e) => {
+      if (edit && artefactsChange(e.target)) return;
       const cdep = e.target.closest('#bm-plans .bmpl-cl-dep');
       if (cdep && edit) {
         const it = edit.clusters[Number(cdep.dataset.i)];
@@ -1664,8 +2378,8 @@ const BMPlans = (() => {
     });
   }
 
-  return { init, render, openDeploy, openTemplate, openCapiTemplate, resumeButton, clusterLink, mountPicker,
-    findingsHtml, findingText, actionLink, linkIds };
+  return { init, render, openDeploy, openUndo, openTemplate, openCapiTemplate, resumeButton, undoButton, undoneBadge,
+    clusterLink, mountPicker, findingsHtml, findingText, actionLink, linkIds };
 })();
 
 document.addEventListener('DOMContentLoaded', BMPlans.init);

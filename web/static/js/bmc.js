@@ -45,7 +45,8 @@ const BMC = (() => {
   // Actions de l'historique : installations et jonctions, séries, démarrages
   // de découverte (baremetal-*), gestes d'alimentation (bmc-power:*), plans
   // de déploiement (deploy:<cluster>, 2.4.0). Filtre `action` de l'Activité
-  // (sous-chaîne, côté serveur).
+  // (sous-chaîne, côté serveur). 2.7.0 : les défaires (deploy-undo:<cluster>)
+  // sont déjà lus par `deploy` (sous-chaîne) et gardés par ce préfixe.
   const HISTORY_KINDS = ['baremetal-', 'bmc-power', 'deploy'];
   const fmtDate = (at) => {
     const t = Number(at);
@@ -414,6 +415,7 @@ const BMC = (() => {
       case 'baremetal-discover': return tr('bmh.kind.discover');
       case 'bmc-power': return tr('bmh.kind.power');
       case 'deploy': return tr('bmh.kind.deploy');
+      case 'deploy-undo': return tr('bmh.kind.deployUndo');
       case 'capi-cluster-create': return tr('bmh.kind.capiCluster');
       default: return verb;
     }
@@ -426,8 +428,10 @@ const BMC = (() => {
     only: (a) => !String(a.action || '').startsWith('capi-cluster-create:') || !!a.parent,
     label: (a) => kindLabel(a.action), hint: () => tr('bmh.hint'), empty: () => tr('bmh.empty'),
     // 2.4.0 : « Reprendre » sur un déroulé de plan arrêté (bm-plans.js) ;
-    // 2.5.0 : lien d'un cluster enfant vers Cluster API > Clusters
-    extra: (a) => (window.BMPlans ? BMPlans.resumeButton(a) + BMPlans.clusterLink(a) : ''),
+    // 2.5.0 : lien d'un cluster enfant vers Cluster API > Clusters ;
+    // 2.7.0 : « Défaire » d'un déroulé fini et son badge (défait, en partie)
+    extra: (a) => (window.BMPlans ? BMPlans.resumeButton(a) + BMPlans.undoButton(a) + BMPlans.undoneBadge(a)
+      + BMPlans.clusterLink(a) : ''),
   });
 
   // -------------------------------------------------------------------------

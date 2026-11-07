@@ -23,7 +23,7 @@ JS = ROOT / "web" / "static" / "js"
 PLANS = JS / "bm-plans.js"
 HTML = (ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
 
-FINDING_CODES = ["plan-invalid", "phase-not-available", "template-missing", "var-missing", "var-invalid",
+FINDING_CODES = ["plan-invalid", "template-missing", "var-missing", "var-invalid",
                  "decl-name-taken", "tf-missing", "cluster-unreachable", "template-newer", "decl-differs",
                  "plan-changed", "decl-exists", "readiness-later", "admin-kind", "forbidden-construct",
                  # 2.5.0 : phases Cluster API et Clusters (constats de flotte compris)
@@ -47,7 +47,15 @@ FINDING_CODES = ["plan-invalid", "phase-not-available", "template-missing", "var
                  "publish-tag-differs", "cluster-registry-not-attached", "cluster-registry-no-fallback-system",
                  "registry-vm-network-unchecked", "cluster-registry-vm-network-unchecked",  # revue finale I-4
                  # 2.6.1 : sonde du réseau des VMs
-                 "cluster-registry-unreachable-from-vm-network", "cluster-registry-vm-network-ok"]
+                 "cluster-registry-unreachable-from-vm-network", "cluster-registry-vm-network-ok",
+                 # 2.7.0 : certificat du registre, phase Artefacts (console et manifest-check)
+                 "registry-cert-expiring", "artefact-invalid", "artefact-not-published", "artefact-taken",
+                 "artefact-check-failed", "artefact-var-missing", "caaph-missing", "child-admin-required",
+                 "artefact-later", "artefact-images-not-published", "manifest-kind-refused", "manifest-kind-unknown",
+                 "manifest-system-namespace", "manifest-object-taken", "manifest-too-big", "manifest-sa-token-refused",
+                 "manifest-crb-admin", "manifest-duplicate", "manifest-no-name", "manifest-too-many",
+                 "artefact-name-too-long", "artefact-name-reserved", "artefact-item-not-manifest",
+                 "team-namespace-taken", "manifest-cluster-missing"]
 
 
 # --- onglet, historique, page d'hôte (source) ----------------------------------
@@ -66,6 +74,7 @@ def test_plans_tab_sits_between_profiles_and_images():
 def test_history_lists_deployment_runs_with_their_label():
     src = (JS / "bmc.js").read_text()
     assert "const HISTORY_KINDS = ['baremetal-', 'bmc-power', 'deploy'];" in src
+    assert "case 'deploy-undo': return tr('bmh.kind.deployUndo');" in src           # 2.7.0
     assert "case 'deploy': return tr('bmh.kind.deploy');" in src
     assert "BMPlans.resumeButton(a)" in src
     hist = (JS / "auto-history.js").read_text()

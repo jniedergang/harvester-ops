@@ -47,6 +47,7 @@ const CapiServices = (() => {
     'invalid-name': (v) => tr('svc.fd.invalid-name', 'Invalid name "{name}": lower case letters, digits and dashes, 42 characters at most.', v),
     'cluster-missing': (v) => tr('svc.fd.cluster-missing', 'Cluster {cluster} does not exist.', v),
     'service-exists': (v) => tr('svc.fd.service-exists', 'Service {name} already exists next to this cluster: it will be updated.', v),
+    'service-name-taken': (v) => tr('svc.fd.service-name-taken', 'Service {name} already serves {cluster} in this namespace: choose another name.', v),
     'invalid-repo': (v) => tr('svc.fd.invalid-repo', '"{repo}" is not a chart repository address (https://, http:// or oci://).', v),
     'invalid-chart': (v) => tr('svc.fd.invalid-chart', 'Invalid chart name "{chart}".', v),
     'invalid-namespace': (v) => tr('svc.fd.invalid-namespace', 'Invalid namespace "{namespace}".', v),
