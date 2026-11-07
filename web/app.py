@@ -35541,7 +35541,7 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
     return _du.phases(steps, run_item, verify_item)
 
 
-def _undo_runner(run, cluster, kc, steps, delete_data, previous, orig_id, lock_fd, runs):
+def _undo_runner(run, cluster, kc, steps, delete_data, previous, orig_id, lock_fd, runs, all_ids=()):
     try:
         run.status = "running"
         run.emit({"type": "status", "status": "running", "ts": time.time()})
@@ -35568,8 +35568,15 @@ def _undo_runner(run, cluster, kc, steps, delete_data, previous, orig_id, lock_f
             run.status = {"done": "done", "cancelled": "cancelled"}.get(final, "error")
             run.ended_at = time.time()
             # historique : l'exécution d'origine dit qui l'a défaite (point 214 :
-            # pas de « défaire le défaire », on relance le plan)
-            _deploy_result_patch(orig_id, {"undone_by": run.id, "undone_at": run.ended_at, "undone_status": final})
+            # pas de « défaire le défaire », on relance le plan). Revue 4-8
+            # C1 (b) : « done » seulement quand TOUT ce que la chaîne a créé est
+            # parti, au fil des défaire successifs ; sinon « partial »
+            prior = set((_action_read(orig_id) or {}).get("result", {}).get("undone_items") or [])
+            gone = prior | {i.get("id") for p in (res or {}).get("phases") or [] for i in p.get("items") or []
+                            if i.get("status") == "done"}
+            status = final if final != "done" or set(all_ids) <= gone else "partial"
+            _deploy_result_patch(orig_id, {"undone_by": run.id, "undone_at": run.ended_at, "undone_status": status,
+                                           "undone_items": sorted(i for i in gone if i)})
             run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
             run.close()
     finally:
@@ -35635,7 +35642,8 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
                 ACTIONS[run_id] = run
             READ_SHARE.invalidate("_activity")
             threading.Thread(target=_undo_runner, args=(run, cluster, kc, steps, set(delete_data), previous,
-                                                        action_id, lock_fd, prev["chain_runs"]),
+                                                        action_id, lock_fd, prev["chain_runs"],
+                                                        [u["id"] for u in undos]),
                              daemon=True, name=f"undo-{run_id}").start()
         except BaseException:
             _flock_release(lock_fd)

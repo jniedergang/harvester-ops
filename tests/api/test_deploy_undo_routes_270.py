@@ -206,7 +206,8 @@ def test_undo_runs_in_reverse_order_and_marks_the_original(undo):
     assert {"capi-service-remove:web/podinfo", "capi-manifest-remove:web/web/regles",
             "capi-cluster-delete:web/web"} <= labels
     orig = undo["orig"].result
-    assert orig["undone_by"] == run.id and orig["undone_status"] == "done" and orig["undone_at"]
+    # le registre décoché reste : la chaîne n'est défaite qu'en partie (C1 b)
+    assert orig["undone_by"] == run.id and orig["undone_status"] == "partial" and orig["undone_at"]
     conn = sqlite3.connect(str(undo["db"]))
     stored = json.loads(conn.execute("SELECT result FROM actions WHERE id = ?", (undo["orig"].id,)).fetchone()[0])
     conn.close()
@@ -304,7 +305,7 @@ def test_no_undo_of_the_undo(undo):
 
 def test_a_run_already_fully_undone_is_refused(undo):
     """Revue 4-8 C1 (b) : un déroulé entièrement défait ne se défait plus."""
-    run = finish(launch(undo))
+    run = finish(launch(undo, include=[u["id"] for u in plan_of(undo).get_json()["items"]]))
     assert undo["orig"].result["undone_status"] == "done"
     removals = list(undo["undo"].removals)
     r = launch(undo)
@@ -345,3 +346,18 @@ def test_undo_leaves_what_another_run_recreated(undo):
 def test_a_run_of_another_cluster(undo):
     undo["orig"].action = "deploy:autre"
     assert launch(undo).status_code == 400
+
+
+def test_a_partial_selection_is_not_a_full_undo(undo):
+    """Revue 4-8 C1 (b) : seule une exécution dont TOUT est défait est
+    refusée ; un défaire d'une partie des éléments la laisse « en partie »."""
+    run = finish(launch(undo, include=["chart-web/web/podinfo"]))
+    assert run.status == "done", run.result
+    assert undo["orig"].result["undone_status"] == "partial"
+    run2 = finish(launch(undo))
+    assert run2.status == "done", run2.result
+    # le registre (décoché par défaut) reste : toujours « en partie »
+    assert undo["orig"].result["undone_status"] == "partial"
+    run3 = finish(launch(undo, include=["registry-harvlab/amorcage"]))
+    assert run3.status == "done" and undo["orig"].result["undone_status"] == "done"
+    assert launch(undo).status_code == 409
