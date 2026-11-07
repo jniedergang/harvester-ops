@@ -2273,11 +2273,31 @@ Clusters, Services, Registries, Artefacts, History, Installation
   exist.
 - **Older Harvester releases** keep the previous install: cert-manager,
   Cluster API core and providers, all from the bundle.
-- **The legacy Uninstall** (2.5.0) is refused on a stack managed by Turtles,
-  and its button is greyed with the reason: it deletes namespaces and images,
-  not the `CAPIProvider` objects, and would break what Harvester and the
-  plans declared. It stays available for a stack made by the previous
-  install.
+- **Uninstall on a Turtles stack (2.7.0)**: the Uninstall button of the
+  Installation tab (admin) opens a window listing what goes, what stays and
+  the refusals, and asks for the typed cluster name. It removes only the
+  `CAPIProvider` objects the console declared (label
+  `harvester-ops.io/managed`), in the order CAAPH, CAPHV, RKE2 control
+  plane, RKE2 bootstrap, waits for their deployments to go, then removes
+  the ConfigMaps of the bundle and the compatibility Service. Never
+  `core/cluster-api` nor Turtles; the CRDs and the provider namespaces
+  stay. Refused while a Cluster (other than `fleet-local/local`), a
+  `HelmChartProxy` (when CAAPH goes), a `HarvesterCluster` left without
+  its Cluster (when CAPHV goes: nothing would release its finalizer) or a
+  plan run exists (`capi-clusters-present`, `caaph-services-present`,
+  `capi-harvesterclusters-present`, `capi-plan-running`). Images on the
+  nodes: optional, unticked; `--remove-images` takes the images of every
+  Deployment of the provider namespaces (not verified for real). The
+  deployment lock is checked at the start, not held during the removal.
+  Install lays the stack again. CLI: `harvester-capi uninstall [--dry-run]
+  [--remove-images]`. The legacy uninstall stays for a stack made before
+  Harvester 1.9.
+- **Leftover HarvesterCluster (2.7.0)**: a `HarvesterCluster` left by an
+  older `Cluster` blocks the creation of a cluster of the same name
+  (`harvester-cluster-leftover`); Delete (or `harvester-capi delete`)
+  removes it and names a finalizer that holds it, never removing one. A
+  plain orphan without owner is only a warning (the next creation adopts
+  it).
 
 ### Creating a cluster (1.48.0, window with menus in 1.53.0)
 
@@ -2494,10 +2514,21 @@ Internet. Full reference: **[artefacts.md](artefacts.md)**.
 - **Services** can install a chart **From a registry** (above).
 - **Registry phase** in the deployment plans, between Terraform and Cluster
   API: see section 6.
+- **Artefacts on child clusters (2.7.0)**: **Apply** a chart, manifest or
+  policy item from the Artefacts tab; Services lists charts, manifests and
+  policies (column Kind, binding state, Remove); the console removes the
+  objects of a manifest itself (Cluster API never does), only those that
+  still carry its labels; a base of policies (quotas, limits, deny by
+  default network policies with DNS, namespace and ingress opened),
+  roles by group, automation accounts and **Issue a token** (600 to
+  86 400 s, shown once, never stored). Operator plus the right to read the
+  admin kubeconfig Secret of the child cluster. CLI: `harvester-capi
+  manifest-check | manifest-deploy | manifest-remove | manifest-verify |
+  manifests | policy-render | token`.
 - Command line: `harvester-artefacts pack | sign | verify | inspect |
   import | list | remove | publish`, `harvester-registry declare | attach |
   check | list | show | forget | deploy | status | delete`.
-- **Not yet**: the Artefacts phase of the plans (2.7), a child cluster
+- **Not yet**: GitOps items (2.8), a child cluster
   bootstrapped entirely without Internet, changing the registries of an
   existing cluster, garbage collection of a bootstrap registry.
 
@@ -2507,7 +2538,9 @@ Internet. Full reference: **[artefacts.md](artefacts.md)**.
   download, and a Harvester version compatibility check.
 - `harvester-capi status | install | cleanup-legacy | inventory | check |
   render | create | delete | state | services | service-check |
-  service-deploy | service-remove`, each with `--cluster` or
+  service-deploy | service-remove`, 2.7.0 `uninstall`, `manifest-check |
+  manifest-deploy | manifest-remove | manifest-verify | manifests |
+  policy-render | token`, each with `--cluster` or
   `--kubeconfig`; `create` and `service-deploy` exit 2 when the pre-check
   blocks. 2.5.0: `create --identity restricted|console` (restricted by
   default), `create --origin`, `check --many` (a JSON list of requests,
@@ -2701,9 +2734,25 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   cluster (admin) or checks a client registry, then publishes the chosen
   artefact packages; child clusters of the plan name these registries. A
   registry posed by a plan is adopted by its next runs, never deleted by
-  the chain. The **artefacts** phase stays greyed, "coming in 2.7".
-  Details in [bare-metal.md](bare-metal.md) and
+  the chain. Details in [bare-metal.md](bare-metal.md) and
   [artefacts.md](artefacts.md).
+
+- **Artefacts phase in plans (2.7.0)**: the last phase applies package
+  items to the child clusters of the plan or to existing ones: a base of
+  policies (unticked by default), roles by group and automation accounts,
+  then manifests and policies, then charts. The items of a cluster that
+  failed are skipped, the others go on. Details in
+  [bare-metal.md](bare-metal.md).
+
+- **Undo a deployment (2.7.0)**: History > Undo (admin) removes, in
+  reverse order, what a run and its resumes created: artefacts, child
+  clusters, the bootstrap registry the plan laid (unticked by default, data
+  kept unless its name is typed), the Terraform content; never Harvester
+  nor the Cluster API stack. Destruction plan before, typed cluster name,
+  tracked and resumable action `deploy-undo:<cluster>`. Only what still
+  carries the run mark of the chain is removed; an object recreated since
+  is left and named. A cluster or registry that could not be removed keeps
+  the Terraform content. CLI: `harvester-plans undo`.
 
 - **A machine that already carries a system is guarded (2.2.0)**: the
   install window lists what the BMC shows (UEFI boot entries of a loader
@@ -2821,7 +2870,12 @@ Terraform workspace.
   own configuration: cluster power sequencing, node maintenance, cluster
   declarations, bare-metal, the ISO store, the Terraform provider,
   Terraform declarations that hold free code (2.3.1) and those that create
-  VM networks, storage classes or IP pools (2.4.0). Deployment plans and
+  VM networks, storage classes or IP pools (2.4.0), undoing a deployment
+  and uninstalling the Cluster API stack (2.7.0). Applying an artefact to a
+  child cluster, its policies and accounts, and issuing a token need
+  operator **and** the right to read the admin kubeconfig Secret of that
+  child cluster, checked by the server with the identity of the person
+  (2.7.0). Deployment plans and
   their templates are written by an admin; an operator applies a plan to an
   existing cluster unless it creates those admin-only objects.
 - **Enforced centrally, deny by default.** Any request that changes

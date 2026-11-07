@@ -112,10 +112,10 @@ def test_full_chain():
     (["terraform", "readiness"], [("readiness", "done"), ("terraform", "done")]),
     # phase désactivée : sautée, la suivante tourne
     ([("readiness", False), "terraform"], [("readiness", "disabled"), ("terraform", "done")]),
-    # artefacts : sautée « coming in 2.7 », même activée par erreur ; capi
-    # tourne depuis la 2.5.0, registry depuis la 2.6.0, AVANT capi (point 189)
-    (["readiness", "capi", "artefacts", "registry"],
-     [("readiness", "done"), ("registry", "done"), ("capi", "done"), ("artefacts", "disabled")]),
+    # capi tourne depuis la 2.5.0, registry depuis la 2.6.0, AVANT capi
+    # (point 189), artefacts depuis la 2.7.0, en dernier
+    (["readiness", "artefacts", "capi", "registry"],
+     [("readiness", "done"), ("registry", "done"), ("capi", "done"), ("artefacts", "done")]),
 ])
 def test_order_disabled_and_coming(phases_ids, expected):
     ctx = Ctx()
@@ -125,10 +125,6 @@ def test_order_disabled_and_coming(phases_ids, expected):
         phases.append(simple(ctx, pid, enabled=en))
     out = run(ctx, phases)
     assert statuses(out) == expected and out["status"] == "done"
-    for pid in ("artefacts",):
-        if any(p.id == pid for p in phases):
-            assert ctx.final(f"phase-{pid}") == ("skipped", "coming in 2.7")
-            assert pid not in ctx.calls
     if ("readiness", False) in phases_ids:
         assert ctx.final("phase-readiness") == ("skipped", "disabled in the plan")
 

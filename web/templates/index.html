@@ -755,6 +755,14 @@
               <p class="form-hint" data-i18n="common.loading">Loading…</p>
             </div>
           </div>
+          <!-- 2.7.0 : comptes d'automatisation des clusters enfants, jetons courts -->
+          <div class="card" id="capi-tokens-card">
+            <div class="card-header">
+              <h2><span data-icon="key" data-icon-size="18"></span> <span data-i18n="tok.title">Automation accounts</span></h2>
+              <button class="btn btn-sm btn-secondary tip" id="btn-capi-tokens-refresh" data-i18n="overview.refresh" data-i18n-title="tok.t.refresh" data-tip-i18n="tok.t.refresh" title="Read the automation accounts again">Refresh</button>
+            </div>
+            <div class="card-body" id="capi-tokens-body"></div>
+          </div>
         </div>
 
         <div class="capi-tab-content" data-capi-tab="services" role="tabpanel">
@@ -1430,6 +1438,7 @@
 <script src="/static/js/vpc.js"></script>
 <script src="/static/js/capi-services.js"></script>
 <script src="/static/js/artefacts.js"></script>
+<script src="/static/js/capi-tokens.js"></script>
 <script src="/static/js/registries.js"></script>
 <script src="/static/js/storage-map.js"></script>
 <script src="/static/js/cluster-map.js"></script>

@@ -21,6 +21,8 @@ import re
 import time
 from pathlib import Path
 
+from capi_cluster import K_HARVESTERCLUSTER
+from capi_services import K_HCP
 from kube import KubeError
 
 K_CAPIPROVIDER = "capiproviders.turtles-capi.cattle.io"
@@ -423,4 +425,167 @@ def cleanup_legacy(kube, step, dry_run=False):
             if "NotFound" not in str(e) and "not found" not in str(e):
                 raise
     step("legacy", "done", f"{len(plan)} legacy object(s) {'to remove' if dry_run else 'removed'}")
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# Retrait de la pile Turtles (2.7.0, décisions 178 et 215)
+# ---------------------------------------------------------------------------
+
+# Ordre de retrait : les services (CAAPH) avant l'infrastructure (CAPHV),
+# puis le plan de contrôle et l'amorçage RKE2. Un fournisseur étiqueté d'un
+# autre genre vient après, dans l'ordre de la liste.
+UNINSTALL_ORDER = (("addon", "helm"), ("infrastructure", "harvester"),
+                   ("controlPlane", "rke2"), ("bootstrap", "rke2"))
+CAAPH = ("addon", "helm")
+CAPHV = ("infrastructure", "harvester")
+# Le cluster local de Rancher, que legacy_plan écarte déjà : il ne relève
+# pas des fournisseurs de la console.
+RANCHER_LOCAL = "fleet-local/local"
+
+
+def _finding(code, level="block", **facts):
+    return {"code": code, "level": level, "facts": facts}
+
+
+def _rank(p):
+    key = (p["type"], p["name"])
+    return UNINSTALL_ORDER.index(key) if key in UNINSTALL_ORDER else len(UNINSTALL_ORDER)
+
+
+def _deployment_images(kube, ns):
+    out = []
+    for d in kube.list("deployments", ns):
+        for c in (((d.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []:
+            if c.get("image") and c["image"] not in out:
+                out.append(c["image"])
+    return out
+
+
+def uninstall_plan(kube, running=None):
+    """Ce que le retrait de la pile Turtles supprimerait, et ses refus.
+
+    Seuls les `CAPIProvider` étiquetés `harvester-ops.io/managed: "true"`
+    (posés par `provider_manifest`) partent ; jamais le cœur ni Turtles,
+    qui sont à Harvester. Turtles ne refuse aucune suppression (essai 6 de
+    la 2.7.0, même celle du cœur avec un cluster enfant présent) : la
+    console refuse elle-même. `running` : {"run", "plan"} d'un déroulé qui
+    tient ce cluster, ou None. Rend {"providers", "configmaps", "shim",
+    "images", "refusals", "kept", "blocked"} ; les CRD et les namespaces
+    restent toujours."""
+    objs = kube.list(K_CAPIPROVIDER, missing_ok=False)     # sans Turtles : KubeError
+    providers, kept = [], [{"provider": "turtles", "namespace": None, "reason": "turtles"}]
+    for o in objs:
+        st = provider_state(o)
+        ref = {"key": o["metadata"]["name"], "namespace": st["namespace"], "type": st["type"],
+               "name": st["name"], "version": st["version"]}
+        if st["type"] == "core":
+            kept.append({"provider": f"core/{st['name']}", "namespace": st["namespace"], "reason": "core"})
+        elif not st["managed_by_console"]:
+            kept.append({"provider": f"{st['type']}/{st['name']}", "namespace": st["namespace"],
+                         "reason": "not-managed"})
+        else:
+            providers.append(ref)
+    providers.sort(key=_rank)
+    refusals = []
+    clusters = sorted(f"{(c.get('metadata') or {}).get('namespace')}/{c['metadata']['name']}"
+                      for c in kube.list(K_CLUSTER))
+    clusters = [c for c in clusters if c != RANCHER_LOCAL]
+    if clusters:
+        refusals.append(_finding("capi-clusters-present", clusters=", ".join(clusters[:20]),
+                                 count=len(clusters)))
+    if any((p["type"], p["name"]) == CAPHV for p in providers):
+        # revue finale 2.7.0 (m3 i) : un HarvesterCluster resté sans son
+        # Cluster garde le finaliseur de CAPHV ; sans CAPHV, plus personne
+        # ne le lève (les Clusters présents sont déjà refusés plus haut)
+        hcs = sorted(f"{h['metadata'].get('namespace')}/{h['metadata']['name']}"
+                     for h in kube.list(K_HARVESTERCLUSTER))
+        hcs = [h for h in hcs if h not in clusters]
+        if hcs:
+            refusals.append(_finding("capi-harvesterclusters-present", clusters=", ".join(hcs[:20]),
+                                     count=len(hcs)))
+    if any((p["type"], p["name"]) == CAAPH for p in providers):
+        hcps = sorted(f"{h['metadata'].get('namespace')}/{h['metadata']['name']}" for h in kube.list(K_HCP))
+        if hcps:
+            refusals.append(_finding("caaph-services-present", services=", ".join(hcps[:20]), count=len(hcps)))
+    if running:
+        refusals.append(_finding("capi-plan-running", run=running.get("run") or "?",
+                                 plan=running.get("plan") or "?"))
+    namespaces = list(dict.fromkeys(p["namespace"] for p in providers))
+    configmaps = [f"{ns}/{cm['metadata']['name']}" for ns in namespaces
+                  for cm in kube.list("configmaps", ns, selector=f"{MANAGED}=true")]
+    images = []
+    for ns in namespaces:
+        images += [i for i in _deployment_images(kube, ns) if i not in images]
+    removed = {(p["type"], p["name"]) for p in providers}
+    caphv_left = any(st["type"] == CAPHV[0] and st["name"] == CAPHV[1] and (st["type"], st["name"]) not in removed
+                     for st in (provider_state(o) for o in objs))
+    svc = kube.get("services", SHIM_NS, SHIM_NAME)
+    shim = bool(svc) and _labels(svc).get(SHIM_LABEL) == "caphv-ingress-expose" and not caphv_left
+    return {"providers": providers, "configmaps": configmaps, "shim": shim, "images": images,
+            "refusals": refusals, "kept": kept, "blocked": bool(refusals)}
+
+
+def _gone(e):
+    return "NotFound" in str(e) or "not found" in str(e)
+
+
+def uninstall(kube, step, dry_run=False, timeout=600, running=None, now=time.time, sleep=time.sleep):
+    """Retire la pile Turtles posée par la console, dans l'ordre de
+    UNINSTALL_ORDER : chaque `CAPIProvider` supprimé, puis attente de la
+    disparition de ses déploiements (`timeout` secondes par fournisseur ;
+    au-delà RuntimeError, les suivants ne sont pas touchés), puis les
+    ConfigMaps du paquet (étiquette MANAGED) et le service de compatibilité
+    (SHIM_LABEL). Les CRD ne sont JAMAIS supprimées : des objets d'ailleurs
+    peuvent encore les employer. Rend le plan (`uninstall_plan`) ; un plan
+    refusé n'a rien supprimé."""
+    plan = uninstall_plan(kube, running)
+    if plan["blocked"]:
+        step("uninstall", "error", "refused: " + "; ".join(
+            f"{f['code']} ({', '.join(f'{k}={v}' for k, v in f['facts'].items())})" for f in plan["refusals"]))
+        return plan
+    verb = "would delete" if dry_run else "deleted"
+    for k in plan["kept"]:
+        step("uninstall", "running", f"kept: {k['provider']} ({k['reason']})")
+    for p in plan["providers"]:
+        label = f"{p['type']}/{p['name']} ({p['namespace']}/{p['key']})"
+        if dry_run:
+            step("providers", "running", f"{verb} {label}")
+            continue
+        try:
+            kube.delete(K_CAPIPROVIDER, p["namespace"], p["key"])
+        except KubeError as e:
+            if not _gone(e):
+                raise
+        step("providers", "running", f"{verb} {label}, waiting for its deployments")
+        deadline = now() + timeout
+        while True:
+            left = [d["metadata"]["name"] for d in kube.list("deployments", p["namespace"])]
+            obj = kube.get(K_CAPIPROVIDER, p["namespace"], p["key"])
+            if not left and obj is None:
+                break
+            if now() > deadline:
+                raise RuntimeError(f"{label} still has deployment(s) {', '.join(left) or '-'} after "
+                                   f"{timeout} s; the next providers are untouched")
+            sleep(5)
+        step("providers", "running", f"{label} removed")
+    for ref in plan["configmaps"]:
+        ns, _, name = ref.partition("/")
+        if not dry_run:
+            try:
+                kube.delete("configmaps", ns, name)
+            except KubeError as e:
+                if not _gone(e):
+                    raise
+        step("configmaps", "running", f"{verb} configmap {ref}")
+    if plan["shim"]:
+        if not dry_run:
+            try:
+                kube.delete("services", SHIM_NS, SHIM_NAME)
+            except KubeError as e:
+                if not _gone(e):
+                    raise
+        step("compatibility", "running", f"{verb} service {SHIM_NS}/{SHIM_NAME}")
+    step("uninstall", "done", f"{len(plan['providers'])} provider(s) {'to remove' if dry_run else 'removed'}; "
+                              "CRDs and namespaces kept")
     return plan

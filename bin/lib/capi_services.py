@@ -81,7 +81,8 @@ CUSTOM = "custom"
 REGISTRY = "registry"
 SOURCE_KEYS = ("registry", "package", "version", "item")
 KEYS = {"service", "name", "cluster", "repo", "chart", "version", "namespace",
-        "values", "params", "source"}
+        "values", "params", "source", "origin", "by"}
+BY_MAX = 128
 
 
 def catalog():
@@ -122,6 +123,20 @@ def normalize(raw):
         out["service"] = REGISTRY
         out["source"] = {k: source[k] for k in SOURCE_KEYS}
         out["name"] = str(raw.get("name") or source["item"]).strip().lower()
+    # 2.7.0 : chart d'un paquet appliqué par un plan ou par une personne
+    # (étiquettes d'élément et d'origine sur le HelmChartProxy) ; l'origine
+    # est contrôlée par l'outil (capi_cluster.parse_origin)
+    origin = raw.get("origin")
+    if origin is not None:
+        if source is None or not isinstance(origin, dict) or \
+                not all(isinstance(k, str) and isinstance(v, str) for k, v in origin.items()):
+            raise ValueError("origin: an object of names, for a chart from a registry")
+        out["origin"] = dict(origin)
+    by = raw.get("by", "")
+    if not isinstance(by, str) or len(by) > BY_MAX or "\n" in by:
+        raise ValueError(f"by: one line, {BY_MAX} characters at most")
+    if by:
+        out["by"] = by
     return out
 
 
@@ -132,7 +147,8 @@ def finding(code, level, **facts):
 def check(spec, facts):
     """Constats sur une demande : bloquants et avertissements. `facts` :
     clusters (["ns/nom"]), caaph (bool), services (["ns/nom-du-service"]),
-    no_lb (clusters encore sans kube-vip, qui le recevront)."""
+    no_lb (clusters encore sans kube-vip, qui le recevront), service_clusters
+    ({"ns/nom-du-service": ["ns/cluster" qui porte son étiquette]})."""
     out = []
     if not facts.get("caaph"):
         out.append(finding("caaph-missing", "block"))
@@ -146,7 +162,15 @@ def check(spec, facts):
     if spec["cluster"] in set(facts.get("no_lb") or []):
         out.append(finding("lb-added", "ok", cluster=spec["cluster"]))
     ns = spec["cluster"].split("/", 1)[0]
-    if f"{ns}/{spec['name']}" in set(facts.get("services") or []):
+    # 2.7.0 (m-15) : le HelmChartProxy se nomme comme le service dans le
+    # namespace ; un second cluster de ce namespace le reprendrait (ses
+    # identifiants de registre passeraient à l'autre, le Secret du premier
+    # resterait orphelin) : refusé
+    others = [c for c in (facts.get("service_clusters") or {}).get(f"{ns}/{spec['name']}") or []
+              if c != spec["cluster"]]
+    if others:
+        out.append(finding("service-name-taken", "block", name=spec["name"], cluster=others[0]))
+    elif f"{ns}/{spec['name']}" in set(facts.get("services") or []):
         out.append(finding("service-exists", "warn", name=spec["name"]))
     if not URL_RE.match(spec["repo"]):
         out.append(finding("invalid-repo", "block", repo=spec["repo"]))
@@ -265,10 +289,12 @@ def secrets_to_remove(removed, remaining, secrets):
     return sorted(out)
 
 
-def manifest(spec, registry=None):
+def manifest(spec, registry=None, meta=None):
     """HelmChartProxy du service. `registry` (2.6.0) : {"name", "ca": bool}
     pour un chart publié ; identifiants et CA par les Secrets de
-    `registry_secret_names` (`insecureSkipTLSVerify` jamais posé)."""
+    `registry_secret_names` (`insecureSkipTLSVerify` jamais posé). `meta`
+    (2.7.0) : (étiquettes, annotations) d'un élément de paquet
+    (capi_manifests.meta_of), ajoutées à celles du service."""
     ns, _, _ = spec["cluster"].partition("/")
     body = {"clusterSelector": {"matchLabels": {label_of(spec["name"]): "on"}},
             "repoURL": spec["repo"], "chartName": spec["chart"],
@@ -283,10 +309,11 @@ def manifest(spec, registry=None):
         body["credentials"] = {"secret": {"name": names["auth"], "namespace": ns}, "key": "config.json"}
         if registry.get("ca"):
             body["tlsConfig"] = {"caSecret": {"name": names["ca"], "namespace": ns}}
+    labels, annotations = meta or ({}, {})
     return {"apiVersion": HCP_API, "kind": "HelmChartProxy",
             "metadata": {"name": spec["name"], "namespace": ns,
-                         "labels": {MANAGED: "true"},
-                         "annotations": dict({"harvester-ops.io/service": spec["service"]},
+                         "labels": dict(labels, **{MANAGED: "true"}),
+                         "annotations": dict(annotations, **{"harvester-ops.io/service": spec["service"]},
                                              **({"harvester-ops.io/source": "/".join(
                                                  spec["source"][k] for k in SOURCE_KEYS)}
                                                 if spec.get("source") else {}))},

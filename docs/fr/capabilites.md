@@ -2498,11 +2498,32 @@ Voir « Paquets d'artefacts et registres (2.6.0) » plus bas.
 - **Les versions antérieures de Harvester** gardent l'installation
   d'avant : cert-manager, cœur Cluster API et fournisseurs, tout depuis le
   paquet.
-- **L'ancien retrait** (2.5.0) est refusé sur une pile gérée par Turtles, et
-  son bouton est grisé avec la raison : il supprime des namespaces et des
-  images, pas les objets `CAPIProvider`, et casserait ce que Harvester et les
-  plans ont déclaré. Il reste offert pour une pile posée par l'installation
-  d'avant.
+- **Désinstaller une pile Turtles (2.7.0)** : le bouton Désinstaller de
+  l'onglet Installation (admin) ouvre une fenêtre qui liste ce qui part, ce
+  qui reste et les refus, et demande le nom du cluster tapé. Il ne retire
+  que les objets `CAPIProvider` que la console a déclarés (étiquette
+  `harvester-ops.io/managed`), dans l'ordre CAAPH, CAPHV, plan de contrôle
+  RKE2, amorçage RKE2, attend la disparition de leurs déploiements, puis
+  retire les ConfigMaps du paquet et le service de compatibilité. Jamais
+  `core/cluster-api` ni Turtles ; les CRD et les namespaces des
+  fournisseurs restent. Refusé tant qu'un Cluster (autre que
+  `fleet-local/local`), un `HelmChartProxy` (quand CAAPH part), un
+  `HarvesterCluster` resté sans son Cluster (quand CAPHV part : plus rien
+  ne lèverait son finaliseur) ou un déroulé de plan existe
+  (`capi-clusters-present`, `caaph-services-present`,
+  `capi-harvesterclusters-present`, `capi-plan-running`). Images des
+  nœuds : en option, décochée ; `--remove-images` prend les images de tous
+  les Deployments des namespaces des fournisseurs (non vérifié en réel).
+  Le verrou des déroulés est vérifié au départ, pas tenu pendant le
+  retrait. Installer repose la pile. Ligne de commande :
+  `harvester-capi uninstall [--dry-run] [--remove-images]`. L'ancien retrait
+  reste pour une pile posée avant Harvester 1.9.
+- **HarvesterCluster restant (2.7.0)** : un `HarvesterCluster` laissé par un
+  ancien `Cluster` bloque la création d'un cluster du même nom
+  (`harvester-cluster-leftover`) ; Supprimer (ou `harvester-capi delete`) le
+  retire et nomme le finaliseur qui le retient, sans jamais en retirer un.
+  Un orphelin sans propriétaire n'est qu'un avertissement (la création
+  suivante l'adopte).
 
 ### Créer un cluster (1.48.0, fenêtre à menus en 1.53.0)
 
@@ -2732,10 +2753,22 @@ Internet. Référence complète : **[artefacts.md](artefacts.md)**.
   (ci-dessus).
 - **Phase Registre** dans les plans de déploiement, entre Terraform et
   Cluster API : voir section 6.
+- **Artefacts dans les clusters enfants (2.7.0)** : **Appliquer** un élément
+  chart, manifeste ou politique depuis l'onglet Artefacts ; Services liste
+  charts, manifestes et politiques (colonne Sorte, état du binding,
+  Retirer) ; la console retire elle-même les objets d'un manifeste
+  (Cluster API ne le fait jamais), seulement ceux qui portent encore ses
+  étiquettes ; un socle de politiques (quotas, limites, politiques réseau
+  de refus par défaut avec DNS, namespace et ingress ouverts), des rôles
+  par groupe, des comptes d'automatisation et **Émettre un jeton** (600 à
+  86 400 s, montré une fois, jamais rangé). Opérateur plus le droit de lire
+  le Secret du kubeconfig administrateur du cluster enfant. Ligne de
+  commande : `harvester-capi manifest-check | manifest-deploy |
+  manifest-remove | manifest-verify | manifests | policy-render | token`.
 - Ligne de commande : `harvester-artefacts pack | sign | verify | inspect |
   import | list | remove | publish`, `harvester-registry declare | attach |
   check | list | show | forget | deploy | status | delete`.
-- **Pas encore** : la phase Artefacts des plans (2.7), un cluster enfant
+- **Pas encore** : les éléments GitOps (2.8), un cluster enfant
   amorcé entièrement sans Internet, changer les registres d'un cluster
   existant, le ramasse-miettes d'un registre d'amorçage.
 
@@ -2746,7 +2779,9 @@ Internet. Référence complète : **[artefacts.md](artefacts.md)**.
   Harvester.
 - `harvester-capi status | install | cleanup-legacy | inventory | check |
   render | create | delete | state | services | service-check |
-  service-deploy | service-remove`, chacune avec `--cluster` ou
+  service-deploy | service-remove`, 2.7.0 `uninstall`, `manifest-check |
+  manifest-deploy | manifest-remove | manifest-verify | manifests |
+  policy-render | token`, chacune avec `--cluster` ou
   `--kubeconfig` ; `create` et `service-deploy` sortent en 2 quand le
   contrôle préalable bloque. 2.5.0 : `create --identity restricted|console`
   (restreinte par défaut), `create --origin`, `check --many` (une liste
@@ -2956,9 +2991,26 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   Harvester (admin) ou vérifie un registre du client, puis publie les
   paquets d'artefacts choisis ; les clusters enfants du plan désignent ces
   registres. Un registre posé par un plan est repris par ses exécutions
-  suivantes, jamais supprimé par la chaîne. La phase **artefacts** reste
-  grisée, « à venir (2.7) ». Détails dans [bare-metal.md](bare-metal.md)
-  et [artefacts.md](artefacts.md).
+  suivantes, jamais supprimé par la chaîne. Détails dans
+  [bare-metal.md](bare-metal.md) et [artefacts.md](artefacts.md).
+
+- **Phase Artefacts dans les plans (2.7.0)** : la dernière phase applique
+  des éléments de paquet aux clusters enfants du plan ou à des clusters
+  existants : un socle de politiques (décoché par défaut), des rôles par
+  groupe et des comptes d'automatisation, puis manifestes et politiques,
+  puis charts. Les éléments d'un cluster en échec sont sautés, les autres
+  vont au bout. Détails dans [bare-metal.md](bare-metal.md).
+
+- **Défaire un déploiement (2.7.0)** : Historique > Défaire (admin) retire,
+  dans l'ordre inverse, ce qu'une exécution et ses reprises ont créé :
+  artefacts, clusters enfants, registre d'amorçage posé par le plan (décoché
+  par défaut, données gardées sauf nom tapé), contenu Terraform ; jamais
+  Harvester ni la pile Cluster API. Plan de destruction avant, nom du
+  cluster tapé, action suivie et reprenable `deploy-undo:<cluster>`. Seul
+  ce qui porte encore la marque d'exécution de la chaîne est retiré ; un
+  objet recréé depuis est laissé et nommé. Un cluster ou un registre qui
+  n'a pas pu partir garde le contenu Terraform. Ligne de commande :
+  `harvester-plans undo`.
 
 - **Une machine qui porte déjà un système est gardée (2.2.0)** : la
   fenêtre d'installation liste ce que montre le BMC (entrées de démarrage
@@ -3089,7 +3141,12 @@ un workspace Terraform.
   déclarations de cluster, bare-metal, magasin d'ISO, provider Terraform et
   déclarations Terraform qui contiennent du code libre (2.3.1) et celles qui
   créent des réseaux de VM, des classes de stockage ou des pools d'adresses
-  (2.4.0). Les plans de déploiement et leurs modèles s'écrivent par un
+  (2.4.0), le Défaire d'un déploiement et la désinstallation de la pile
+  Cluster API (2.7.0). Appliquer un artefact à un cluster enfant, ses
+  politiques et ses comptes, et émettre un jeton demandent operator **et**
+  le droit de lire le Secret du kubeconfig administrateur de ce cluster
+  enfant, contrôlé par le serveur avec l'identité de la personne (2.7.0).
+  Les plans de déploiement et leurs modèles s'écrivent par un
   admin ; un opérateur applique un plan à un cluster existant, sauf s'il
   crée ces objets réservés à l'admin.
 - **Appliqué au centre, en refus par défaut.** Toute requête qui modifie

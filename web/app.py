@@ -1081,6 +1081,8 @@ ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
                        # v1.43.0 : une maintenance déplace ou arrête des VMs.
                        "/maintenance")
 
+DEPLOY_UNDO_SUFFIXES = ("/undo", "/undo/plan")
+
 _roles_cache = {"mtime": None, "data": None}
 
 
@@ -1251,6 +1253,10 @@ def required_role_for(path, method):
         return "operator"
     if path.startswith(("/api/registries", "/api/artefacts")):
         return _artefacts_required_role(path)
+    # 2.7.0 : défaire un déroulé et son plan de destruction (pas le `/undo`
+    # d'une action de dossier, qui reste à l'opérateur)
+    if path.startswith("/api/deploy/") and path.endswith(DEPLOY_UNDO_SUFFIXES):
+        return "admin"
     if path.startswith(ADMIN_ONLY_PREFIXES) or path.endswith(ADMIN_ONLY_SUFFIXES):
         return "admin"
     return "operator"
@@ -13534,6 +13540,8 @@ def _action_request_cancel(run):
         # ses boucles, mais rien ne le posait : le bouton du dock ne faisait
         # rien. Elle s'arrête d'elle-même et nettoie ce qu'elle a commencé.
         run._cancel = True
+        # revue finale 2.7.0 (m-c) : la réponse dit que l'arrêt est demandé
+        run.cancel_requested = True
 
 
 def _kill_after_grace(run, wait=None):
@@ -17595,7 +17603,7 @@ _UNSET = object()
 
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
                 capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
-                setup=None, parent=None, cluster_user=_UNSET):
+                setup=None, parent=None, cluster_user=_UNSET, sink=None):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
@@ -17613,7 +17621,8 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     même plan : un seul passe). 2.5.0 : `parent`, l'action parente (chaîne
     d'un plan), posée avant que l'action soit visible ; `cluster_user`
     passé par un appelant hors requête (identité figée au déclenchement),
-    sinon lu dans la requête."""
+    sinon lu dans la requête. 2.7.0 : `sink(objet)`, l'objet JSON de stdout
+    rendu en mémoire à l'appelant et jamais gardé (jeton, voir le relais)."""
     wd = _capi_work_dir()
     spec_file = None
     if spec is not None:
@@ -17649,10 +17658,9 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
 
     def work():
         try:
-            if summarize is None:          # signature d'avant la 1.99.0 (outils et tests)
-                _vm_transfer_runner(run, cmd, capture=capture)
-            else:
-                _vm_transfer_runner(run, cmd, capture=capture, summarize=summarize)
+            # signature d'avant la 1.99.0 (outils et tests) quand rien n'est donné
+            extra = {k: v for k, v in (("summarize", summarize), ("sink", sink)) if v is not None}
+            _vm_transfer_runner(run, cmd, capture=capture, **extra)
         finally:
             if spec_file:
                 Path(spec_file).unlink(missing_ok=True)
@@ -21715,6 +21723,45 @@ import capi_services as _sv  # noqa: E402
 _CAPI_SERVICES_CACHE = {}      # (cluster, identité) -> (horodatage, réponse)
 
 
+CHILD_ADMIN_REQUIRED = "child-admin-required"
+
+
+def _child_admin_allowed(kc, namespace, child):
+    """2.7.0 (point 205, Contraintes : rôles) : qui lit le Secret
+    `<cluster>-kubeconfig` du namespace du cluster enfant en est
+    administrateur. (True | False | None, raison) par `kubectl auth can-i`
+    avec le kubeconfig de la personne (SelfSubjectAccessReview, usurpation
+    et Rancher compris) ; None : la question n'a pas eu de réponse, jamais
+    prise pour un oui. Seul endroit qui pose la question : gestes
+    d'artefacts, jeton, phase Artefacts d'un plan."""
+    if not (isinstance(namespace, str) and _K8S_NAME_RE.match(namespace)
+            and isinstance(child, str) and _K8S_NAME_RE.match(child)):
+        return False, "invalid name"
+    try:
+        r = _kubectl_run(["kubectl", "--kubeconfig", kc, "auth", "can-i", "get",
+                          f"secrets/{child}-kubeconfig", "-n", namespace],
+                         capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired as e:
+        return None, _safe_proc_error(e)
+    out = (r.stdout or "").strip().lower()
+    if out.startswith("yes"):
+        return True, ""
+    if out.startswith("no"):
+        return False, ""
+    return None, ((r.stderr or "").strip().replace(kc, "<kubeconfig>") or f"exit code {r.returncode}")[:300]
+
+
+def _child_admin_refusal(kc, namespace, child):
+    """Réponse de refus (403 / 502), ou None si la personne a le droit."""
+    ok, why = _child_admin_allowed(kc, namespace, child)
+    if ok:
+        return None
+    if ok is None:
+        return jsonify({"error": f"the right on {namespace}/{child} could not be checked: {why}"}), 502
+    return jsonify({"error": f"reading the Secret {child}-kubeconfig in {namespace} is needed (administrator "
+                             "of the child cluster)", "code": CHILD_ADMIN_REQUIRED}), 403
+
+
 def _capi_service_body():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -21730,33 +21777,73 @@ def _capi_service_body():
 def api_capi_services(cluster):
     """Catalogue, services déployés et leur état sur chaque cluster, et si
     CAAPH est installé. Lecture seule, 5 s de cache par identité."""
-    key = (cluster, (current_cluster_identity() or {}).get("user"), current_user())
-    hit = _CAPI_SERVICES_CACHE.get(key)
-    if hit and request.args.get("fresh") != "1" and time.time() - hit[0] < 5:
-        return jsonify(dict(hit[1], registry_charts=_capi_registry_charts(cluster)))
-    kc = _kubectl_for_cluster(cluster)
-    if kc and _cluster_reachable(kc) is False:
+    out, err = _capi_cached_read(cluster, "services")
+    if err:
+        return err
+    if out is None:
         return jsonify({"unreachable": True, "caaph": False, "clusters": [],
                         "catalog": _sv.catalog(), "services": []})
-    cmd, err = _capi_base(cluster, "services")
+    return jsonify(dict(out, registry_charts=_capi_registry_charts(cluster)))
+
+
+def _capi_cached_read(cluster, sub):
+    """Lecture `<sub> --json` de l'outil, 5 s de cache par identité (vidé par
+    chaque geste). (None, None) quand le cluster ne répond pas."""
+    key = (cluster, (current_cluster_identity() or {}).get("user"), current_user(), sub)
+    hit = _CAPI_SERVICES_CACHE.get(key)
+    if hit and request.args.get("fresh") != "1" and time.time() - hit[0] < 5:
+        return hit[1], None
+    kc = _kubectl_for_cluster(cluster)
+    if kc and _cluster_reachable(kc) is False:
+        return None, None
+    cmd, err = _capi_base(cluster, sub)
     if err:
-        return err
+        return None, err
     res, err = _capi_run_json(cmd + ["--json"], timeout=60)
     if err:
-        return err
-    out = res[0]
-    _CAPI_SERVICES_CACHE[key] = (time.time(), out)
-    return jsonify(dict(out, registry_charts=_capi_registry_charts(cluster)))
+        return None, err
+    _CAPI_SERVICES_CACHE[key] = (time.time(), res[0])
+    return res[0], None
+
+
+_CAPI_REGISTRY_CHARTS_CACHE = {}
+
+
+def _capi_registry_charts_key(state):
+    """Date de modification des déclarations de registres et des paquets
+    rangés : la liste des charts ne change qu'avec elles."""
+    import artefacts as _artm
+    import registries as _rgm
+    key = []
+    for d in (Path(state) / _rgm.DIR, _artm.packages_dir(state)):
+        try:
+            key.append(d.stat().st_mtime_ns)
+            key += sorted((f.name, f.stat().st_mtime_ns) for f in d.iterdir())
+        except OSError:
+            key.append(None)
+    return tuple(key)
 
 
 def _capi_registry_charts(cluster):
     """2.6.0 (tâche 10) : charts publiés dans les registres rattachés à ce
     cluster Harvester qui servent des charts, lus dans l'état (paquets
-    rangés) : de quoi remplir « Depuis un registre »."""
+    rangés) : de quoi remplir « Depuis un registre ». 2.7.0 (m-16) : gardé
+    par date de modification de l'état ; le relevé des Services (toutes les
+    5 s) ne rouvre plus chaque chart."""
+    state = _bm_profiles_state()
+    key = _capi_registry_charts_key(state)
+    hit = _CAPI_REGISTRY_CHARTS_CACHE.get((state, cluster))
+    if hit and hit[0] == key:
+        return [dict(x) for x in hit[1]]
+    out = _capi_registry_charts_read(state, cluster)
+    _CAPI_REGISTRY_CHARTS_CACHE[(state, cluster)] = (key, out)
+    return [dict(x) for x in out]
+
+
+def _capi_registry_charts_read(state, cluster):
     import artefacts as _artm
     import oci_layout as _olm
     import registries as _rgm
-    state = _bm_profiles_state()
     out = []
     for summary in _rgm.list_decls(state):
         d = _rgm.load(state, summary["name"])
@@ -21828,6 +21915,306 @@ def api_capi_service_remove(cluster, namespace, name):
     if err:
         return err
     return jsonify({"action_id": run.id, "name": name}), 202
+
+
+# ---------------------------------------------------------------------------
+# 2.7.0 (tâche 6) : gestes d'artefacts hors plan et jetons d'automatisation
+#
+# Appliquer un élément d'un paquet importé à un cluster enfant (chart par
+# CAAPH, manifeste ou politique par ClusterResourceSet), le retirer, poser
+# le socle de politiques, émettre un jeton. Chaque geste : opérateur ET
+# administrateur du cluster enfant (_child_admin_refusal), action suivie
+# créée avant tout geste, outil `harvester-capi` (parité CLI).
+# ---------------------------------------------------------------------------
+ARTEFACT_KEYS = {"cluster", "package", "version", "item", "registry", "values"}
+ARTEFACT_REMOVE_KINDS = ("chart", "manifest", "policy", "policies")
+TOKEN_WAIT = 150               # s : l'outil lit le Secret puis demande le jeton
+
+
+def _artefact_error(msg, status, code=None):
+    return jsonify(dict({"error": msg}, **({"code": code} if code else {}))), status
+
+
+def _child_ref(text, field="cluster"):
+    """(namespace, nom) d'un `ns/nom` RFC 1123, ou une réponse 400."""
+    bits = text.split("/") if isinstance(text, str) else []
+    if len(bits) != 2 or not all(_K8S_NAME_RE.match(b) for b in bits):
+        return None, _artefact_error(f"{field}: namespace/name expected", 400)
+    return tuple(bits), None
+
+
+def _capi_artefact_request(cluster, check=False):
+    """Lit la demande d'application d'un élément. La sorte vient du paquet
+    importé, jamais de la demande. Rend (demande, None) ou (None, réponse) :
+    {ns, child, kind, sub, spec, label}."""
+    import artefacts as _artm
+    import capi_manifests as _mf
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return None, _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - ARTEFACT_KEYS):
+        return None, _artefact_error(f"{k}: unknown key", 400)
+    ref, err = _child_ref(body.get("cluster"))
+    if err:
+        return None, err
+    for k, rx in (("package", _artm.NAME_RE), ("version", _artm.VERSION_RE), ("item", _artm.ITEM_RE)):
+        if not isinstance(body.get(k), str) or not rx.match(body[k]):
+            return None, _artefact_error(f"{k}: required, a valid name", 400)
+    package, version, item = body["package"], body["version"], body["item"]
+    try:
+        pkg = _artm.load_package(_bm_profiles_state(), package, version)
+    except _artm.ArtefactError:
+        return None, _artefact_error(f"no package {package}-{version}", 404, "artefact-package-missing")
+    it = next((i for i in pkg["index"].get("items") or [] if i.get("name") == item), None)
+    if it is None:
+        return None, _artefact_error(f"no item {item} in {package}-{version}", 404, "artefact-item-unknown")
+    kind = it.get("kind")
+    if kind == "images":
+        return None, _artefact_error("images are published by the Registry phase", 400, "artefact-kind-images")
+    if kind in _artm.LATER_KINDS:
+        return None, _artefact_error(f"{kind}: coming in 2.8", 400, "artefact-kind-later")
+    if not _mf.item_name_ok(item):
+        return None, _artefact_error(f"{item}: 42 characters at most to be applied", 400, "artefact-name-too-long")
+    ns, child = ref
+    who = current_user() or ""
+    if kind == "chart":
+        registry = body.get("registry")
+        if not isinstance(registry, str) or not _K8S_NAME_RE.match(registry):
+            return None, _artefact_error("registry: required for a chart", 400)
+        values = body.get("values")
+        if isinstance(values, str):
+            try:
+                values = yaml.safe_load(values) if values.strip() else None
+            except yaml.YAMLError as e:
+                return None, _artefact_error(f"values: not valid YAML: {str(e)[:160]}", 400)
+        if values is not None and not isinstance(values, dict):
+            return None, _artefact_error("values: a mapping", 400)
+        if not any((c["registry"], c["package"], c["version"], c["item"]) == (registry, package, version, item)
+                   for c in _capi_registry_charts(cluster)):
+            return None, _artefact_error(f"{package}-{version} ({item}) is not published in {registry}, or the "
+                                         f"registry is not attached to {cluster}", 409, "artefact-not-published")
+        spec = {"cluster": f"{ns}/{child}", "source": {"registry": registry, "package": package,
+                                                       "version": version, "item": item}, "by": who}
+        if values:
+            spec["values"] = yaml.safe_dump(values, sort_keys=False)
+        try:
+            spec = _sv.normalize(spec)
+        except ValueError as e:
+            return None, _artefact_error(str(e), 400)
+        sub, label = ("service-check" if check else "service-deploy"), f"capi-service-deploy:{ns}/{child}:{item}"
+    else:
+        for k in ("registry", "values"):
+            if body.get(k) not in (None, "", {}):
+                return None, _artefact_error(f"{k}: only for a chart", 400)
+        spec = {"cluster": f"{ns}/{child}", "package": package, "version": version, "item": item, "by": who}
+        sub, label = ("manifest-check" if check else "manifest-deploy"), f"capi-manifest-deploy:{ns}/{child}:{item}"
+    return {"ns": ns, "child": child, "kind": kind, "sub": sub, "spec": spec, "label": label}, None
+
+
+def _capi_child_base(cluster, sub, ns, child):
+    """Commande de l'outil après le contrôle du droit sur le cluster enfant
+    (403 child-admin-required, 502 sans réponse) : rien n'est lancé avant."""
+    cmd, err = _capi_base(cluster, sub)
+    if err:
+        return None, err
+    refusal = _child_admin_refusal(_kubectl_for_cluster(cluster), ns, child)
+    return (None, refusal) if refusal else (cmd, None)
+
+
+@app.route("/api/capi/<cluster>/artefact-check", methods=["POST"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_capi_artefact_check(cluster):
+    """Constats de la fenêtre Appliquer avant son bouton : contrôle de
+    l'outil (lecture seule) et droit sur le cluster enfant."""
+    req, err = _capi_artefact_request(cluster, check=True)
+    if err:
+        return err
+    cmd, err = _capi_base(cluster, req["sub"])
+    if err:
+        return err
+    res, err = _capi_run_json(cmd + ["--spec", "-"], spec=req["spec"], timeout=60)
+    if err:
+        return err
+    out, rc = res
+    found = list(out.get("findings") or [])
+    ok, why = _child_admin_allowed(_kubectl_for_cluster(cluster), req["ns"], req["child"])
+    # l'outil peut déjà le dire (contrôle ouvert avec l'identité de la personne)
+    if not ok and not any(f.get("code") == CHILD_ADMIN_REQUIRED for f in found):
+        found.append({"code": CHILD_ADMIN_REQUIRED if ok is False else "child-admin-unknown",
+                      "level": "block", "facts": {"cluster": f"{req['ns']}/{req['child']}", "message": why}})
+    blocked = rc == 2 or bool(out.get("blocked")) or not ok
+    return jsonify(dict(out, findings=found, blocked=blocked, kind=req["kind"]))
+
+
+@app.route("/api/capi/<cluster>/artefact", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_artefact_apply(cluster):
+    """Applique un élément de paquet à un cluster enfant : action suivie."""
+    req, err = _capi_artefact_request(cluster)
+    if err:
+        return err
+    cmd, err = _capi_child_base(cluster, req["sub"], req["ns"], req["child"])
+    if err:
+        return err
+    run, err = _cli_action(cluster, req["label"], cmd, "harvester-capi", spec=req["spec"],
+                           after=lambda: _CAPI_SERVICES_CACHE.clear())
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "kind": req["kind"], "item": req["spec"].get("item") or
+                    req["spec"]["source"]["item"], "cluster": f"{req['ns']}/{req['child']}"}), 202
+
+
+@app.route("/api/capi/<cluster>/artefact/<namespace>/<name>/<item>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_artefact_remove(cluster, namespace, name, item):
+    """Retire un élément appliqué au cluster enfant `<namespace>/<name>` ;
+    `?kind=` dit lequel (chart : HelmChartProxy ; manifeste, politique ou
+    socle : ClusterResourceSet et objets étiquetés)."""
+    import capi_manifests as _mf
+    kind = request.args.get("kind") or ""
+    if kind not in ARTEFACT_REMOVE_KINDS:
+        return _artefact_error("kind: chart, manifest, policy or policies", 400)
+    if not all(_K8S_NAME_RE.match(x) for x in (namespace, name)):
+        return _artefact_error("invalid name", 400)
+    if not _mf.item_name_ok(item):
+        return _artefact_error(f"{item}: not an applicable item name", 400, "artefact-name-too-long")
+    if kind == "chart":
+        sub, args, label = "service-remove", ["--name", f"{namespace}/{item}"], f"capi-service-remove:{namespace}/{item}"
+    else:
+        sub, args = "manifest-remove", ["--name", f"{namespace}/{name}/{item}"]
+        label = f"capi-manifest-remove:{namespace}/{name}/{item}"
+    cmd, err = _capi_child_base(cluster, sub, namespace, name)
+    if err:
+        return err
+    run, err = _cli_action(cluster, label, cmd + args, "harvester-capi",
+                           after=lambda: _CAPI_SERVICES_CACHE.clear())
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "kind": kind, "item": item}), 202
+
+
+@app.route("/api/capi/<cluster>/policies", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_policies(cluster):
+    """Socle de politiques, rôles par groupe et comptes d'automatisation
+    d'un cluster enfant (élément hops-policies) : action suivie. Le socle
+    reste décoché tant qu'il n'est pas demandé (décision 127)."""
+    import child_policies as _cp
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - {"cluster", "policies"}):
+        return _artefact_error(f"{k}: unknown key", 400)
+    ref, err = _child_ref(body.get("cluster"))
+    if err:
+        return err
+    try:
+        _cp.normalize(body.get("policies"))
+    except ValueError as e:
+        return _artefact_error(str(e), 400)
+    ns, child = ref
+    cmd, err = _capi_child_base(cluster, "manifest-deploy", ns, child)
+    if err:
+        return err
+    spec = {"cluster": f"{ns}/{child}", "policies": body.get("policies") or {}, "by": current_user() or ""}
+    run, err = _cli_action(cluster, f"capi-policies:{ns}/{child}", cmd, "harvester-capi", spec=spec,
+                           after=lambda: _CAPI_SERVICES_CACHE.clear())
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{ns}/{child}"}), 202
+
+
+@app.route("/api/capi/<cluster>/token", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_capi_token(cluster):
+    """Jeton `TokenRequest` d'un compte d'automatisation (point 208). Rendu
+    une fois dans cette réponse : l'outil l'écrit sur sa sortie standard,
+    lue en mémoire par le relais (`sink`) et jamais rangée ; l'action
+    `capi-token:` garde l'étape, sans la valeur."""
+    import child_access as _ca
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - {"cluster", "account", "seconds"}):
+        return _artefact_error(f"{k}: unknown key", 400)
+    ref, err = _child_ref(body.get("cluster"))
+    if err:
+        return err
+    acc, err = _child_ref(body.get("account"), "account")
+    if err:
+        return err
+    try:
+        seconds = _ca.check_seconds(body.get("seconds", _ca.TOKEN_DEFAULT))
+    except ValueError as e:
+        return _artefact_error(str(e), 400)
+    ns, child = ref
+    cmd, err = _capi_child_base(cluster, "token", ns, child)
+    if err:
+        return err
+    box, done = {}, threading.Event()
+
+    def keep(obj):
+        if isinstance(obj.get("token"), str) and obj["token"]:
+            box["token"], box["expires_at"] = obj["token"], obj.get("expires_at")
+    args = ["--name", f"{ns}/{child}", "--account", "/".join(acc), "--seconds", str(seconds),
+            "--by", current_user() or ""]
+    run, err = _cli_action(cluster, f"capi-token:{ns}/{child}", cmd + args, "harvester-capi",
+                           sink=keep, after=done.set)
+    if err:
+        return err
+    if not done.wait(TOKEN_WAIT):
+        return jsonify({"error": "the token was not issued in time", "action_id": run.id}), 504
+    if "token" not in box:
+        return jsonify({"error": run.error_summary or "no token issued", "action_id": run.id}), 502
+    resp = jsonify({"token": box.pop("token"), "expires_at": box.pop("expires_at", None),
+                    "seconds": seconds, "action_id": run.id})
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@app.route("/api/capi/<cluster>/artefacts/applied")
+@requires_auth
+def api_capi_artefacts_applied(cluster):
+    """Ce qui est appliqué aux clusters enfants : charts de paquets (avec
+    leur élément), manifestes, politiques et socle (état du binding), et
+    les comptes d'automatisation déclarés par la console. Lecture seule."""
+    import artefacts as _artm
+    import child_policies as _cp
+    svc, err = _capi_cached_read(cluster, "services")
+    if err:
+        return err
+    if svc is None:
+        return jsonify({"unreachable": True, "charts": [], "manifests": [], "accounts": []})
+    mans, err = _capi_cached_read(cluster, "manifests")
+    if err:
+        return err
+    kinds = {}
+
+    def kind_of(m):
+        if m.get("item") == _cp.ITEM:
+            return "policies"
+        key = (m.get("package"), m.get("version"))
+        if key not in kinds:
+            try:
+                idx = _artm.load_package(_bm_profiles_state(), *key)["index"]
+                kinds[key] = {i.get("name"): i.get("kind") for i in idx.get("items") or []}
+            except (_artm.ArtefactError, TypeError):
+                kinds[key] = {}
+        return kinds[key].get(m.get("item")) or "manifest"
+    manifests, accounts = [], []
+    for m in mans or []:
+        manifests.append(dict({k: v for k, v in m.items() if k != "accounts"}, kind=kind_of(m)))
+        for a in m.get("accounts") or []:
+            accounts.append(dict(a, cluster=f"{m.get('namespace')}/{m.get('cluster')}"))
+    charts = [dict(s, kind="chart") for s in svc.get("services") or [] if s.get("artefact")]
+    return jsonify({"charts": charts, "manifests": manifests, "accounts": accounts,
+                    "clusters": svc.get("clusters") or []})
 
 
 @app.route("/api/capi/<cluster>/cluster-create", methods=["POST"])
@@ -22193,8 +22580,54 @@ def _capi_uninstall_runner(run, cluster, kc, nodes_ips, ssh_user, ssh_key,
     run.close()
 
 
+def _capi_uninstall_turtles(cluster, data):
+    """2.7.0 (décision 215) : retrait de la pile Turtles posée par la
+    console, par `harvester-capi uninstall` en action suivie. Rôle admin
+    (ADMIN_ONLY_SUFFIXES), nom du cluster retapé ; refusé pendant un
+    déroulé de plan sur ce cluster (l'outil relit aussi le verrou)."""
+    if data.get("confirm") != cluster:
+        return jsonify({"error": "type the cluster name to uninstall its Cluster API providers",
+                        "code": "confirm-name"}), 400
+    busy = _deploy_busy(cluster)
+    holder = {"run": busy.id, "plan": (busy.result or {}).get("plan")} if busy else _deploy_lock_holder(cluster)
+    if holder:
+        return jsonify({"error": "a plan deployment holds this cluster", "code": "capi-plan-running",
+                        "run": holder.get("run"), "plan": holder.get("plan")}), 409
+    cmd, err = _capi_base(cluster, "uninstall")
+    if err:
+        return err
+    dry = bool(data.get("dry_run"))
+    images = bool(data.get("remove_images"))
+    cmd += (["--dry-run"] if dry else []) + (["--cluster", cluster, "--remove-images"] if images else [])
+    run, err = _cli_action(cluster, f"capi-uninstall:{cluster}", cmd, "harvester-capi", dry_run=dry,
+                           after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None),
+                           setup=lambda r: setattr(r, "required_role", "admin"))
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "mode": "turtles", "dry_run": dry, "remove_images": images}), 201
+
+
+@app.route("/api/capi/<cluster>/uninstall/plan")
+@requires_auth
+def api_capi_uninstall_plan(cluster):
+    """Ce que retirerait la désinstallation de la pile Turtles (fenêtre de
+    confirmation) : fournisseurs, refus, ce qui reste. Lecture seule
+    (`uninstall --dry-run --json`), réservée à l'administrateur comme le
+    geste."""
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return jsonify({"error": "forbidden", "required": "admin"}), 403
+    cmd, err = _capi_base(cluster, "uninstall")
+    if err:
+        return err
+    got, err = _capi_run_json(cmd + ["--dry-run", "--json"], timeout=120)
+    if err:
+        return err
+    return jsonify(got[0])
+
+
 @app.route("/api/capi/<cluster>/uninstall", methods=["POST"])
 @requires_auth
+@_rate_limit("6 per minute")
 def api_capi_uninstall(cluster):
     """Uninstall the CAPI/CAPHV stack from the target cluster + clean the
     container images off the Harvester nodes. Reverse of `/install`.
@@ -22210,14 +22643,15 @@ def api_capi_uninstall(cluster):
         return jsonify({"error": "kubeconfig missing"}), 400
     # Revue 2.5.0 (D2) : ce retrait d'avant Turtles supprime des namespaces
     # et des images, pas les objets CAPIProvider ; sur une pile Turtles il
-    # casserait ce que Harvester et les plans ont déclaré. Refusé, le bouton
-    # est grisé avec la raison (réécriture prévue).
+    # casserait ce que Harvester et les plans ont déclaré : celle-ci passe
+    # par `harvester-capi uninstall` (2.7.0, _capi_uninstall_turtles).
     stack_cmd, err = _capi_base(cluster, "status")
     if not err:
         got, _err = _capi_run_json(stack_cmd + ["--json"], timeout=90)
         if got and (got[0] or {}).get("turtles"):
-            return jsonify({"error": "this stack is managed by Rancher Turtles: the legacy uninstall "
-                                     "would break it", "code": "turtles-stack"}), 409
+            # 2.7.0 : la pile Turtles a son propre retrait (l'ancien
+            # supprimerait des namespaces que Harvester et les plans emploient)
+            return _capi_uninstall_turtles(cluster, request.get_json(force=True, silent=True) or {})
     data = request.get_json(force=True, silent=True) or {}
     dry_run = bool(data.get("dry_run", False))
     keep_cm = bool(data.get("keep_cert_manager", True))
@@ -22585,14 +23019,17 @@ def _transfer_busy(clusters, label, prefix=None):
 CLI_OUTPUT_MAX = 1024 * 1024
 
 
-def _vm_transfer_runner(run, cmd, capture=False, summarize=None):
+def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
     """Relaie les étapes du script, comme pour l'installateur du provider.
     `capture` : l'objet JSON de stdout va dans `run.result["output"]`
     (fichier temporaire anonyme, pas de tube qui se remplirait).
     `summarize(run, rc, sortie, dernière erreur)` (v1.99.0) : rend (statut,
     résumé) pour un outil qui dit lui-même ce que veut dire sa sortie (la
     réplication distingue annulé et défait, interrompu à reprendre), ou None
-    pour les textes habituels."""
+    pour les textes habituels.
+    2.7.0 : `sink(objet)` reçoit l'objet JSON de stdout lu EN MÉMOIRE (tube
+    vidé par un fil), jamais rangé dans l'action ni sur le disque : c'est le
+    chemin d'un jeton d'automatisation, rendu à la seule requête."""
     def step(sid, status, msg=""):
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
@@ -22611,10 +23048,16 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None):
     try:
         # dans le try : une erreur ici (disque plein) laissait l'action
         # « running » pour toujours
-        out_file = tempfile.TemporaryFile() if capture else None
-        proc = subprocess.Popen(cmd, stdout=out_file or subprocess.DEVNULL,
+        out_file = tempfile.TemporaryFile() if capture and sink is None else None
+        proc = subprocess.Popen(cmd, stdout=out_file or (subprocess.PIPE if sink is not None else subprocess.DEVNULL),
                                 stderr=subprocess.PIPE, text=True)
         run.proc = proc          # annulable depuis le dock : le script défait tout
+        got = []
+        reader = None
+        if sink is not None:
+            # lu à part : un tube plein bloquerait l'outil pendant qu'on lit stderr
+            reader = threading.Thread(target=lambda: got.append(proc.stdout.read()), daemon=True)
+            reader.start()
         if run.cancel_requested:
             # v1.99.0 : annulation demandée avant que le processus existe
             proc.terminate()
@@ -22639,6 +23082,16 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None):
                     run.emit_progress(snap)
         rc = proc.wait()
         run.exit_code = rc
+        if reader is not None:
+            reader.join(10)
+            try:
+                mem = json.loads(got[0]) if got else None
+            except ValueError:
+                mem = None
+            got.clear()
+            if isinstance(mem, dict):
+                sink(mem)
+            mem = None
         if out_file is not None:
             out_file.seek(0)
             try:
@@ -28581,24 +29034,41 @@ def api_tf_declaration_delete(decl_id):
     d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
     if d is None:
         return jsonify({"error": "declaration not found"}), 404
+    removed, why = _tf_decl_remove(decl_id)
+    if removed:
+        return jsonify({"deleted": decl_id})
+    if why == "running":
+        return jsonify({"error": "this declaration is running", "code": "running",
+                        "hint": "wait for the current plan, apply or destroy to end"}), 409
+    if isinstance(why, list):
+        return jsonify({"error": "declaration still has deployed resources",
+                        "code": "deployed", "deployed": why}), 409
+    return jsonify({"error": "declaration not found"}), 404
+
+
+def _tf_decl_remove(decl_id):
+    """Supprime une déclaration et son espace, refusé tant que son état
+    porte des ressources (route et Défaire, 2.7.0). (True, None) ou (False,
+    "running" | "not-found" | [adresses déployées])."""
+    d = TF_DECLS.get(decl_id)
+    if d is None:
+        return False, "not-found"
     with TF_DECL_RUNNING_LOCK:
         fd = None if _tf_decl_busy(decl_id) or decl_id in TF_DECL_FDS else _tf_decl_flock(decl_id, "delete")
         if fd is None:
-            return jsonify({"error": "this declaration is running", "code": "running",
-                            "hint": "wait for the current plan, apply or destroy to end"}), 409
+            return False, "running"
     try:
         ws = _tf_decl_ws(d, create=False)
         deployed = _tfst.addresses(ws) if ws.exists() else []
         if deployed:
-            return jsonify({"error": "declaration still has deployed resources",
-                            "code": "deployed", "deployed": deployed}), 409
+            return False, deployed
         TF_DECLS.delete(decl_id)
         if ws.exists():
             import shutil as _shutil
             _shutil.rmtree(ws, ignore_errors=True)
     finally:
         _flock_release(fd)
-    return jsonify({"deleted": decl_id})
+    return True, None
 
 
 @app.route("/api/terraform/<cluster>/apply_declaration", methods=["POST"])
@@ -32342,7 +32812,7 @@ TF_TEMPLATE_FIELD_TYPES = {
 }
 # Constats : niveau de chacun (bloquant = rien ne se lance)
 DEPLOY_FINDING_LEVELS = {
-    "plan-invalid": "blocking", "phase-not-available": "blocking", "template-missing": "blocking",
+    "plan-invalid": "blocking", "template-missing": "blocking",
     "var-missing": "blocking", "var-invalid": "blocking", "decl-name-taken": "blocking",
     "tf-missing": "blocking", "cluster-unreachable": "blocking",
     "admin-kind": "blocking", "forbidden-construct": "blocking",
@@ -32362,6 +32832,10 @@ DEPLOY_FINDING_LEVELS = {
     "package-untrusted-strict": "blocking", "registry-var-missing": "blocking",
     "registry-exists": "info", "registry-later": "info", "publish-later": "info",
     "cluster-registry-later": "info",
+    # 2.7.0 : phase Artefacts
+    "artefact-invalid": "blocking", "artefact-not-published": "blocking", "artefact-taken": "blocking",
+    "artefact-check-failed": "blocking", "artefact-var-missing": "blocking", "caaph-missing": "blocking",
+    "child-admin-required": "blocking", "artefact-later": "info",
 }
 # Constats de `harvester-capi check --many` repris dans la phase clusters :
 # niveau de l'outil -> niveau d'un lancement
@@ -32494,8 +32968,8 @@ def _deploy_mark_orphans():
     try:
         conn = sqlite3.connect(str(ACTIONS_DB), timeout=10)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT id, action, result FROM actions WHERE action LIKE 'deploy:%' "
-                            "AND status IN ('starting', 'running')").fetchall()
+        rows = conn.execute("SELECT id, action, result FROM actions WHERE (action LIKE 'deploy:%' "
+                            "OR action LIKE 'deploy-undo:%') AND status IN ('starting', 'running')").fetchall()
         conn.close()
     except sqlite3.Error as e:
         log_actions.warning("deploy orphans: %s", e)
@@ -32503,7 +32977,7 @@ def _deploy_mark_orphans():
     marked = []
     now = time.time()
     for row in rows:
-        cluster = row["action"][len(DEPLOY_PREFIX):]
+        cluster = row["action"].partition(":")[2]
         if (_deploy_lock_holder(cluster) or {}).get("run") == row["id"]:
             continue
         try:
@@ -32582,8 +33056,7 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
         except _dpl.ProfileError as e:
             why = e.errors
         for where, reason in why:
-            code = "phase-not-available" if str(reason).startswith(_dpl.COMING) else "plan-invalid"
-            findings.append(_deploy_finding(code, "plan", f"{where}: {reason}"))
+            findings.append(_deploy_finding("plan-invalid", "plan", f"{where}: {reason}"))
         return findings, {"declarations": [], "estimate_minutes": 0}, None
     phases = plan["phases"]
     tf_on = (phases.get("terraform") or {}).get("enabled") and _dpl.plan_templates(plan)
@@ -32660,13 +33133,16 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
                                         "readiness is checked again when the phase starts"))
     reg = _deploy_registry_prepare(kc, plan, values, install, findings, role=role)
     capi = _deploy_capi_prepare(kc, plan, values, install, findings, role=role, later=reg["created_here"])
+    later = {s["name"] for s in capi["summary"] if not s.get("exists")}
+    arts = _deploy_artefacts_prepare(kc, plan, values, install, findings, capi["entries"], cluster, later)
     estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) \
-        + (30 if install else 0) + reg["estimate"] + capi["estimate"]
+        + (30 if install else 0) + reg["estimate"] + capi["estimate"] + arts["estimate"]
     summary = {"declarations": decls, "estimate_minutes": estimate, "capi": capi["capi"],
-               "clusters": capi["summary"], "registries": reg["summary"], "publish": reg["publish"]}
+               "clusters": capi["summary"], "registries": reg["summary"], "publish": reg["publish"],
+               "artefacts": arts["summary"]}
     ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
            "update_differing": bool(update_differing), "clusters": capi["entries"],
-           "registries": reg["entries"]}
+           "registries": reg["entries"], "artefacts": arts["rows"]}
     return findings, summary, ctx
 
 
@@ -32862,6 +33338,7 @@ def _deploy_registry_prepare(kc, plan, values, install, findings, role=None):
                                                 f"{r.get('address')}: the plan never moves a registry"))
                 continue
             findings.append(_deploy_finding("registry-exists", "registry", f"{r['name']} exists: it is adopted"))
+            findings += _deploy_tool_findings(st, "registry", f"{r['name']}: ")    # 2.7.0 : registry-cert-expiring
             ready.add(r["name"])
             continue
         out["created_here"].add(r["name"])
@@ -32973,8 +33450,9 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=(
         try:
             name = _dpl.render_cluster_name(e["name"], values)
             spec = _dpl.render_capi_template(t, values, name)
-            if e.get("registries"):
+            if e.get("registries") is not None:
                 # 2.6.0 : les registres de l'entrée remplacent ceux du modèle
+                # (2.7.0, m-13 : une liste vide explicite aussi)
                 spec["registries"] = _dpl.render_registries(e["registries"], values,
                                                             f"clusters[{e['name']}].registries")
         except _dpl.ProfileError as ex:
@@ -32983,7 +33461,8 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=(
                 findings.append(_deploy_finding(code, "clusters", f"{where}: {why}"))
             continue
         names[e["name"]] = name
-        out["entries"].append({"name": name, "template": t["name"], "template_revision": t["revision"],
+        out["entries"].append({"name": name, "raw_name": e["name"], "template": t["name"],
+                               "template_revision": t["revision"],
                                "spec": spec, "raw": t["spec"],
                                "depends_on": [names.get(d, d) for d in e.get("depends_on") or []]})
     absent = []
@@ -33283,15 +33762,25 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
             origin = {"plan": plan["name"], "template": tname,
                       "template_revision": t["revision"], "plan_revision": plan["revision"],
                       "template_by": t.get("updated_by") or ""}
+            if not dry:
+                # 2.7.0 : l'exécution qui crée la déclaration (preuve du Défaire)
+                origin["run"] = run.id
             decl = TF_DECLS.create(uuid.uuid4().hex[:12], cluster, dname,
                                    description=f"plan {plan['name']}, template {tname}",
                                    resources=rendered[tname], user=user, origin=origin)
             if dry:
                 created.append(decl["id"])
+            else:
+                data.update(created=True, undo={"kind": "tf-declaration", "ref": decl["id"]})
         else:
             o = decl.get("origin") or {}
             if o.get("plan") != plan["name"] or o.get("template") != tname:
                 return _dch.ItemOutcome("error", "decl-name-taken", data=data)
+            prev = next((it for it in ((state.get("previous") or {}).get("items") or [])
+                         if it.get("template") == tname), {})
+            if prev.get("created") and (prev.get("undo") or {}).get("ref") == decl["id"]:
+                # créée par un maillon précédent de la même chaîne de reprises
+                data.update({k: prev[k] for k in ("created", "undo")})
         data["declaration_id"] = decl["id"]
         if not _tf_decl_hold(decl["id"], run.id):
             return _dch.ItemOutcome("error", "declaration-busy", data=data)
@@ -33753,6 +34242,366 @@ def _deploy_registry_phase(run, cluster, kc_ref, dctx):
                       item_key="id", item_step="")
 
 
+# --- 2.7.0 : phase Artefacts (charts, manifestes, politiques) ------------------
+
+ARTEFACT_POLICIES = ("harvester-ops", "builtin")      # paquet et version du socle (harvester-capi)
+
+
+def _deploy_artefact_rows(plan, values, cluster_entries, findings):
+    """Rangées de la phase Artefacts : une par (entrée, cluster), dans
+    l'ordre d'application d'un cluster (point 211) : politiques (socle,
+    rôles, comptes), puis manifestes et politiques de paquet, puis charts,
+    chacun dans l'ordre des entrées. `cluster_entries` : clusters de la
+    phase Clusters rendus ({raw_name, name, spec}). Les constats de rendu et
+    de sorte vont dans `findings`."""
+    import child_policies as _cpm
+    pols, items = _dpl.plan_artefacts(plan)
+    rendered = {e["raw_name"]: e["name"] for e in cluster_entries or []}
+    in_plan = {e["name"] for e in cluster_entries or []}
+    clusters_on = bool((plan["phases"].get("clusters") or {}).get("enabled"))
+    kinds = _dpl.item_kind_from(_deploy_state())
+    rows, groups = [], {"policies": [], "manifest": [], "chart": []}
+
+    def refs(names, what):
+        try:
+            return _dpl.render_artefact_clusters(plan, names, values, rendered)
+        except _dpl.ProfileError as e:
+            for where, why in e.errors:
+                findings.append(_deploy_finding("artefact-var-missing" if "missing variable" in why
+                                                else "var-invalid", "artefacts", f"{what}: {where}: {why}"))
+            return []
+
+    def row_id(prefix, ref, item=None):
+        ns, c = ref.split("/")
+        base = c if ns == c else f"{ns}-{c}"
+        return f"{prefix}-{base}" + (f"-{item}" if item else "")
+
+    def deps_on_cluster(planc):
+        return [f"clusters:{planc}"] if planc and clusters_on and planc in in_plan else []
+    for p in pols:
+        spec = {k: v for k, v in p.items() if k != "clusters"}
+        for ref, planc in refs(p["clusters"], "policies"):
+            groups["policies"].append({"id": row_id("pol", ref), "type": "policies", "ref": ref,
+                                       "plan_cluster": planc, "item": _cpm.ITEM, "package": ARTEFACT_POLICIES[0],
+                                       "version": ARTEFACT_POLICIES[1], "policies": spec,
+                                       "depends_on": deps_on_cluster(planc)})
+    for i, e in enumerate(items):
+        where = f"phases.artefacts.items[{i}]"
+        kind = kinds(e["package"], e["version"], e["item"])
+        if kind is None:
+            findings.append(_deploy_finding("artefact-package-missing", "artefacts",
+                                            f"{e['package']}-{e['version']}: item {e['item']} is not imported"))
+            continue
+        bad = _dpl.artefact_entry_refusals(e, kind, where)
+        for w, why in bad:
+            findings.append(_deploy_finding("artefact-invalid", "artefacts", f"{w}: {why}"))
+        if bad:
+            continue
+        registry = None
+        if kind == "chart":
+            try:
+                registry = _dpl.render_artefact_registry(e["registry"], values)
+            except _dpl.ProfileError as ex:
+                for w, why in ex.errors:
+                    findings.append(_deploy_finding("artefact-var-missing" if "missing variable" in why
+                                                    else "var-invalid", "artefacts", f"{where}: {why}"))
+                continue
+        for ref, planc in refs(e["clusters"], e["item"]):
+            groups["chart" if kind == "chart" else "manifest"].append({
+                "id": row_id("art", ref, e["item"]), "type": "chart" if kind == "chart" else "manifest",
+                "kind": kind, "ref": ref, "plan_cluster": planc, "item": e["item"], "package": e["package"],
+                "version": e["version"], "registry": registry, "values": e.get("values"),
+                "entry_deps": list(e.get("depends_on") or []), "depends_on": deps_on_cluster(planc)})
+    for g in ("policies", "manifest", "chart"):
+        rows += groups[g]
+    by_ref_item = {(r["ref"], r["item"]): r["id"] for r in rows}
+    pol_of = {r["ref"]: r["id"] for r in groups["policies"]}
+    seen = set()
+    for r in rows:
+        if r["id"] in seen:
+            findings.append(_deploy_finding("artefact-invalid", "artefacts", f"{r['id']}: two clusters give the "
+                                            "same item identifier"))
+        seen.add(r["id"])
+        if r["type"] != "policies":
+            if r["ref"] in pol_of:
+                r["depends_on"].append(pol_of[r["ref"]])
+            r["depends_on"] += [by_ref_item[(r["ref"], d)] for d in r.pop("entry_deps") if (r["ref"], d) in by_ref_item]
+    return rows
+
+
+def _deploy_applied(kc):
+    """Ce qui est appliqué aux clusters enfants, vu du cluster de gestion :
+    {(namespace, élément): {"type": chart | manifest, "cluster", "origin",
+    "version", "ready"}} (services et manifestes de harvester-capi), ou
+    None si la lecture échoue."""
+    out = {}
+    svc, _rc, err = _deploy_capi_json(kc, "services", ["--json"], timeout=60)
+    if err or not isinstance(svc, dict):
+        return None
+    for s in svc.get("services") or []:
+        art = s.get("artefact") or {}
+        out[(s.get("namespace"), s.get("name"))] = {
+            "type": "chart", "cluster": art.get("cluster"), "package": art.get("package"),
+            "origin": art.get("origin") or {}, "version": art.get("version") or "", "item": bool(art),
+            "ready": bool(s.get("ready")) and all(r.get("ready") and r.get("current") for r in s.get("releases") or [])
+            and bool(s.get("releases")) and bool(s.get("current"))}
+    mans, _rc, err = _deploy_capi_json(kc, "manifests", ["--json"], timeout=60)
+    if err or not isinstance(mans, list):
+        return None
+    for m in mans:
+        out[(m.get("namespace"), m.get("item"))] = {
+            "type": "manifest", "cluster": m.get("cluster"), "package": m.get("package"),
+            "origin": m.get("origin") or {}, "version": m.get("version") or "", "item": True,
+            "ready": bool((m.get("state") or {}).get("applied"))}
+    return out
+
+
+def _deploy_manifest_spec(row, plan, run_id, by, origin_run=None):
+    """Demande de `manifest-deploy` d'une rangée (socle ou élément)."""
+    origin = {"plan": plan["name"]}
+    if origin_run or run_id:
+        origin["run"] = origin_run or run_id
+    spec = {"cluster": row["ref"], "origin": origin, "by": by}
+    if row["type"] == "policies":
+        spec["policies"] = row["policies"]
+    else:
+        spec.update(package=row["package"], version=row["version"], item=row["item"])
+    return spec
+
+
+def _deploy_chart_spec(row, plan, run_id, by, origin_run=None):
+    """Demande de `service-deploy` d'un chart de paquet (source « Depuis un
+    registre » de la 2.6.0), valeurs de l'entrée par-dessus celles de
+    l'élément."""
+    import yaml as _yaml
+    origin = {"plan": plan["name"]}
+    if origin_run or run_id:
+        origin["run"] = origin_run or run_id
+    return {"cluster": row["ref"], "name": row["item"],
+            "source": {"registry": row["registry"], "package": row["package"], "version": row["version"],
+                       "item": row["item"]},
+            "values": _yaml.safe_dump(row["values"], sort_keys=False) if row.get("values") else "",
+            "origin": origin, "by": by}
+
+
+def _deploy_artefacts_checks(kc, rows, plan, values, later_clusters, cluster_name, live=True):
+    """Constats des rangées (préparation et `before` de la phase) :
+    paquet présent et confiance en mode strict, CAAPH, chart publié dans son
+    registre (`artefact-not-published`), images publiées
+    (`artefact-images-not-published`), objets et nom (`manifest-check`),
+    droit de la personne sur `<c>-kubeconfig`, élément posé par une autre
+    origine (`artefact-taken`). `later_clusters` : clusters enfants créés
+    plus tard par ce plan (vérifiés au début de la phase)."""
+    state = _deploy_state()
+    findings = []
+    strict = _art_settings()["strict"]
+    pubs = {(p["package"], p["version"], p["registry"]) for p in _dpl.plan_publications(plan)}
+    for pkg, ver in sorted({(r["package"], r["version"]) for r in rows if r["type"] != "policies"}):
+        try:
+            p = _art.load_package(state, pkg, ver)
+        except _art.ArtefactError:
+            findings.append(_deploy_finding("artefact-package-missing", "artefacts", f"{pkg}-{ver} is not imported"))
+            continue
+        trust = (p.get("trust") or {}).get("state")
+        if strict and trust != "valid":
+            findings.append(_deploy_finding("package-untrusted-strict", "artefacts",
+                                            f"{pkg}-{ver}: {trust}, refused in strict mode"))
+    if not kc:
+        if rows:
+            findings.append(_deploy_finding("artefact-later", "artefacts",
+                                            "the artefacts are checked when the phase starts"))
+        return findings
+    applied = _deploy_applied(kc)
+    if applied is None:
+        findings.append(_deploy_finding("artefact-check-failed", "artefacts", "applied items unreadable"))
+        return findings
+    caaph = None
+    for r in rows:
+        ns, child = r["ref"].split("/")
+        later = r["plan_cluster"] in later_clusters
+        where = f"{r['item']} on {r['ref']}"
+        cur = applied.get((ns, r["item"]))
+        if cur is not None and (not cur["item"] or cur["cluster"] != child
+                                or (cur["origin"] or {}).get("plan") != plan["name"]
+                                or cur["package"] != r["package"] or cur["type"] != r["type"].replace("policies",
+                                                                                                    "manifest")):
+            findings.append(_deploy_finding("artefact-taken", "artefacts", f"{where}: {ns}/{r['item']} exists and "
+                                            "was not applied by this plan to this cluster"))
+            continue
+        if r["type"] == "chart":
+            if not _sv.NAME_RE.match(r["item"]):
+                findings.append(_deploy_finding("artefact-invalid", "artefacts",
+                                                f"{where}: item names applied to a cluster have 42 characters at most"))
+                continue
+            if caaph is None:
+                svc, _rc, err = _deploy_capi_json(kc, "services", ["--json"], timeout=60)
+                caaph = bool((svc or {}).get("caaph")) if not err else False
+            if not caaph:
+                findings.append(_deploy_finding("caaph-missing", "artefacts",
+                                                f"{where}: CAAPH is not installed (Cluster API > Installation)"))
+            d = _rg.load(state, r["registry"])
+            published = bool(d) and any((p.get("package"), p.get("version")) == (r["package"], r["version"])
+                                        for p in d.get("published") or [])
+            if not published and (r["package"], r["version"], r["registry"]) in pubs and not live:
+                findings.append(_deploy_finding("artefact-later", "artefacts",
+                                                f"{where}: published by the Registry phase of this plan"))
+            elif not published:
+                findings.append(_deploy_finding("artefact-not-published", "artefacts",
+                                                f"{where}: {r['package']}-{r['version']} is not published in "
+                                                f"{r['registry']}"))
+            elif cluster_name not in (d.get("clusters") or []):
+                findings.append(_deploy_finding("artefact-not-published", "artefacts",
+                                                f"{where}: {r['registry']} is not attached to {cluster_name}"))
+        if r["type"] != "policies":
+            try:
+                it = next((i for i in _art.load_package(state, r["package"], r["version"])["index"].get("items") or []
+                           if i.get("name") == r["item"]), {})
+            except _art.ArtefactError:
+                it = {}
+            if it.get("images") and not any(
+                    (p.get("package"), p.get("version")) == (r["package"], r["version"])
+                    for d in (_rg.load(state, s["name"]) for s in _rg.list_decls(state))
+                    if d and cluster_name in (d.get("clusters") or []) and "images" in (d.get("usage") or [])
+                    for p in d.get("published") or []) and not any(
+                    (pk, vr) == (r["package"], r["version"]) for pk, vr, _reg in pubs):
+                strict_pull = any(isinstance(x, dict) and x.get("no_fallback")
+                                  for x in (r.get("cluster_spec") or {}).get("registries") or [])
+                findings.append({"code": "artefact-images-not-published",
+                                 "level": "blocking" if strict_pull else "warning", "phase": "artefacts",
+                                 "detail": f"{where}: the images of the item are in no registry of {cluster_name}"
+                                           + (" and the cluster has no fallback" if strict_pull else "")})
+        if later:
+            continue
+        ok, why = _child_admin_allowed(kc, ns, child)
+        if ok is None:
+            findings.append(_deploy_finding("artefact-check-failed", "artefacts", f"{where}: {why}"))
+            continue
+        if not ok:
+            findings.append(_deploy_finding(CHILD_ADMIN_REQUIRED, "artefacts", f"{where}: reading the Secret "
+                                            f"{child}-kubeconfig in {ns} is needed (administrator of the child cluster)"))
+            continue
+        if r["type"] != "chart":
+            spec = _deploy_manifest_spec(r, plan, None, "")
+            out, _rc, err = _deploy_capi_json(kc, "manifest-check", ["--spec", "-"], spec=spec, timeout=120)
+            if err:
+                findings.append(_deploy_finding("artefact-check-failed", "artefacts", f"{where}: {err}"))
+                continue
+            findings += [f for f in _deploy_tool_findings(out, "artefacts", f"{where}: ")
+                         if not (cur and f["code"] == "manifest-object-taken")]
+    return findings
+
+
+def _deploy_artefacts_prepare(kc, plan, values, install, findings, cluster_entries, cluster_name, later):
+    """Constats et contexte de la phase Artefacts (2.7.0), lecture seule.
+    Rend {"summary", "rows", "estimate"}."""
+    out = {"summary": [], "rows": [], "estimate": 0}
+    if not (plan["phases"].get("artefacts") or {}).get("enabled"):
+        return out
+    rows = _deploy_artefact_rows(plan, values, cluster_entries, findings)
+    specs = {e["name"]: e.get("spec") or {} for e in cluster_entries or []}
+    for r in rows:
+        r["cluster_spec"] = specs.get(r["plan_cluster"]) or {}
+    out["rows"] = rows
+    out["summary"] = [{k: r.get(k) for k in ("id", "type", "ref", "item", "package", "version", "registry")}
+                      for r in rows]
+    out["estimate"] = 2 * len(rows)
+    findings += _deploy_artefacts_checks(None if install else kc, rows, plan, values, later, cluster_name,
+                                         live=False)
+    return out
+
+
+def _deploy_artefacts_phase(run, cluster, kc_ref, dctx):
+    """Phase Artefacts (2.7.0, tâche 4) : un élément par (entrée, cluster),
+    `pol-<cluster>` (socle, rôles, comptes) puis `art-<cluster>-<élément>`.
+    Chart : `harvester-capi service-deploy` (source registre) ; manifeste et
+    politique : `manifest-deploy`, en action fille. Un élément posé par une
+    exécution de ce plan est repris (son exécution d'origine gardée) ; le
+    déroulé ne marque `created` que ce qui porte SON exécution (ou celle
+    d'un maillon de sa chaîne de reprises, recopiée). Les éléments d'un
+    cluster en échec de la phase Clusters sont sautés, les autres vont à
+    leur terme (`after_failure_of`)."""
+    plan = dctx["plan"]
+    rows = {r["id"]: r for r in dctx.get("artefacts") or []}
+    timeout_s = int((plan["phases"].get("artefacts") or {}).get("timeout_minutes")
+                    or _dpl.ARTEFACTS_TIMEOUT[2]) * 60
+    dry = bool(run.dry_run)
+    by = (run.result or {}).get("by") or ""
+
+    def before(ctx, state):
+        # revue 4-8 I1 : les rangées d'un cluster pas fait dans la phase
+        # Clusters sont sautées par le moteur ; leur kubeconfig ne s'ouvre
+        # pas, les contrôler bloquerait la phase entière
+        live = [r for r in rows.values() if all(_dch.done_elsewhere(state, d) for d in r["depends_on"]
+                                                if d.startswith("clusters:"))]
+        found = _deploy_artefacts_checks(kc_ref(), live, plan, dctx["values"], set(), cluster)
+        blocking = _deploy_blocking(found)
+        if blocking:
+            return _dch.PhaseOutcome("error", message="blocked by the pre-check: " + ", ".join(
+                sorted({f["code"] for f in blocking})), data={"blocked_by": [
+                    {"code": f["code"], "detail": f["detail"]} for f in blocking][:20]})
+        return None
+
+    def run_item(ctx, state, item):
+        r = rows[item.id]
+        ns, child = r["ref"].split("/")
+        data = {"cluster": r["ref"], "item": r["item"], "type": r["type"], "package": r["package"],
+                "version": r["version"], "created": False, "actions": []}
+        prev = next((it for it in ((state.get("previous") or {}).get("items") or []) if it.get("id") == item.id), {})
+        kc = kc_ref()
+        applied = _deploy_applied(kc)
+        if applied is None:
+            return _dch.ItemOutcome("error", "applied items unreadable", data=data)
+        cur = applied.get((ns, r["item"]))
+        if cur is not None and ((cur["origin"] or {}).get("plan") != plan["name"] or cur["cluster"] != child):
+            return _dch.ItemOutcome("error", "artefact-taken", data=data)
+        if prev.get("created"):
+            # créé par un maillon précédent de la même chaîne de reprises
+            data.update({k: prev[k] for k in ("created", "undo") if k in prev})
+        if dry:
+            return _dch.ItemOutcome("done", "checked (dry run): would be applied" if cur is None
+                                    else "checked (dry run): present, would be updated", data=data)
+        # repris : l'exécution qui l'a créé reste écrite dessus (preuve du Défaire)
+        origin_run = (cur["origin"] or {}).get("run") if cur is not None else None
+        if r["type"] == "chart":
+            sub, spec = "service-deploy", _deploy_chart_spec(r, plan, run.id, by, origin_run)
+            label = f"capi-service-deploy:{r['ref']}:{r['item']}"
+        else:
+            sub, spec = "manifest-deploy", _deploy_manifest_spec(r, plan, run.id, by, origin_run)
+            label = (f"capi-policies:{r['ref']}" if r["type"] == "policies"
+                     else f"capi-manifest-deploy:{r['ref']}:{r['item']}")
+        child_run, err = _capi_launch(cluster, kc, sub, ["--timeout", str(timeout_s)], spec=spec, parent=run.id,
+                                      cluster_user=run.cluster_user, label=label)
+        if err:
+            return _dch.ItemOutcome("error", str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child_run.id)
+        status, _c = _deploy_wait_child(child_run.id)
+        after = (_deploy_applied(kc) or {}).get((ns, r["item"]))
+        if after is not None and (after["origin"] or {}).get("run") == run.id:
+            data["created"] = True
+            data["undo"] = {"kind": r["type"], "ref": f"{r['ref']}/{r['item']}"}
+        if status == "done":
+            return _dch.ItemOutcome("done", "applied" if cur is None else "already present, updated", data=data)
+        return _dch.ItemOutcome("error", f"apply failed (action {child_run.id})", data=data)
+
+    def verify_item(ctx, state, prev):
+        r = rows.get(prev.get("id"))
+        if r is None:
+            return False
+        kc = kc_ref()
+        ns, child = r["ref"].split("/")
+        cur = (_deploy_applied(kc) or {}).get((ns, r["item"]))
+        if cur is None or (cur["origin"] or {}).get("plan") != plan["name"] or cur["version"] != r["version"]:
+            return False
+        if r["type"] == "chart":
+            return cur["ready"]
+        # une empreinte égale ne prouve pas que les objets sont là (essai 1)
+        out, _rc, err = _deploy_capi_json(kc, "manifest-verify", ["--name", f"{r['ref']}/{r['item']}"], timeout=120)
+        return err is None and bool((out or {}).get("ok"))
+    items = [_dch.Item(r["id"], tuple(r["depends_on"])) for r in rows.values()]
+    return _dch.Phase("artefacts", items=items, run_item=run_item, verify_item=verify_item, before=before,
+                      item_key="id", item_step="", after_failure_of=("clusters",))
+
+
 def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=None, store=None):
     """Phases du déroulé, branchées sur les mécanismes existants."""
     plan = dctx["plan"]
@@ -33780,6 +34629,8 @@ def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=
             phases.append(_deploy_capi_phase(run, cluster, kc_ref, plan))
         elif pid == "clusters":
             phases.append(_deploy_clusters_phase(run, cluster, kc_ref, dctx))
+        elif pid == "artefacts":
+            phases.append(_deploy_artefacts_phase(run, cluster, kc_ref, dctx))
     return phases
 
 
@@ -34369,6 +35220,519 @@ def api_deploy_resume(cluster):
         update_differing=result.get("update_differing") is True, role=current_role())
     if status != 202 and store is not None:
         store.delete_tree(_dch.SECRET_CLASS, run_id)
+    return jsonify(body), status
+
+
+# --- 2.7.0 : « Défaire le déploiement » (décision 128) ---------------------------
+
+import deploy_undo as _du  # noqa: E402
+
+DEPLOY_UNDO_PREFIX = "deploy-undo:"
+UNDO_CHART_TIMEOUT, UNDO_MANIFEST_TIMEOUT, UNDO_CLUSTER_TIMEOUT = 900, 300, 2400
+# Ce que le défaire ne sait pas retirer seul, dit avant (plan de destruction)
+UNDO_LIMITS = (
+    {"code": "volumes-claimed", "detail": "a volume still claimed by a VM or a pod is kept until it is released"},
+    {"code": "lb-dhcp", "detail": "load balancers whose address came from DHCP may stay "
+                                  "(harvester/harvester#11767): check the Load balancers view"},
+    {"code": "ccm-kubernetes", "detail": "objects named after the cloud provider name 'kubernetes' of a child "
+                                         "cluster (CAPHV #277) may stay on Harvester"},
+    {"code": "release-namespace", "detail": "the namespace of a chart release is removed only if it is empty "
+                                            "and was created for the chart"},
+)
+
+
+def _action_read(action_id):
+    """{action, status, result} d'une action (mémoire, sinon actions.db), ou
+    None."""
+    if not isinstance(action_id, str) or not _dch.RUN_ID_RE.match(action_id):
+        return None
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(action_id)
+    if run is not None:
+        return {"action": run.action, "status": run.status, "result": dict(run.result or {})}
+    d, _ev = _actions_db_get(action_id)
+    if not d:
+        return None
+    return {"action": d.get("action"), "status": d.get("status"),
+            "result": d.get("result") if isinstance(d.get("result"), dict) else {}}
+
+
+def _undo_chain(cluster, action_id):
+    """(exécution d'origine, résultats de sa chaîne, None) ou (None, None,
+    (corps, statut)). Gardes : un déroulé `deploy:` de ce cluster, fini,
+    pas un essai."""
+    a = _action_read(action_id)
+    if a and str(a.get("action") or "").startswith(DEPLOY_UNDO_PREFIX):
+        # point 214 : pas de « défaire le défaire », on relance le plan
+        return None, None, ({"error": "this is an undo: apply the plan again instead", "code": "undo-of-undo",
+                             "fields": ["action_id"]}, 400)
+    prev, err = _deploy_previous(action_id)
+    if err:
+        return None, None, err
+    if prev["action"] != f"{DEPLOY_PREFIX}{cluster}":
+        return None, None, ({"error": "this run belongs to another cluster", "fields": ["action_id"]}, 400)
+    if prev["status"] in ("starting", "running"):
+        return None, None, ({"error": "this run is still in progress", "code": "deploy-running"}, 409)
+    if prev["dry_run"]:
+        return None, None, ({"error": "a dry run created nothing to undo", "code": "undo-dry-run-target"}, 400)
+
+    def read(i):
+        p, e = _deploy_previous(i)
+        return (p or {}).get("result") if e is None and not (p or {}).get("dry_run") else None
+    try:
+        results = _du.chain(action_id, read)
+    except _du.UndoError as e:
+        return None, None, ({"error": str(e), "code": e.code}, 400)
+    return prev, results, None
+
+
+def _undo_collect(cluster, action_id):
+    """(origine, [Undo], None) ou (None, None, (corps, statut))."""
+    prev, results, err = _undo_chain(cluster, action_id)
+    if err:
+        return None, None, err
+
+    def tf_lookup(decl_id):
+        d = TF_DECLS.get(decl_id)
+        return d if d and d.get("cluster") == cluster else None
+    undos = _du.collect(results, tf_lookup, plan=(prev["result"] or {}).get("plan"), cluster=cluster)
+    # revue 4-8 C1 : les exécutions de la chaîne, seules à pouvoir prouver
+    # qu'un objet trouvé sous ce nom est bien celui qu'elles ont créé
+    prev["chain_runs"] = sorted({r["_run"] for r in results})
+    return prev, undos, None
+
+
+def _undo_target(kc, cluster, u, runs, services=None):
+    """État de ce que désigne l'élément : (« absent » | « ours » |
+    « foreign », exécution lue) ou (None, None) si la lecture échoue
+    (jamais pris pour « parti »). Revue 4-8 C1 : un objet n'est à nous que
+    s'il porte l'annotation `plan-run` d'une exécution de la chaîne défaite
+    (`runs`) ; un objet du même nom recréé par un autre déroulé ou à la
+    main est « foreign » et n'est jamais touché. Une déclaration Terraform
+    se désigne par son identifiant, unique et jamais réattribué, et son
+    origine ne change jamais (tf_store) : sa présence suffit."""
+    kind, ref = u["kind"], u["ref"]
+
+    def judge(present, origin):
+        if not present:
+            return "absent", None
+        run_id = (origin or {}).get("run")
+        return ("ours" if run_id in runs else "foreign"), run_id
+    if kind == "chart":
+        ns, _c, item = ref.split("/")
+        if services is None:
+            services, _rc, err = _deploy_capi_json(kc, "services", ["--json"], timeout=60)
+            if err:
+                return None, None
+        s = next((x for x in (services or {}).get("services") or [] if (x.get("namespace"), x.get("name")) == (ns, item)),
+                 None)
+        art = (s or {}).get("artefact") or {}
+        return judge(s is not None, art.get("origin"))
+    if kind in ("manifest", "policies"):
+        out, _rc, err = _deploy_capi_json(kc, "manifest-verify", ["--name", ref], timeout=120)
+        if err:
+            return None, None
+        return judge(bool((out or {}).get("present")), (out or {}).get("origin"))
+    if kind == "capi-cluster":
+        out, _rc, err = _deploy_capi_json(kc, "state", ["--name", ref, "--json"], timeout=60)
+        if err:
+            return None, None
+        return judge(bool((out or {}).get("present")), (out or {}).get("origin"))
+    if kind == "registry":
+        name = ref.split("/", 1)[1]
+        st, _rc, err = _deploy_registry_json(kc, "registry:status", [name, "--cluster", cluster])
+        if err:
+            return None, None
+        return judge(_rg.load(_bm_profiles_state(), name) is not None or bool((st or {}).get("present")),
+                     (st or {}).get("origin"))
+    return ("ours", None) if TF_DECLS.get(ref) is not None else ("absent", None)
+
+
+def _undo_not_ours(run_id):
+    return (f"undo-not-ours: recreated by run {run_id}, left untouched" if run_id
+            else "undo-not-ours: no mark of this run (recreated by hand?), left untouched")
+
+
+UNDO_TF_CARRIES = "undo-tf-carries-cluster"
+
+
+def _undo_carriers_present(kc, refs):
+    """Revue finale 2.7.0 (I1) : clusters enfants de `refs` (ceux que la
+    chaîne nomme) encore là, qu'ils soient à nous, recréés ou repris :
+    (liste, None) ou (None, erreur de lecture)."""
+    out = []
+    for ref in refs or []:
+        st, _rc, err = _deploy_capi_json(kc, "state", ["--name", ref, "--json"], timeout=60)
+        if err:
+            return None, err
+        if (st or {}).get("present"):
+            out.append(ref)
+    return out, None
+
+
+def _undo_details(kc, cluster, u, services):
+    """Ce qui partira pour un élément (lectures seules, suppressions jugées
+    par le serveur pour les objets d'un cluster enfant)."""
+    kind, ref = u["kind"], u["ref"]
+    if kind == "chart":
+        ns, c, item = ref.split("/")
+        s = next((x for x in (services or {}).get("services") or [] if (x.get("namespace"), x.get("name")) == (ns, item)),
+                 None)
+        if s is None:
+            return {"present": False}
+        return {"present": True, "release": item, "release_namespace": s.get("release_namespace"),
+                "chart": s.get("chart"), "version": s.get("version")}
+    if kind in ("manifest", "policies"):
+        out, _rc, err = _deploy_capi_json(kc, "manifest-remove", ["--name", ref, "--dry-run"], timeout=180)
+        if err:
+            return {"error": err}
+        return {"present": not out.get("absent"), "delete": out.get("delete") or [], "kept": out.get("kept") or [],
+                "refused": out.get("refused") or [], "cluster_present": out.get("cluster_present", True)}
+    if kind == "capi-cluster":
+        out, _rc, err = _deploy_capi_json(kc, "delete", ["--name", ref, "--dry-run"], timeout=120)
+        return {"error": err} if err else out
+    if kind == "registry":
+        name = ref.split("/", 1)[1]
+        d = _rg.load(_bm_profiles_state(), name)
+        return {"present": d is not None, "address": (d or {}).get("address"), "volume": f"{name}-data"}
+    d = TF_DECLS.get(ref)
+    if d is None:
+        return {"present": False}
+    ws = _tf_decl_ws(d, create=False)
+    return {"present": True, "name": d["name"], "revision": d.get("revision"),
+            "resources": _tfst.addresses(ws) if ws.exists() else []}
+
+
+def _undo_include(undos, include):
+    """Identifiants choisis (liste) ou None (cochés par défaut) ; un
+    identifiant inconnu est refusé."""
+    if include is None:
+        return None, None
+    if not isinstance(include, list) or not all(isinstance(i, str) for i in include):
+        return None, ({"error": "include: a list of item identifiers", "fields": ["include"]}, 400)
+    known = {u["id"] for u in undos}
+    bad = [i for i in include if i not in known]
+    if bad:
+        return None, ({"error": f"unknown item {bad[0][:80]}", "fields": ["include"]}, 400)
+    return set(include), None
+
+
+def _undo_plan_body(cluster, kc, action_id, include=None):
+    """Plan de destruction : (corps, statut)."""
+    prev, undos, err = _undo_collect(cluster, action_id)
+    if err:
+        return err
+    chosen, err = _undo_include(undos, include)
+    if err:
+        return err
+    steps = {s["id"] for s in _du.plan(undos, chosen)}
+    services, _rc, serr = _deploy_capi_json(kc, "services", ["--json"], timeout=60) if any(
+        u["kind"] == "chart" for u in undos) else ({}, 0, None)
+    items = []
+    runs = set(prev["chain_runs"])
+    for u in sorted(undos, key=lambda x: _du.KINDS_ORDER.index(x["kind"])):
+        det = {"error": serr} if serr and u["kind"] == "chart" else _undo_details(kc, cluster, u, services)
+        if "error" not in det:
+            seen, run_id = _undo_target(kc, cluster, u, runs, services)
+            if seen == "foreign":
+                # revue 4-8 C1 : dit avant, jamais touché pendant
+                det = dict(det, not_ours=True, note=_undo_not_ours(run_id), recreated_by=run_id or "")
+        items.append(dict(u, selected=u["id"] in steps, details=det))
+    tfs = [i for i in items if i["kind"] == "tf-declaration" and i["details"].get("present")]
+    if tfs:
+        # revue finale 2.7.0 (I1) : un cluster de la chaîne qui restera (non
+        # choisi, recréé, repris) garde le contenu Terraform ; dit ici
+        going = {i["ref"] for i in items if i["kind"] == "capi-cluster" and i["selected"]
+                 and not i["details"].get("not_ours") and "error" not in i["details"]}
+        present, cerr = _undo_carriers_present(kc, tfs[0].get("carries"))
+        for i in tfs:
+            i["details"] = dict(i["details"], error=cerr) if cerr else dict(
+                i["details"], carried_by=[r for r in present if r not in going])
+    res = prev["result"] or {}
+    return {"undoes": action_id, "plan": res.get("plan"), "cluster": cluster, "items": items,
+            "limits": list(UNDO_LIMITS), "undone_by": res.get("undone_by")}, 200
+
+
+def _deploy_result_patch(action_id, patch):
+    """Ajoute des clés au résultat d'une action (en mémoire et dans
+    actions.db), sans toucher au reste."""
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(action_id)
+    if run is not None:
+        run.result = dict(run.result or {}, **patch)
+        if run.status not in ("starting", "running"):
+            _actions_persist(run)
+        return
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB), timeout=10)
+        row = conn.execute("SELECT result FROM actions WHERE id = ?", (action_id,)).fetchone()
+        if row is not None:
+            conn.execute("UPDATE actions SET result = ? WHERE id = ?",
+                         (json.dumps(dict(_row_result(row[0]), **patch)), action_id))
+            conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        log_actions.warning("undo mark %s: %s", action_id, e)
+
+
+def _undo_phases(run, cluster, kc, steps, delete_data, runs):
+    """Phases du défaire (une par phase de deploy_undo.ORDER), branchées sur
+    les gestes existants en actions filles. `runs` : exécutions de la chaîne
+    défaite (revue 4-8 C1, seul ce qui en porte une est retiré)."""
+    by_id = {s["id"]: s for s in steps}
+    runs = set(runs)
+    state = _bm_profiles_state()
+
+    def wait(child, timeout=None):
+        if timeout:
+            st, _c = _deploy_wait_until(child.id, timeout, run)
+            return "error" if st == "timeout" else st
+        return _deploy_wait_child(child.id)[0]
+
+    def capi(sub, args, label):
+        child, err = _capi_launch(cluster, kc, sub, args, parent=run.id, cluster_user=run.cluster_user, label=label)
+        if err:
+            return None, str(err.get("error") or "refused")[:120]
+        return child, None
+
+    def run_item(ctx, st, item):
+        u = by_id[item.id]
+        kind, ref = u["kind"], u["ref"]
+        data = {"kind": kind, "ref": ref, "actions": []}
+        seen, run_id = _undo_target(kc, cluster, u, runs)
+        if seen is None:
+            return _dch.ItemOutcome("error", "state unreadable", data=data)
+        if seen == "absent":
+            return _dch.ItemOutcome("done", "already gone", data=data)
+        if seen == "foreign":
+            data["recreated_by"] = run_id or ""
+            return _dch.ItemOutcome("error", _undo_not_ours(run_id), data=data)
+        # revue finale 2.7.0 (m-b) : l'outil relit la marque juste avant
+        # d'écrire ; un objet recréé entre-temps n'est pas touché
+        expect = ["--expect-run", run_id] if run_id else []
+        if kind == "chart":
+            ns, _c, it = ref.split("/")
+            child, err = capi("service-remove", ["--name", f"{ns}/{it}", "--timeout", str(UNDO_CHART_TIMEOUT)]
+                              + expect,
+                              f"capi-service-remove:{ns}/{it}")
+            timeout = None
+        elif kind in ("manifest", "policies"):
+            child, err = capi("manifest-remove", ["--name", ref] + expect, f"capi-manifest-remove:{ref}")
+            timeout = UNDO_MANIFEST_TIMEOUT
+        elif kind == "capi-cluster":
+            child, err = capi("delete", ["--name", ref, "--timeout", str(UNDO_CLUSTER_TIMEOUT)] + expect,
+                              f"capi-cluster-delete:{ref}")
+            timeout = None
+        elif kind == "registry":
+            name = ref.split("/", 1)[1]
+            cmd = _registry_cmd("delete")
+            if cmd is None:
+                return _dch.ItemOutcome("error", f"{REGISTRY_SCRIPT} not deployed", data=data)
+            cmd += [name, "--cluster", cluster, "--kubeconfig", kc] + expect \
+                + (["--delete-data"] if name in delete_data else [])
+            if (run.result or {}).get("plan"):
+                # le plan défait désigne son registre : il ne le retient pas
+                cmd += ["--ignore-plan", run.result["plan"]]
+            with app.app_context():
+                child, e2 = _cli_action(cluster, f"registry-delete:{cluster}/{name}", cmd, "harvester-registry",
+                                        parent=run.id, cluster_user=run.cluster_user,
+                                        setup=lambda c: setattr(c, "required_role", "admin"))
+            err = None if child else "refused"
+            timeout = None
+            data["data_kept"] = name not in delete_data
+        else:
+            return _undo_tf(ctx, u, data)
+        if err:
+            return _dch.ItemOutcome("error", err, data=data)
+        data["actions"].append(child.id)
+        status = wait(child, timeout)
+        if status == "done" and _undo_target(kc, cluster, u, runs)[0] == "absent":
+            return _dch.ItemOutcome("done", "removed", data=data)
+        return _dch.ItemOutcome("error", f"removal failed (action {child.id})", data=data)
+
+    def _undo_tf(ctx, u, data):
+        decl_id = u["ref"]
+        # revue finale 2.7.0 (I1) : jamais sous un cluster de la chaîne resté
+        # là, choisi ou non, à nous ou non ; relu juste avant la destruction
+        present, err = _undo_carriers_present(kc, u.get("carries"))
+        if err:
+            return _dch.ItemOutcome("error", "state unreadable", data=data)
+        if present:
+            data["carried_by"] = present
+            return _dch.ItemOutcome("error", f"{UNDO_TF_CARRIES}: {', '.join(present)} still present, its Terraform "
+                                             "content is kept; remove the cluster first", data=data)
+        if not _tf_decl_hold(decl_id, run.id):
+            return _dch.ItemOutcome("error", "declaration-busy", data=data)
+        try:
+            aid, _h = _tf_decl_launch(cluster, kc, decl_id, "destroy", user=(run.result or {}).get("by") or "",
+                                      cluster_user=run.cluster_user, holder=run.id, role=run.launch_role,
+                                      parent=run.id)
+            data["actions"].append(aid)
+            status, _c = _deploy_wait_child(aid)
+            if not _tf_decl_wait_idle(decl_id):
+                return _dch.ItemOutcome("error", "declaration-busy", data=data)
+            if status != "done":
+                return _dch.ItemOutcome("error", f"destroy failed (action {aid})", data=data)
+        except TfLaunchError as e:
+            return _dch.ItemOutcome("error", str(e.payload.get("code") or e.payload.get("error") or "refused")[:120],
+                                    data=data)
+        finally:
+            _tf_decl_release(decl_id, run.id)
+        removed, why = _tf_decl_remove(decl_id)
+        return _dch.ItemOutcome("done" if removed else "error",
+                                "destroyed and removed" if removed else f"destroyed, not removed ({why})", data=data)
+
+    def verify_item(ctx, st, prev):
+        u = by_id.get(prev.get("id"))
+        return bool(u) and _undo_target(kc, cluster, u, runs)[0] == "absent"
+    return _du.phases(steps, run_item, verify_item)
+
+
+def _undo_runner(run, cluster, kc, steps, delete_data, previous, orig_id, lock_fd, runs, all_ids=()):
+    try:
+        run.status = "running"
+        run.emit({"type": "status", "status": "running", "ts": time.time()})
+        base = dict(run.result or {})
+        ctx = _DeployCtx(run, base)
+        res = None
+        try:
+            res = _dch.run(ctx, _undo_phases(run, cluster, kc, steps, delete_data, runs), previous=previous,
+                           order=_du.ORDER, secrets=_sst.store())
+        except BaseException as e:
+            log.exception("undo %s", run.id)
+            res = dict(run.result or {}, status="error", error_summary=type(e).__name__)
+            if not isinstance(e, Exception):
+                raise
+        finally:
+            final = (res or {}).get("status") or "error"
+            if final == "error" and any(i.get("status") == "done" for p in (res or {}).get("phases") or []
+                                        for i in p.get("items") or []):
+                # une partie est défaite : le reste se reprend (point 214)
+                final = "partial"
+            run.result = dict(base, **{k: v for k, v in (res or {}).items() if k != "status"}, status=final)
+            run.error_summary = (res or {}).get("error_summary") or None
+            run.exit_code = _dch.EXIT_CODES.get(final, 1)
+            run.status = {"done": "done", "cancelled": "cancelled"}.get(final, "error")
+            run.ended_at = time.time()
+            # historique : l'exécution d'origine dit qui l'a défaite (point 214 :
+            # pas de « défaire le défaire », on relance le plan). Revue 4-8
+            # C1 (b) : « done » seulement quand TOUT ce que la chaîne a créé est
+            # parti, au fil des défaire successifs ; sinon « partial »
+            prior = set((_action_read(orig_id) or {}).get("result", {}).get("undone_items") or [])
+            gone = prior | {i.get("id") for p in (res or {}).get("phases") or [] for i in p.get("items") or []
+                            if i.get("status") == "done"}
+            gone.discard(None)
+            status = "done" if set(all_ids) <= gone else "partial" if gone else final
+            _deploy_result_patch(orig_id, {"undone_by": run.id, "undone_at": run.ended_at, "undone_status": status,
+                                           "undone_items": sorted(gone)})
+            run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
+            run.close()
+    finally:
+        _flock_release(lock_fd)
+
+
+def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_registry, user, cluster_user,
+                role):
+    """Contrôles puis lancement de `deploy-undo:<cluster>`, sous le verrou
+    de cluster des déroulés : (corps, statut)."""
+    if confirm != cluster:
+        return {"error": "type the name of the Harvester cluster to undo", "code": "confirm-name",
+                "fields": ["confirm"]}, 400
+    prev, undos, err = _undo_collect(cluster, action_id)
+    if err:
+        return err
+    res = prev["result"] or {}
+    if res.get("undone_status") == "done":
+        # revue 4-8 C1 (b) : tout est déjà défait ; ce qui porte ces noms
+        # aujourd'hui a été recréé depuis, par un autre déroulé ou à la main
+        return {"error": "this run is already undone; apply the plan again to recreate it",
+                "code": "undo-already-done", "undone_by": res.get("undone_by") or ""}, 409
+    chosen, err = _undo_include(undos, include)
+    if err:
+        return err
+    steps = _du.plan(undos, chosen)
+    if not steps:
+        return {"error": "nothing selected to undo", "code": "undo-empty"}, 400
+    regs = {s["ref"].split("/", 1)[1] for s in steps if s["kind"] == "registry"}
+    if not isinstance(delete_data, list) or not all(isinstance(n, str) for n in delete_data):
+        return {"error": "delete_data: a list of registry names", "fields": ["delete_data"]}, 400
+    confirm_registry = confirm_registry if isinstance(confirm_registry, dict) else {}
+    for name in delete_data:
+        if name not in regs:
+            return {"error": f"{name[:40]} is not a selected registry", "fields": ["delete_data"]}, 400
+        if confirm_registry.get(name) != name:
+            # point 210 : les données d'un registre partent sur un second nom tapé
+            return {"error": f"type the registry name {name} to delete its data", "code": "confirm-name",
+                    "fields": ["confirm_registry"]}, 400
+    previous = None
+    last = _action_read(res.get("undone_by"))
+    if last and last["action"] == f"{DEPLOY_UNDO_PREFIX}{cluster}" and last["result"].get("undoes") == action_id:
+        # reprise d'un défaire : ce qui est parti est revérifié et sauté
+        previous = last["result"]
+    with _DEPLOY_LAUNCH_LOCK:
+        busy = _deploy_busy(cluster)
+        if busy:
+            return {"error": "a deployment is running on this cluster", "code": "deploy-running",
+                    "running": busy.id}, 409
+        run_id = uuid.uuid4().hex[:12]
+        label = f"undo:{res.get('plan') or ''}"
+        lock_fd, holder = _deploy_cluster_lock(cluster, run_id, label)
+        end = time.time() + 3
+        while lock_fd is None and time.time() < end and _deploy_run_ended_here(holder.get("run")):
+            # comme un déroulé : le défaire précédent a écrit son statut final
+            # et rend son verrou dans l'instant (reprise relancée aussitôt)
+            time.sleep(0.05)
+            lock_fd, holder = _deploy_cluster_lock(cluster, run_id, label)
+        if lock_fd is None:
+            return {"error": "a deployment or an undo is running on this cluster", "code": "deploy-running",
+                    "running": holder.get("run") or ""}, 409
+        try:
+            run = ActionRun(run_id, f"{DEPLOY_UNDO_PREFIX}{cluster}", cluster, [])
+            run.cluster_user = cluster_user
+            run.required_role = "admin"
+            run.launch_role = role
+            run.result = {"undoes": action_id, "plan": res.get("plan"), "cluster": cluster, "by": user or "",
+                          "selected": [s["id"] for s in steps], "delete_data": sorted(delete_data), "phases": []}
+            with ACTIONS_LOCK:
+                ACTIONS[run_id] = run
+            READ_SHARE.invalidate("_activity")
+            threading.Thread(target=_undo_runner, args=(run, cluster, kc, steps, set(delete_data), previous,
+                                                        action_id, lock_fd, prev["chain_runs"],
+                                                        [u["id"] for u in undos]),
+                             daemon=True, name=f"undo-{run_id}").start()
+        except BaseException:
+            _flock_release(lock_fd)
+            raise
+    return {"action_id": run_id, "undoes": action_id, "selected": [s["id"] for s in steps]}, 202
+
+
+@app.route("/api/deploy/<cluster>/undo/plan", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_deploy_undo_plan(cluster):
+    """Plan de destruction d'un déroulé et de sa chaîne de reprises :
+    lectures seules (suppressions jugées par le serveur)."""
+    kc, err = _deploy_route_cluster(cluster)
+    if err:
+        return err
+    data = _deploy_body()
+    body, status = _undo_plan_body(cluster, kc, data.get("action_id"), data.get("include"))
+    return jsonify(body), status
+
+
+@app.route("/api/deploy/<cluster>/undo", methods=["POST"])
+@requires_auth
+@_rate_limit("6/minute")
+def api_deploy_undo(cluster):
+    """Défait un déroulé (administrateur) : action `deploy-undo:<cluster>`,
+    nom du cluster Harvester tapé ; reprenable en le relançant."""
+    kc, err = _deploy_route_cluster(cluster)
+    if err:
+        return err
+    data = _deploy_body()
+    body, status = _undo_start(cluster, kc, data.get("action_id"), data.get("include"), data.get("confirm"),
+                               data.get("delete_data") or [], data.get("confirm_registry"), current_user() or "",
+                               (current_cluster_identity() or {}).get("user"), current_role())
     return jsonify(body), status
 
 

@@ -86,7 +86,7 @@ def test_a_full_publication_then_a_second_one_that_sends_nothing(world, capsys):
     m = world["dst"].manifests
     assert (f"{host}/stefanprodan/podinfo", "6.9.2") in m and (f"{host}/x/tool", "1.0") in m
     assert ("charts/podinfo", "6.9.2") in m
-    assert "regles: skipped (coming in 2.7)" in err and "quotas: skipped (manifests are not published)" in err
+    assert "regles: skipped (manifests are not published)" in err and "quotas: skipped (manifests are not published)" in err
     pub = rg.load(world["state"], "amorcage")["published"]
     assert [(p["package"], p["version"], p["by"]) for p in pub] == [("socle", "2026.11", "alice")]
     uploads = len(world["dst"].uploads)
@@ -244,7 +244,7 @@ def test_the_detail_marks_later_kinds_and_lists_the_registries(console, world, c
     assert publish(capsys, "--items", "outils")[0] == 0
     d = console.app.test_client().get("/api/artefacts/socle/2026.11").get_json()
     kinds = {it["name"]: it.get("later", False) for it in d["index"]["items"]}
-    assert kinds == {"podinfo": False, "outils": False, "quotas": False, "regles": True}
+    assert kinds == {"podinfo": False, "outils": False, "quotas": False, "regles": False}      # 2.7.0 : policy applicable
     assert [p["registry"] for p in d["published"]] == ["amorcage"]
     assert {im["name"].split("/", 1)[1] for im in d["images"]} == {"stefanprodan/podinfo:6.9.2", "x/tool:1.0"}
 

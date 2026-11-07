@@ -78,8 +78,19 @@ def test_a_good_index_is_read_and_later_kinds_are_kept_marked():
     doc["items"].append({"name": "pol", "kind": "policy", "files": ["manifests/pol/p.yaml"]})
     idx, errors = art.check_index(doc, image_names=["ghcr.io/stefanprodan/podinfo:6.9.2"])
     assert errors == [] and idx["name"] == "socle" and idx["version"] == "2026.11"
-    assert idx["items"][2] == {"name": "pol", "kind": "policy", "files": ["manifests/pol/p.yaml"], "later": True}
+    # 2.7.0 : `policy` est un manifeste applicable ; seul `gitops` reste « à venir »
+    assert idx["items"][2] == {"name": "pol", "kind": "policy", "files": ["manifests/pol/p.yaml"]}
     assert "later" not in idx["items"][0]
+    doc["items"].append({"name": "git", "kind": "gitops"})
+    idx, errors = art.check_index(doc, image_names=["ghcr.io/stefanprodan/podinfo:6.9.2"])
+    assert errors == [] and idx["items"][3] == {"name": "git", "kind": "gitops", "later": True}
+
+
+def test_a_policy_needs_its_files_like_a_manifest():
+    doc = json.loads(json.dumps(INDEX))
+    doc["items"].append({"name": "pol", "kind": "policy"})
+    _, errors = art.check_index(doc, image_names=["ghcr.io/stefanprodan/podinfo:6.9.2"])
+    assert errors == ["items[2].files: manifests/pol/<file>.yaml, one at least"]
 
 
 @pytest.mark.parametrize("mutate,expected", [

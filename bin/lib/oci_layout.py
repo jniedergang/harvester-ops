@@ -229,6 +229,17 @@ def _pick_platform(src, repo, body, ref, platform):
     raise op.RegistryError(f"{ref}: no {platform} image in its index", code="no-platform")
 
 
+def descriptor_size(desc, what):
+    """Taille d'un descripteur OCI, exigée par la spécification : un entier
+    positif ou nul. Sans elle, la copie n'aurait aucune borne (revue 4-8 de
+    la 2.6.0, m-1) : RegistryError `descriptor-no-size`."""
+    size = (desc or {}).get("size")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise op.RegistryError(f"{what}: descriptor {str((desc or {}).get('digest'))[:19]} has no size",
+                               code="descriptor-no-size")
+    return size
+
+
 def copy_image(src, ref, layout, platform=DEFAULT_PLATFORM, progress=None):
     """Copie l'image `ref` du registre `src` (un `oci_push.Registry`) dans
     `layout`, une plateforme, octets inchangés. Rend {"name", "digest",
@@ -249,7 +260,7 @@ def copy_image(src, ref, layout, platform=DEFAULT_PLATFORM, progress=None):
         # image d'une seule plateforme : sa configuration dit laquelle
         cd = man["config"]["digest"]
         if not layout.has_blob(cd):
-            src.blob_to_file(path, cd, layout.blob_path(cd), size=man["config"].get("size"))
+            src.blob_to_file(path, cd, layout.blob_path(cd), size=descriptor_size(man["config"], ref))
         cfg = json.loads(layout.read_blob(cd))
         want = _platform(platform)
         got = [cfg.get("os"), cfg.get("architecture")] + ([cfg.get("variant")] if len(want) == 3 else [])
@@ -257,9 +268,10 @@ def copy_image(src, ref, layout, platform=DEFAULT_PLATFORM, progress=None):
             raise op.RegistryError(f"{ref}: a {'/'.join(map(str, got))} image, not {platform}", code="no-platform")
         plat = {"os": want[0], "architecture": want[1], **({"variant": want[2]} if len(want) == 3 else {})}
     blobs = [man["config"]] + list(man.get("layers") or [])
-    for b in blobs:
+    sizes = [descriptor_size(b, ref) for b in blobs]       # avant tout octet copié
+    for b, size in zip(blobs, sizes):
         if not layout.has_blob(b["digest"]):
-            src.blob_to_file(path, b["digest"], layout.blob_path(b["digest"]), on_bytes=progress, size=b.get("size"))
+            src.blob_to_file(path, b["digest"], layout.blob_path(b["digest"]), on_bytes=progress, size=size)
     mdigest = layout.add_blob_bytes(body)
     desc = {"mediaType": mt, "digest": mdigest, "size": len(body), **({"platform": plat} if plat else {})}
     layout.add_entry(desc, tag or "", name)
@@ -321,16 +333,22 @@ def _chart_yaml(text):
     return out
 
 
+CHART_YAML_MAX = 1 << 20          # 2.7.0 (m-16) : un Chart.yaml ne pèse jamais 1 Mio
+
+
 def chart_meta(tgz):
     """Scalaires de `<chart>/Chart.yaml` d'un `.tgz` (nom et version exigés) ;
-    ValueError sinon."""
+    ValueError sinon, et pour un Chart.yaml de plus de CHART_YAML_MAX octets
+    (lu à chaque relevé des services : jamais sans borne)."""
     meta = None
     try:
         with tarfile.open(tgz, "r:gz") as t:
             for m in t:
                 parts = m.name.split("/")
                 if len(parts) == 2 and parts[1] == "Chart.yaml" and m.isfile():
-                    meta = _chart_yaml(t.extractfile(m).read().decode("utf-8", "replace"))
+                    if m.size > CHART_YAML_MAX:
+                        raise ValueError(f"chart {Path(tgz).name}: Chart.yaml is larger than 1 MiB")
+                    meta = _chart_yaml(t.extractfile(m).read(CHART_YAML_MAX).decode("utf-8", "replace"))
                     break
     except (OSError, tarfile.TarError) as e:
         raise ValueError(f"chart {Path(tgz).name}: not a readable .tgz ({e})") from None

@@ -83,10 +83,9 @@ def test_a_disabled_phase_of_an_older_plan_keeps_its_free_keys_as_warnings():
     assert warnings == ["phases.registry.mirrors: unknown key, ignored (phase disabled)"]
 
 
-def test_artefacts_stays_coming_in_2_7():
-    with pytest.raises(dp.ProfileError) as e:
-        dp.check_plan({"phases": {"artefacts": {"enabled": True}}})
-    assert ("phases.artefacts", "coming in 2.7: set enabled: false") in e.value.errors
+def test_artefacts_is_available_since_2_7():
+    out = dp.check_plan({"phases": {"artefacts": {"enabled": True}}})
+    assert out["phases"]["artefacts"] == {"enabled": True, "timeout_minutes": 15, "policies": [], "items": []}
 
 
 @pytest.mark.parametrize("values,ok,error", [
@@ -177,7 +176,7 @@ def test_cli_delete_refuses_a_registry_in_use(regcli, monkeypatch, tmp_path, cap
                                    "size_gib": 8, "storage_class": "s"})
     monkeypatch.setattr(regcli, "kube_from", lambda a, need_entry=False: (kube, None))
     rc = regcli.cmd_delete(argparse.Namespace(name="amorcage", cluster="harvlab2", kubeconfig="/k",
-                                              delete_data=False))
+                                              delete_data=False, ignore_plan=None))
     assert rc == code
     assert (kube.deleted == []) is (code == 2)
     if code:

@@ -19,7 +19,25 @@ const CapiServices = (() => {
   let host = null;
   let timer = null;
   let lastData = null;
+  let lastApplied = null;     // 2.7.0 : manifestes, politiques et socle appliqués
   let modal = null;
+  const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+  const can = (need) => (ROLE_RANK[window.App && App.role ? App.role() : null] || 0) >= ROLE_RANK[need];
+
+  // 2.7.0 : sorte de ce qui est appliqué (un appel littéral par sorte)
+  const KIND_TEXT = {
+    chart: () => tr('svc.art.kind.chart', 'chart'),
+    manifest: () => tr('svc.art.kind.manifest', 'manifest'),
+    policy: () => tr('svc.art.kind.policy', 'policy'),
+    policies: () => tr('svc.art.kind.policies', 'policies'),
+  };
+  const KIND_TIP = {
+    chart: () => tr('svc.art.t.kind.chart', 'A Helm chart installed by CAAPH (HelmChartProxy)'),
+    manifest: () => tr('svc.art.t.kind.manifest', 'Objects of a package delivered by a ClusterResourceSet; the console removes them itself'),
+    policy: () => tr('svc.art.t.kind.policy', 'Policy objects of a package delivered by a ClusterResourceSet'),
+    policies: () => tr('svc.art.t.kind.policies', 'Policy base, group roles and automation accounts of the console'),
+  };
+  const kindBadge = (k) => `<span class="badge dim tip svc-kind" data-kind="${esc(k)}" data-tip="${esc((KIND_TIP[k] || KIND_TIP.manifest)())}">${esc((KIND_TEXT[k] || (() => k))())}</span>`;
 
   // Un appel littéral par constat : le contrôle de parité des traductions
   // ne voit que ces formes.
@@ -29,6 +47,7 @@ const CapiServices = (() => {
     'invalid-name': (v) => tr('svc.fd.invalid-name', 'Invalid name "{name}": lower case letters, digits and dashes, 42 characters at most.', v),
     'cluster-missing': (v) => tr('svc.fd.cluster-missing', 'Cluster {cluster} does not exist.', v),
     'service-exists': (v) => tr('svc.fd.service-exists', 'Service {name} already exists next to this cluster: it will be updated.', v),
+    'service-name-taken': (v) => tr('svc.fd.service-name-taken', 'Service {name} already serves {cluster} in this namespace: choose another name.', v),
     'invalid-repo': (v) => tr('svc.fd.invalid-repo', '"{repo}" is not a chart repository address (https://, http:// or oci://).', v),
     'invalid-chart': (v) => tr('svc.fd.invalid-chart', 'Invalid chart name "{chart}".', v),
     'invalid-namespace': (v) => tr('svc.fd.invalid-namespace', 'Invalid namespace "{namespace}".', v),
@@ -98,6 +117,40 @@ const CapiServices = (() => {
       + ` · ${esc(r.status || tr('svc.pending', 'pending'))}${r.revision ? ` · r${esc(r.revision)}` : ''}</span>`;
   }
 
+  // 2.7.0 : élément d'un paquet (chart appliqué depuis Artefacts ou un plan)
+  function artefactHint(a) {
+    if (!a) return '';
+    return `<div class="form-hint svc-artefact">${esc(tr('svc.art.from', 'Item {item} of {package} {version}, by {by}', {
+      item: a.item, package: a.package, version: a.version, by: a.by || '?' }))}</div>`;
+  }
+
+  // État du binding d'un ClusterResourceSet : appliqué à l'empreinte du
+  // ConfigMap, ou en attente (message de l'outil)
+  function bindingBadge(st) {
+    const s = st || {};
+    if (s.applied) {
+      return `<span class="badge ok tip svc-binding" data-tip="${esc(tr('svc.art.t.applied', 'Applied to the child cluster with the current content ({hash})', { hash: String(s.hash || '').slice(0, 19) }))}">${Icons.svg('ok', { size: 12 })} ${esc(tr('svc.art.applied', 'applied'))}</span>`;
+    }
+    return `<span class="badge warn tip svc-binding" data-tip="${esc(s.message || tr('svc.art.t.pending', 'Not applied with the current content yet'))}">${Icons.svg('pending', { size: 12 })} ${esc(tr('svc.art.pending', 'not applied yet'))}</span>`;
+  }
+
+  function manifestRow(m) {
+    const ref = `${m.namespace}/${m.cluster}/${m.item}`;
+    const off = !can('operator');
+    const tip = off ? tr('svc.art.t.needOperator', 'Needs the operator role, and the right to read the kubeconfig Secret of the child cluster')
+      : tr('svc.art.t.remove', 'Remove the item: the ClusterResourceSet first, then the objects that still carry the labels of the console');
+    return `
+          <tr data-svc-art="${esc(ref)}">
+            <td><strong>${esc(m.item)}</strong><div class="form-hint">${esc(m.namespace)}/${esc(m.cluster)}${m.applied_by ? ` · ${esc(tr('svc.art.by', 'by {by}', { by: m.applied_by }))}` : ''}</div></td>
+            <td>${kindBadge(m.kind || 'manifest')}</td>
+            <td><code>${esc(m.package || '')} ${esc(m.version || '')}</code><div class="form-hint">${esc(tr('svc.art.objects', '{n} object(s)', { n: m.objects == null ? '?' : m.objects }))}</div></td>
+            <td><code>-</code></td>
+            <td>${bindingBadge(m.state)}</td>
+            <td><span class="tip" data-tip="${esc(tip)}"><button type="button" class="btn btn-sm btn-danger" data-svc-art-remove="${esc(ref)}" data-kind="${esc(m.kind || 'manifest')}"
+                        ${off ? 'disabled' : ''} title="${esc(tip)}" aria-label="${esc(tip)}">${Icons.svg('delete', { size: 13 })} ${esc(tr('svc.remove', 'Remove'))}</button></span></td>
+          </tr>`;
+  }
+
   function render(d) {
     const body = host.querySelector('.svc-body');
     if (!body) return;
@@ -132,27 +185,30 @@ const CapiServices = (() => {
           </div></div>`;
       }).join('')}</div>`);
     const services = d.services || [];
+    const manifests = (lastApplied && lastApplied.manifests) || [];
     parts.push(`<h4 style="margin-top:16px;">${esc(tr('svc.deployed', 'Deployed services'))}</h4>`);
-    if (!services.length) {
+    if (!services.length && !manifests.length) {
       parts.push(`<p class="empty-state">${esc(tr('svc.none', 'No service deployed yet.'))}</p>`);
     } else {
       parts.push(`<table class="data-table svc-table">
         <thead><tr>
           <th>${esc(tr('svc.col.service', 'Service'))}</th>
+          <th>${esc(tr('svc.art.col.kind', 'Kind'))}</th>
           <th>${esc(tr('svc.col.chart', 'Chart'))}</th>
           <th>${esc(tr('svc.col.namespace', 'Namespace in the cluster'))}</th>
           <th>${esc(tr('svc.col.clusters', 'Clusters'))}</th>
           <th>${esc(tr('capi.v.col.actions', 'Actions'))}</th>
         </tr></thead><tbody>${services.map(s => `
           <tr data-svc="${esc(s.namespace)}/${esc(s.name)}">
-            <td><strong>${esc(s.name)}</strong><div class="form-hint">${esc(titleOf(s.service))} · ${esc(s.namespace)}</div></td>
+            <td><strong>${esc(s.name)}</strong><div class="form-hint">${esc(titleOf(s.service))} · ${esc(s.namespace)}</div>${artefactHint(s.artefact)}</td>
+            <td>${kindBadge('chart')}</td>
             <td><code>${esc(s.chart || '')} ${esc(s.version || tr('svc.latest', 'latest'))}</code></td>
             <td><code>${esc(s.release_namespace || 'default')}</code></td>
             <td class="svc-releases">${(s.releases || []).length ? s.releases.map(releaseBadge).join(' ')
               : `<span class="badge warn tip" data-tip="${esc(s.message || tr('svc.t.noRelease', 'CAAPH has not selected any cluster yet'))}">${Icons.svg('pending', { size: 12 })} ${esc(tr('svc.waiting', 'waiting'))}</span>`}</td>
             <td><button type="button" class="btn btn-sm btn-danger tip" data-svc-remove="${esc(s.namespace)}/${esc(s.name)}"
                         data-tip="${esc(tr('svc.t.remove', 'Uninstall the service from its clusters and delete it'))}">${Icons.svg('delete', { size: 13 })} ${esc(tr('svc.remove', 'Remove'))}</button></td>
-          </tr>`).join('')}</tbody></table>`);
+          </tr>`).join('')}${manifests.map(manifestRow).join('')}</tbody></table>`);
     }
     body.innerHTML = parts.join('');
   }
@@ -418,6 +474,20 @@ const CapiServices = (() => {
     }
   }
 
+  // 2.7.0 : retrait d'un manifeste, d'une politique ou du socle
+  async function removeArtefact(ref, kind) {
+    const [ns, child, item] = ref.split('/');
+    if (!confirm(tr('svc.art.confirmRemove', 'Remove {item} from {cluster}? Objects modified by hand (labels of the console removed) are kept.', { item, cluster: `${ns}/${child}` }))) return;
+    try {
+      const r = await fetch(`/api/capi/${enc(cluster)}/artefact/${enc(ns)}/${enc(child)}/${enc(item)}?kind=${enc(kind)}`, { method: 'DELETE' });
+      const out = await r.json();
+      if (!r.ok) throw new Error(out.error || out.hint || `HTTP ${r.status}`);
+      follow(out.action_id, tr('svc.removed', '{name} removed.', { name: item }));
+    } catch (e) {
+      say(`<span style="color:var(--danger)">${esc(tr('svc.error', 'Error: {msg}', { msg: e.message }))}</span>`);
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Cycle de vie
   // -------------------------------------------------------------------------
@@ -425,9 +495,14 @@ const CapiServices = (() => {
     if (!cluster || !host || !host.isConnected) return;
     const asked = cluster;
     try {
-      const r = await fetch(`/api/capi/${enc(asked)}/services${fresh ? '?fresh=1' : ''}`);
+      const [r, applied] = await Promise.all([
+        fetch(`/api/capi/${enc(asked)}/services${fresh ? '?fresh=1' : ''}`),
+        fetch(`/api/capi/${enc(asked)}/artefacts/applied${fresh ? '?fresh=1' : ''}`)
+          .then(x => (x.ok ? x.json() : null)).catch(() => null),
+      ]);
       const d = await r.json();
       if (asked !== cluster) return;
+      lastApplied = applied;
       if (!r.ok || d.unreachable || d.error) {
         host.querySelector('.svc-body').innerHTML = `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(d.unreachable
           ? tr('fabric.unreachable', 'Cluster unreachable') : (d.error || 'HTTP ' + r.status))}</div></div>`;
@@ -446,6 +521,7 @@ const CapiServices = (() => {
       let el;
       if ((el = e.target.closest('[data-svc-deploy]'))) { openForm(el.dataset.svcDeploy); return; }
       if ((el = e.target.closest('[data-svc-remove]'))) { remove(el.dataset.svcRemove); return; }
+      if ((el = e.target.closest('[data-svc-art-remove]'))) { if (!el.disabled) removeArtefact(el.dataset.svcArtRemove, el.dataset.kind); return; }
       if ((el = e.target.closest('[data-svc-goto]')) && window.CAPI && CAPI.setTab) CAPI.setTab(el.dataset.svcGoto, { sync: true });
     });
   }
@@ -459,13 +535,16 @@ const CapiServices = (() => {
     const c = window.App && App.managementCluster ? App.managementCluster() : '';
     if (!h) return Promise.resolve();
     if (!c) { h.innerHTML = `<p class="form-hint">${esc(tr('capi.new.pickCluster', 'Select a cluster'))}</p>`; return Promise.resolve(); }
-    if (cluster !== c) lastData = null;
+    if (cluster !== c) { lastData = null; lastApplied = null; }
     cluster = c;
     if (host !== h || !h.querySelector('.svc-body')) { host = h; shell(); }
     if (!lastData) host.querySelector('.svc-body').innerHTML = `<p class="hint">${esc(tr('common.loading', 'Loading...'))}</p>`;
     if (!timer) timer = setInterval(() => { if (!modal && visible()) refresh(); }, REFRESH_MS);
     return refresh(true);
   }
+
+  // 2.7.0 : le rôle arrive après le premier rendu ; les boutons de retrait suivent
+  document.addEventListener('hops:role', () => { if (lastData && host && host.isConnected) render(lastData); });
 
   return { start, refresh, openForm, _findingText: findingText };
 })();

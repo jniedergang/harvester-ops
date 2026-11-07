@@ -592,3 +592,48 @@ un registre d'amorçage depuis un plan demande le rôle admin. Rôles : la
 lecture est ouverte aux lecteurs ; importer, les clés, le mode strict,
 déclarer et poser des registres relèvent de l'admin ; rattacher, vérifier,
 publier et créer des clusters à registres relèvent de l'opérateur.
+
+## 17. Appliquer des artefacts aux clusters enfants, émettre des jetons, défaire un déploiement (2.7.0)
+
+Référence complète : [artefacts.md](artefacts.md), « Artefacts dans les
+clusters enfants » ; la phase du plan et le Défaire :
+[bare-metal.md](bare-metal.md).
+
+1. **Opérateur avec le droit de lire `<c>-kubeconfig` : appliquer.**
+   Cluster API > Artefacts, ouvrir le paquet, **Appliquer** sur un élément
+   chart, manifeste ou politique : choisir le cluster enfant (et le registre
+   pour un chart), lire **Vérifications**, puis **Appliquer**. Suivre
+   l'action dans le dock. Un refus `child-admin-required` veut dire que vous
+   ne pouvez pas lire le kubeconfig administrateur du cluster enfant.
+2. **Voir ce qui est appliqué.** Cluster API > Services : colonne
+   **Sorte**, état du binding (« appliqué », « pas encore appliqué »).
+   **Retirer** enlève un élément ; les objets modifiés à la main sont gardés
+   et nommés.
+3. **Socle de politiques et comptes.** Dans un plan (carte Artefacts) ou par
+   `harvester-capi manifest-deploy` et une spec `policies`. Le socle est
+   décoché par défaut : ne le cocher que pour des namespaces d'équipe que la
+   console crée.
+4. **Jeton pour une chaîne d'intégration.** Cluster API > Clusters, carte du
+   cluster enfant, **Émettre un jeton** sur un compte d'automatisation :
+   durée de 600 à 86 400 s ; le copier tout de suite, il n'est jamais
+   remontré. Il fonctionne environ une minute après son expiration.
+5. **Admin : défaire un déploiement.** Bare-metal > Historique, **Défaire**
+   sur l'exécution : lire **Contenu** (registre et déclarations non
+   prouvées ou modifiées décochés), lire le **Plan de destruction** (un
+   élément dit recréé depuis reste ; une déclaration gardée par un cluster
+   qui reste est signalée), taper le nom du cluster dans
+   **Confirmation** (et le nom du registre pour supprimer ses données),
+   **Défaire**. Un résultat partiel dit ce qui est resté et pourquoi :
+   corriger, puis relancer **Défaire** sur la même exécution ; ce qui est
+   parti est vérifié et sauté. Pour recréer, relancer le plan.
+6. **Admin : désinstaller la pile Cluster API.** Supprimer d'abord chaque
+   cluster enfant. Cluster API > Installation, **Désinstaller** : lire ce
+   qui part et ce qui reste, taper le nom du cluster. **Installer** la
+   repose depuis le paquet. Ne lancez pas de déroulé pendant le retrait :
+   le verrou des déroulés est vérifié au départ mais pas tenu pendant le
+   retrait.
+7. **Bancs d'essai : des adresses à eux.** Chaque banc d'essai a sa propre
+   adresse de registre et son propre pool d'adresses, réservés dans la
+   gestion des adresses et le DNS avant usage. N'empruntez jamais l'adresse
+   d'un autre banc : les deux bancs allumés, deux répartiteurs kube-vip
+   répondraient en ARP pour la même adresse.

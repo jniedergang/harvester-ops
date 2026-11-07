@@ -4,6 +4,205 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.7.0] - 2026-11-07 - Full artefacts and undoing a deployment
+
+### Added
+- **Artefacts on child clusters** (decisions 123, 125, 127, points 202 to
+  208). A package item reaches a child cluster made by Cluster API: a chart
+  through CAAPH from a registry where the package is published (a
+  `HelmChartProxy` that carries the item, the package, the version, the
+  person and the plan origin); a manifest or a `policy` item through a
+  ConfigMap and a `ClusterResourceSet` `art-<item>` in `Reconcile` mode.
+  Cluster API never removes what a `ClusterResourceSet` applied, so the
+  console follows the removal itself: every object gets the labels of the
+  item and the cluster, the objects leaving the content at an update are
+  written in an annotation before the apply and deleted once the binding
+  carries the new checksum, a removal takes the `ClusterResourceSet` first
+  (orphan cascade: Cluster API makes it the owner of the ConfigMap), then
+  the objects one by one (namespaced first), each deletion judged by the
+  server first. Only the objects that still carry the labels go
+  (`kept-relabelled` otherwise); a delivered namespace holding something
+  foreign stays (`kept-in-use`). Accepted kinds: any namespaced kind outside
+  the system namespaces, and `Namespace`, `ClusterRole`,
+  `ClusterRoleBinding` (never `cluster-admin` nor a `system:*` subject),
+  `StorageClass`, `PriorityClass`, `IngressClass`; CRDs, webhooks, admission
+  policies, `APIService`, `Node`, `PersistentVolume`, `CSIDriver`,
+  `RuntimeClass` and service account token Secrets refused; 500 objects and
+  900 KiB per item.
+- **Base of policies, roles and automation accounts**, unticked by
+  default: team namespaces with a `ResourceQuota`, a `LimitRange` and deny
+  by default network policies (DNS, same namespace and the RKE2 ingress
+  controller opened), `RoleBinding`s by group to `admin`, `edit` or `view`,
+  service accounts bound to `edit` or `view` without any token Secret.
+  Rendered as the builtin item `hops-policies`.
+- **Tokens**: `TokenRequest` of 600 to 86 400 s for an automation account,
+  shown once (Copy), never stored in an action, a log, the event stream or
+  `actions.db`, answered with `Cache-Control: no-store`.
+- **Gestures outside a plan**: Apply in the Artefacts tab (Parameters,
+  Checks, Summary), a Kind column and the binding state in Cluster API >
+  Services, automation accounts and Issue a token in Cluster API >
+  Clusters. Applying, removing, the base and tokens need the operator role
+  and the right to read the admin kubeconfig Secret of the child cluster,
+  checked by the server with a `SelfSubjectAccessReview` made with the
+  identity of the person (`child-admin-required`).
+- **Artefacts phase of the deployment plans** (the last phase, "coming in
+  2.7" until now): base and accounts, then manifests and policies, then
+  charts, per cluster, `depends_on` between entries, 32 entries and 128
+  unfolded items at most, a cluster that failed has its items skipped while
+  the others go on, checks replayed before the phase, resume checks every
+  object of a manifest again. Terraform declarations created by a run now
+  carry it (`origin.run`) and are marked `created` with an `undo` mark.
+- **Undo a deployment** (decision 128, points 210 to 214): History > Undo
+  (administrator) removes in reverse order what a run and its resumes
+  created: artefacts, child clusters, the bootstrap registry the plan laid
+  (unticked by default, its data kept unless its name is typed again), the
+  Terraform content. Never the Harvester installation nor the Cluster API
+  stack. Window with Content, Destruction plan (server dry runs, limits
+  said) and Confirmation (typed cluster name); action `deploy-undo:<cluster>`
+  under the cluster lock of the deployments, child actions per item,
+  resumable; the original run shows Undone or Partially undone. CLI
+  `harvester-plans undo ACTION_ID [--dry-run] [--include
+  registry,unproven,modified] --confirm C [--delete-registry-data NAME]`.
+- **Uninstall on a Turtles stack** (decision 178, point 215): removes only
+  the `CAPIProvider` objects the console declared (CAAPH, CAPHV, RKE2
+  control plane, RKE2 bootstrap, in this order), waits for their
+  deployments, then removes the bundle ConfigMaps and the compatibility
+  Service it laid; never `core/cluster-api` nor Turtles, CRDs and
+  namespaces kept; refused while a Cluster, a `HelmChartProxy` (CAAPH
+  going) or a plan run exists. Window with the refusals, what stays and the
+  typed name; `harvester-capi uninstall [--dry-run] [--remove-images]`.
+- `harvester-capi manifest-check | manifest-deploy | manifest-remove |
+  manifest-verify | manifests | policy-render | token | uninstall`.
+
+### Changed
+- `policy` is an applicable item kind; `gitops` stays "coming (2.8)".
+- `harvester-capi delete` removes a `HarvesterCluster` left without its
+  `Cluster` (waits 120 s, names a finalizer that holds it, never removes
+  one); `check` blocks on such a leftover (`harvester-cluster-leftover`)
+  and only warns on a plain orphan (point 216).
+- The working files of the tools go to `HARVESTER_OPS_WORK_DIR` or
+  `<state>/work` (0700), never the bare `/tmp` (m11 of the 2.5.0 review).
+- `harvester-registry delete --ignore-plan PLAN`: the plan being undone
+  does not count as a user of its own registry.
+- `harvester-capi delete | service-remove | manifest-remove` and
+  `harvester-registry delete --expect-run ID`: refuse with `undo-not-ours`
+  unless the object still carries that plan run. The undo passes the run it
+  judged ours.
+- `harvester-registry delete` removes the registry Deployment, which
+  carries the run mark, last, after the console record.
+- The Turtles uninstall also refuses while a `HarvesterCluster` left
+  without its `Cluster` exists and CAPHV goes
+  (`capi-harvesterclusters-present`).
+
+### Fixed
+- Minors of the 2.6.0 final review (point 213): an explicit `registries:
+  []` of a plan entry replaces the template one, a second service of the
+  same name in a namespace is refused (`service-name-taken`), chart
+  metadata bounded and cached, both disk findings reported, an oversized
+  `SHA256SUMS` named (`sums-too-large`), a descriptor without `size`
+  refused by `pack`, an unreachable registry exits with a clear message,
+  `registry-cert-expiring` 60 days before the end of the bootstrap
+  registry certificate.
+
+- Found on the benches and fixed before release: the registry step of an
+  undo was always refused by the plan being undone; an undo relaunched at
+  once was refused by the lock it was releasing; a failed undo after a
+  partial one turned the run from partial to error; the undo window named
+  the last resume as the creator of an item.
+- Final review: the undo destroyed a Terraform declaration under a child
+  cluster that stayed (unticked, recreated by another run, or adopted). It
+  now refuses with `undo-tf-carries-cluster` while any cluster the Clusters
+  phase of the chain names is present, and the destruction plan names
+  them on the declaration. The troubleshooting advice "untick the item"
+  now says to untick the Terraform declarations too.
+- Final review: a registry delete stopped halfway left a registry without
+  its run mark, judged `undo-not-ours` for good; the marked Deployment now
+  goes last, so the undo finishes it when run again.
+- Final review: between the "ours" check of the undo and the deletion by
+  name, an object recreated under that name could go; the tools now read
+  the mark again (`--expect-run`).
+- Final review: cancelling an undo answered `cancel_requested: false`
+  although the cancel took effect.
+
+### Upgrade notes
+- Nothing to migrate. A plan saved by 2.6 with a disabled `artefacts`
+  phase of free keys loads with a warning; the unknown keys are dropped at
+  the next save.
+- Runs made before 2.7.0 carry no Terraform mark: their declarations are
+  offered unticked by the undo ("creation by this run not proven").
+- A Terraform declaration counts as created by a run by its id alone (ids
+  are never reused): a declaration that a later run of the same plan
+  adopted is still destroyed by the undo of the run that created it, once
+  no cluster of the chain is left.
+
+**Back to 2.6.1**:
+- 2.6.1 refuses a plan whose Artefacts phase is enabled ("coming in 2.7:
+  set enabled: false"): such a plan can neither be applied nor resumed.
+  Disable the phase first; its keys are kept and 2.7.0 reads them back.
+- Artefacts already applied stay on the child clusters (the
+  `ClusterResourceSet` objects keep reconciling). 2.6.1 can neither remove
+  them nor undo a run.
+- An undo (`deploy-undo:`) running at rollback time is lost: run it again
+  after upgrading again.
+- The rest is harmless to 2.6.1: `origin.run` of the declarations, the
+  `undone_*` keys of the runs and `<state>/work`. A Turtles stack
+  uninstalled under 2.7.0 is laid again by Install.
+
+### Tests
+- New API tests for manifests, policies, tokens, the Artefacts phase, the
+  undo (order, dependencies, origin of each target, resume, history,
+  routes, CLI), the Turtles uninstall and the leftover HarvesterCluster;
+  e2e tests for the Artefacts card, the Undo window (one launch, network
+  error, target recreated since), the Apply window, tokens and the
+  Uninstall window. Named mutations killed for every review fix.
+- Final review: a declaration kept while a cluster of the chain stays
+  (unticked, recreated, adopted) and destroyed once it is gone, the plan
+  line (e2e), a registry delete stopped halfway or killed at the console
+  record then resumed, `--expect-run` on the four tools and the undo, the
+  cancel flag, orphan HarvesterClusters refusing the uninstall, and a
+  leftover HarvesterCluster removal keeping a namespace shared with
+  another cluster. A mutation removing each guard is killed.
+- Three timing races of older tests removed (signal handlers of the
+  replication test children, a cancel sent before the handler was set, a
+  declaration relaunched before its runner released it).
+
+### Verified for real
+- harvlab2 (Harvester v1.9.0, nested): a plan with Terraform, a bootstrap
+  registry, one 1+1 child cluster and the Artefacts phase (base, roles,
+  account, manifest, policy, chart), stopped and resumed twice in the
+  Artefacts phase; quotas, default limits, deny by default with DNS,
+  ingress through the RKE2 controller; update to a version with one object
+  less, an object relabelled by hand kept; a token used, refused outside
+  its namespace, absent from the database and logs; undo in three passes
+  with decoys (an item recreated outside the plan, another item outside
+  the plan, a labelled ConfigMap) that all survived, then
+  `undo-already-done`; an undo interrupted during the cluster deletion
+  finished when relaunched; Turtles uninstall refused with a cluster, done
+  without (26 s), stack laid again by Install (52 s); leftover
+  HarvesterCluster blocked, finalizer named and left, plain orphan removed.
+- harv4 (bare metal, Harvester v1.9.0): two child clusters with a manifest
+  and a chart on each (19 min 20 s), then one undo of everything, registry
+  data included (6 min 15 s); a token refused about 80 s after its expiry.
+
+### Not verified for real
+- More than two child clusters; a Rancher outside the bench importing the
+  child clusters; a restricted Rancher person issuing a token
+  (impersonation only); `harvester-capi uninstall --remove-images`.
+- The final review fixes refuse or reorder and are unit-tested only, not
+  replayed on a bench: the `undo-tf-carries-cluster` guard, the registry
+  delete resumed after stopping halfway, `--expect-run`, the cancel flag
+  and the `capi-harvesterclusters-present` refusal.
+
+### Known limits
+- A deployment whose Clusters phase is partial and whose Artefacts phase
+  then fails ends `error`, although clusters were created; the undo treats
+  it as partial (2.7.1).
+- `harvester-capi uninstall --remove-images` takes the images of every
+  Deployment of the provider namespaces (to restrict to the provider
+  Deployments).
+- The deployment lock is checked at the start of the Turtles uninstall,
+  not held during the removal.
+
 ## [2.6.1] - 2026-11-07 - Registry reachability from the VM network, write port restricted to the console
 
 ### Added

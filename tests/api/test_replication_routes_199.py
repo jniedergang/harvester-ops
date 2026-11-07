@@ -645,13 +645,15 @@ def test_other_tools_keep_their_texts():
 
 # enfants de test : SIGTERM (annulation) et SIGUSR2 (arrêt de la console,
 # décision 68) ignorés, ou suivis d'une sortie 3 ; le signal reçu est écrit
-STUBBORN = ("import signal,sys,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+# os.write et non print : un signal reçu pendant un print du même flux
+# lève « reentrant call » dans le gestionnaire (course vue sous charge)
+STUBBORN = ("import os,signal,sys,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             "signal.signal(signal.SIGUSR2, signal.SIG_IGN)\n"
-            "print('ready', flush=True)\ntime.sleep(30)\n")
-POLITE = ("import signal,sys,time\ndef h(n, f):\n    print(signal.Signals(n).name, flush=True); "
+            "os.write(1, b'ready\\n')\ntime.sleep(30)\n")
+POLITE = ("import os,signal,sys,time\ndef h(n, f):\n    os.write(1, (signal.Signals(n).name + '\\n').encode()); "
           "time.sleep(0.5); sys.exit(3)\n"
           "signal.signal(signal.SIGTERM, h)\nsignal.signal(signal.SIGUSR2, h)\n"
-          "print('ready', flush=True)\ntime.sleep(30)\n")
+          "os.write(1, b'ready\\n')\ntime.sleep(30)\n")
 
 
 def _child(code):
@@ -1297,9 +1299,11 @@ def test_switching_a_large_plan_back_to_console_follow_is_refused(client, env):
 
 # --- annulation : l'action reste en cours jusqu'à la sortie de l'outil --------------------
 
+# READY : fichier posé une fois le gestionnaire installé (sous charge, un
+# SIGTERM envoyé avant tuait l'enfant sans passer par lui)
 FINISH_ON_TERM = ("import json,signal,sys,time\n"
                   "def h(*a):\n    time.sleep(0.6); print(json.dumps(OUT)); sys.exit(RC)\n"
-                  "signal.signal(signal.SIGTERM, h)\nprint('ready', file=sys.stderr, flush=True)\n"
+                  "signal.signal(signal.SIGTERM, h)\nopen(READY, 'w').close()\n"
                   "time.sleep(30)\n")
 
 
@@ -1308,18 +1312,19 @@ FINISH_ON_TERM = ("import json,signal,sys,time\n"
     (3, {"ok": False, "kind": "cancelled", "left": []}, "cancelled"),
     (3, {"ok": False, "kind": "interrupted", "resume_required": True}, "cancelled"),
 ])
-def test_cancel_keeps_a_replication_action_running_until_the_tool_says(client, rc, out, status):
+def test_cancel_keeps_a_replication_action_running_until_the_tool_says(client, tmp_path, rc, out, status):
     run = wapp.ActionRun("c1", f"replication:{PID}:protect", "harvlab", ["x"])
     run.required_role, run.kill_grace, run.cancel_waits = "operator", 30, True
     wapp.ACTIONS["c1"] = run
-    code = FINISH_ON_TERM.replace("OUT", repr(out)).replace("RC", str(rc))
+    ready = tmp_path / "ready"
+    code = FINISH_ON_TERM.replace("OUT", repr(out)).replace("RC", str(rc)).replace("READY", repr(str(ready)))
     t = _RealThread(target=wapp._vm_transfer_runner, args=(run, [sys.executable, "-c", code]),
                     kwargs={"capture": True, "summarize": wapp._repl_summarize})
     t.start()
-    deadline = time.monotonic() + 10
-    while run.proc is None and time.monotonic() < deadline:
+    deadline = time.monotonic() + 20
+    while not ready.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
-    time.sleep(0.3)
+    assert ready.exists(), "the child never installed its handler"
     r = client.delete("/api/action/c1")
     d = r.get_json()
     assert r.status_code == 200 and d["status"] == "running" and d["cancel_requested"] is True

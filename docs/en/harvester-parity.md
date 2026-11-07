@@ -1,6 +1,6 @@
 # Parity with the Harvester UI
 
-Status on 2026-11-07, console **v2.6.1**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
+Status on 2026-11-07, console **v2.7.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
 
 Of 136 functions of the Harvester UI: **133 done**, **3 partial**, **0 missing**; 1 out of scope. A missing function shows the version it is planned for.
 
@@ -278,7 +278,8 @@ Harvester menu: *VM Imports / VM Migration*
 | Terraform: declarations kept by the console | Console only | 1.54 | screen in tabs Declarations, Resources, History, Installation (2.2); target a Harvester cluster or a KVM host, RKE2 on libvirt VMs template (2.3); network, storage class, IP pool forms (2.4) |
 | RKE2 clusters through Cluster API, services through CAAPH | Console only | 1.48 | Rancher also creates them, with its Harvester node driver; the console does it without Rancher; screen in tabs Clusters, Services, History, Installation (2.2), plus Registries and Artefacts (2.6) |
 | Signed artefact packages and child-cluster registries | Console only | 2.6 | package built on a connected machine (standard library only) and imported offline, permissive or strict trust, bootstrap registry on the Harvester cluster or client registry, resumable publishing, RKE2 mirrors set at creation, charts through CAAPH from the registry; Harvester only has the containerd-registry setting of its own nodes |
-| Bare-metal Harvester install over Redfish | Console only | 1.19 | complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78); screen in tabs Machines, Profiles, Images, History, last discovery remembered (2.1); a machine that already carries a system is guarded, profile batches included (2.2); deployment plans: readiness then Terraform content, tracked and resumable (2.4), Cluster API and child clusters (2.5), registries and package publishing (2.6) |
+| Artefacts applied to child clusters, undoing a deployment | Console only | 2.7 | manifests and policies through a ClusterResourceSet with removal followed by the console, base of policies, automation accounts and short tokens, Artefacts phase of the plans, reverse removal of what a run created; Harvester has nothing of the kind |
+| Bare-metal Harvester install over Redfish | Console only | 1.19 | complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78); screen in tabs Machines, Profiles, Images, History, last discovery remembered (2.1); a machine that already carries a system is guarded, profile batches included (2.2); deployment plans: readiness then Terraform content, tracked and resumable (2.4), Cluster API and child clusters (2.5), registries and package publishing (2.6), artefacts and undo (2.7) |
 | Activity: every action tracked, action dock | Console only | 1.6 |  |
 | Collaborative notes on VMs and nodes | Console only | 1.4 |  |
 | Real Longhorn allocatable per class | Console only | 1.29 |  |

@@ -106,7 +106,7 @@ def test_badges_and_hostile_names_are_escaped(context, flask_server):
            "imported_by": "alice", "imported_at": "2026-11-06"},
           {"name": "b", "version": "2.0.0", "items": 2, "trust": "unknown-key", "principal": None},
           {"name": "c", "version": "3.0.0", "items": 2, "trust": "unsigned", "principal": None}]
-    detail = {"name": HOSTILE, "version": "1.0.0", "index": {"items": [{"name": "p", "kind": "policy", "later": True}]},
+    detail = {"name": HOSTILE, "version": "1.0.0", "index": {"items": [{"name": "p", "kind": "gitops", "later": True}]},
               "images": [{"name": HOSTILE, "digest": "sha256:" + "a" * 64, "size": 10, "platform": "linux/amd64"}],
               "trust": {"state": "valid", "principal": HOSTILE, "key_fingerprint": "SHA256:abc", "person": HOSTILE,
                         "date": "d", "mode": "permissive"}, "published": []}
@@ -118,7 +118,7 @@ def test_badges_and_hostile_names_are_escaped(context, flask_server):
     expect(badges.nth(2)).to_contain_text("Unsigned")
     expect(page.locator("#artefacts-body .art-table")).to_contain_text(HOSTILE)       # texte, pas balise
     page.locator(".art-row").first.click()
-    expect(page.locator("#artefacts-detail")).to_contain_text("coming (2.7)")
+    expect(page.locator("#artefacts-detail")).to_contain_text("coming (2.8)")
     expect(page.locator("#artefacts-detail .art-images")).to_contain_text(HOSTILE)
     assert page.evaluate("() => window.__pwned") is None
     assert page.locator("#artefacts-body img").count() == 0

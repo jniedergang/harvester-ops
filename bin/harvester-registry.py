@@ -44,13 +44,13 @@ Voir docs/design/2026-11-05-artefacts-registre-260-plan.md (tâches 6 et 7).
 """
 
 import argparse
+import base64
 import json
 import os
 import secrets
 import shutil
 import socket
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -62,6 +62,7 @@ import deploy_plans as dp  # noqa: E402
 import registries as rg  # noqa: E402
 import registry_seed as rs  # noqa: E402
 import vm_probe  # noqa: E402
+import work_dir  # noqa: E402
 from kube import Kube, KubeError, cluster_config  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
@@ -462,7 +463,12 @@ def cmd_deploy(args):
     except (OSError, ValueError) as e:
         step("tls", "error", str(e))
         return EXIT_REFUSED
-    work = Path(tempfile.mkdtemp(prefix="hops-registry-", dir=os.environ.get("HARVESTER_OPS_WORK_DIR")))
+    try:
+        # 2.7.0 (m11) : espace de travail privé, jamais /tmp (clés de la CA)
+        work = work_dir.mkdtemp("hops-registry-")
+    except ValueError as e:
+        step("tls", "error", str(e))
+        return EXIT_REFUSED
     try:
         step("tls", "running", "client certificate" if client_tls else "CA and server certificate")
         tls = client_tls or rs.make_tls(work, args.address, args.dns_name, args.name)
@@ -516,6 +522,7 @@ def cmd_status(args):
         svc = kube.get("services", rs.NAMESPACE, args.name)
         wsvc = kube.get("services", rs.NAMESPACE, rs.write_service_name(args.name))
         present = {r: kube.get("secrets", rs.NAMESPACE, n) is not None for r, n in rg.secret_names(args.name).items()}
+        tls = kube.get("secrets", rs.NAMESPACE, f"{args.name}-tls")
         used = None
         vol = ((pvc or {}).get("spec") or {}).get("volumeName")
         if vol:
@@ -538,7 +545,14 @@ def cmd_status(args):
                 repos = len(json.loads(body).get("repositories") or [])
             except (op.RegistryError, ValueError):
                 repos = None
+    # seul le certificat public est lu : la clé du Secret ne sort jamais
+    crt = ((tls or {}).get("data") or {}).get("tls.crt")
+    try:
+        not_after = rs.cert_not_after(base64.b64decode(crt).decode()) if crt else None
+    except (ValueError, UnicodeDecodeError):
+        not_after = None
     out({"registry": args.name, "declared": d is not None, "present": dep is not None,
+         "cert_not_after": not_after, "findings": rs.cert_findings(args.name, not_after, time.time()),
          "origin": rs.origin_of(dep) if dep else {},
          "ready": bool(st.get("readyReplicas")), "image": containers[0].get("image") if containers else None,
          "address": ingress.get("ip") or (d or {}).get("address"),
@@ -630,33 +644,59 @@ def cmd_delete(args):
     except KubeError as e:
         step("delete", "error", f"registry-usage-unknown: {str(e)[:200]}")
         return EXIT_REFUSED
+    # 2.7.0 (Défaire, vu en réel) : le plan défait désigne son registre ;
+    # lui seul ne le retient pas (son document reste et le reposerait)
+    ignored = {f"plan:{p}" for p in args.ignore_plan or []}
+    used = [u for u in used if u.split(" (", 1)[0] not in ignored]
     if used:
         step("delete", "error", f"registry-in-use: {', '.join(sorted(set(used)))}")
         out({"registry": args.name, "deleted": False, "used_by": sorted(set(used))})
         return EXIT_REFUSED
+    expect = getattr(args, "expect_run", "")
+    if expect:
+        # revue finale 2.7.0 (m-b) : la marque relue juste avant d'écrire ;
+        # sans Deployment, la suppression précédente s'est arrêtée en route (I2)
+        try:
+            dep = kube.get("deployments", rs.NAMESPACE, args.name)
+        except KubeError as e:
+            step("delete", "error", f"state unreadable: {str(e)[:200]}")
+            return EXIT_FAIL
+        refused = cc.run_mismatch(dep, expect) if dep is not None else None
+        if refused:
+            step("delete", "error", refused)
+            out({"registry": args.name, "deleted": False})
+            return EXIT_REFUSED
     names = rg.secret_names(args.name)
-    objs = [("deployments", args.name), ("services", args.name), ("services", rs.write_service_name(args.name)),
+    # revue finale 2.7.0 (I2) : le Deployment porte la marque de l'exécution
+    # (plan-run) ; il part en DERNIER, après la fiche de la console. Une
+    # suppression arrêtée en route le laisse : le Défaire reconnaît encore
+    # le registre et finit le retrait quand on le relance
+    objs = [("services", args.name), ("services", rs.write_service_name(args.name)),
             ("configmaps", f"{args.name}-config"),
             ("secrets", f"{args.name}-tls"), ("secrets", f"{args.name}-htpasswd"),
             ("secrets", names["push"]), ("secrets", names["pull"]), ("secrets", names["ca"])]
     if args.delete_data:
         objs.append(("persistentvolumeclaims", f"{args.name}-data"))
+
+    def remove(kind, n):
+        o = kube.get(kind, rs.NAMESPACE, n)
+        if o is None:
+            return
+        if ((o.get("metadata") or {}).get("labels") or {}).get(rs.LABEL) != args.name:
+            # revue 2.6.1 : jamais l'objet d'un autre registre
+            step("delete", "running", f"{kind} {n} kept: it does not belong to {args.name}")
+            return
+        kube.delete(kind, rs.NAMESPACE, n)
+        step("delete", "running", f"{kind} {n}")
     try:
         for kind, n in objs:
-            o = kube.get(kind, rs.NAMESPACE, n)
-            if o is None:
-                continue
-            if ((o.get("metadata") or {}).get("labels") or {}).get(rs.LABEL) != args.name:
-                # revue 2.6.1 : jamais l'objet d'un autre registre
-                step("delete", "running", f"{kind} {n} kept: it does not belong to {args.name}")
-                continue
-            kube.delete(kind, rs.NAMESPACE, n)
-            step("delete", "running", f"{kind} {n}")
+            remove(kind, n)
+        if d is not None:
+            rg.delete(state(), args.name)
+        remove("deployments", args.name)
     except KubeError as e:
         step("delete", "error", str(e)[:300])
         return EXIT_FAIL
-    if d is not None:
-        rg.delete(state(), args.name)
     kept = "" if args.delete_data else f"; volume {args.name}-data kept (its images stay for a new deployment)"
     step("delete", "done", f"{args.name} removed{kept}")
     out({"registry": args.name, "deleted": True, "data_kept": not args.delete_data})
@@ -726,6 +766,10 @@ def parser():
     s.add_argument("name")
     cluster_args(s)
     s.add_argument("--delete-data", action="store_true")
+    s.add_argument("--ignore-plan", action="append", metavar="PLAN",
+                   help="a plan being undone: it does not count as a user")
+    s.add_argument("--expect-run", default="", metavar="ID",
+                   help="refuse unless the Deployment carries this plan run (the undo of a plan)")
     s.set_defaults(fn=cmd_delete)
     s = sub.add_parser("show", allow_abbrev=False)
     s.add_argument("name")

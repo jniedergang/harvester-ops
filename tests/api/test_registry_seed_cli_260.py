@@ -279,3 +279,78 @@ def test_a_plan_resumes_over_the_leftovers_of_its_own_failed_deploy(world, capsy
         code, out, err = deploy(capsys, "--origin", "plan=site,run=0123456789ac")
         assert code == 0, err
         assert rg.load(world["state"], "amorcage")["kind"] == "bootstrap"
+
+
+@pytest.mark.parametrize("users,ignore,code", [
+    (["plan:site"], [], 2),
+    (["plan:site"], ["--ignore-plan", "site"], 0),
+    (["plan:site (possibly, through a variable)"], ["--ignore-plan", "site"], 0),
+    (["plan:site", "plan:autre"], ["--ignore-plan", "site"], 2),            # un autre plan l'emploie
+    (["plan:site", "cluster:harvlab2/web"], ["--ignore-plan", "site"], 2),  # un cluster aussi
+])
+def test_delete_by_the_undo_of_a_plan_ignores_only_that_plan(world, capsys, monkeypatch, users, ignore, code):
+    """2.7.0, vu en réel : le Défaire d'un plan était refusé (registry-in-use)
+    parce que ce même plan désigne le registre ; il ne compte plus ce plan,
+    et seulement lui."""
+    assert deploy(capsys)[0] == 0
+    capsys.readouterr()
+    monkeypatch.setattr(cli, "users", lambda name, clusters, kube_for=None: list(users))
+    assert cli.main(["delete", "amorcage", "--cluster", "harvlab2"] + ignore) == code
+    assert (rg.load(world["state"], "amorcage") is None) is (code == 0)
+
+
+@pytest.mark.parametrize("fail_on", [("secrets", "amorcage-pull"), ("services", "amorcage"), ("deployments", "amorcage")])
+def test_a_delete_stopped_halfway_keeps_the_marked_deployment_and_resumes(world, capsys, fail_on):
+    """Revue finale 2.7.0 (I2) : le Deployment porte la marque de
+    l'exécution ; il part en dernier, après la fiche de la console. Une
+    suppression arrêtée en route le laisse : le registre reste reconnu
+    (« ours ») et une nouvelle suppression finit le retrait."""
+    assert deploy(capsys, "--origin", "plan=site,run=0123456789ab")[0] == 0
+    capsys.readouterr()
+    kube = world["kube"]
+    real = kube.delete
+
+    def failing(kind, ns, name, cascade=None):
+        if (kind, name) == fail_on:
+            raise cli.KubeError("forbidden")
+        real(kind, ns, name, cascade)
+    kube.delete = failing
+    assert cli.main(["delete", "amorcage", "--cluster", "harvlab2"]) == cli.EXIT_FAIL
+    dep = kube.objects.get(("deployments", "amorcage"))
+    assert dep is not None and cli.rs.origin_of(dep)["run"] == "0123456789ab"
+    assert ("deployments", "amorcage") not in kube.deleted
+    capsys.readouterr()
+    kube.delete = real
+    assert cli.main(["delete", "amorcage", "--cluster", "harvlab2"]) == cli.EXIT_OK
+    assert ("deployments", "amorcage") not in kube.objects and rg.load(world["state"], "amorcage") is None
+    assert [n for k, n in kube.deleted].count("amorcage-pull") == 1
+
+
+def test_a_delete_killed_at_the_console_record_keeps_the_deployment(world, capsys, monkeypatch):
+    """Revue finale 2.7.0 (I2) : tué entre la fiche et le Deployment (arrêt de
+    la console), le Deployment marqué reste ; jamais une fiche sans lui."""
+    assert deploy(capsys, "--origin", "plan=site,run=0123456789ab")[0] == 0
+    capsys.readouterr()
+
+    def killed(state, name):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(cli.rg, "delete", killed)
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["delete", "amorcage", "--cluster", "harvlab2"])
+    assert ("deployments", "amorcage") in world["kube"].objects
+
+
+@pytest.mark.parametrize("deployed_by,expect,code", [
+    ("0123456789ab", "0123456789ab", 0),
+    ("0123456789ac", "0123456789ab", 2),                    # recréé par une autre exécution
+    (None, "0123456789ab", 2),                              # recréé à la main
+])
+def test_delete_rereads_the_run_mark_before_writing(world, capsys, deployed_by, expect, code):
+    """Revue finale 2.7.0 (m-b) : `--expect-run` refuse un registre recréé
+    entre le jugement du Défaire et la suppression ; rien n'est supprimé."""
+    assert deploy(capsys, *(["--origin", f"plan=site,run={deployed_by}"] if deployed_by else []))[0] == 0
+    capsys.readouterr()
+    assert cli.main(["delete", "amorcage", "--cluster", "harvlab2", "--expect-run", expect]) == code
+    assert (world["kube"].deleted == []) is (code != 0)
+    if code:
+        assert "undo-not-ours" in capsys.readouterr().err and rg.load(world["state"], "amorcage") is not None

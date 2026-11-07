@@ -34,6 +34,7 @@ const Registries = (() => {
     'registry-not-attached': (v) => tr('reg.fd.registry-not-attached', 'The registry {registry} has no accounts on this cluster: attach it.', v),
     'registry-unreachable': (v) => tr('reg.fd.registry-unreachable', 'The registry {registry} does not answer at {endpoint}.', v),
     'registry-auth-refused': (v) => tr('reg.fd.registry-auth-refused', 'The registry {registry} refuses the account(s) {accounts}.', v),
+    'registry-cert-expiring': (v) => tr('reg.fd.registry-cert-expiring', 'The server certificate of {registry} expires in {days} day(s), on {not_after}: renew it before the nodes refuse it.', v),
     'registry-ca-invalid': (v) => tr('reg.fd.registry-ca-invalid', 'The certificate of {registry} is not signed by its declared CA.', v),
     'registry-pull-is-push': (v) => tr('reg.fd.registry-pull-is-push', 'The read account of {registry} is its write account: it will be written on every child node.', v),
     'registry-no-usage': (v) => tr('reg.fd.registry-no-usage', 'The registry {registry} serves neither images nor charts.', v),
@@ -267,7 +268,7 @@ const Registries = (() => {
         el.innerHTML = `<p class="reg-state">${s.ready ? `<span class="badge ok">${esc(tr('reg.ready', 'ready'))}</span>`
           : `<span class="badge warn">${esc(tr('reg.notReady', 'not ready'))}</span>`}
           ${s.volume && s.volume.used_bytes != null ? esc(tr('reg.used', '{used} used', { used: bytes(s.volume.used_bytes) })) : ''}
-          ${s.repositories != null ? esc(tr('reg.repos', '{n} repositories', { n: s.repositories })) : ''}</p>`;
+          ${s.repositories != null ? esc(tr('reg.repos', '{n} repositories', { n: s.repositories })) : ''}</p>${findingsHtml(s.findings)}`;
       }
     }
   }

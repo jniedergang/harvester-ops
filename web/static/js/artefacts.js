@@ -19,6 +19,9 @@ const Artefacts = (() => {
   let data = null;
   let selected = null;
   let modal = null;
+  const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+  const can = (need) => (ROLE_RANK[window.App && App.role ? App.role() : null] || 0) >= ROLE_RANK[need];
+  const APPLICABLE = ['chart', 'manifest', 'policy'];
 
 
   // Un appel littéral par état : le contrôle de parité des traductions ne
@@ -88,8 +91,8 @@ const Artefacts = (() => {
     if (!d) { box.innerHTML = `<p class="form-hint">${esc(tr('art.loadError', 'The packages could not be read.'))}</p>`; return; }
     const t = d.trust || {};
     const items = (d.index.items || []).map(it => `<li><b>${esc(it.name)}</b> <span class="badge dim">${esc(it.kind)}</span>
-      ${it.later ? `<span class="badge info tip" data-tip="${esc(tr('art.t.later', 'Kept in the package; applied by a later version'))}">${esc(tr('art.later', 'coming (2.7)'))}</span>` : ''}
-      ${it.version ? `<span class="form-hint">${esc(it.version)}</span>` : ''}</li>`).join('');
+      ${it.later ? `<span class="badge info tip" data-tip="${esc(tr('art.t.later', 'Kept in the package; applied by a later version'))}">${esc(tr('art.later', 'coming (2.8)'))}</span>` : ''}
+      ${it.version ? `<span class="form-hint">${esc(it.version)}</span>` : ''}${applyButton(it)}</li>`).join('');
     const images = (d.images || []).map(im => `<li><code>${esc(im.name)}</code>
       <span class="form-hint">${im.size != null ? esc(bytes(im.size)) : ''} ${esc(im.platform || '')} ${esc(String(im.digest || '').slice(7, 19))}</span></li>`).join('');
     const pubs = (d.published || []).map(p => `<li>${esc(p.registry)} <span class="form-hint">${esc(p.at || '')}</span></li>`).join('');
@@ -138,7 +141,7 @@ const Artefacts = (() => {
     ]);
     const regs = (rr.registries || []).filter(x => (x.clusters || []).includes(cluster));
     const items = ((dr.index || {}).items || []);
-    const publishable = (it) => !it.later && it.kind !== 'manifest';
+    const publishable = (it) => !it.later && it.kind !== 'manifest' && it.kind !== 'policy';
     closeModal();
     modal = document.createElement('div');
     modal.className = 'modal-overlay active art-modal art-publish';
@@ -163,7 +166,7 @@ const Artefacts = (() => {
           <div class="xfer-live-line" data-x="progress" hidden></div>
         </div>
         <div class="modal-footer apply-bar" style="margin:0;">
-          <button type="button" class="btn btn-secondary btn-sm" data-art-close>${esc(tr('common.cancel', 'Cancel'))}</button>
+          <button type="button" class="btn btn-secondary btn-sm tip" data-art-close data-tip="${esc(tr('art.t.closeWindow', 'Close this window'))}" title="${esc(tr('art.t.closeWindow', 'Close this window'))}">${esc(tr('common.cancel', 'Cancel'))}</button>
           <span class="tip" data-x="go-wrap"><button type="button" class="btn btn-primary btn-sm" data-art-go disabled>${icon('upload', 13)} ${esc(tr('art.publish', 'Publish'))}</button></span>
           <span class="apply-result" data-x="feedback"></span>
         </div>
@@ -216,6 +219,7 @@ const Artefacts = (() => {
       line.hidden = false;
       line.textContent = tr('art.publishStarted', 'Publishing (action {id}), see the dock.', { id: d.action_id });
       if (!window.SSEReconnect) return;
+      if (modal !== m) return;
       const es = SSEReconnect.connect(`/api/stream/${enc(d.action_id)}`, {
         on: {
           step: (ev) => { try { const st = JSON.parse(ev.data); if (st.message) line.textContent = st.message; } catch { /* ligne illisible */ } },
@@ -228,6 +232,183 @@ const Artefacts = (() => {
           },
         },
       });
+    });
+    check();
+  }
+
+  // -------------------------------------------------------------------------
+  // Appliquer un élément à un cluster enfant (2.7.0, tâche 6) : Paramètres,
+  // Vérifications, Résumé ; constats avant le bouton
+  // -------------------------------------------------------------------------
+  function applyButton(it) {
+    if (it.later || !APPLICABLE.includes(it.kind)) return '';
+    const off = !can('operator');
+    const tip = off ? tr('art.ap.t.needOperator', 'Needs the operator role, and the right to read the kubeconfig Secret of the child cluster')
+      : tr('art.ap.t.apply', 'Apply this item to a cluster created by Cluster API: parameters, checks, summary');
+    return ` <span class="tip" data-tip="${esc(tip)}"><button type="button" class="btn btn-sm btn-secondary" data-art-apply="${esc(it.name)}"
+      ${off ? 'disabled' : ''} title="${esc(tip)}" aria-label="${esc(tip)}">${icon('play', 12)} ${esc(tr('art.ap.apply', 'Apply'))}</button></span>`;
+  }
+
+  const AP_FINDINGS = {
+    'child-admin-required': (v) => tr('art.ap.fd.child-admin-required', 'You cannot read the kubeconfig Secret of {cluster}: only an administrator of the child cluster applies items to it.', v),
+    'child-admin-unknown': (v) => tr('art.ap.fd.child-admin-unknown', 'Your right on {cluster} could not be checked: {message}', v),
+  };
+  // les constats de l'outil sont ceux de Services (charts) ; sinon le code
+  const apText = (f) => (AP_FINDINGS[f.code] ? AP_FINDINGS[f.code](Object.assign({}, f.facts || {}))
+    : (window.CapiServices && CapiServices._findingText ? CapiServices._findingText(f) : f.code));
+
+  async function openApply(itemName) {
+    if (!selected) return;
+    const pkg = Object.assign({}, selected);
+    const cluster = window.App && App.managementCluster ? App.managementCluster() : '';
+    const [dr, sr] = await Promise.all([
+      fetch(`/api/artefacts/${enc(pkg.name)}/${enc(pkg.version)}`).then(r => r.json()).catch(() => ({})),
+      fetch(`/api/capi/${enc(cluster)}/services`).then(r => r.json()).catch(() => ({})),
+    ]);
+    const it = ((dr.index || {}).items || []).find(x => x.name === itemName);
+    if (!it) return;
+    const chart = it.kind === 'chart';
+    const children = sr.clusters || [];
+    const regs = (sr.registry_charts || []).filter(c => c.package === pkg.name && c.version === pkg.version && c.item === it.name);
+    const tabs = ['params', 'checks', 'summary'];
+    const TAB = { params: tr('reg.tab.params', 'Parameters'), checks: tr('reg.tab.checks', 'Checks'), summary: tr('reg.tab.summary', 'Summary') };
+    closeModal();
+    modal = document.createElement('div');
+    modal.className = 'modal-overlay active art-modal art-apply';
+    modal.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-header"><div><h3>${icon('play')} ${esc(tr('art.ap.title', 'Apply an item'))}</h3>
+          <div class="modal-subtitle">${esc(`${it.name} (${it.kind})`)} · ${esc(`${pkg.name} ${pkg.version}`)} · ${esc(cluster)}</div></div>
+          <button type="button" class="btn-close tip" data-art-close data-tip="${esc(tr('common.cancel', 'Cancel'))}" title="${esc(tr('common.cancel', 'Cancel'))}">×</button></div>
+        <div class="modal-body">
+          <div class="sub-tabs sub-tabs-inline art-apply-tabs" role="tablist">${tabs.map((t, i) => `<button type="button" role="tab"
+            class="sub-tab tip${i ? '' : ' active'}" data-art-tab="${t}" data-tip="${esc(TAB[t])}" title="${esc(TAB[t])}">${esc(TAB[t])}${t === 'checks'
+              ? ' <span class="badge dim" data-x="count"></span>' : ''}</button>`).join('')}</div>
+          <section data-art-pane="params">
+            <div class="form-row"><label>${esc(tr('art.ap.cluster', 'Child cluster'))}</label>
+              <select data-x="cluster" class="tip" data-tip="${esc(tr('art.ap.t.cluster', 'A cluster created by Cluster API on this Harvester cluster (namespace/name)'))}"
+                      title="${esc(tr('art.ap.t.cluster', 'A cluster created by Cluster API on this Harvester cluster (namespace/name)'))}">${children.map(c =>
+                `<option value="${esc(c)}">${esc(c)}</option>`).join('')}</select></div>
+            ${children.length ? '' : `<p class="form-hint">${esc(tr('art.ap.noCluster', 'No cluster created by Cluster API on this Harvester cluster.'))}</p>`}
+            ${chart ? `<div class="form-row"><label>${esc(tr('art.registry', 'Registry'))}</label>
+              <select data-x="registry" class="tip" data-tip="${esc(tr('art.ap.t.registry', 'Registries attached to this cluster where this chart is published'))}"
+                      title="${esc(tr('art.ap.t.registry', 'Registries attached to this cluster where this chart is published'))}">${regs.map(c =>
+                `<option value="${esc(c.registry)}">${esc(`${c.registry} (${c.chart} ${c.chart_version})`)}</option>`).join('')}</select></div>
+              ${regs.length ? '' : `<p class="form-hint" data-x="unpublished">${esc(tr('art.ap.notPublished', 'This chart is not published in a registry attached to this cluster: publish the package first.'))}</p>`}
+              <div class="form-row"><label>${esc(tr('svc.f.values', 'Values (YAML)'))}</label>
+              <textarea data-x="values" rows="6" spellcheck="false" class="tip" data-tip="${esc(tr('art.ap.t.values', 'A YAML mapping laid over the values of the package'))}"
+                        title="${esc(tr('art.ap.t.values', 'A YAML mapping laid over the values of the package'))}"></textarea></div>`
+              : `<p class="tf-desc">${esc(tr('art.ap.manifestIntro', 'The objects are delivered by a ClusterResourceSet in Reconcile mode. The console removes them itself when the item is removed.'))}</p>`}
+          </section>
+          <section data-art-pane="checks" hidden><div class="xfer-report" data-x="report"><p class="form-hint">${esc(tr('art.checking', 'Checking…'))}</p></div></section>
+          <section data-art-pane="summary" hidden><div data-x="summary"></div></section>
+          <div class="xfer-live-line" data-x="progress" hidden></div>
+        </div>
+        <div class="modal-footer apply-bar" style="margin:0;">
+          <button type="button" class="btn btn-secondary btn-sm tip" data-art-close data-tip="${esc(tr('art.t.closeWindow', 'Close this window'))}" title="${esc(tr('art.t.closeWindow', 'Close this window'))}">${esc(tr('common.cancel', 'Cancel'))}</button>
+          <span class="tip" data-x="go-wrap"><button type="button" class="btn btn-primary btn-sm" data-art-apply-go disabled>${icon('play', 13)} ${esc(tr('art.ap.apply', 'Apply'))}</button></span>
+          <span class="apply-result" data-x="feedback"></span>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const m = modal;
+    const q = (x) => m.querySelector(`[data-x="${x}"]`);
+    const show = (t) => {
+      m.querySelectorAll('[data-art-tab]').forEach(b => b.classList.toggle('active', b.dataset.artTab === t));
+      m.querySelectorAll('[data-art-pane]').forEach(p => { p.hidden = p.dataset.artPane !== t; });
+    };
+    m.querySelectorAll('[data-art-tab]').forEach(b => b.addEventListener('click', () => show(b.dataset.artTab)));
+    const body = () => {
+      const b = { cluster: q('cluster').value, package: pkg.name, version: pkg.version, item: it.name };
+      if (chart) {
+        b.registry = q('registry').value;
+        if (q('values').value.trim()) b.values = q('values').value;
+      }
+      return b;
+    };
+    const go = m.querySelector('[data-art-apply-go]');
+    const setGo = (ok, why) => {
+      go.disabled = !ok;
+      q('go-wrap').dataset.tip = why;
+      go.title = why;
+    };
+    // revue 4-8 I3 : une fois lancé, Appliquer reste grisé (pas de second envoi)
+    const seq = { n: 0, t: null, launched: false, es: null };
+    async function check() {
+      if (seq.launched) return;
+      const n = ++seq.n;
+      const b = body();
+      if (!b.cluster) { setGo(false, tr('art.ap.noCluster', 'No cluster created by Cluster API on this Harvester cluster.')); return; }
+      if (chart && !b.registry) { setGo(false, tr('art.ap.notPublished', 'This chart is not published in a registry attached to this cluster: publish the package first.')); return; }
+      q('report').innerHTML = `<p class="form-hint">${esc(tr('art.checking', 'Checking…'))}</p>`;
+      const r = await fetch(`/api/capi/${enc(cluster)}/artefact-check`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) }).catch(() => null);
+      const d = r ? await r.json().catch(() => ({})) : {};
+      if (n !== seq.n || modal !== m) return;
+      const fs = d.findings || [];
+      const blockers = fs.filter(f => f.level === 'block');
+      q('count').textContent = String(blockers.length);
+      q('report').innerHTML = !r || !r.ok ? `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(d.error || (r ? `HTTP ${r.status}` : '?'))}</div></div>`
+        : fs.map(f => `<div class="sto-finding ${f.level === 'block' ? 'sev-critical' : f.level === 'warn' ? 'sev-watch' : 'sev-info'}" data-code="${esc(f.code)}"><div class="sto-finding-title">${esc(apText(f))}</div></div>`).join('')
+          || `<div class="sto-finding sev-info"><div class="sto-finding-title">${esc(tr('art.noBlocker', 'No blocker.'))}</div></div>`;
+      q('summary').innerHTML = `<ul class="art-apply-summary">
+        <li>${esc(tr('art.ap.sum.what', '{item} ({kind}) of {package} {version}', { item: it.name, kind: it.kind, package: pkg.name, version: pkg.version }))}</li>
+        <li>${esc(tr('art.ap.sum.where', 'On {cluster}, declared in its namespace on {harvester}', { cluster: b.cluster, harvester: cluster }))}</li>
+        <li>${esc(chart ? tr('art.ap.sum.chart', 'Installed by CAAPH from {registry}', { registry: b.registry })
+          : tr('art.ap.sum.manifest', '{n} object(s) delivered by a ClusterResourceSet', { n: d.objects == null ? '?' : d.objects }))}</li></ul>`;
+      if (!can('operator')) setGo(false, tr('art.ap.t.needOperator', 'Needs the operator role, and the right to read the kubeconfig Secret of the child cluster'));
+      else if (!r || !r.ok || d.blocked) setGo(false, tr('art.t.publishBlocked', 'Blocked: {reason}', { reason: blockers[0] ? apText(blockers[0]) : (d.error || '?') }));
+      else setGo(true, tr('art.ap.t.go', 'Apply the item: tracked action, progress in the dock'));
+    }
+    // Appliquer grisé dès une saisie, jusqu'aux constats de ces valeurs ;
+    // aucune vérification différée après le lancement ou la fermeture
+    const later = (ms) => {
+      clearTimeout(seq.t);
+      seq.n++;
+      go.disabled = true;
+      seq.t = setTimeout(check, ms);
+    };
+    m._cleanup = () => {
+      clearTimeout(seq.t); seq.n++;
+      if (seq.es) { seq.es.close(); seq.es = null; }
+    };
+    m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-art-close]')) closeModal(); });
+    m.addEventListener('input', () => later(500));
+    m.addEventListener('change', () => later(200));
+    go.addEventListener('click', async () => {
+      if (go.disabled || seq.launched) return;
+      go.disabled = true;
+      seq.launched = true;
+      clearTimeout(seq.t); seq.n++;
+      const r = await fetch(`/api/capi/${enc(cluster)}/artefact`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body()) }).catch(() => null);
+      const d = r ? await r.json().catch(() => ({})) : {};
+      if (!r || !r.ok) {
+        q('feedback').textContent = d.error || (r ? `HTTP ${r.status}` : '?');
+        seq.launched = false;
+        go.disabled = false;
+        return;
+      }
+      setGo(false, tr('art.ap.t.launched', 'Applied once from this window: follow the action in the dock'));
+      if (typeof Dock !== 'undefined' && Dock.poll) Dock.poll();
+      const line = q('progress');
+      line.hidden = false;
+      line.textContent = tr('art.ap.started', 'Applying (action {id}), see the dock.', { id: d.action_id });
+      if (!window.SSEReconnect) return;
+      if (modal !== m) return;
+      const es = SSEReconnect.connect(`/api/stream/${enc(d.action_id)}`, {
+        on: {
+          step: (ev) => { try { const st = JSON.parse(ev.data); if (st.message) line.textContent = st.message; } catch { /* ligne illisible */ } },
+          end: (ev) => {
+            let x = {};
+            try { x = JSON.parse(ev.data); } catch { /* fin sans détail */ }
+            es.close();
+            seq.es = null;
+            line.textContent = x.status === 'done' ? tr('art.ap.done', 'Applied.') : tr('art.ap.failed', 'The item was not applied: see the dock.');
+          },
+        },
+      });
+      seq.es = es;
     });
     check();
   }
@@ -250,6 +431,7 @@ const Artefacts = (() => {
   // Fenêtre d'import
   // -------------------------------------------------------------------------
   function closeModal() {
+    if (modal && modal._cleanup) modal._cleanup();
     if (modal) modal.remove();
     modal = null;
   }
@@ -317,7 +499,7 @@ const Artefacts = (() => {
           <div data-x="verdict"></div>
         </div>
         <div class="modal-footer apply-bar" style="margin:0;">
-          <button type="button" class="btn btn-secondary btn-sm" data-art-close>${esc(tr('common.cancel', 'Cancel'))}</button>
+          <button type="button" class="btn btn-secondary btn-sm tip" data-art-close data-tip="${esc(tr('art.t.closeWindow', 'Close this window'))}" title="${esc(tr('art.t.closeWindow', 'Close this window'))}">${esc(tr('common.cancel', 'Cancel'))}</button>
           <button type="button" class="btn btn-secondary btn-sm tip" data-art-upload disabled
                   data-tip="${esc(tr('art.t.upload', 'Send the files and check the package (nothing is imported yet)'))}" title="${esc(tr('art.t.upload', 'Send the files and check the package (nothing is imported yet)'))}">${icon('upload')} ${esc(tr('art.upload', 'Send and check'))}</button>
           <button type="button" class="btn btn-primary btn-sm tip" data-art-accept disabled
@@ -421,6 +603,8 @@ const Artefacts = (() => {
       if (row) { showDetail(row.dataset.artName, row.dataset.artVersion); return; }
       if (e.target.closest('[data-art-remove]')) { remove(); return; }
       if (e.target.closest('[data-art-publish]')) { openPublish(); return; }
+      const ap = e.target.closest('[data-art-apply]');
+      if (ap) { if (!ap.disabled) openApply(ap.dataset.artApply); return; }
       const un = e.target.closest('[data-art-unsign]');
       if (un) { putSettings({ remove_signer: un.dataset.artUnsign }); return; }
       if (e.target.closest('#art-add-key-btn')) {
@@ -439,6 +623,6 @@ const Artefacts = (() => {
   }
 
   document.addEventListener('DOMContentLoaded', init);
-  return { start: refresh, refresh, openImport, openPublish, _verdictHtml: verdictHtml };
+  return { start: refresh, refresh, openImport, openPublish, openApply, _verdictHtml: verdictHtml };
 })();
 window.Artefacts = Artefacts;

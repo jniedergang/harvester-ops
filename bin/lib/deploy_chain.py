@@ -71,8 +71,8 @@ import secret_store
 # crée peut servir) et avant Cluster API (les clusters ont besoin de leurs
 # registres à la création). La reprise repère les phases par `id`.
 ORDER = ("install", "readiness", "terraform", "registry", "capi", "clusters", "artefacts")
-COMING = ("artefacts",)
-COMING_MESSAGE = "coming in 2.7"
+# phases du format pas encore livrées (aucune depuis la 2.7.0)
+COMING = ()
 CHECKED_MESSAGE = "already done (checked)"
 POLL_SECONDS = 15
 SECRET_CLASS = "plan-run"
@@ -115,6 +115,11 @@ class Phase:
     item_key: str = "id"              # clé de l'identifiant dans l'entrée (template)
     item_step: str = "item-"          # préfixe des étapes d'élément (tf-)
     before: object = None             # before(ctx, state) -> PhaseOutcome | None (2.5.0)
+    # 2.7.0 : phases dont l'échec (`partial` ou `error`) n'arrête pas
+    # celle-ci : les artefacts des clusters créés vont à leur terme, ceux
+    # d'un cluster en échec sont sautés par leur dépendance
+    # `<phase>:<élément>` ; chaque phase du Défaire va à son terme
+    after_failure_of: tuple = ()
 
 
 def _exc_name(e):
@@ -156,6 +161,15 @@ def _run_simple(ctx, ph, state, sleep, now):
             return PhaseOutcome("cancelled", items=out.items, message="cancelled", data=out.data), None
 
 
+def done_elsewhere(state, dep):
+    """Dépendance `<phase>:<élément>` vers un élément d'une phase déjà
+    déroulée : faite si cet élément y est `done`."""
+    pid, _, iid = dep.partition(":")
+    entry = (state.get("results") or {}).get(pid) or {}
+    key = entry.get("item_key") or "id"
+    return any(it.get(key) == iid and it.get("status") == "done" for it in entry.get("items") or [])
+
+
 def _run_items(ctx, ph, state, previous, progress=None):
     prev_items = {}
     if previous:
@@ -180,7 +194,8 @@ def _run_items(ctx, ph, state, previous, progress=None):
             entry.update(status="skipped", message="cancelled")
         else:
             prev = prev_items.get(item.id)
-            blocked = [d for d in item.depends_on if status_of.get(d) != "done"]
+            blocked = [d for d in item.depends_on
+                       if (not done_elsewhere(state, d) if ":" in d else status_of.get(d) != "done")]
             if blocked:
                 entry.update(status="skipped", message=f"depends on {', '.join(blocked)}, not done")
             elif prev and prev.get("status") == "done" and _verified(ph.verify_item, ctx, state, prev):
@@ -206,19 +221,23 @@ def _run_items(ctx, ph, state, previous, progress=None):
             progress(entries)
     done = sum(1 for e in entries if e["status"] == "done")
     errors = sum(1 for e in entries if e["status"] == "error")
+    # sauté pour une dépendance : derrière un échec de cette phase, ou
+    # (2.7.0) d'une phase précédente lancée en `partial`
+    skipped = sum(1 for e in entries if e["status"] == "skipped")
     if cancelled:
         status = "cancelled"
-    elif errors:
-        # un élément n'est sauté pour dépendance que derrière un échec
+    elif errors or skipped:
         status = "partial" if done else "error"
     else:
         status = "done"
-    msg = f"{done}/{len(entries)} done" + (f", {errors} failed" if errors else "")
+    msg = f"{done}/{len(entries)} done" + (f", {errors} failed" if errors else "") \
+        + (f", {skipped} skipped" if skipped and not errors else "")
     return PhaseOutcome(status, items=entries, message=msg)
 
 
-def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=None):
-    """Déroule les phases ; rend le résultat (voir l'en-tête du module)."""
+def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=None, order=ORDER):
+    """Déroule les phases ; rend le résultat (voir l'en-tête du module).
+    `order` (2.7.0) : ordre des phases d'une autre chaîne (le Défaire)."""
     if not isinstance(getattr(ctx, "run_id", None), str) or not RUN_ID_RE.match(ctx.run_id):
         # avant tout secret : l'effacement final ne pourrait pas le désigner
         raise ValueError("run_id must be 12 hexadecimal characters")
@@ -228,18 +247,19 @@ def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=Non
     results = {}
     stop = None                                   # statut qui arrête la chaîne
     try:
-        for pid in ORDER:
+        for pid in order:
             ph = by_id.get(pid)
             if ph is None:
                 continue
             sid = f"phase-{pid}"
             if pid in COMING:
-                entry = {"id": pid, "status": "disabled", "message": COMING_MESSAGE}
-                ctx.emit_step(sid, "skipped", COMING_MESSAGE)
+                entry = {"id": pid, "status": "disabled", "message": "coming in a later release"}
+                ctx.emit_step(sid, "skipped", entry["message"])
             elif not ph.enabled:
                 entry = {"id": pid, "status": "disabled", "message": "disabled in the plan"}
                 ctx.emit_step(sid, "skipped", "disabled in the plan")
-            elif stop is not None:
+            elif stop is not None and not (stop in ("partial", "error")
+                                           and result.get("failed_phase") in ph.after_failure_of):
                 entry = {"id": pid, "status": "skipped",
                          "message": "cancelled" if stop == "cancelled" else "an earlier phase did not end"}
                 ctx.emit_step(sid, "skipped", entry["message"])
@@ -274,12 +294,16 @@ def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=Non
                     entry.update(id=pid, status=status, message=out.message or "")
                     if out.items is not None:
                         entry["items"] = out.items
+                        entry["item_key"] = ph.item_key
                     entry["seconds"] = round(now() - t0, 1)
                     ctx.emit_step(sid, status, entry["message"])
-                    if status != "done":
+                    if status != "done" and stop is None:
                         stop = status
                         result["failed_phase"] = pid
                         result["error_summary"] = err or entry["message"]
+                    elif status in ("error", "cancelled"):
+                        # phase lancée derrière un échec (after_failure_of)
+                        stop = status
             results[pid] = entry
             result["phases"].append(entry)
             ctx.set_result(dict(result))

@@ -358,6 +358,43 @@ def make_tls(work, address, dns_name=None, name="registry", runner=None):
             "ca": (work / "ca.crt").read_text()}
 
 
+# 2.7.0 (point 213) : le certificat serveur vaut 2 ans (CERT_DAYS) et la
+# console ne le renouvelle pas encore (la CA n'est pas gardée, 2.8.0) :
+# avertissement à 60 jours, dans Registres et dans les contrôles d'un plan.
+CERT_WARN_DAYS = 60
+
+
+def cert_not_after(pem, runner=None):
+    """Fin de validité (secondes depuis l'époque, UTC) du premier
+    certificat de `pem`, lue par openssl ; None s'il est illisible."""
+    import ssl
+    try:
+        text = _run(runner, ["openssl", "x509", "-noout", "-enddate"], input=pem)
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        return None
+    for line in (text or "").splitlines():
+        if line.startswith("notAfter="):
+            try:
+                return int(ssl.cert_time_to_seconds(line[len("notAfter="):].strip()))
+            except ValueError:
+                return None
+    return None
+
+
+def cert_findings(name, not_after, now):
+    """`registry-cert-expiring` (avertissement) quand le certificat serveur
+    du registre `name` expire dans moins de CERT_WARN_DAYS jours (ou a déjà
+    expiré : 0 jour)."""
+    if not_after is None:
+        return []
+    days = int((not_after - now) // 86400)
+    if days >= CERT_WARN_DAYS:
+        return []
+    import time
+    return [cc.finding("registry-cert-expiring", "warn", registry=name, days=max(days, 0),
+                       not_after=time.strftime("%Y-%m-%d", time.gmtime(not_after)))]
+
+
 def make_htpasswd(user, password, runner=None, tool=None):
     """Ligne htpasswd bcrypt : `htpasswd -niB <compte>`, mot de passe sur
     l'entrée standard (point 183), jamais en argument."""
