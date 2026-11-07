@@ -973,6 +973,27 @@ def _auth_moved(kube, endpoint):
     return False, ""
 
 
+def _other_auth_hosts(kube, before, endpoint):
+    """Hôtes du réglage, autres que `endpoint`, dont Harvester garde le mot
+    de passe dans un Secret auth-config (leur `Auth` est déjà retiré du
+    réglage). Revue finale 2.8.0 I-1 : quand les miroirs changent, le
+    contrôleur de Harvester 1.9 réécrit ces Secrets depuis le réglage, avec
+    `host` seul pour un `Auth` nul (`syncContainerdRegistryConfigSecret`,
+    pkg/controller/master/setting/containerd_registry.go) : écrire le réglage
+    effacerait leurs identifiants."""
+    try:
+        configs = (json.loads(before or "{}") or {}).get("Configs") or {}
+    except ValueError:
+        configs = {}
+    hosts = {h for h, c in configs.items() if h != endpoint and not (c or {}).get("Auth")}
+    if not hosts:
+        return []
+    return sorted({_decoded(sec, "host") for sec in
+                   kube.list("secrets", AUTH_SECRET_NS, selector=f"{AUTH_SECRET_LABEL}={SETTING}")
+                   if sec.get("type") == AUTH_SECRET_TYPE and _decoded(sec, "password")
+                   and _decoded(sec, "host") in hosts})
+
+
 def cmd_harvester_nodes(args):
     """Fusionne le registre (miroirs, CA, compte de lecture) dans le
     réglage `containerd-registry` des nœuds Harvester, sans toucher aux
@@ -1013,6 +1034,16 @@ def cmd_harvester_nodes(args):
         value, found = rg.containerd_merge(before, d, creds, remove=args.remove)
     except ValueError as e:
         return refuse("harvester-nodes-value-unreadable", str(e)[:300])
+    if value != before:
+        try:
+            others = _other_auth_hosts(kube, before, d["endpoint"])
+        except KubeError as e:
+            return refuse("cluster-unreachable", str(e)[:300], EXIT_FAIL)
+        if others:
+            found = found + [cc.finding("harvester-nodes-other-auth", "block", hosts=", ".join(others))]
+            step("harvester-nodes", "error", f"harvester-nodes-other-auth: {', '.join(others)} keep a password in "
+                                             f"Harvester; changing the mirrors of {SETTING} would make Harvester erase "
+                                             "it. Nothing written")
     for f in found:
         step("harvester-nodes", "error" if f["level"] == "block" else "running", f"{f['code']} {json.dumps(f['facts'])}")
     if cc.blocking(found):

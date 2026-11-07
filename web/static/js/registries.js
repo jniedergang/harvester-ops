@@ -60,6 +60,7 @@ const Registries = (() => {
     // 2.8.0 : CA gardée, CA en transition, réglage des nœuds Harvester
     'registry-ca-key-missing': (v) => tr('reg.fd.registry-ca-key-missing', 'The CA of {registry} was not kept (posed before 2.8.0): renewing its certificate needs a new CA, in two steps.', v),
     'registry-ca-transition-pending': (v) => tr('reg.fd.registry-ca-transition-pending', 'A new CA of {registry} is in transition: child clusters that do not trust it yet: {clusters}.', v),
+    'harvester-nodes-other-auth': (v) => tr('reg.fd.harvester-nodes-other-auth', '{hosts} keep a password in Harvester, which would erase it when the mirrors change: nothing written. Remove these credentials in Harvester first, then enter them again afterwards.', v),
     'harvester-nodes-mirror-conflict': (v) => tr('reg.fd.harvester-nodes-mirror-conflict', 'The Harvester nodes already mirror {origin} through {endpoints}: remove that entry first.', v),
     'harvester-rke2-restart': (v) => tr('reg.fd.harvester-rke2-restart', 'Harvester restarts RKE2 on every node to apply the setting {setting}.', v),
     // revue 5-8 (I-7) et tâche 9 (constat 2) : refus rendus en JSON par l'outil

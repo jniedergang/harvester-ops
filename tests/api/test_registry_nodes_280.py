@@ -47,6 +47,7 @@ class Kube:
         return list(self.secrets)
 
     def patch(self, kind, ns, name, body, dry_run=False, secret=False):
+        self.settings_before = (self.settings.get(name) or {}).get("value")
         self.patched.append((name, body["value"]))
         self.secret_flags.append(secret)
         self.settings[name] = {"value": body["value"]}
@@ -58,10 +59,23 @@ class Kube:
                 if auth:
                     self.secrets.append({"type": "rke.cattle.io/auth-config", "metadata": {
                         "name": "harvester-containerd-registry-0011223344556677"},
+                        "fresh": True,
                         "data": {k: base64.b64encode(v.encode()).decode() for k, v in
                                  (("host", host), ("username", auth["Username"]), ("password", auth["Password"]))}})
                     conf["Auth"] = None
             self.settings[name] = {"value": json.dumps(doc)}
+            # revue finale I-1 : quand les miroirs changent, Harvester
+            # réécrit le Secret de chaque hôte depuis le réglage ; un `Auth`
+            # nul n'y laisse que `host` (syncContainerdRegistryConfigSecret)
+            old = json.loads(self.settings_before or "{}").get("Mirrors")
+            if old != doc.get("Mirrors"):
+                for sec in self.secrets:
+                    host = base64.b64decode(sec["data"]["host"]).decode()
+                    if not ((doc.get("Configs") or {}).get(host) or {}).get("Auth") \
+                            and not sec.get("fresh"):
+                        sec["data"] = {"host": sec["data"]["host"]}
+            for sec in self.secrets:
+                sec.pop("fresh", None)
 
 
 @pytest.fixture
@@ -246,3 +260,47 @@ def test_renew_cert_route_dry_run_is_a_read(renv):
     assert r.status_code == 200 and r.get_json()["not_after"] == 1
     argv = reg_calls(renv)[-1]["argv"]
     assert "--dry-run" in argv and "--new-ca" in argv and "--days" in argv
+
+
+def other_auth_secret(host="172.16.1.11:5005", password="OTHER-PW-1618"):
+    import base64
+    return {"type": "rke.cattle.io/auth-config", "metadata": {"name": "harvester-containerd-registry-aa"},
+            "data": {k: base64.b64encode(v.encode()).decode() for k, v in
+                     (("host", host), ("username", "u"), ("password", password))}}
+
+
+@pytest.mark.parametrize("extra", [[], ["--dry-run"]])
+def test_another_registry_with_a_password_in_harvester_is_never_wiped(world, capsys, extra):
+    """Revue finale I-1 : une autre entrée authentifiée perdrait son mot de
+    passe (Harvester réécrit son Secret au changement des miroirs) : refus,
+    rien d'écrit, le mot de passe reste."""
+    world["kube"].secrets.append(other_auth_secret())
+    code, out, err = nodes(capsys, *extra)
+    assert code == 2 and "harvester-nodes-other-auth" in err and world["kube"].patched == []
+    assert out["blocked"] is True and out["findings"][-1]["code"] == "harvester-nodes-other-auth"
+    assert out["findings"][-1]["facts"]["hosts"] == "172.16.1.11:5005"
+    assert "password" in world["kube"].secrets[0]["data"]
+
+
+def test_the_fake_models_harvester_erasing_the_other_password(world, capsys, monkeypatch):
+    """Le faux reproduit la perte : sans le refus, le mot de passe disparaît."""
+    world["kube"].secrets.append(other_auth_secret())
+    monkeypatch.setattr(cli, "_other_auth_hosts", lambda *a: [])
+    code, _out, _err = nodes(capsys)
+    assert code == 0 and "password" not in world["kube"].secrets[0]["data"]
+
+
+def test_remove_of_our_entry_is_also_refused_when_another_keeps_a_password(world, capsys):
+    nodes(capsys)
+    world["kube"].secrets.append(other_auth_secret())
+    world["kube"].patched.clear()
+    code, out, err = nodes(capsys, "--remove")
+    assert code == 2 and "harvester-nodes-other-auth" in err and world["kube"].patched == []
+
+
+def test_our_own_secret_and_an_inline_auth_are_not_counted(world, capsys):
+    """Notre propre entrée, et un hôte dont l'Auth est encore dans le réglage
+    (réécrit tel quel), ne bloquent pas."""
+    nodes(capsys)                         # notre Secret existe désormais
+    code, _out, err = nodes(capsys, "--remove")
+    assert code == 0, err
