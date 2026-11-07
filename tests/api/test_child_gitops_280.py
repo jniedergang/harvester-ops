@@ -95,8 +95,8 @@ def test_check_refusals(over, facts, code):
 @pytest.mark.parametrize("over,facts", [
     ({}, {}),
     ({"privileges": "cluster"}, {"role": "admin"}),
-    ({"source": dict(GIT)}, {"tool": "fleet"}),
-    ({"source": dict(CHART)}, {"tool": "fleet"}),
+    ({"source": dict(GIT), "privileges": "cluster"}, {"tool": "fleet", "role": "admin"}),
+    ({"source": dict(CHART), "privileges": "cluster"}, {"tool": "fleet", "role": "admin"}),
 ])
 def test_check_accepts(over, facts):
     """Mutation « privileges cluster admis pour un opérateur » : le cas
@@ -164,7 +164,7 @@ def test_flux_values_impose_the_multitenancy_lockdown():
 def test_fleet_objects():
     g = entry(source=dict(GIT))
     o = cg.fleet_object(g, "harvlab2-rke2-banc", "harvlab2", "rke2-banc", "rke2-banc", secret_name="s", run="0123456789ab")
-    assert o["kind"] == "GitRepo" and o["metadata"]["name"] == "hops-harvlab2-demo"
+    assert o["kind"] == "GitRepo" and o["metadata"]["name"] == "hops-harvlab2-rke2-banc-demo"
     assert o["spec"] == {"repo": GIT["url"], "branch": "main", "paths": ["./"], "targetNamespace": "equipe-a",
                          "targets": [{"clusterName": "harvlab2-rke2-banc"}], "clientSecretName": "s"}
     assert cg.fleet_ours(o, "harvlab2", "rke2-banc", "rke2-banc", g, "0123456789ab")

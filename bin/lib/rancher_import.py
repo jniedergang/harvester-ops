@@ -58,9 +58,20 @@ LEFTOVER_CLUSTERROLES = ("cattle-*", "cluster-owner", "create-ns", "project-owne
 LEFTOVER_CLUSTERROLEBINDINGS = ("cattle-*", "crb-*", "globaladmin-*", "proxy-role-binding-kubernetes-master")
 LEFTOVER_CRD_GROUPS = ("management.cattle.io", "catalog.cattle.io", "ui.cattle.io", "upgrade.cattle.io",
                        "auditlog.cattle.io", "telemetry.cattle.io")
-NEVER_GROUPS = ("k3s.cattle.io", "helm.cattle.io")
 LEFTOVERS = {"Namespace": LEFTOVER_NAMESPACES, "ClusterRole": LEFTOVER_CLUSTERROLES,
              "ClusterRoleBinding": LEFTOVER_CLUSTERROLEBINDINGS}
+# Revue 1-4 (I-1) : un nom ne suffit pas (`crb-monitoring`, `create-ns` d'un
+# autre outil). Un reste n'est retiré que s'il porte une marque de Rancher :
+# une étiquette ou une annotation d'un domaine `cattle.io` (`cattle.io/creator`,
+# `authz.cluster.cattle.io/...`, `lifecycle.cattle.io/...`), ou une référence
+# de propriétaire vers un objet d'un groupe `cattle.io`. Les objets du
+# manifeste d'enregistrement (point 1 des essais : noms fixés par Rancher,
+# appliqués par la console elle-même) n'en portent pas : ils sont reconnus à
+# leur nom exact. Marques à relever sur le banc (tâche 10, R2) ; un objet
+# sans marque est gardé (`kept-not-rancher`).
+REGISTRATION_OBJECTS = {("ClusterRole", "proxy-clusterrole-kubeapiserver"), ("ClusterRole", "cattle-admin"),
+                        ("ClusterRoleBinding", "proxy-role-binding-kubernetes-master"),
+                        ("ClusterRoleBinding", "cattle-admin-binding")}
 
 
 class RancherImportError(Exception):
@@ -79,6 +90,11 @@ def rancher_name(harvester, ns, cluster):
     """`<harvester>-<c>` si le namespace vaut le nom du cluster enfant, sinon
     `<harvester>-<ns>-<c>` ; au-delà de 63 caractères, 54 premiers plus `-`
     et 8 hexadécimaux de sha256 du nom complet (stable)."""
+    # revue 1-4 (m-8) : un nom de cluster de la console hors RFC 1123
+    # (soulignés, points) donnerait un 422 brut de Rancher
+    if not isinstance(harvester, str) or not NAME_RE.match(harvester.lower()):
+        raise RancherImportError("rancher-name-invalid", f"{str(harvester)[:40]}: the Harvester cluster name is not "
+                                                         "a valid Rancher name (RFC 1123)")
     full = f"{harvester}-{cluster}" if ns == cluster else f"{harvester}-{ns}-{cluster}"
     full = full.lower()
     if len(full) <= NAME_MAX:
@@ -148,12 +164,16 @@ def registration_manifest_url(tokens):
                              "no registration manifest address with its token yet")
 
 
-def manifest_path(url):
+def manifest_path(url, session_url=""):
     """Chemin `/v3/import/<...>.yaml` de l'adresse : la console relit le
     manifeste par l'adresse de la session Rancher, jamais par l'hôte écrit
     dans `manifestUrl` (vu sur la maison : il se résout sur l'adresse
-    publique)."""
+    publique). Revue 1-4 (m-4) : un Rancher servi sous un préfixe
+    (`https://h/rancher`) voit ce préfixe retiré, la session l'ajoute."""
     path = urllib.parse.urlparse(url or "").path
+    prefix = urllib.parse.urlparse(session_url or "").path.rstrip("/")
+    if prefix and path.startswith(prefix + "/"):
+        path = path[len(prefix):]
     if not IMPORT_PATH_RE.match(path):
         raise RancherImportError("rancher-manifest-path", "unexpected registration manifest address")
     return path
@@ -266,6 +286,11 @@ def image_findings(images, registries_doc, found, no_fallback):
     out = []
     for img in images:
         if not probe_targets(img, registries_doc):
+            if no_fallback:
+                # revue 1-4 (m-3) : hôte sans miroir et repli coupé, l'agent
+                # ne se tire pas (registry.rancher.com rarement miroité)
+                out.append({"code": "rancher-agent-image-unmirrored", "level": "warn",
+                            "facts": {"image": img, "host": split_image(img)[0]}})
             continue
         if found.get(img):
             continue
@@ -306,19 +331,40 @@ def _crd_group(name):
     return name.split(".", 1)[1] if "." in name else ""
 
 
-def leftovers(objs):
+def _rancher_domain(key):
+    domain = key.split("/", 1)[0] if "/" in key else ""
+    return domain == "cattle.io" or domain.endswith(".cattle.io")
+
+
+def rancher_marked(obj):
+    """Vrai si l'objet porte une marque de Rancher (voir REGISTRATION_OBJECTS)."""
+    md = (obj or {}).get("metadata") or {}
+    if (obj.get("kind"), md.get("name")) in REGISTRATION_OBJECTS:
+        return True
+    keys = list((md.get("labels") or {})) + list((md.get("annotations") or {}))
+    if any(_rancher_domain(k) for k in keys):
+        return True
+    return any(str(r.get("apiVersion") or "").split("/", 1)[0].endswith("cattle.io")
+               for r in md.get("ownerReferences") or [])
+
+
+def leftovers(objs, unmarked=None):
     """Restes connus de Rancher parmi des objets du cluster enfant :
-    [(sorte, namespace, nom)], namespaces en dernier. Une CRD de RKE2
-    (`NEVER_GROUPS`) n'en fait jamais partie."""
+    [(sorte, namespace, nom)], namespaces en dernier. Une CRD des groupes de
+    Rancher (le groupe est la marque) ; un autre objet dont le nom suit un
+    motif ET qui porte une marque de Rancher (`rancher_marked`). Les noms
+    qui suivent un motif sans marque vont dans `unmarked` (liste fournie)."""
     out = []
     for o in objs or []:
         kind = o.get("kind") or ""
         name = ((o.get("metadata") or {}).get("name")) or ""
         if kind == "CustomResourceDefinition":
-            group = _crd_group(name)
-            if group in LEFTOVER_CRD_GROUPS and group not in NEVER_GROUPS:
+            if _crd_group(name) in LEFTOVER_CRD_GROUPS:
                 out.append((kind, "", name))
             continue
         if any(fnmatch.fnmatchcase(name, p) for p in LEFTOVERS.get(kind, ())):
-            out.append((kind, "", name))
+            if rancher_marked(o):
+                out.append((kind, "", name))
+            elif unmarked is not None:
+                unmarked.append((kind, "", name))
     return sorted(out, key=lambda r: (r[0] == "Namespace", r[0], r[2]))

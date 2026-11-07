@@ -24,6 +24,7 @@ NS, CL, H = "rke2-banc", "rke2-banc", "harvlab2"
 PULL_PW = "PULL-PASSWORD-31415"
 SSH_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nKEYDATA-2718\n-----END OPENSSH PRIVATE KEY-----\n"
 SERVER = "rancher.home.zypp.fr"
+FLEET_NAME = f"hops-{H}-{CL}-demo"
 
 
 @pytest.fixture(scope="module")
@@ -97,6 +98,11 @@ class Rancher:
 def world(tmp_path, monkeypatch, cli):
     state = tmp_path / "state"
     (state / "registries.d").mkdir(parents=True)
+    pkg = state / "artefacts.d" / "banc-280-1.0.0"
+    pkg.mkdir(parents=True)
+    (pkg / "artefacts.yaml").write_text(json.dumps({"name": "banc-280", "version": "1.0.0", "items": [
+        {"name": "demo", "kind": "gitops", "files": ["manifests/demo/a.yaml"]},
+        {"name": "regles", "kind": "manifest", "files": ["manifests/regles/a.yaml"]}]}))
     monkeypatch.setenv("HARVESTER_OPS_STATE_DIR", str(state))
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     monkeypatch.setattr(cli, "_state", lambda: state)
@@ -183,6 +189,9 @@ def flux_world(locked=True, ready=True):
     (lambda: flux_world(), {"entry": entry(source=dict(entry()["source"], version="9.9.9"))},
      "gitops-package-not-published"),
     (lambda: Mgmt({}), {}, "gitops-cluster-missing"),
+    # revue 1-4 (m-6) : l'élément d'un paquet publié doit être de sorte gitops
+    (lambda: flux_world(), {"entry": entry(source=dict(entry()["source"], item="regles"))},
+     "gitops-package-not-published"),
     (lambda: Mgmt({(cs.K_CLUSTER, NS, CL): capi_cluster(imported=True)}), {}, "gitops-source-unsupported"),
 ])
 def test_check_findings(cli, world, capsys, mgmt, over, code):
@@ -196,7 +205,8 @@ def test_a_fleet_entry_needs_a_rancher_session(cli, world, capsys):
     g = entry(source={"type": "git", "url": "https://h/r.git"})
     assert world["run"](mgmt, ["gitops-check", "--kubeconfig", "/x"], req(entry=g)) == 2
     out = json.loads(capsys.readouterr().out)
-    assert out["tool"] == "fleet" and [f["code"] for f in out["findings"]] == ["rancher-session-needed"]
+    assert out["tool"] == "fleet" and [f["code"] for f in out["findings"]] == ["gitops-fleet-admin-only",
+                                                                                 "rancher-session-needed"]
 
 
 def test_flux_deploy_delivers_objects_and_credentials_apart(cli, world, capsys):
@@ -235,22 +245,22 @@ def test_fleet_deploy_writes_a_gitrepo_with_its_secret(cli, world, capsys):
     mgmt = Mgmt({(cs.K_CLUSTER, NS, CL): capi_cluster(imported=True)})
     r = Rancher()
     g = entry(source={"type": "git", "url": "ssh://git@172.16.1.11:2222/x/app.git", "secret": "depot"})
-    spec = req(entry=g, secrets={"depot": {"identity": SSH_KEY, "known_hosts": "h k"}})
+    spec = req(entry=g, secrets={"depot": {"identity": SSH_KEY, "known_hosts": "h k"}}, role="admin")
     assert world["run"](mgmt, ["gitops-deploy", "--kubeconfig", "/x", "--harvester-name", H], spec, rancher=r) == 0
-    repo = r.objs[("gitrepos", "hops-harvlab2-demo")]
+    repo = r.objs[("gitrepos", FLEET_NAME)]
     assert repo["spec"]["targets"] == [{"clusterName": f"{H}-{CL}"}]
-    assert repo["spec"]["clientSecretName"] == "hops-harvlab2-demo-auth"
-    sec = r.objs[("secrets", "hops-harvlab2-demo-auth")]
+    assert repo["spec"]["clientSecretName"] == f"{FLEET_NAME}-auth"
+    sec = r.objs[("secrets", f"{FLEET_NAME}-auth")]
     assert sec["type"] == "kubernetes.io/ssh-auth" and sec["stringData"]["ssh-privatekey"] == SSH_KEY
     assert "KEYDATA-2718" not in capsys.readouterr().err
 
 
 def test_fleet_deploy_refuses_a_foreign_object(cli, world, capsys):
     mgmt = Mgmt({(cs.K_CLUSTER, NS, CL): capi_cluster(imported=True)})
-    r = Rancher({("gitrepos", "hops-harvlab2-demo"): {"metadata": {"name": "hops-harvlab2-demo", "labels": {}}}})
+    r = Rancher({("gitrepos", FLEET_NAME): {"metadata": {"name": FLEET_NAME, "labels": {}}}})
     g = entry(source={"type": "git", "url": "https://h/r.git"})
-    assert world["run"](mgmt, ["gitops-deploy", "--kubeconfig", "/x", "--harvester-name", H], req(entry=g),
-                        rancher=r) == 2
+    assert world["run"](mgmt, ["gitops-deploy", "--kubeconfig", "/x", "--harvester-name", H],
+                        req(entry=g, role="admin"), rancher=r) == 2
     assert "gitops-name-taken" in capsys.readouterr().err
     assert not [c for c in r.calls if c[0] in ("POST", "PUT")]
 
@@ -291,3 +301,29 @@ def test_status_lists_flux_and_fleet_entries(cli, world, capsys):
     out = json.loads(capsys.readouterr().out)
     assert [(x["tool"], x["entry"]) for x in out["entries"]] == [("flux", "demo"), ("fleet", "web")]
     assert out["entries"][1]["state"]["ready"] is True
+
+
+def test_fleet_deploy_writes_no_secret_over_a_foreign_one(cli, world, capsys):
+    """Revue 1-4 (I-5) : un Secret du même nom d'un autre usage n'est jamais
+    écrasé ; rien n'est écrit dans Rancher."""
+    mgmt = Mgmt({(cs.K_CLUSTER, NS, CL): capi_cluster(imported=True)})
+    r = Rancher({("secrets", f"{FLEET_NAME}-auth"): {"metadata": {"name": f"{FLEET_NAME}-auth",
+                                                                  "labels": {"app": "x"}}}})
+    g = entry(source={"type": "git", "url": "ssh://git@h:2222/x/app.git", "secret": "depot"})
+    spec = req(entry=g, secrets={"depot": {"identity": SSH_KEY, "known_hosts": "h k"}}, role="admin")
+    assert world["run"](mgmt, ["gitops-deploy", "--kubeconfig", "/x", "--harvester-name", H], spec, rancher=r) == 2
+    assert not [c for c in r.calls if c[0] in ("POST", "PUT", "DELETE")]
+    assert r.objs[("secrets", f"{FLEET_NAME}-auth")]["metadata"]["labels"] == {"app": "x"}
+    assert "gitops-name-taken" in capsys.readouterr().err
+
+
+def test_fleet_deploy_checks_the_object_before_writing_its_secret(cli, world, capsys):
+    """Revue 1-4 (I-5) : l'objet d'un autre cluster ou d'une autre origine
+    arrête le geste avant l'écriture du Secret (clé SSH)."""
+    mgmt = Mgmt({(cs.K_CLUSTER, NS, CL): capi_cluster(imported=True)})
+    r = Rancher({("gitrepos", FLEET_NAME): {"metadata": {"name": FLEET_NAME, "labels": {}}}})
+    g = entry(source={"type": "git", "url": "ssh://git@h:2222/x/app.git", "secret": "depot"})
+    spec = req(entry=g, secrets={"depot": {"identity": SSH_KEY, "known_hosts": "h k"}}, role="admin")
+    assert world["run"](mgmt, ["gitops-deploy", "--kubeconfig", "/x", "--harvester-name", H], spec, rancher=r) == 2
+    assert not [c for c in r.calls if c[0] in ("POST", "PUT")]
+    assert ("secrets", f"{FLEET_NAME}-auth") not in r.objs and "KEYDATA" not in json.dumps(list(r.objs.values()))

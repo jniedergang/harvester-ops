@@ -117,3 +117,16 @@ def test_a_secret_that_left_the_content_is_pruned(cli, world, monkeypatch):
     assert cli.deliver(mgmt, NS, CL, "gitops-demo", "banc", "1.0.1", [SA], {}, "", 30) == 0
     assert child.deleted == ["hops-gitops-demo-pull"]
     assert ("secrets", NS, "art-gitops-demo") not in mgmt.objs
+
+
+def test_deliver_never_touches_a_foreign_secret_of_the_same_name(cli, world, monkeypatch):
+    """Revue 1-4 (m-1) : un Secret `art-<élément>` qui n'est pas celui de
+    cet élément n'est ni lu (objets en attente) ni supprimé."""
+    mgmt = MgmtS({(cs.K_CLUSTER, NS, CL): cluster()})
+    foreign = {"kind": "Secret", "metadata": {"name": "art-gitops-demo", "namespace": NS, "labels": {"app": "x"}},
+               "data": {"objects": base64.b64encode(json.dumps([SA]).encode()).decode()}}
+    mgmt.objs[("secrets", NS, "art-gitops-demo")] = foreign
+    monkeypatch.setattr(cli, "Kube", lambda path, **kw: Child([]))
+    assert cli.deliver(mgmt, NS, CL, "gitops-demo", "banc", "1.0.0", [SA], {}, "", 30) == 0
+    assert mgmt.objs[("secrets", NS, "art-gitops-demo")] is foreign
+    assert ("delete", "secrets", "art-gitops-demo", None) not in mgmt.calls

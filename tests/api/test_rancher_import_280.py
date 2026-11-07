@@ -153,10 +153,12 @@ def test_probe_targets_follow_the_rewrite_of_the_mirror():
 
 
 @pytest.mark.parametrize("found,no_fallback,want", [
-    ({"registry.rancher.com/rancher/rancher-agent:v2.14.1": True}, True, []),
-    ({"registry.rancher.com/rancher/rancher-agent:v2.14.1": False}, True, [("rancher-agent-image-missing", "block")]),
+    # revue 1-4 (m-3) : busybox sans miroir, repli coupé : averti
+    ({"registry.rancher.com/rancher/rancher-agent:v2.14.1": True}, True, [("rancher-agent-image-unmirrored", "warn")]),
+    ({"registry.rancher.com/rancher/rancher-agent:v2.14.1": False}, True, [("rancher-agent-image-missing", "block"),
+                                                                           ("rancher-agent-image-unmirrored", "warn")]),
     ({"registry.rancher.com/rancher/rancher-agent:v2.14.1": False}, False, [("rancher-agent-image-fallback", "warn")]),
-    ({}, True, [("rancher-agent-image-missing", "block")]),
+    ({}, True, [("rancher-agent-image-missing", "block"), ("rancher-agent-image-unmirrored", "warn")]),
 ])
 def test_agent_image_findings(found, no_fallback, want):
     imgs = ["registry.rancher.com/rancher/rancher-agent:v2.14.1", "busybox:1.37"]      # busybox : sans miroir
@@ -181,8 +183,13 @@ def test_server_id():
     assert ri.server_id("https://r:8443/") == "r:8443"
 
 
-def _o(kind, name):
-    return {"kind": kind, "metadata": {"name": name}}
+def _o(kind, name, marked=True):
+    """Objet du cluster enfant ; `marked` : porte une marque de Rancher
+    (revue 1-4 I-1), sauf les objets du manifeste reconnus à leur nom."""
+    md = {"name": name}
+    if marked:
+        md["labels"] = {"cattle.io/creator": "norman"}
+    return {"kind": kind, "metadata": md}
 
 
 def test_leftovers_are_the_ones_seen_on_rancher_2_14():
@@ -237,3 +244,19 @@ def test_secret_values_to_hide():
     hidden = ri.secret_values(text, f"/v3/import/{TOKEN}_c-m-nwsjn9p6.yaml")
     assert TOKEN in hidden and f"{TOKEN}_c-m-nwsjn9p6" in hidden
     assert base64.b64encode(TOKEN.encode()).decode() in hidden and "https://rancher.home.zypp.fr" in hidden
+
+
+def test_manifest_path_under_a_prefixed_rancher():
+    """Revue 1-4 (m-4) : préfixe de la session retiré avant le contrôle."""
+    url = f"https://r.example/rancher/v3/import/{TOKEN}_c-m-nwsjn9p6.yaml"
+    assert ri.manifest_path(url, "https://r.example/rancher") == f"/v3/import/{TOKEN}_c-m-nwsjn9p6.yaml"
+    with pytest.raises(ri.RancherImportError):
+        ri.manifest_path(url)
+
+
+@pytest.mark.parametrize("name", ["harv_lab", "harv.lab", "-x"])
+def test_rancher_name_refuses_a_console_name_rancher_would_refuse(name):
+    """Revue 1-4 (m-8)."""
+    with pytest.raises(ri.RancherImportError) as e:
+        ri.rancher_name(name, "web", "web")
+    assert e.value.code == "rancher-name-invalid"

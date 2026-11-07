@@ -103,3 +103,17 @@ def test_status_is_a_read(env, session):
     r = env.client.get("/api/capi/harvlab2/rancher-status")
     assert r.status_code == 200 and r.get_json() == {"session": None, "clusters": []}
     assert calls(env)[-1]["argv"][0] == "rancher-status"
+
+
+@pytest.mark.parametrize("role,status,forget", [("operator", 403, False), ("admin", 201, True)])
+def test_delete_forget_rancher_is_an_administrator_gesture(env, session, role, status, forget):
+    """Revue 1-4 (I-2) : oublier l'import d'un Rancher disparu ne revient
+    qu'à l'administrateur ; un opérateur ne lance rien."""
+    env.right["role"] = role
+    r = env.client.delete("/api/capi/harvlab2/cluster/web/web?forget_rancher=1")
+    assert r.status_code == status, r.get_json()
+    if forget:
+        wait(r.get_json()["action_id"])
+        assert "--forget-rancher" in calls(env)[-1]["argv"]
+    else:
+        assert r.get_json()["code"] == "rancher-forget-admin" and calls(env) == []

@@ -188,6 +188,16 @@ def check(entry, facts):
         found.append(finding("gitops-namespace-not-team", namespace=ns))
     if entry["privileges"] == "cluster" and facts.get("role") != "admin":
         found.append(finding("gitops-privileges-admin-only"))
+    if tool == "fleet":
+        # revue 1-4 (I-4) : un GitRepo ou un HelmOp sans `serviceAccount`
+        # déploie avec l'agent Fleet, administrateur du cluster enfant ;
+        # `privileges: namespace` n'y est pas tenu. Fleet est donc réservé à
+        # l'administrateur, et l'administrateur est prévenu (compte de Fleet
+        # confiné à relever sur le banc, tâche 10)
+        if facts.get("role") != "admin":
+            found.append(finding("gitops-fleet-admin-only"))
+        elif entry["privileges"] == "namespace":
+            found.append(finding("gitops-fleet-not-confined", "warn", namespace=entry["namespace"]))
     sec = entry["source"].get("secret")
     if sec and sec not in set(facts.get("secrets") or ()):
         found.append(finding("gitops-secret-missing", secret=sec))
@@ -308,9 +318,17 @@ def state_flux(source, kustomization, revision=None):
 # ---------------------------------------------------------------------------
 # Fleet
 # ---------------------------------------------------------------------------
-def fleet_name(harvester, entry):
-    """`hops-<harvester>-<nom>`, 63 caractères au plus."""
-    return f"hops-{harvester}-{entry['name']}"[:63].rstrip("-")
+def fleet_name(harvester, ns, cluster, entry):
+    """`hops-<harvester>-<c>-<nom>` (`hops-<harvester>-<ns>-<c>-<nom>` si le
+    namespace diffère du nom) : une entrée du même nom sur deux clusters
+    enfants ne partage ni objet ni Secret (revue 1-4 I-5). Au-delà de 63
+    caractères : 54 plus `-` et 8 hexadécimaux de sha256 du nom complet."""
+    import hashlib
+    child = cluster if ns == cluster else f"{ns}-{cluster}"
+    full = f"hops-{harvester}-{child}-{entry['name']}".lower()
+    if len(full) <= 63:
+        return full
+    return f"{full[:54].rstrip('-')}-{hashlib.sha256(full.encode()).hexdigest()[:8]}"
 
 
 def fleet_labels(harvester, ns, cluster, entry):
@@ -328,7 +346,7 @@ def fleet_object(entry, fleet_cluster, harvester, ns, cluster, chart_repo=None, 
     ann = {mf.A_BY: by or ""}
     if run:
         ann["harvester-ops.io/plan-run"] = run
-    meta = {"name": fleet_name(harvester, entry), "namespace": FLEET_NAMESPACE,
+    meta = {"name": fleet_name(harvester, ns, cluster, entry), "namespace": FLEET_NAMESPACE,
             "labels": fleet_labels(harvester, ns, cluster, entry), "annotations": ann}
     targets = [{"clusterName": fleet_cluster}]
     if src["type"] == "git":

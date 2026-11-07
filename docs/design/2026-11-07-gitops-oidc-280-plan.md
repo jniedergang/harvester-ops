@@ -188,6 +188,12 @@ Ce qui est réutilisé, sans copie :
   source), chacune jugée d'abord par le serveur (`--dry-run=server`) ;
   jamais un namespace qui porte autre chose que des objets de Rancher.
   Marque relue juste avant d'écrire (`--expect-run`, leçon de la 2.7.0).
+  Revue des tâches 1 à 4 : un reste n'est retiré que s'il porte une marque
+  de Rancher (étiquette ou annotation d'un domaine `cattle.io`, propriétaire
+  d'un groupe `cattle.io`, ou objet du manifeste d'enregistrement à son nom
+  exact), sinon `kept-not-rancher` ; la suppression du cluster retire le
+  cluster de Rancher et la marque sans rien lire dans le cluster enfant, et
+  `delete --forget-rancher` (administrateur) oublie un Rancher disparu.
 
 ### OIDC de l'API
 
@@ -298,7 +304,15 @@ Ce qui est réutilisé, sans copie :
   `helmSecretName`). Nom du cluster Fleet d'un cluster importé et
   disponibilité de `HelmOp` sans drapeau dans Fleet 0.15 (Rancher 2.14)
   relevés en tâche 1. Mêmes étiquettes et annotations d'origine que
-  l'import.
+  l'import. Revue des tâches 1 à 4 : le nom porte le cluster enfant
+  (`hops-<harvester>-<c>-<nom>`, `hops-<harvester>-<ns>-<c>-<nom>` si le
+  namespace diffère, 54 caractères plus `-` et 8 hexadécimaux au-delà de 63),
+  la propriété de l'objet et de ses Secrets est jugée avant toute écriture ;
+  un `GitRepo` ou un `HelmOp` sans `serviceAccount` déploie avec l'agent
+  Fleet, administrateur du cluster enfant : Fleet est réservé à
+  l'administrateur (`gitops-fleet-admin-only`), averti par
+  `gitops-fleet-not-confined` pour `privileges: namespace` (compte confiné
+  de Fleet à relever sur le banc, tâche 10).
 - **Phase `gitops` du plan** : dernière phase de `ORDER` ; 16 entrées au plus,
   64 éléments au plus une fois les clusters dépliés, `timeout_minutes` 1 à
   60, 15 par défaut ; nom d'entrée RFC 1123, 34 caractères au plus

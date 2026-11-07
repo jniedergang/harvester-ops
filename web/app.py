@@ -22458,12 +22458,17 @@ def api_capi_cluster_create(cluster):
 @_rate_limit("6 per minute")
 def api_capi_cluster_delete(cluster, namespace, name):
     """Supprime un cluster créé par Cluster API et suit le retrait de ses
-    machines ; retire aussi son espace de noms s'il a été créé pour lui."""
+    machines ; retire aussi son espace de noms s'il a été créé pour lui.
+    2.8.0 (revue 1-4 I-2) : `?forget_rancher=1`, administrateur seulement,
+    oublie l'import dans un Rancher disparu ou injoignable."""
+    forget = request.args.get("forget_rancher") in ("1", "true")
+    if forget and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return jsonify({"error": "forbidden", "required": "admin", "code": "rancher-forget-admin"}), 403
     cmd, err = _capi_base(cluster, "delete")
     if err:
         return err
     run, err = _capi_action(cluster, f"capi-cluster-delete:{namespace}/{name}",
-                            cmd + ["--name", f"{namespace}/{name}"])
+                            cmd + ["--name", f"{namespace}/{name}"] + (["--forget-rancher"] if forget else []))
     if err:
         return err
     return jsonify({"action_id": run.id, "deleting": f"{namespace}/{name}"}), 201

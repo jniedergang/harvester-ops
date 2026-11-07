@@ -292,8 +292,9 @@ def test_mutation_dry_run_writes_nothing(cli, world, capsys):
 # ---------------------------------------------------------------------------
 # Retrait
 # ---------------------------------------------------------------------------
-def _o(kind, name):
-    return {"kind": kind, "metadata": {"name": name}}
+def _o(kind, name, labels=None):
+    return {"kind": kind, "metadata": {"name": name,
+                                       "labels": {"cattle.io/creator": "norman"} if labels is None else labels}}
 
 
 LEFT = [_o("Namespace", "local"), _o("Namespace", "equipe-a"), _o("ClusterRole", "cattle-admin"),
