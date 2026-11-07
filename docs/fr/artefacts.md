@@ -46,9 +46,11 @@ Dedans, un seul répertoire racine :
 qu'il extrait l'archive. Un fichier absent de la liste, ou d'une autre
 empreinte, fait refuser tout le paquet.
 
-Sortes d'éléments : `chart`, `images`, `manifest`. Deux sortes de plus,
-`policy` et `gitops`, sont gardées dans le paquet et montrées « à venir
-(2.7) » ; elles ne sont jamais appliquées ni publiées.
+Sortes d'éléments : `chart`, `images`, `manifest`, `policy` (un manifeste
+de politiques, livré comme un manifeste depuis la 2.7.0). Une sorte de
+plus, `gitops`, est gardée dans le paquet et montrée « à venir (2.8) » ;
+elle n'est jamais appliquée ni publiée. Manifestes et politiques ne sont
+pas publiés dans un registre.
 
 ### Construire un paquet : `harvester-artefacts pack`
 

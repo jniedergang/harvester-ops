@@ -187,7 +187,7 @@ def check_description(doc):
         if imgs:
             item["images"] = imgs
         files = it.get("files")
-        if kind == "manifest" or (kind in art.LATER_KINDS and files is not None):
+        if kind in art.MANIFEST_KINDS or (kind in art.LATER_KINDS and files is not None):
             if not isinstance(files, list) or not files or not all(isinstance(f, str) and FILE_RE.match(Path(f).name)
                                                                   for f in files):
                 errors.append(f"{where}.files: .yaml files, one at least")
@@ -701,7 +701,7 @@ def publication(pkg, items=None):
                 images.append(n)
         if it["kind"] == "chart":
             charts.append(it["chart"])
-        elif it["kind"] == "manifest":
+        elif it["kind"] in art.MANIFEST_KINDS:
             skipped.append({"item": it["name"], "why": "manifest"})
     return images, charts, skipped
 
@@ -740,7 +740,7 @@ def publish(pkg, decl, dst, items=None, dry_run=False, work=None):
     """Publie (ou liste, `dry_run`) ; rend le résultat sans identifiant."""
     images, charts, skipped = publication(pkg, items)
     for s in skipped:
-        step("publish", "running", f"{s['item']}: skipped ({'coming in 2.7' if s['why'] == 'coming' else 'manifests are not published'})")
+        step("publish", "running", f"{s['item']}: skipped ({'coming in 2.8' if s['why'] == 'coming' else 'manifests are not published'})")
     findings, todo = plan_publication(pkg, decl, dst, images, charts, work)
     if dry_run or [f for f in findings if f["level"] == "block"]:
         return {"findings": findings, "blocked": bool(findings),

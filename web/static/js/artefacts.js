@@ -88,7 +88,7 @@ const Artefacts = (() => {
     if (!d) { box.innerHTML = `<p class="form-hint">${esc(tr('art.loadError', 'The packages could not be read.'))}</p>`; return; }
     const t = d.trust || {};
     const items = (d.index.items || []).map(it => `<li><b>${esc(it.name)}</b> <span class="badge dim">${esc(it.kind)}</span>
-      ${it.later ? `<span class="badge info tip" data-tip="${esc(tr('art.t.later', 'Kept in the package; applied by a later version'))}">${esc(tr('art.later', 'coming (2.7)'))}</span>` : ''}
+      ${it.later ? `<span class="badge info tip" data-tip="${esc(tr('art.t.later', 'Kept in the package; applied by a later version'))}">${esc(tr('art.later', 'coming (2.8)'))}</span>` : ''}
       ${it.version ? `<span class="form-hint">${esc(it.version)}</span>` : ''}</li>`).join('');
     const images = (d.images || []).map(im => `<li><code>${esc(im.name)}</code>
       <span class="form-hint">${im.size != null ? esc(bytes(im.size)) : ''} ${esc(im.platform || '')} ${esc(String(im.digest || '').slice(7, 19))}</span></li>`).join('');
@@ -138,7 +138,7 @@ const Artefacts = (() => {
     ]);
     const regs = (rr.registries || []).filter(x => (x.clusters || []).includes(cluster));
     const items = ((dr.index || {}).items || []);
-    const publishable = (it) => !it.later && it.kind !== 'manifest';
+    const publishable = (it) => !it.later && it.kind !== 'manifest' && it.kind !== 'policy';
     closeModal();
     modal = document.createElement('div');
     modal.className = 'modal-overlay active art-modal art-publish';

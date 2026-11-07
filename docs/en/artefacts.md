@@ -45,9 +45,10 @@ Inside, one root directory:
 extracts the archive. A file missing from the list, or with another
 checksum, refuses the whole package.
 
-Item kinds: `chart`, `images`, `manifest`. Two more kinds, `policy` and
-`gitops`, are kept in the package and shown "coming (2.7)"; they are never
-applied nor published.
+Item kinds: `chart`, `images`, `manifest`, `policy` (a manifest of
+policies, delivered like a manifest since 2.7.0). One more kind, `gitops`,
+is kept in the package and shown "coming (2.8)"; it is never applied nor
+published. Manifests and policies are not published in a registry.
 
 ### Building a package: `harvester-artefacts pack`
 
