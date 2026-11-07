@@ -17597,7 +17597,7 @@ _UNSET = object()
 
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
                 capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
-                setup=None, parent=None, cluster_user=_UNSET):
+                setup=None, parent=None, cluster_user=_UNSET, sink=None):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
@@ -17615,7 +17615,8 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     même plan : un seul passe). 2.5.0 : `parent`, l'action parente (chaîne
     d'un plan), posée avant que l'action soit visible ; `cluster_user`
     passé par un appelant hors requête (identité figée au déclenchement),
-    sinon lu dans la requête."""
+    sinon lu dans la requête. 2.7.0 : `sink(objet)`, l'objet JSON de stdout
+    rendu en mémoire à l'appelant et jamais gardé (jeton, voir le relais)."""
     wd = _capi_work_dir()
     spec_file = None
     if spec is not None:
@@ -17651,10 +17652,9 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
 
     def work():
         try:
-            if summarize is None:          # signature d'avant la 1.99.0 (outils et tests)
-                _vm_transfer_runner(run, cmd, capture=capture)
-            else:
-                _vm_transfer_runner(run, cmd, capture=capture, summarize=summarize)
+            # signature d'avant la 1.99.0 (outils et tests) quand rien n'est donné
+            extra = {k: v for k, v in (("summarize", summarize), ("sink", sink)) if v is not None}
+            _vm_transfer_runner(run, cmd, capture=capture, **extra)
         finally:
             if spec_file:
                 Path(spec_file).unlink(missing_ok=True)
@@ -21771,23 +21771,33 @@ def _capi_service_body():
 def api_capi_services(cluster):
     """Catalogue, services déployés et leur état sur chaque cluster, et si
     CAAPH est installé. Lecture seule, 5 s de cache par identité."""
-    key = (cluster, (current_cluster_identity() or {}).get("user"), current_user())
-    hit = _CAPI_SERVICES_CACHE.get(key)
-    if hit and request.args.get("fresh") != "1" and time.time() - hit[0] < 5:
-        return jsonify(dict(hit[1], registry_charts=_capi_registry_charts(cluster)))
-    kc = _kubectl_for_cluster(cluster)
-    if kc and _cluster_reachable(kc) is False:
+    out, err = _capi_cached_read(cluster, "services")
+    if err:
+        return err
+    if out is None:
         return jsonify({"unreachable": True, "caaph": False, "clusters": [],
                         "catalog": _sv.catalog(), "services": []})
-    cmd, err = _capi_base(cluster, "services")
+    return jsonify(dict(out, registry_charts=_capi_registry_charts(cluster)))
+
+
+def _capi_cached_read(cluster, sub):
+    """Lecture `<sub> --json` de l'outil, 5 s de cache par identité (vidé par
+    chaque geste). (None, None) quand le cluster ne répond pas."""
+    key = (cluster, (current_cluster_identity() or {}).get("user"), current_user(), sub)
+    hit = _CAPI_SERVICES_CACHE.get(key)
+    if hit and request.args.get("fresh") != "1" and time.time() - hit[0] < 5:
+        return hit[1], None
+    kc = _kubectl_for_cluster(cluster)
+    if kc and _cluster_reachable(kc) is False:
+        return None, None
+    cmd, err = _capi_base(cluster, sub)
     if err:
-        return err
+        return None, err
     res, err = _capi_run_json(cmd + ["--json"], timeout=60)
     if err:
-        return err
-    out = res[0]
-    _CAPI_SERVICES_CACHE[key] = (time.time(), out)
-    return jsonify(dict(out, registry_charts=_capi_registry_charts(cluster)))
+        return None, err
+    _CAPI_SERVICES_CACHE[key] = (time.time(), res[0])
+    return res[0], None
 
 
 def _capi_registry_charts(cluster):
@@ -21869,6 +21879,306 @@ def api_capi_service_remove(cluster, namespace, name):
     if err:
         return err
     return jsonify({"action_id": run.id, "name": name}), 202
+
+
+# ---------------------------------------------------------------------------
+# 2.7.0 (tâche 6) : gestes d'artefacts hors plan et jetons d'automatisation
+#
+# Appliquer un élément d'un paquet importé à un cluster enfant (chart par
+# CAAPH, manifeste ou politique par ClusterResourceSet), le retirer, poser
+# le socle de politiques, émettre un jeton. Chaque geste : opérateur ET
+# administrateur du cluster enfant (_child_admin_refusal), action suivie
+# créée avant tout geste, outil `harvester-capi` (parité CLI).
+# ---------------------------------------------------------------------------
+ARTEFACT_KEYS = {"cluster", "package", "version", "item", "registry", "values"}
+ARTEFACT_REMOVE_KINDS = ("chart", "manifest", "policy", "policies")
+TOKEN_WAIT = 150               # s : l'outil lit le Secret puis demande le jeton
+
+
+def _artefact_error(msg, status, code=None):
+    return jsonify(dict({"error": msg}, **({"code": code} if code else {}))), status
+
+
+def _child_ref(text, field="cluster"):
+    """(namespace, nom) d'un `ns/nom` RFC 1123, ou une réponse 400."""
+    bits = text.split("/") if isinstance(text, str) else []
+    if len(bits) != 2 or not all(_K8S_NAME_RE.match(b) for b in bits):
+        return None, _artefact_error(f"{field}: namespace/name expected", 400)
+    return tuple(bits), None
+
+
+def _capi_artefact_request(cluster, check=False):
+    """Lit la demande d'application d'un élément. La sorte vient du paquet
+    importé, jamais de la demande. Rend (demande, None) ou (None, réponse) :
+    {ns, child, kind, sub, spec, label}."""
+    import artefacts as _artm
+    import capi_manifests as _mf
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return None, _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - ARTEFACT_KEYS):
+        return None, _artefact_error(f"{k}: unknown key", 400)
+    ref, err = _child_ref(body.get("cluster"))
+    if err:
+        return None, err
+    for k, rx in (("package", _artm.NAME_RE), ("version", _artm.VERSION_RE), ("item", _artm.ITEM_RE)):
+        if not isinstance(body.get(k), str) or not rx.match(body[k]):
+            return None, _artefact_error(f"{k}: required, a valid name", 400)
+    package, version, item = body["package"], body["version"], body["item"]
+    try:
+        pkg = _artm.load_package(_bm_profiles_state(), package, version)
+    except _artm.ArtefactError:
+        return None, _artefact_error(f"no package {package}-{version}", 404, "artefact-package-missing")
+    it = next((i for i in pkg["index"].get("items") or [] if i.get("name") == item), None)
+    if it is None:
+        return None, _artefact_error(f"no item {item} in {package}-{version}", 404, "artefact-item-unknown")
+    kind = it.get("kind")
+    if kind == "images":
+        return None, _artefact_error("images are published by the Registry phase", 400, "artefact-kind-images")
+    if kind in _artm.LATER_KINDS:
+        return None, _artefact_error(f"{kind}: coming in 2.8", 400, "artefact-kind-later")
+    if not _mf.item_name_ok(item):
+        return None, _artefact_error(f"{item}: 42 characters at most to be applied", 400, "artefact-name-too-long")
+    ns, child = ref
+    who = current_user() or ""
+    if kind == "chart":
+        registry = body.get("registry")
+        if not isinstance(registry, str) or not _K8S_NAME_RE.match(registry):
+            return None, _artefact_error("registry: required for a chart", 400)
+        values = body.get("values")
+        if isinstance(values, str):
+            try:
+                values = yaml.safe_load(values) if values.strip() else None
+            except yaml.YAMLError as e:
+                return None, _artefact_error(f"values: not valid YAML: {str(e)[:160]}", 400)
+        if values is not None and not isinstance(values, dict):
+            return None, _artefact_error("values: a mapping", 400)
+        if not any((c["registry"], c["package"], c["version"], c["item"]) == (registry, package, version, item)
+                   for c in _capi_registry_charts(cluster)):
+            return None, _artefact_error(f"{package}-{version} ({item}) is not published in {registry}, or the "
+                                         f"registry is not attached to {cluster}", 409, "artefact-not-published")
+        spec = {"cluster": f"{ns}/{child}", "source": {"registry": registry, "package": package,
+                                                       "version": version, "item": item}, "by": who}
+        if values:
+            spec["values"] = yaml.safe_dump(values, sort_keys=False)
+        try:
+            spec = _sv.normalize(spec)
+        except ValueError as e:
+            return None, _artefact_error(str(e), 400)
+        sub, label = ("service-check" if check else "service-deploy"), f"capi-service-deploy:{ns}/{child}:{item}"
+    else:
+        for k in ("registry", "values"):
+            if body.get(k) not in (None, "", {}):
+                return None, _artefact_error(f"{k}: only for a chart", 400)
+        spec = {"cluster": f"{ns}/{child}", "package": package, "version": version, "item": item, "by": who}
+        sub, label = ("manifest-check" if check else "manifest-deploy"), f"capi-manifest-deploy:{ns}/{child}:{item}"
+    return {"ns": ns, "child": child, "kind": kind, "sub": sub, "spec": spec, "label": label}, None
+
+
+def _capi_child_base(cluster, sub, ns, child):
+    """Commande de l'outil après le contrôle du droit sur le cluster enfant
+    (403 child-admin-required, 502 sans réponse) : rien n'est lancé avant."""
+    cmd, err = _capi_base(cluster, sub)
+    if err:
+        return None, err
+    refusal = _child_admin_refusal(_kubectl_for_cluster(cluster), ns, child)
+    return (None, refusal) if refusal else (cmd, None)
+
+
+@app.route("/api/capi/<cluster>/artefact-check", methods=["POST"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_capi_artefact_check(cluster):
+    """Constats de la fenêtre Appliquer avant son bouton : contrôle de
+    l'outil (lecture seule) et droit sur le cluster enfant."""
+    req, err = _capi_artefact_request(cluster, check=True)
+    if err:
+        return err
+    cmd, err = _capi_base(cluster, req["sub"])
+    if err:
+        return err
+    res, err = _capi_run_json(cmd + ["--spec", "-"], spec=req["spec"], timeout=60)
+    if err:
+        return err
+    out, rc = res
+    found = list(out.get("findings") or [])
+    ok, why = _child_admin_allowed(_kubectl_for_cluster(cluster), req["ns"], req["child"])
+    # l'outil peut déjà le dire (contrôle ouvert avec l'identité de la personne)
+    if not ok and not any(f.get("code") == CHILD_ADMIN_REQUIRED for f in found):
+        found.append({"code": CHILD_ADMIN_REQUIRED if ok is False else "child-admin-unknown",
+                      "level": "block", "facts": {"cluster": f"{req['ns']}/{req['child']}", "message": why}})
+    blocked = rc == 2 or bool(out.get("blocked")) or not ok
+    return jsonify(dict(out, findings=found, blocked=blocked, kind=req["kind"]))
+
+
+@app.route("/api/capi/<cluster>/artefact", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_artefact_apply(cluster):
+    """Applique un élément de paquet à un cluster enfant : action suivie."""
+    req, err = _capi_artefact_request(cluster)
+    if err:
+        return err
+    cmd, err = _capi_child_base(cluster, req["sub"], req["ns"], req["child"])
+    if err:
+        return err
+    run, err = _cli_action(cluster, req["label"], cmd, "harvester-capi", spec=req["spec"],
+                           after=lambda: _CAPI_SERVICES_CACHE.clear())
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "kind": req["kind"], "item": req["spec"].get("item") or
+                    req["spec"]["source"]["item"], "cluster": f"{req['ns']}/{req['child']}"}), 202
+
+
+@app.route("/api/capi/<cluster>/artefact/<namespace>/<name>/<item>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_artefact_remove(cluster, namespace, name, item):
+    """Retire un élément appliqué au cluster enfant `<namespace>/<name>` ;
+    `?kind=` dit lequel (chart : HelmChartProxy ; manifeste, politique ou
+    socle : ClusterResourceSet et objets étiquetés)."""
+    import capi_manifests as _mf
+    kind = request.args.get("kind") or ""
+    if kind not in ARTEFACT_REMOVE_KINDS:
+        return _artefact_error("kind: chart, manifest, policy or policies", 400)
+    if not all(_K8S_NAME_RE.match(x) for x in (namespace, name)):
+        return _artefact_error("invalid name", 400)
+    if not _mf.item_name_ok(item):
+        return _artefact_error(f"{item}: not an applicable item name", 400, "artefact-name-too-long")
+    if kind == "chart":
+        sub, args, label = "service-remove", ["--name", f"{namespace}/{item}"], f"capi-service-remove:{namespace}/{item}"
+    else:
+        sub, args = "manifest-remove", ["--name", f"{namespace}/{name}/{item}"]
+        label = f"capi-manifest-remove:{namespace}/{name}/{item}"
+    cmd, err = _capi_child_base(cluster, sub, namespace, name)
+    if err:
+        return err
+    run, err = _cli_action(cluster, label, cmd + args, "harvester-capi",
+                           after=lambda: _CAPI_SERVICES_CACHE.clear())
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "kind": kind, "item": item}), 202
+
+
+@app.route("/api/capi/<cluster>/policies", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_policies(cluster):
+    """Socle de politiques, rôles par groupe et comptes d'automatisation
+    d'un cluster enfant (élément hops-policies) : action suivie. Le socle
+    reste décoché tant qu'il n'est pas demandé (décision 127)."""
+    import child_policies as _cp
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - {"cluster", "policies"}):
+        return _artefact_error(f"{k}: unknown key", 400)
+    ref, err = _child_ref(body.get("cluster"))
+    if err:
+        return err
+    try:
+        _cp.normalize(body.get("policies"))
+    except ValueError as e:
+        return _artefact_error(str(e), 400)
+    ns, child = ref
+    cmd, err = _capi_child_base(cluster, "manifest-deploy", ns, child)
+    if err:
+        return err
+    spec = {"cluster": f"{ns}/{child}", "policies": body.get("policies") or {}, "by": current_user() or ""}
+    run, err = _cli_action(cluster, f"capi-policies:{ns}/{child}", cmd, "harvester-capi", spec=spec,
+                           after=lambda: _CAPI_SERVICES_CACHE.clear())
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{ns}/{child}"}), 202
+
+
+@app.route("/api/capi/<cluster>/token", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_capi_token(cluster):
+    """Jeton `TokenRequest` d'un compte d'automatisation (point 208). Rendu
+    une fois dans cette réponse : l'outil l'écrit sur sa sortie standard,
+    lue en mémoire par le relais (`sink`) et jamais rangée ; l'action
+    `capi-token:` garde l'étape, sans la valeur."""
+    import child_access as _ca
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - {"cluster", "account", "seconds"}):
+        return _artefact_error(f"{k}: unknown key", 400)
+    ref, err = _child_ref(body.get("cluster"))
+    if err:
+        return err
+    acc, err = _child_ref(body.get("account"), "account")
+    if err:
+        return err
+    try:
+        seconds = _ca.check_seconds(body.get("seconds", _ca.TOKEN_DEFAULT))
+    except ValueError as e:
+        return _artefact_error(str(e), 400)
+    ns, child = ref
+    cmd, err = _capi_child_base(cluster, "token", ns, child)
+    if err:
+        return err
+    box, done = {}, threading.Event()
+
+    def keep(obj):
+        if isinstance(obj.get("token"), str) and obj["token"]:
+            box["token"], box["expires_at"] = obj["token"], obj.get("expires_at")
+    args = ["--name", f"{ns}/{child}", "--account", "/".join(acc), "--seconds", str(seconds),
+            "--by", current_user() or ""]
+    run, err = _cli_action(cluster, f"capi-token:{ns}/{child}", cmd + args, "harvester-capi",
+                           sink=keep, after=done.set)
+    if err:
+        return err
+    if not done.wait(TOKEN_WAIT):
+        return jsonify({"error": "the token was not issued in time", "action_id": run.id}), 504
+    if "token" not in box:
+        return jsonify({"error": run.error_summary or "no token issued", "action_id": run.id}), 502
+    resp = jsonify({"token": box.pop("token"), "expires_at": box.pop("expires_at", None),
+                    "seconds": seconds, "action_id": run.id})
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@app.route("/api/capi/<cluster>/artefacts/applied")
+@requires_auth
+def api_capi_artefacts_applied(cluster):
+    """Ce qui est appliqué aux clusters enfants : charts de paquets (avec
+    leur élément), manifestes, politiques et socle (état du binding), et
+    les comptes d'automatisation déclarés par la console. Lecture seule."""
+    import artefacts as _artm
+    import child_policies as _cp
+    svc, err = _capi_cached_read(cluster, "services")
+    if err:
+        return err
+    if svc is None:
+        return jsonify({"unreachable": True, "charts": [], "manifests": [], "accounts": []})
+    mans, err = _capi_cached_read(cluster, "manifests")
+    if err:
+        return err
+    kinds = {}
+
+    def kind_of(m):
+        if m.get("item") == _cp.ITEM:
+            return "policies"
+        key = (m.get("package"), m.get("version"))
+        if key not in kinds:
+            try:
+                idx = _artm.load_package(_bm_profiles_state(), *key)["index"]
+                kinds[key] = {i.get("name"): i.get("kind") for i in idx.get("items") or []}
+            except (_artm.ArtefactError, TypeError):
+                kinds[key] = {}
+        return kinds[key].get(m.get("item")) or "manifest"
+    manifests, accounts = [], []
+    for m in mans or []:
+        manifests.append(dict({k: v for k, v in m.items() if k != "accounts"}, kind=kind_of(m)))
+        for a in m.get("accounts") or []:
+            accounts.append(dict(a, cluster=f"{m.get('namespace')}/{m.get('cluster')}"))
+    charts = [dict(s, kind="chart") for s in svc.get("services") or [] if s.get("artefact")]
+    return jsonify({"charts": charts, "manifests": manifests, "accounts": accounts,
+                    "clusters": svc.get("clusters") or []})
 
 
 @app.route("/api/capi/<cluster>/cluster-create", methods=["POST"])
@@ -22626,14 +22936,17 @@ def _transfer_busy(clusters, label, prefix=None):
 CLI_OUTPUT_MAX = 1024 * 1024
 
 
-def _vm_transfer_runner(run, cmd, capture=False, summarize=None):
+def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
     """Relaie les étapes du script, comme pour l'installateur du provider.
     `capture` : l'objet JSON de stdout va dans `run.result["output"]`
     (fichier temporaire anonyme, pas de tube qui se remplirait).
     `summarize(run, rc, sortie, dernière erreur)` (v1.99.0) : rend (statut,
     résumé) pour un outil qui dit lui-même ce que veut dire sa sortie (la
     réplication distingue annulé et défait, interrompu à reprendre), ou None
-    pour les textes habituels."""
+    pour les textes habituels.
+    2.7.0 : `sink(objet)` reçoit l'objet JSON de stdout lu EN MÉMOIRE (tube
+    vidé par un fil), jamais rangé dans l'action ni sur le disque : c'est le
+    chemin d'un jeton d'automatisation, rendu à la seule requête."""
     def step(sid, status, msg=""):
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
@@ -22652,10 +22965,16 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None):
     try:
         # dans le try : une erreur ici (disque plein) laissait l'action
         # « running » pour toujours
-        out_file = tempfile.TemporaryFile() if capture else None
-        proc = subprocess.Popen(cmd, stdout=out_file or subprocess.DEVNULL,
+        out_file = tempfile.TemporaryFile() if capture and sink is None else None
+        proc = subprocess.Popen(cmd, stdout=out_file or (subprocess.PIPE if sink is not None else subprocess.DEVNULL),
                                 stderr=subprocess.PIPE, text=True)
         run.proc = proc          # annulable depuis le dock : le script défait tout
+        got = []
+        reader = None
+        if sink is not None:
+            # lu à part : un tube plein bloquerait l'outil pendant qu'on lit stderr
+            reader = threading.Thread(target=lambda: got.append(proc.stdout.read()), daemon=True)
+            reader.start()
         if run.cancel_requested:
             # v1.99.0 : annulation demandée avant que le processus existe
             proc.terminate()
@@ -22680,6 +22999,16 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None):
                     run.emit_progress(snap)
         rc = proc.wait()
         run.exit_code = rc
+        if reader is not None:
+            reader.join(10)
+            try:
+                mem = json.loads(got[0]) if got else None
+            except ValueError:
+                mem = None
+            got.clear()
+            if isinstance(mem, dict):
+                sink(mem)
+            mem = None
         if out_file is not None:
             out_file.seek(0)
             try:

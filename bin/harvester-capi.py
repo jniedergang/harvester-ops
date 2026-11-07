@@ -1890,11 +1890,21 @@ def cmd_manifests(args):
         md = crs["metadata"]
         ns, lab, ann = md.get("namespace"), md.get("labels") or {}, md.get("annotations") or {}
         cmap = kube.get("configmaps", ns, md["name"])
-        out.append({"namespace": ns, "cluster": lab.get(mf.L_CLUSTER), "item": lab.get(mf.L_ITEM),
-                    "package": lab.get(mf.L_PACKAGE), "version": ann.get(mf.A_VERSION),
-                    "applied_by": ann.get(mf.A_BY) or "", "origin": cc.origin_of(crs),
-                    "objects": len(mf.objects_of(cmap)),
-                    "state": mf.state(crs, bindings.get(ns, []), cmap)})
+        objs = mf.objects_of(cmap)
+        row = {"namespace": ns, "cluster": lab.get(mf.L_CLUSTER), "item": lab.get(mf.L_ITEM),
+               "package": lab.get(mf.L_PACKAGE), "version": ann.get(mf.A_VERSION),
+               "applied_by": ann.get(mf.A_BY) or "", "origin": cc.origin_of(crs),
+               "objects": len(objs), "state": mf.state(crs, bindings.get(ns, []), cmap)}
+        if row["item"] == cp.ITEM:
+            # 2.7.0 : comptes d'automatisation déclarés par la console (lus
+            # dans le ConfigMap, sans accès au cluster enfant) et leur rôle
+            roles = {((o.get("metadata") or {}).get("namespace"), (o.get("metadata") or {}).get("name")):
+                     (o.get("roleRef") or {}).get("name") for o in objs if o.get("kind") == "RoleBinding"}
+            row["accounts"] = [{"namespace": o["metadata"].get("namespace"), "name": o["metadata"].get("name"),
+                                "role": roles.get((o["metadata"].get("namespace"),
+                                                   "hops-sa-" + str(o["metadata"].get("name"))))}
+                               for o in objs if o.get("kind") == "ServiceAccount" and o.get("metadata")]
+        out.append(row)
     print(json.dumps(out) if args.json else json.dumps(out, indent=1))
     return EXIT_OK
 
