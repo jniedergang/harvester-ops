@@ -19373,6 +19373,33 @@ def _session_rancher(cluster):
         return kc, None
 
 
+def _child_rancher_cid(cluster, child):
+    """2.8.0 (tâche 9) : identifiant Rancher (`c-m-...`) d'un cluster enfant
+    importé dans le Rancher de la session, pour la fenêtre Membres. Lu par
+    `harvester-capi rancher-status` (marque du cluster Cluster API) et refusé
+    si l'import vise un autre Rancher ou n'y existe plus : (cid, None) ou
+    (None, réponse)."""
+    ref, err = _child_ref(child)
+    if err:
+        return None, err
+    cmd, err = _capi_base(cluster, "rancher-status")
+    if err:
+        return None, err
+    res, err = _capi_run_json(cmd + ["--name", "/".join(ref), "--json"], timeout=60)
+    if err:
+        return None, err
+    out = res[0] or {}
+    row = next((x for x in out.get("clusters") or [] if (x.get("namespace"), x.get("cluster")) == tuple(ref)), None)
+    if not row or not row.get("imported") or not out.get("session") or row.get("rancher") != out.get("session") \
+            or not row.get("present") or not _CHILD_CID_RE.match(str(row.get("cid") or "")):
+        return None, (jsonify({"error": f"{'/'.join(ref)} is not imported in the Rancher of your session",
+                               "code": "child-not-imported"}), 409)
+    return row["cid"], None
+
+
+_CHILD_CID_RE = re.compile(r"^c-[a-z0-9]([-a-z0-9]{0,40}[a-z0-9])?$")
+
+
 @app.route("/api/rancher-members/<cluster>")
 @requires_auth
 def api_rancher_members(cluster):
@@ -19382,12 +19409,20 @@ def api_rancher_members(cluster):
     if r is None:
         return jsonify({"managed": False, "members": [], "roles": []})
     scope = request.args.get("scope") or "cluster"
+    cid = r["cid"]
+    if request.args.get("child"):
+        # 2.8.0 : membres d'un cluster enfant importé (scope cluster seul)
+        if scope != "cluster":
+            return jsonify({"error": "child: cluster scope only"}), 400
+        cid, err = _child_rancher_cid(cluster, request.args.get("child"))
+        if err:
+            return err
     try:
         if scope == "project":
             target = f"{r['cid']}:{_hpj.check_pid(request.args.get('project'))}"
             path = f"/v3/projectroletemplatebindings?projectId={target}"
         elif scope == "cluster":
-            path = f"/v3/clusterroletemplatebindings?clusterId={r['cid']}"
+            path = f"/v3/clusterroletemplatebindings?clusterId={cid}"
         else:
             raise ValueError("scope: cluster or project")
     except ValueError as e:
@@ -19471,6 +19506,15 @@ def api_rancher_members_do(cluster, action):
             label = f"member:remove:{scope}"
     except (ValueError, TypeError) as e:
         return jsonify({"error": str(e)}), 400
+    if b.get("child"):
+        # 2.8.0 : membres d'un cluster enfant importé (scope cluster seul)
+        if scope != "cluster":
+            return jsonify({"error": "child: cluster scope only"}), 400
+        cid, err = _child_rancher_cid(cluster, b.get("child"))
+        if err:
+            return err
+        args += ["--cid", cid]
+        label += ":child"
     run, err = _res_cli(cluster, kc, label, args)
     return _res_reply(run, err, action=action)
 
@@ -22319,7 +22363,7 @@ def api_capi_oidc_kubeconfig(cluster, namespace, name):
     return resp
 
 
-GITOPS_KEYS = {"cluster", "entry", "secrets"}
+GITOPS_KEYS = {"cluster", "entry", "secrets", "dry_run"}
 
 
 @app.route("/api/capi/<cluster>/gitops", methods=["POST"])
@@ -22345,9 +22389,29 @@ def api_capi_gitops(cluster):
     secrets = body.get("secrets") or {}
     if not isinstance(secrets, dict) or not all(isinstance(v, dict) for v in secrets.values()):
         return _artefact_error("secrets: {name: {identity, known_hosts} | {username, password}}", 400)
+    ns, child = ref
+    if body.get("dry_run") is True:
+        # 2.8.0, tâche 9 : la vérification de la fenêtre avant son bouton
+        # (`gitops-check`, lecture seule) ; le droit sur le cluster enfant y
+        # devient un constat, comme pour Appliquer. Les secrets ne servent
+        # qu'à leur nom : seules les clés partent.
+        cmd, err = _capi_base(cluster, "gitops-check")
+        if err:
+            return err
+        spec = {"cluster": f"{ns}/{child}", "entry": entry, "secrets": {k: {} for k in secrets},
+                "role": current_role() or "viewer", "by": current_user() or ""}
+        res, err = _capi_run_json(cmd + ["--spec", "-"], spec=spec, timeout=60)
+        if err:
+            return err
+        out, rc = res
+        found = list(out.get("findings") or [])
+        ok, why = _child_admin_allowed(_kubectl_for_cluster(cluster), ns, child)
+        if not ok and not any(f.get("code") == CHILD_ADMIN_REQUIRED for f in found):
+            found.append({"code": CHILD_ADMIN_REQUIRED if ok is False else "child-admin-unknown",
+                          "level": "block", "facts": {"cluster": f"{ns}/{child}", "message": why}})
+        return jsonify(dict(out, findings=found, blocked=rc != 0 or bool(out.get("blocked")) or not ok))
     if entry["privileges"] == "cluster" and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
         return _artefact_error("privileges cluster: administrators only", 403, "gitops-privileges-admin-only")
-    ns, child = ref
     cmd, err = _capi_child_base(cluster, "gitops-deploy", ns, child)
     if err:
         return err
@@ -22664,10 +22728,14 @@ def api_capi_cluster_details(cluster, namespace, name):
                 identity = "restricted"
         except ValueError:
             pass
+    # 2.8.0 (tâche 9) : réglages OIDC publics posés à la création (aucun
+    # secret : annotation harvester-ops.io/oidc), pour la fenêtre Accès
+    import child_oidc as _co
     return jsonify({
         "name": name,
         "namespace": namespace,
         "identity": identity,
+        "oidc": _co.of_cluster(cl),
         "phase": cl.get("status", {}).get("phase", ""),
         # v1.48.0 : le cœur de Turtles répond en v1beta2 (plus de
         # `status.controlPlaneReady`)

@@ -25,11 +25,15 @@ const RancherMembers = (() => {
     return d;
   }
 
+  // 2.8.0 : `child` (`ns/nom`) = un cluster enfant importé dans le Rancher
+  // de la session (scope cluster seul) ; le serveur vérifie la marque
   function query(o) {
-    return o.scope === 'project' ? `?scope=project&project=${enc(o.project)}` : '?scope=cluster';
+    if (o.scope === 'project') return `?scope=project&project=${enc(o.project)}`;
+    return o.child ? `?scope=cluster&child=${enc(o.child)}` : '?scope=cluster';
   }
+  const target = (o) => Object.assign({ scope: o.scope, project: o.project }, o.child ? { child: o.child } : {});
 
-  /** Monte la liste des membres dans `host` ; o = {cluster, scope, project, title}.
+  /** Monte la liste des membres dans `host` ; o = {cluster, scope, project, child, title}.
    * `note` : le message de la dernière action, gardé à travers la relecture
    * (vu en réel : il disparaissait avec la liste qu'on redessinait). */
   async function render(host, o, note) {
@@ -96,7 +100,7 @@ const RancherMembers = (() => {
       if (!f.principal.value) { msg.innerHTML = `<span class="res-error">${esc(tr('rm.pickFirst'))}</span>`; return; }
       try {
         const out = await call('POST', `/api/rancher-members/${enc(o.cluster)}/do/add`,
-          { scope: o.scope, project: o.project, principal: f.principal.value, role: f.role.value });
+          Object.assign(target(o), { principal: f.principal.value, role: f.role.value }));
         done(out.action_id, tr('rm.done.added'));
       } catch (err) {
         msg.innerHTML = `<span class="res-error">${esc(err.message)}</span>`;
@@ -108,7 +112,7 @@ const RancherMembers = (() => {
       const m = d.members.find(x => x.id === b.closest('tr').dataset.rm);
       if (!m || !confirm(tr('rm.confirmRemove', { name: m.name, role: m.role_name }))) return;
       try {
-        const out = await call('POST', `/api/rancher-members/${enc(o.cluster)}/do/remove`, { scope: o.scope, project: o.project, id: m.id });
+        const out = await call('POST', `/api/rancher-members/${enc(o.cluster)}/do/remove`, Object.assign(target(o), { id: m.id }));
         done(out.action_id, tr('rm.done.removed'));
       } catch (err) {
         msg.innerHTML = `<span class="res-error">${esc(err.message)}</span>`;

@@ -54,6 +54,10 @@ const CapiCreate = (() => {
     'oidc-admin-group-invalid': (v) => tr('capi.new.fd.oidc-admin-group-invalid', v),
     'oidc-version-too-old': (v) => tr('capi.new.fd.oidc-version-too-old', v),
     'oidc-with-rancher': (v) => tr('capi.new.fd.oidc-with-rancher', v),
+    // 2.8.0 : cluster enfant sans Internet (rke2_offline)
+    'offline-needs-no-fallback': (v) => tr('capi.new.fd.offline-needs-no-fallback', v),
+    'offline-rke2-missing': (v) => tr('capi.new.fd.offline-rke2-missing', v),
+    'offline-rke2-version-mismatch': (v) => tr('capi.new.fd.offline-rke2-version-mismatch', v),
     'keypair-missing': (v) => tr('capi.new.fd.keypair-missing', v),
     'network-missing': (v) => tr('capi.new.fd.network-missing', v),
     'storage-class-missing': (v) => tr('capi.new.fd.storage-class-missing', v),
@@ -103,7 +107,9 @@ const CapiCreate = (() => {
   // v1.53.0 : la création passe dans une fenêtre à menus, comme celle d'une
   // VM (demande de l'exploitant) : l'essentiel au premier menu, le reste
   // rangé par thème, le contrôle préalable à part avec un compteur par menu.
-  const SECTIONS = ['essentials', 'nodes', 'network', 'storage', 'kubernetes', 'integrations', 'registries', 'check'];
+  // 2.8.0 : menu Accès (Rancher externe, OIDC de l'API), entre Intégrations
+  // et Registres
+  const SECTIONS = ['essentials', 'nodes', 'network', 'storage', 'kubernetes', 'integrations', 'access', 'registries', 'check'];
   const SEC_LABEL = {
     essentials: () => tr('capi.new.nav.essentials'),
     nodes: () => tr('capi.new.nav.nodes'),
@@ -111,6 +117,7 @@ const CapiCreate = (() => {
     storage: () => tr('capi.new.nav.storage'),
     kubernetes: () => tr('capi.new.nav.kubernetes'),
     integrations: () => tr('capi.new.nav.integrations'),
+    access: () => tr('capi.new.nav.access'),
     registries: () => tr('capi.new.nav.registries'),
     check: () => tr('capi.new.nav.check'),
   };
@@ -121,11 +128,12 @@ const CapiCreate = (() => {
     storage: () => tr('capi.new.nav.t.storage'),
     kubernetes: () => tr('capi.new.nav.t.kubernetes'),
     integrations: () => tr('capi.new.nav.t.integrations'),
+    access: () => tr('capi.new.nav.t.access'),
     registries: () => tr('capi.new.nav.t.registries'),
     check: () => tr('capi.new.nav.t.check'),
   };
   const SEC_ICON = { essentials: 'general', nodes: 'compute', network: 'network', storage: 'storage',
-                     kubernetes: 'capi', integrations: 'plug', registries: 'containers', check: 'test' };
+                     kubernetes: 'capi', integrations: 'plug', access: 'key', registries: 'containers', check: 'test' };
   // Le menu où se règle ce que dit chaque constat (compteur sur le menu).
   const FINDING_SEC = {
     'small-nodes': 'nodes', 'cpu-short': 'nodes', 'memory-short': 'nodes',
@@ -135,6 +143,12 @@ const CapiCreate = (() => {
     'cluster-registry-no-images': 'registries', 'cluster-registry-mirror-unknown': 'registries',
     'cluster-registry-no-fallback-system': 'registries', 'cluster-registry-vm-network-unchecked': 'registries',
     'cluster-registry-vm-network-ok': 'registries', 'cluster-registry-unreachable-from-vm-network': 'registries',
+    'rancher-import-conflict': 'access', 'rancher-session-needed': 'access', 'oidc-invalid': 'access',
+    'oidc-issuer-invalid': 'access', 'oidc-audience-invalid': 'access', 'oidc-claim-invalid': 'access',
+    'oidc-prefix-required': 'access', 'oidc-prefix-system': 'access', 'oidc-ca-unreadable': 'access',
+    'oidc-admin-group-invalid': 'access', 'oidc-version-too-old': 'access', 'oidc-with-rancher': 'access',
+    'offline-needs-no-fallback': 'registries', 'offline-rke2-missing': 'registries',
+    'offline-rke2-version-mismatch': 'registries',
   };
   // Point 198 : registres d'origine des images système de RKE2. Couper le
   // repli vers Internet pour eux n'est proposé que si un registre qui les
@@ -312,7 +326,6 @@ const CapiCreate = (() => {
         <section class="capi-sec" data-sec="integrations" role="tabpanel" hidden>
           <h3>${esc(SEC_LABEL.integrations())}</h3>
           <div class="tf-args">
-            <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('capi.new.t.rancher'))}"><input data-x="rancher_import" type="checkbox"><span class="tf-label">${esc(tr('capi.new.f.rancher'))}</span></label>
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.fleetRepo'))}</span>
               <input data-x="fleet_repo" type="text" placeholder="https://" class="tip" data-tip="${esc(tr('capi.new.t.fleetRepo'))}"></label>
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.fleetBranch'))}</span>
@@ -329,22 +342,23 @@ const CapiCreate = (() => {
               </select></label>
           </div>
         </section>
+        <section class="capi-sec" data-sec="access" role="tabpanel" hidden>
+          <h3>${esc(SEC_LABEL.access())}</h3>
+          ${accessHtml(T)}
+        </section>
         <section class="capi-sec" data-sec="registries" role="tabpanel" hidden>
           <h3>${esc(SEC_LABEL.registries())}</h3>
           <p class="tf-desc">${esc(tr('capi.reg.intro'))}</p>
-          <div class="capi-reg-list" data-reg="list"></div>
-          <div class="tf-args">
-            <label class="tf-field"><span class="tf-label">${esc(tr('capi.reg.add'))}</span>
-              <select data-reg="add" class="tip" data-tip="${esc(tr('capi.reg.t.add'))}">
-                <option value="">${esc(tr('capi.reg.choose'))}</option>
-                ${(inv.registries || []).map(r => `<option value="${esc(r.name)}"${r.attached ? '' : ' disabled'}>${esc(r.attached
-                  ? tr('capi.reg.option', { name: r.name, endpoint: r.endpoint || '' })
-                  : tr('capi.reg.optionNotAttached', { name: r.name }))}</option>`).join('')}
-                ${T ? `<option value="${VAR}">${esc(tr('capi.tpl.variable'))}</option>` : ''}
+          ${registriesHtml(inv, T)}
+          <div class="tf-args capi-offline">
+            <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('capi.new.t.offline'))}"><input data-x="offline" type="checkbox"><span class="tf-label">${esc(tr('capi.new.f.offline'))}</span></label>
+            <label class="tf-field" data-x-wrap="offline_artifacts" hidden><span class="tf-label">${esc(tr('capi.new.f.offlineArtifacts'))}</span>
+              <select data-x="offline_artifacts" class="tip" data-tip="${esc(tr('capi.new.t.offlineArtifacts'))}">
+                <option value="fetch">${esc(tr('capi.new.offline.fetch'))}</option>
+                <option value="image">${esc(tr('capi.new.offline.image'))}</option>
               </select></label>
-            <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('capi.reg.t.noFallback'))}"><input data-reg="nofallback" type="checkbox"><span class="tf-label">${esc(tr('capi.reg.noFallback'))}</span></label>
           </div>
-          <p class="tf-desc capi-reg-note" data-reg="note" hidden></p>
+          <p class="tf-desc" data-x-wrap="offline-note" hidden>${esc(tr('capi.new.offlineNote'))}</p>
         </section>
         ${T ? '' : `<section class="capi-sec" data-sec="check" role="tabpanel" hidden>
           <h3>${esc(SEC_LABEL.check())}</h3>
@@ -372,6 +386,181 @@ const CapiCreate = (() => {
           <span class="apply-result" data-x="feedback"></span>
         </div>`}
       </div>`;
+  }
+
+  /** Liste des registres du cluster enfant (ajout, ordre, coupure du
+   *  repli) ; partagée par la création, le modèle et le renouvellement. */
+  function registriesHtml(inv, T) {
+    return `<div class="capi-reg-list" data-reg="list"></div>
+          <div class="tf-args">
+            <label class="tf-field"><span class="tf-label">${esc(tr('capi.reg.add'))}</span>
+              <select data-reg="add" class="tip" data-tip="${esc(tr('capi.reg.t.add'))}">
+                <option value="">${esc(tr('capi.reg.choose'))}</option>
+                ${((inv || {}).registries || []).map(r => `<option value="${esc(r.name)}"${r.attached ? '' : ' disabled'}>${esc(r.attached
+                  ? tr('capi.reg.option', { name: r.name, endpoint: r.endpoint || '' })
+                  : tr('capi.reg.optionNotAttached', { name: r.name }))}</option>`).join('')}
+                ${T ? `<option value="${VAR}">${esc(tr('capi.tpl.variable'))}</option>` : ''}
+              </select></label>
+            <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('capi.reg.t.noFallback'))}"><input data-reg="nofallback" type="checkbox"><span class="tf-label">${esc(tr('capi.reg.noFallback'))}</span></label>
+          </div>
+          <p class="tf-desc capi-reg-note" data-reg="note" hidden></p>`;
+  }
+
+  // --- accès humain au cluster enfant (2.8.0, décision 125) -------------
+  // Rancher d'abord : un des trois modes ; OIDC de l'API en second accès.
+  // Valeurs par défaut de child_oidc (DEFAULTS) ; préfixes obligatoires.
+  const ACCESS_MODES = ['none', 'turtles', 'external'];
+  const OIDC_DEFAULTS = { username_claim: 'email', username_prefix: 'oidc:', groups_claim: 'groups', groups_prefix: 'oidc:' };
+  const OIDC_FIELDS = ['issuer_url', 'audience', 'username_claim', 'username_prefix', 'groups_claim', 'groups_prefix',
+                       'admin_group', 'ca_pem'];
+  const ACCESS_LABEL = {
+    none: () => tr('capi.acc.mode.none'), turtles: () => tr('capi.acc.mode.turtles'), external: () => tr('capi.acc.mode.external'),
+  };
+  const ACCESS_TIP = {
+    none: () => tr('capi.acc.t.none'), turtles: () => tr('capi.acc.t.turtles'), external: () => tr('capi.acc.t.external'),
+  };
+  const OIDC_LABEL = {
+    issuer_url: () => tr('capi.oidc.f.issuer'), audience: () => tr('capi.oidc.f.audience'),
+    username_claim: () => tr('capi.oidc.f.usernameClaim'), username_prefix: () => tr('capi.oidc.f.usernamePrefix'),
+    groups_claim: () => tr('capi.oidc.f.groupsClaim'), groups_prefix: () => tr('capi.oidc.f.groupsPrefix'),
+    admin_group: () => tr('capi.oidc.f.adminGroup'), ca_pem: () => tr('capi.oidc.f.ca'),
+  };
+  const OIDC_TIP = {
+    issuer_url: () => tr('capi.oidc.t.issuer'), audience: () => tr('capi.oidc.t.audience'),
+    username_claim: () => tr('capi.oidc.t.usernameClaim'), username_prefix: () => tr('capi.oidc.t.usernamePrefix'),
+    groups_claim: () => tr('capi.oidc.t.groupsClaim'), groups_prefix: () => tr('capi.oidc.t.groupsPrefix'),
+    admin_group: () => tr('capi.oidc.t.adminGroup'), ca_pem: () => tr('capi.oidc.t.ca'),
+  };
+  const OIDC_PH = { issuer_url: 'https://idp.example/realms/main', audience: 'kubernetes', admin_group: 'k8s-admins',
+                    ca_pem: '-----BEGIN CERTIFICATE-----' };
+
+  /** Champs OIDC (partagés avec le renouvellement) ; `on` : coché d'avance. */
+  function oidcHtml(on) {
+    const input = (k) => (k === 'ca_pem'
+      ? `<textarea data-o="${k}" rows="3" spellcheck="false" placeholder="${esc(OIDC_PH[k])}" class="tip" data-tip="${esc(OIDC_TIP[k]())}"></textarea>`
+      : `<input data-o="${k}" type="text" autocomplete="off" spellcheck="false" value="${esc(OIDC_DEFAULTS[k] || '')}"
+               placeholder="${esc(OIDC_PH[k] || '')}" class="tip" data-tip="${esc(OIDC_TIP[k]())}">`);
+    return `<label class="tf-field tf-type-bool tip" data-tip="${esc(tr('capi.oidc.t.on'))}"><input data-o-on="1" type="checkbox"${on ? ' checked' : ''}><span class="tf-label">${esc(tr('capi.oidc.on'))}</span></label>
+      <div class="tf-args capi-oidc" data-o-box="1"${on ? '' : ' hidden'}>
+        ${OIDC_FIELDS.map(k => `<label class="tf-field${k === 'ca_pem' ? ' capi-oidc-wide' : ''}"><span class="tf-label">${esc(OIDC_LABEL[k]())}</span>${input(k)}
+          <span class="capi-oidc-err" data-o-err="${k}" hidden></span></label>`).join('')}
+        <p class="tf-desc capi-oidc-wide">${esc(tr('capi.oidc.note'))}</p>
+      </div>`;
+  }
+
+  function accessHtml(T) {
+    return `<p class="tf-desc">${esc(tr('capi.acc.intro'))}</p>
+      <fieldset class="tf-block capi-access-modes"><legend>${esc(tr('capi.acc.rancher'))}</legend>
+        ${ACCESS_MODES.map(m => `<label class="tf-field tf-type-bool tip capi-access-mode" data-access-wrap="${m}" data-tip="${esc(ACCESS_TIP[m]())}">
+          <input type="radio" name="capi-access-${T ? 'tpl' : 'new'}" data-access="${m}"${m === 'none' ? ' checked' : ''}>
+          <span class="tf-label">${esc(ACCESS_LABEL[m]())}</span></label>`).join('')}
+        <p class="tf-desc" data-x-wrap="rancher-note" hidden></p>
+      </fieldset>
+      <fieldset class="tf-block"><legend>${esc(tr('capi.oidc.title'))}</legend>${oidcHtml(false)}</fieldset>`;
+  }
+
+  /** Erreurs de saisie OIDC vues avant le contrôle du serveur (préfixe vide
+   *  ou `system:`, émetteur non https) ; chaque champ fautif est marqué. */
+  function oidcLocalErrors(root) {
+    const on = root.querySelector('[data-o-on]');
+    const out = [];
+    root.querySelectorAll('[data-o-err]').forEach(el => { el.hidden = true; el.textContent = ''; });
+    root.querySelectorAll('[data-o]').forEach(el => el.classList.remove('is-invalid'));
+    if (!on || !on.checked) return out;
+    const val = (k) => ((root.querySelector(`[data-o="${k}"]`) || {}).value || '');
+    const mark = (k, code) => {
+      const el = root.querySelector(`[data-o="${k}"]`);
+      const err = root.querySelector(`[data-o-err="${k}"]`);
+      const f = { code, level: 'block', facts: { option: k } };
+      if (el) { el.classList.add('is-invalid'); el.setAttribute('aria-invalid', 'true'); }
+      if (err) { err.hidden = false; err.textContent = findingText(f); }
+      out.push(f);
+    };
+    ['username_prefix', 'groups_prefix'].forEach(k => {
+      const v = val(k);
+      if (/\{\{/.test(v)) return;
+      if (!v.trim()) mark(k, 'oidc-prefix-required');
+      else if (v.startsWith('system:')) mark(k, 'oidc-prefix-system');
+    });
+    const iss = val('issuer_url').trim();
+    if (iss && !/\{\{/.test(iss) && !/^https:\/\/[^\s@?#]+$/.test(iss)) mark('issuer_url', 'oidc-issuer-invalid');
+    root.querySelectorAll('[data-o]:not(.is-invalid)').forEach(el => el.removeAttribute('aria-invalid'));
+    return out;
+  }
+
+  /** Option `oidc` lue (null si décochée) : préfixes toujours envoyés, même
+   *  vides (le serveur les refuse, jamais remplacés en silence). */
+  function readOidc(root) {
+    const on = root.querySelector('[data-o-on]');
+    if (!on || !on.checked) return null;
+    const o = {};
+    root.querySelectorAll('[data-o]').forEach(el => {
+      const k = el.dataset.o;
+      const v = k === 'ca_pem' ? el.value : el.value.trim();
+      if (v !== '' || k === 'username_prefix' || k === 'groups_prefix') o[k] = v;
+    });
+    return o;
+  }
+
+  function fillOidc(root, cfg) {
+    const on = root.querySelector('[data-o-on]');
+    if (!on) return;
+    on.checked = !!cfg;
+    root.querySelector('[data-o-box]').hidden = !cfg;
+    root.querySelectorAll('[data-o]').forEach(el => {
+      const k = el.dataset.o;
+      el.value = cfg && cfg[k] != null ? String(cfg[k]) : (OIDC_DEFAULTS[k] || '');
+    });
+  }
+
+  function accessMode(root) {
+    const r = root.querySelector('[data-access]:checked');
+    return r ? r.dataset.access : 'none';
+  }
+
+  function setAccess(root, mode) {
+    const r = root.querySelector(`[data-access="${ACCESS_MODES.includes(mode) ? mode : 'none'}"]`);
+    if (r && !r.disabled) r.checked = true;
+  }
+
+  /** Rancher externe grisé sans session Rancher (point 221), la bulle et
+   *  la note disent pourquoi ; `session` : adresse du Rancher, null sans. */
+  function paintAccessSession(root, session) {
+    const ext = root.querySelector('[data-access="external"]');
+    const wrap = root.querySelector('[data-access-wrap="external"]');
+    const note = root.querySelector('[data-x-wrap="rancher-note"]');
+    if (!ext || !wrap || !note) return;
+    const why = session === undefined ? tr('capi.acc.t.sessionReading')
+      : session ? tr('capi.acc.t.externalOn', { rancher: session }) : tr('capi.acc.t.noSession');
+    ext.disabled = !session;
+    if (ext.disabled && ext.checked) setAccess(root, 'none');
+    wrap.dataset.tip = why;
+    wrap.classList.toggle('is-disabled', !session);
+    note.hidden = false;
+    note.textContent = why;
+  }
+
+  /** Boîte OIDC dépliée avec sa case ; options « sans Internet » montrées
+   *  avec leur case. */
+  function wireAccess(root, onChange) {
+    const on = root.querySelector('[data-o-on]');
+    if (on) {
+      on.addEventListener('change', () => { root.querySelector('[data-o-box]').hidden = !on.checked; oidcLocalErrors(root); onChange(); });
+      root.querySelectorAll('[data-o]').forEach(el => {
+        el.addEventListener('input', () => oidcLocalErrors(root));
+        el.addEventListener('change', onChange);
+      });
+    }
+    root.querySelectorAll('[data-access]').forEach(r => r.addEventListener('change', onChange));
+    const off = root.querySelector('[data-x="offline"]');
+    if (off) {
+      const sync = () => {
+        root.querySelector('[data-x-wrap="offline_artifacts"]').hidden = !off.checked;
+        root.querySelector('[data-x-wrap="offline-note"]').hidden = !off.checked;
+      };
+      off.addEventListener('change', sync);
+      sync();
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -416,6 +605,12 @@ const CapiCreate = (() => {
     q('check-status').addEventListener('click', () => show('check'));
     show('essentials');
     wireRegistries(root, inv, false, () => later());
+    wireAccess(root, () => later());
+    // Rancher externe : seulement avec une session Rancher (point 221) ;
+    // grisé, la raison dans la bulle, tant que la réponse n'est pas venue
+    paintAccessSession(root, undefined);
+    fetch(`/api/capi/${enc(cluster)}/rancher-status`).then(r => (r.ok ? r.json() : {}))
+      .catch(() => ({})).then(d => { if (root.isConnected) paintAccessSession(root, (d && d.session) || null); });
 
     // Un compteur par menu, et l'état du contrôle dans la barre d'actions,
     // visible quel que soit le menu ouvert.
@@ -515,6 +710,17 @@ const CapiCreate = (() => {
         report.innerHTML = `<p class="tf-desc">${esc(tr('capi.new.needName'))}</p>`;
         q('create').disabled = true;
         q('check-status').textContent = tr('capi.new.needName');
+        return;
+      }
+      // 2.8.0 : une saisie OIDC refusée d'avance (préfixe vide...) bloque
+      // sans attendre le serveur
+      const local = oidcLocalErrors(root);
+      if (local.length) {
+        report.classList.remove('is-checking');
+        report.innerHTML = local.map(f => `<div class="sto-finding ${LEVEL_CLASS.block}" data-code="${esc(f.code)}" data-level="block">
+            <div class="sto-finding-title">${esc(findingText(f))}</div></div>`).join('');
+        counts(local, true);
+        q('create').disabled = true;
         return;
       }
       try {
@@ -646,6 +852,15 @@ const CapiCreate = (() => {
     if (b.extra_networks) b.extra_networks = b.extra_networks.filter(n => n !== b.network);
     const regs = readRegistries(root);
     if (regs.length) b.registries = regs;
+    // 2.8.0 : accès (un seul mode Rancher), OIDC, sans Internet
+    if (root.querySelector('[data-access]')) {
+      const mode = accessMode(root);
+      b.rancher_import = mode === 'turtles';
+      b.rancher_external = mode === 'external';
+    }
+    const oidc = readOidc(root);
+    if (oidc) b.oidc = oidc;
+    if (!b.offline) delete b.offline_artifacts;
     return b;
   }
 
@@ -855,8 +1070,21 @@ const CapiCreate = (() => {
       }
     });
     const regs = wireRegistries(root, inv || {}, true, () => {});
+    wireAccess(root, () => {});
     fillTemplate(root, spec || {});
     regs.set((spec || {}).registries || []);
+    const sp = spec || {};
+    setAccess(root, sp.rancher_external ? 'external' : sp.rancher_import ? 'turtles' : 'none');
+    if (sp.rancher_import && sp.rancher_external) {
+      // revue : un modèle qui demande les deux est refusé par le serveur ;
+      // le dire ici plutôt que de choisir en silence
+      const note = root.querySelector('[data-x-wrap="rancher-note"]');
+      note.hidden = false;
+      note.textContent = findingText({ code: 'rancher-import-conflict', facts: {} });
+    }
+    fillOidc(root, sp.oidc && typeof sp.oidc === 'object' ? sp.oidc : null);
+    const off = root.querySelector('[data-x="offline"]');
+    if (off) off.dispatchEvent(new Event('change'));
     return { read: () => { const b = readBody(root); PLAN_FIELDS.forEach(k => delete b[k]); return b; } };
   }
 
@@ -953,7 +1181,9 @@ const CapiCreate = (() => {
     return panel;
   }
 
-  return { open, render, formHtml, templateForm, _findingText: findingText, _stepText: stepText };
+  return { open, render, formHtml, templateForm, _findingText: findingText, _stepText: stepText,
+    // 2.8.0 : partagés avec le renouvellement des machines (capi.js)
+    registriesHtml, wireRegistries, readRegistries, oidcHtml, readOidc, fillOidc, oidcLocalErrors };
 })();
 
 window.CapiCreate = CapiCreate;

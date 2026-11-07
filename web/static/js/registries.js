@@ -57,6 +57,11 @@ const Registries = (() => {
     'registry-vm-network-ok': (v) => tr('reg.fd.registry-vm-network-ok', '{endpoint} answers from the VM network {network} (probe address {address}, TLS handshake done).', vmFacts(v)),
     'registry-unreachable-from-vm-network': (v) => tr('reg.fd.registry-unreachable-from-vm-network', '{endpoint} cannot be reached from the VM network {network}: {failed}.', vmFacts(v)),
     'registry-write-port-open': (v) => tr('reg.fd.registry-write-port-open', 'The write port {endpoint} accepts every address: reserve it to the console in Settings > Registries.', v),
+    // 2.8.0 : CA gardée, CA en transition, réglage des nœuds Harvester
+    'registry-ca-key-missing': (v) => tr('reg.fd.registry-ca-key-missing', 'The CA of {registry} was not kept (posed before 2.8.0): renewing its certificate needs a new CA, in two steps.', v),
+    'registry-ca-transition-pending': (v) => tr('reg.fd.registry-ca-transition-pending', 'A new CA of {registry} is in transition: child clusters that do not trust it yet: {clusters}.', v),
+    'harvester-nodes-mirror-conflict': (v) => tr('reg.fd.harvester-nodes-mirror-conflict', 'The Harvester nodes already mirror {origin} through {endpoints}: remove that entry first.', v),
+    'harvester-rke2-restart': (v) => tr('reg.fd.harvester-rke2-restart', 'Harvester restarts RKE2 on every node to apply the setting {setting}.', v),
   };
   // 2.6.1 : raison d'une sonde impossible, étape qui a échoué (un appel
   // littéral par texte, contrôle de parité des traductions)
@@ -223,6 +228,15 @@ const Registries = (() => {
         ${btn('data-reg-check', 'btn-secondary', 'test', tr('reg.check', 'Check'), can('operator')
           ? tr('reg.t.check', 'Read the accounts on this cluster and probe the registry from the console, without writing')
           : tr('reg.t.checkOperator', 'Checking a registry needs the operator role'), !attached || !can('operator'))}
+        ${boot ? btn('data-reg-renew', 'btn-secondary', 'refresh', tr('reg.renew', 'Renew the certificate'), !can('admin')
+          ? tr('reg.t.renewAdmin', 'Renewing the certificate needs the admin role')
+          : d.cluster !== c ? tr('reg.t.renewElsewhere', 'This registry lives on {cluster}: choose that cluster to renew its certificate', { cluster: d.cluster || '?' })
+            : tr('reg.t.renew', 'Sign a new server certificate: parameters, checks, summary'), !can('admin') || d.cluster !== c) : ''}
+        ${btn('data-reg-nodes', 'btn-secondary', 'node', tr('reg.nodes', 'Harvester nodes'), !can('admin')
+          ? tr('reg.t.nodesAdmin', 'Changing the registry setting of the Harvester nodes needs the admin role')
+          : !attached ? tr('reg.t.nodesAttach', 'Attach this registry to {cluster} first', { cluster: c || '?' })
+            : tr('reg.t.nodes', 'Let the Harvester nodes themselves pull from this registry (setting containerd-registry): parameters, checks, summary'),
+          !can('admin') || !attached)}
         ${btn('data-reg-delete', 'btn-danger', 'trash', tr('reg.delete', 'Delete'), boot
           ? tr('reg.t.deleteBoot', 'Remove the bootstrap registry from the cluster; its volume is kept unless you type its name')
           : tr('reg.t.forget', 'Forget this declaration (refused while a plan, a template or a child cluster uses it)'), !can('admin'))}
@@ -268,7 +282,8 @@ const Registries = (() => {
         el.innerHTML = `<p class="reg-state">${s.ready ? `<span class="badge ok">${esc(tr('reg.ready', 'ready'))}</span>`
           : `<span class="badge warn">${esc(tr('reg.notReady', 'not ready'))}</span>`}
           ${s.volume && s.volume.used_bytes != null ? esc(tr('reg.used', '{used} used', { used: bytes(s.volume.used_bytes) })) : ''}
-          ${s.repositories != null ? esc(tr('reg.repos', '{n} repositories', { n: s.repositories })) : ''}</p>${findingsHtml(s.findings)}`;
+          ${s.repositories != null ? esc(tr('reg.repos', '{n} repositories', { n: s.repositories })) : ''}</p>${certLine(s.cert_not_after)}${findingsHtml(s.findings)}`;
+        caKeyMissing[name] = (s.findings || []).some(f => f.code === 'registry-ca-key-missing');
       }
     }
   }
@@ -285,6 +300,252 @@ const Registries = (() => {
     box.innerHTML = r.ok ? ((findingsHtml(fs.filter(f => !isVm(f))) || `<div class="sto-finding sev-info"><div class="sto-finding-title">${esc(tr('reg.allGood', 'Reachable, CA valid, accounts accepted.'))}</div></div>`)
       + findingsHtml(fs.filter(isVm)))
       : `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(r.d.error || `HTTP ${r.status}`)}</div></div>`;
+  }
+
+  // -------------------------------------------------------------------------
+  // 2.8.0 : échéance du certificat, Renouveler le certificat, Nœuds Harvester
+  // -------------------------------------------------------------------------
+  const CERT_WARN_DAYS = 30;              // registry_seed.CERT_WARN_DAYS
+  const caKeyMissing = {};                // registre -> CA non gardée (constat du statut)
+  const dateOf = (epoch) => new Date(epoch * 1000).toISOString().slice(0, 10);
+  function certLine(notAfter) {
+    if (notAfter == null) return '';
+    const days = Math.floor((notAfter * 1000 - Date.now()) / 86400000);
+    const warn = days < CERT_WARN_DAYS;
+    const why = tr('reg.t.cert', 'End of validity of the server certificate; renew it before the nodes refuse it');
+    return `<p class="reg-cert tip" data-x="cert" data-tip="${esc(why)}" title="${esc(why)}">${esc(tr('reg.cert', 'Certificate'))}
+      <span class="badge ${warn ? 'warn' : 'ok'}">${esc(tr('reg.certUntil', 'valid until {date}, {days} day(s) left',
+        { date: dateOf(notAfter), days: Math.max(days, 0) }))}</span></p>`;
+  }
+
+  /** Fenêtre à trois onglets Paramètres, Vérifications, Résumé (comme le
+   *  registre d'amorçage) ; rend { m, show, setCount }. */
+  function tabbedOverlay(title, sub, paramsHtml, launchLabel, launchTip) {
+    const tabs = ['params', 'checks', 'summary'];
+    const TAB = { params: tr('reg.tab.params', 'Parameters'), checks: tr('reg.tab.checks', 'Checks'), summary: tr('reg.tab.summary', 'Summary') };
+    const m = overlay(title, sub, `
+      <div class="sub-tabs sub-tabs-inline reg-boot-tabs" role="tablist">${tabs.map((t, i) => `<button type="button" role="tab"
+        class="sub-tab tip${i ? '' : ' active'}" data-reg-tab="${t}" data-tip="${esc(TAB[t])}" title="${esc(TAB[t])}">${esc(TAB[t])}${t === 'checks'
+          ? ' <span class="badge dim" data-x="count"></span>' : ''}</button>`).join('')}</div>
+      <section data-reg-pane="params">${paramsHtml}</section>
+      <section data-reg-pane="checks" hidden><div class="xfer-report" data-x="report"><p class="form-hint">${esc(tr('reg.checking', 'Checking…'))}</p></div></section>
+      <section data-reg-pane="summary" hidden><div data-x="summary"></div></section>
+      <div class="xfer-live-line" data-x="progress" hidden></div>`,
+      `<span class="tip" data-x="launch-wrap" data-tip="${esc(launchTip)}">${btn('data-reg-launch', 'btn-primary', 'play', launchLabel, launchTip, true)}</span>`);
+    const show = (t) => {
+      m.querySelectorAll('[data-reg-tab]').forEach(b => b.classList.toggle('active', b.dataset.regTab === t));
+      m.querySelectorAll('[data-reg-pane]').forEach(p => { p.hidden = p.dataset.regPane !== t; });
+    };
+    m.querySelectorAll('[data-reg-tab]').forEach(b => b.addEventListener('click', () => show(b.dataset.regTab)));
+    return m;
+  }
+
+  function setLaunch(m, ok, why) {
+    const launch = m.querySelector('[data-reg-launch]');
+    launch.disabled = !ok;
+    launch.title = why;
+    m.querySelector('[data-x="launch-wrap"]').dataset.tip = why;
+  }
+
+  /** Erreur de l'outil (« code {faits} » ou « code: texte ») : le constat
+   *  traduit s'il est connu, sinon le texte tel quel. */
+  function errorFinding(text) {
+    const mm = /^([a-z0-9-]+)(?::\s*|\s+)(\{.*\})?/.exec(String(text || ''));
+    if (mm && FINDINGS[mm[1]]) {
+      let facts = {};
+      try { facts = mm[2] ? JSON.parse(mm[2]) : {}; } catch { facts = {}; }
+      return { code: mm[1], level: 'block', facts };
+    }
+    return null;
+  }
+  const errorHtml = (text) => {
+    const f = errorFinding(text);
+    return f ? findingsHtml([f]) : `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(text)}</div></div>`;
+  };
+
+  /** Suit une action jusqu'à sa fin ; la dernière ligne d'étape reste lisible. */
+  function followAction(m, id, render, onEnd) {
+    const line = m.querySelector('[data-x="progress"]');
+    line.hidden = false;
+    line.textContent = tr('reg.started', 'Started (action {id}), see the dock.', { id });
+    if (!window.SSEReconnect) return;
+    const es = SSEReconnect.connect(`/api/stream/${enc(id)}`, {
+      on: {
+        step: (ev) => { try { const st = JSON.parse(ev.data); if (st.message) line.textContent = render(st.message); } catch { /* ligne illisible */ } },
+        end: (ev) => {
+          let x = {};
+          try { x = JSON.parse(ev.data); } catch { /* fin sans détail */ }
+          es.close();
+          if (x.status !== 'done') line.textContent = tr('reg.actionFailed', 'The action failed: see the dock ({id}).', { id });
+          onEnd(x.status === 'done');
+        },
+      },
+    });
+  }
+
+  function openRenewCert() {
+    const name = selected;
+    const c = cluster();
+    const noKey = !!caKeyMissing[name];
+    const m = tabbedOverlay(tr('reg.renewTitle', 'Renew the certificate'), tr('reg.attachSub', '{registry} on {cluster}', { registry: name, cluster: c }), `
+      <div class="tf-args">
+        ${field(tr('reg.f.days', 'Validity (days)'), '<input data-f="days" type="number" min="1" max="3650" value="730">',
+          tr('reg.t.days', 'Validity of the new server certificate, from 1 to 3650 days (the CA lasts 3650 days)'))}
+        <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('reg.t.newCa', 'Needed when the CA of the registry was not kept: a new CA is created and trusted by every child cluster before the switch'))}">
+          <input data-f="newca" type="checkbox"${noKey ? ' checked' : ''}><span class="tf-label">${esc(tr('reg.newCa', 'New CA (two steps)'))}</span></label>
+      </div>
+      <div class="tf-desc reg-newca-help" data-x="newca-help"${noKey ? '' : ' hidden'}>
+        <p>${esc(tr('reg.newCaIntro', 'Two steps, nothing cut on the child clusters:'))}</p>
+        <ol><li>${esc(tr('reg.newCaStep1', 'This Renew creates a new CA, kept next to the old one (transition).'))}</li>
+          <li>${esc(tr('reg.newCaStep2', 'Each child cluster that uses the registry is renewed with Renew > CA (Clusters tab): its machines then trust both CAs.'))}</li>
+          <li>${esc(tr('reg.newCaStep3', 'A second Renew here switches the server certificate to the new CA.'))}</li></ol></div>
+      <p class="tf-desc">${esc(tr('reg.renewIntro', 'The pod of the registry restarts with the new certificate: reads are cut for a few seconds. The files of the nodes do not change.'))}</p>`,
+      tr('reg.renewGo', 'Renew'), tr('reg.t.checking', 'Waiting for the checks of these values'));
+    const v = (k) => m.querySelector(`[data-f="${k}"]`);
+    const body = () => Object.assign({ cluster: c, days: Number(v('days').value) }, v('newca').checked ? { new_ca: true } : {});
+    const seq = { n: 0, t: null };
+    async function runChecks() {
+      const n = ++seq.n;
+      const b = body();
+      const r = await json('POST', `/api/registries/${enc(name)}/renew-cert`, Object.assign({ dry_run: true }, b));
+      if (n !== seq.n || modal !== m) return;
+      const d = r.d || {};
+      const fs = [];
+      let blocked = true;
+      let reason = '';
+      if (!r.ok) {
+        reason = d.error || `HTTP ${r.status}`;
+        m.querySelector('[data-x="report"]').innerHTML = errorHtml(reason);
+        const f = errorFinding(reason);
+        if (f) reason = findingText(f);
+      } else {
+        if (d.code === 'registry-ca-key-missing') {
+          fs.push({ code: d.code, level: 'block', facts: { registry: name } });
+          caKeyMissing[name] = true;
+          m.querySelector('[data-x="newca-help"]').hidden = false;
+        } else if (d.code === 'registry-ca-transition-pending') {
+          fs.push({ code: d.code, level: 'block', facts: { registry: name, clusters: (d.clusters || []).join(', ') || '-' } });
+        }
+        blocked = !!d.blocked || fs.length > 0;
+        reason = fs.length ? findingText(fs[0]) : (blocked ? (d.error || '?') : '');
+        m.querySelector('[data-x="report"]').innerHTML = findingsHtml(fs)
+          || `<div class="sto-finding sev-info"><div class="sto-finding-title">${esc(tr('reg.noBlocker', 'No blocker.'))}</div></div>`;
+        if (d.code === 'registry-ca-transition-pending' && (d.clusters || []).length) {
+          m.querySelector('[data-x="report"]').insertAdjacentHTML('beforeend', `<ul class="reg-used" data-x="pending">${d.clusters.map(x => `<li><code>${esc(x)}</code></li>`).join('')}</ul>`);
+        }
+      }
+      m.querySelector('[data-x="count"]').textContent = String(blocked ? Math.max(fs.length, 1) : 0);
+      const step1 = r.ok && !blocked && d.step === 'transition';
+      m.querySelector('[data-x="summary"]').innerHTML = `<ul class="reg-summary">${!r.ok || blocked ? `<li>${esc(tr('reg.t.launchBlocked', 'Blocked: {reason}', { reason }))}</li>`
+        : step1 ? `<li>${esc(tr('reg.sum.newCa', 'Step 1: a new CA is created in transition; renew each child cluster with Renew > CA, then come back to switch the certificate.'))}</li>`
+          : `<li>${esc(tr('reg.sum.until', 'New server certificate valid until {date}', { date: d.not_after ? dateOf(d.not_after) : '?' }))}${d.new_ca
+            ? ` ${esc(tr('reg.sum.switch', '(signed by the new CA: the switch)'))}` : ''}</li>
+            <li>${esc(tr('reg.sum.cut', 'The registry pod restarts: reads cut for a few seconds'))}</li>`}</ul>`;
+      setLaunch(m, r.ok && !blocked, r.ok && !blocked ? tr('reg.t.renewGo', 'Renew the certificate now (tracked action)')
+        : tr('reg.t.launchBlocked', 'Blocked: {reason}', { reason }));
+    }
+    const later = (ms) => {
+      clearTimeout(seq.t);
+      seq.n++;
+      setLaunch(m, false, tr('reg.t.checking', 'Waiting for the checks of these values'));
+      seq.t = setTimeout(runChecks, ms);
+    };
+    m._cleanup = () => { clearTimeout(seq.t); seq.n++; };
+    m.addEventListener('input', () => later(500));
+    m.addEventListener('change', (e) => {
+      if (e.target === v('newca')) m.querySelector('[data-x="newca-help"]').hidden = !v('newca').checked && !caKeyMissing[name];
+      later(200);
+    });
+    m.querySelector('[data-reg-launch]').addEventListener('click', async (e) => {
+      const go = e.currentTarget;
+      if (go.disabled) return;
+      go.disabled = true;
+      m._cleanup();
+      const r = await json('POST', `/api/registries/${enc(name)}/renew-cert`, body());
+      const fb = m.querySelector('[data-x="feedback"]');
+      if (!r.ok) { fb.textContent = r.d.error || `HTTP ${r.status}`; go.disabled = false; return; }
+      followAction(m, r.d.action_id, (msg) => {
+        const mm = /valid until (\S+), reads cut (\S+) s/.exec(msg);
+        return mm ? tr('reg.renewDone', 'Certificate valid until {date}; reads cut {cut} s.', { date: mm[1], cut: mm[2] }) : msg;
+      }, () => setTimeout(refresh, 800));
+    });
+    runChecks();
+  }
+
+  function openNodes() {
+    const name = selected;
+    const c = cluster();
+    const m = tabbedOverlay(tr('reg.nodesTitle', 'Registry of the Harvester nodes'), tr('reg.attachSub', '{registry} on {cluster}', { registry: name, cluster: c }), `
+      <div class="tf-args">
+        ${field(tr('reg.f.nodesMode', 'Change'), `<select data-f="mode"><option value="merge">${esc(tr('reg.nodesMerge', 'Add this registry to the nodes'))}</option>
+          <option value="remove">${esc(tr('reg.nodesRemove', 'Remove this registry from the nodes'))}</option></select>`,
+          tr('reg.t.nodesMode', 'Add: its mirrors, CA and read account are merged into containerd-registry, the other entries are kept. Remove: only its entry leaves'))}
+      </div>
+      <p class="tf-desc">${esc(tr('reg.nodesIntro', 'The Harvester nodes themselves pull through this registry (setting containerd-registry, CA in additional-ca). The previous value is kept, masked, in the result of the action (Activity): it gives the way back.'))}</p>
+      <label class="tf-field tf-type-bool tip reg-rke2-ok" data-tip="${esc(tr('reg.t.rke2Ok', 'Harvester restarts RKE2 on each node, one after the other, to apply the setting'))}">
+        <input data-f="rke2" type="checkbox"><span class="tf-label">${esc(tr('reg.rke2Ok', 'I accept that Harvester restarts RKE2 on every node'))}</span></label>`,
+      tr('reg.nodesGo', 'Apply'), tr('reg.t.checking', 'Waiting for the checks of these values'));
+    const v = (k) => m.querySelector(`[data-f="${k}"]`);
+    const body = () => Object.assign({ cluster: c }, v('mode').value === 'remove' ? { remove: true } : {});
+    const seq = { n: 0, t: null };
+    let last = null;                       // { ok, blocked, changed, reason, sig }
+    const sig = () => JSON.stringify(body());
+    function paintLaunch() {
+      if (!last || last.sig !== sig()) { setLaunch(m, false, tr('reg.t.checking', 'Waiting for the checks of these values')); return; }
+      if (!last.ok || last.blocked) { setLaunch(m, false, tr('reg.t.launchBlocked', 'Blocked: {reason}', { reason: last.reason })); return; }
+      if (!last.changed) { setLaunch(m, false, tr('reg.t.nodesNothing', 'Nothing to change: the nodes already have this value')); return; }
+      if (!v('rke2').checked) { setLaunch(m, false, tr('reg.t.rke2Needed', 'Accept the restart of RKE2 on every node first')); return; }
+      setLaunch(m, true, tr('reg.t.nodesGo', 'Write the setting on the Harvester cluster (tracked action)'));
+    }
+    async function runChecks() {
+      const n = ++seq.n;
+      const mine = sig();
+      const r = await json('POST', `/api/registries/${enc(name)}/harvester-nodes`, Object.assign({ dry_run: true }, body()));
+      if (n !== seq.n || modal !== m) return;
+      const d = r.d || {};
+      const rep = m.querySelector('[data-x="report"]');
+      if (!r.ok) {
+        const reason = d.error || `HTTP ${r.status}`;
+        const f = errorFinding(reason);
+        last = { ok: false, sig: mine, reason: f ? findingText(f) : reason };
+        rep.innerHTML = errorHtml(reason);
+        m.querySelector('[data-x="count"]').textContent = '1';
+      } else {
+        const fs = d.findings || [];
+        last = { ok: true, sig: mine, blocked: !!d.blocked, changed: !!d.changed, reason: d.error || '?' };
+        rep.innerHTML = findingsHtml(fs) + (d.changed ? '' : `<div class="sto-finding sev-info" data-code="nothing"><div class="sto-finding-title">${esc(tr('reg.t.nodesNothing', 'Nothing to change: the nodes already have this value'))}</div></div>`)
+          + `<h4>${esc(tr('reg.nodesPrevious', 'Current value (masked)'))}</h4><pre class="capi-yaml reg-setting" data-x="previous">${esc(d.previous || '-')}</pre>
+             <h4>${esc(tr('reg.nodesNew', 'New value (masked)'))}</h4><pre class="capi-yaml reg-setting" data-x="value">${esc(d.value || '-')}</pre>
+             <p class="form-hint">${esc(d.additional_ca_changed ? tr('reg.nodesCaChanged', 'The CA of the registry is added to the setting additional-ca.')
+               : tr('reg.nodesCaSame', 'The setting additional-ca does not change.'))}</p>`;
+        m.querySelector('[data-x="count"]').textContent = String(fs.filter(f => f.level === 'block').length);
+      }
+      m.querySelector('[data-x="summary"]').innerHTML = `<ul class="reg-summary">
+        <li>${esc(v('mode').value === 'remove' ? tr('reg.sum.nodesRemove', 'The entry of {registry} leaves containerd-registry of {cluster}', { registry: name, cluster: c })
+          : tr('reg.sum.nodesMerge', '{registry} is merged into containerd-registry of {cluster}; the other entries are kept', { registry: name, cluster: c }))}</li>
+        <li>${esc(tr('reg.sum.rke2', 'Harvester restarts RKE2 on every node'))}</li>
+        <li>${esc(tr('reg.sum.rollback', 'The previous value stays, masked, in the result of the action (Activity)'))}</li></ul>`;
+      paintLaunch();
+    }
+    const later = (ms) => {
+      clearTimeout(seq.t);
+      seq.n++;
+      paintLaunch();
+      seq.t = setTimeout(runChecks, ms);
+    };
+    m._cleanup = () => { clearTimeout(seq.t); seq.n++; };
+    m.addEventListener('change', (e) => { if (e.target === v('rke2')) paintLaunch(); else later(200); });
+    m.querySelector('[data-reg-launch]').addEventListener('click', async (e) => {
+      const go = e.currentTarget;
+      if (go.disabled) return;
+      go.disabled = true;
+      m._cleanup();
+      const r = await json('POST', `/api/registries/${enc(name)}/harvester-nodes`, body());
+      const fb = m.querySelector('[data-x="feedback"]');
+      if (!r.ok) { fb.textContent = r.d.error || `HTTP ${r.status}`; go.disabled = false; return; }
+      followAction(m, r.d.action_id, (msg) => msg, () => setTimeout(refresh, 800));
+    });
+    runChecks();
   }
 
   // -------------------------------------------------------------------------
@@ -556,6 +817,8 @@ const Registries = (() => {
       if (row) { showDetail(row.dataset.reg); return; }
       if (e.target.closest('[data-reg-attach]')) { openAttach(); return; }
       if (e.target.closest('[data-reg-check]')) { check(); return; }
+      if (e.target.closest('[data-reg-renew]')) { openRenewCert(); return; }
+      if (e.target.closest('[data-reg-nodes]')) { openNodes(); return; }
       if (e.target.closest('[data-reg-delete]')) openDelete();
     });
     document.addEventListener('keydown', (e) => {

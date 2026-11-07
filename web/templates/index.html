@@ -703,6 +703,8 @@
                   data-tip-i18n="capi.tab.clusters.tip" data-i18n-title="capi.tab.clusters.tip" title="The Kubernetes clusters created by Cluster API on the management cluster: create, scale, delete, kubeconfig"><span class="tab-icon" data-icon="node"></span> <span data-i18n="capi.tab.clusters">Clusters</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="services"
                   data-tip-i18n="capi.tab.services.tip" data-i18n-title="capi.tab.services.tip" title="Deploy services (Helm charts) on the clusters created by Cluster API"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="capi.tab.services">Services</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="gitops"
+                  data-tip-i18n="capi.tab.gitops.tip" data-i18n-title="capi.tab.gitops.tip" title="GitOps on the child clusters: Flux, or Fleet when the cluster is imported in Rancher; entries, sources and their state"><span class="tab-icon" data-icon="build"></span> <span data-i18n="capi.tab.gitops">GitOps</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="registries"
                   data-tip-i18n="capi.tab.registries.tip" data-i18n-title="capi.tab.registries.tip" title="Registries the child clusters pull their images and charts from: bootstrap registry on Harvester, registries of your organisation"><span class="tab-icon" data-icon="containers"></span> <span data-i18n="capi.tab.registries">Registries</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="artefacts"
@@ -774,6 +776,19 @@
             <div class="card-body" id="capi-services-body">
               <p class="form-hint" data-i18n="common.loading">Loading…</p>
             </div>
+          </div>
+        </div>
+
+        <div class="capi-tab-content" data-capi-tab="gitops" role="tabpanel">
+          <div class="card">
+            <div class="card-header">
+              <h2><span data-icon="build" data-icon-size="18"></span> <span data-i18n="gop.title">GitOps</span></h2>
+              <div>
+                <button class="btn btn-sm btn-primary tip needs-operator" id="btn-gitops-add" data-i18n-title="gop.t.add" data-tip-i18n="gop.t.add" title="Pose a GitOps entry on a child cluster: parameters, checks, summary"><span data-icon="add" data-icon-size="14"></span> <span data-i18n="gop.add">Add an entry</span></button>
+                <button class="btn btn-sm btn-secondary tip" id="btn-gitops-refresh" data-i18n="overview.refresh" data-i18n-title="gop.t.refresh" data-tip-i18n="gop.t.refresh" title="Read the GitOps entries again">Refresh</button>
+              </div>
+            </div>
+            <div class="card-body" id="capi-gitops-body"></div>
           </div>
         </div>
 
@@ -1424,6 +1439,7 @@
 <script src="/static/js/auto-history.js"></script>
 <script src="/static/js/capi-create.js"></script>
 <script src="/static/js/capi.js"></script>
+<script src="/static/js/capi-gitops.js"></script>
 <script src="/static/js/tf-schema.js"></script>
 <script src="/static/js/tf-form.js"></script>
 <script src="/static/js/tf-declarations.js"></script>

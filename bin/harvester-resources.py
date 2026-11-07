@@ -3510,6 +3510,11 @@ def cmd_project(args):
 
 def _members_target(r, args):
     cid = r["cid"]
+    if getattr(args, "cid", None):
+        # 2.8.0 : un cluster enfant importé dans ce Rancher (scope cluster)
+        if args.scope != "cluster" or not re.match(r"^c-[a-z0-9]([-a-z0-9]{0,40}[a-z0-9])?$", args.cid):
+            raise ValueError("--cid: a Rancher cluster id (c-m-...), cluster scope only")
+        cid = args.cid
     if args.scope == "project":
         target = f"{cid}:{hpj.check_pid(args.project)}"
         return target, "/v3/projectroletemplatebindings", f"?projectId={target}"
@@ -4004,6 +4009,7 @@ def main(argv=None):
     sp.add_argument("--principal", help="add: the Rancher principal (local://u-xxxxx, keycloakoidc_user://..., ..._group://...)")
     sp.add_argument("--role", help="add: the role template (cluster-owner, cluster-member, project-member, read-only...)")
     sp.add_argument("--id", help="remove: the role binding id")
+    sp.add_argument("--cid", help="cluster scope: another cluster of this Rancher (an imported child cluster, c-m-...)")
     args = ap.parse_args(argv)
     signal.signal(signal.SIGTERM, _on_signal)
     try:

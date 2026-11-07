@@ -90,9 +90,9 @@ const Artefacts = (() => {
     } catch (e) { d = null; }
     if (!d) { box.innerHTML = `<p class="form-hint">${esc(tr('art.loadError', 'The packages could not be read.'))}</p>`; return; }
     const t = d.trust || {};
-    const items = (d.index.items || []).map(it => `<li><b>${esc(it.name)}</b> <span class="badge dim">${esc(it.kind)}</span>
+    const items = (d.index.items || []).map(it => `<li><b>${esc(it.name)}</b> ${kindBadge(it.kind)}
       ${it.later ? `<span class="badge info tip" data-tip="${esc(tr('art.t.later', 'Kept in the package; applied by a later version'))}">${esc(tr('art.later', 'coming (2.8)'))}</span>` : ''}
-      ${it.version ? `<span class="form-hint">${esc(it.version)}</span>` : ''}${applyButton(it)}</li>`).join('');
+      ${it.version ? `<span class="form-hint">${esc(it.version)}</span>` : ''}${applyButton(it)}${gitopsButton(it)}</li>`).join('');
     const images = (d.images || []).map(im => `<li><code>${esc(im.name)}</code>
       <span class="form-hint">${im.size != null ? esc(bytes(im.size)) : ''} ${esc(im.platform || '')} ${esc(String(im.digest || '').slice(7, 19))}</span></li>`).join('');
     const pubs = (d.published || []).map(p => `<li>${esc(p.registry)} <span class="form-hint">${esc(p.at || '')}</span></li>`).join('');
@@ -160,7 +160,7 @@ const Artefacts = (() => {
             <label class="bm-check tip" data-tip="${esc(publishable(it) ? tr('art.t.item', 'Published with the others when checked')
               : it.later ? tr('art.t.later', 'Kept in the package; applied by a later version') : tr('art.t.manifest', 'Manifests are not published in a registry'))}">
               <input type="checkbox" data-item="${esc(it.name)}" ${publishable(it) ? 'checked' : 'disabled'}> ${esc(it.name)}
-              <span class="badge dim">${esc(it.kind)}</span></label>`).join('')}</fieldset>
+              ${kindBadge(it.kind)}</label>`).join('')}</fieldset>
           <h4>${esc(tr('art.checks', 'Checks'))}</h4><div class="xfer-report" data-x="report"></div>
           <ul class="art-todo" data-x="todo"></ul>
           <div class="xfer-live-line" data-x="progress" hidden></div>
@@ -234,6 +234,28 @@ const Artefacts = (() => {
       });
     });
     check();
+  }
+
+  // 2.8.0 : sortes gitops (artefact Flux) et rke2 (amorçage sans Internet),
+  // expliquées au survol ; un appel littéral par sorte
+  const KIND_TIPS = {
+    gitops: () => tr('art.kind.t.gitops', 'Manifests delivered by GitOps: published as a Flux artefact, posed from the GitOps tab'),
+    rke2: () => tr('art.kind.t.rke2', 'An exact RKE2 version and its system images: published as blobs, used by child clusters created without Internet'),
+  };
+  function kindBadge(kind) {
+    const tip = KIND_TIPS[kind] ? KIND_TIPS[kind]() : '';
+    return tip ? `<span class="badge dim tip art-kind" data-kind="${esc(kind)}" data-tip="${esc(tip)}" title="${esc(tip)}">${esc(kind)}</span>`
+      : `<span class="badge dim art-kind" data-kind="${esc(kind)}">${esc(kind)}</span>`;
+  }
+  /** 2.8.0 : un élément gitops se pose depuis l'onglet GitOps (artefact Flux
+   *  du paquet publié), fenêtre préremplie. */
+  function gitopsButton(it) {
+    if (it.kind !== 'gitops' || !selected) return '';
+    const off = !can('operator');
+    const tip = off ? tr('art.gop.t.needOperator', 'Needs the operator role, and the right to read the kubeconfig Secret of the child cluster')
+      : tr('art.gop.t.open', 'Pose this item on a child cluster with Flux: opens the GitOps window, prefilled');
+    return ` <span class="tip" data-tip="${esc(tip)}"><button type="button" class="btn btn-sm btn-secondary" data-art-gitops="${esc(it.name)}"
+      ${off ? 'disabled' : ''} title="${esc(tip)}" aria-label="${esc(tip)}">${icon('build', 12)} ${esc(tr('art.gop.open', 'GitOps'))}</button></span>`;
   }
 
   // -------------------------------------------------------------------------
@@ -605,6 +627,13 @@ const Artefacts = (() => {
       if (e.target.closest('[data-art-publish]')) { openPublish(); return; }
       const ap = e.target.closest('[data-art-apply]');
       if (ap) { if (!ap.disabled) openApply(ap.dataset.artApply); return; }
+      const gp = e.target.closest('[data-art-gitops]');
+      if (gp) {
+        if (!gp.disabled && selected && window.CapiGitops) {
+          CapiGitops.openAdd({ source: { type: 'oci', package: selected.name, version: selected.version, item: gp.dataset.artGitops } });
+        }
+        return;
+      }
       const un = e.target.closest('[data-art-unsign]');
       if (un) { putSettings({ remove_signer: un.dataset.artUnsign }); return; }
       if (e.target.closest('#art-add-key-btn')) {

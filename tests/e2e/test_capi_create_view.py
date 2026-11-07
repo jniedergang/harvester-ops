@@ -130,7 +130,7 @@ def test_the_essentials_are_filled_from_the_cluster(form):
     # l'essentiel au premier menu, le reste rangé : les autres menus fermés
     expect(host.locator('.capi-sec[data-sec="network"]')).to_be_hidden()
     navs = host.locator(".vm-edit-nav [data-sec]")
-    assert navs.count() == 8 and all(b.get_attribute("data-tip") for b in navs.all())
+    assert navs.count() == 9 and all(b.get_attribute("data-tip") for b in navs.all())   # 2.8.0 : Accès
     expect(x(host, "summary")).to_contain_text("2 VM : 4 vCPU")
     # passerelle et masque déduits du pool, au menu Réseau
     menu(host, "network")
@@ -198,8 +198,8 @@ def test_advanced_options_reach_the_request(form):
     x(host, "ip_pool_refs").select_option(["lab-pool"])
     menu(host, "storage")
     x(host, "extra_disk_size").fill("20Gi")
-    menu(host, "integrations")
-    x(host, "rancher_import").check()
+    menu(host, "access")                                       # 2.8.0 : Turtles passe au menu Accès
+    host.locator('[data-access="turtles"]').check()
     menu(host, "kubernetes")
     x(host, "cni").select_option("cilium")
     menu(host, "check")
@@ -207,7 +207,7 @@ def test_advanced_options_reach_the_request(form):
     body = calls["check"][-1]
     assert body["ip_pool_refs"] == ["capi-vm-pool", "lab-pool"]   # le principal d'abord
     assert body["extra_disk_size"] == "20Gi" and body["extra_disk_class"] == "harv-rep1"
-    assert body["rancher_import"] is True and body["cni"] == "cilium"
+    assert body["rancher_import"] is True and body["rancher_external"] is False and body["cni"] == "cilium"
 
 
 def test_preview_shows_the_manifests(form):
