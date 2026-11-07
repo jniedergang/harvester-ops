@@ -1445,7 +1445,7 @@ const CAPI = (() => {
     function paintGo() {
       const d = st.diff;
       const fresh = d && st.sig === JSON.stringify(body());
-      const changed = fresh && d.ok && !d.blocked && ((d.changes || []).length || d.secrets_changed);
+      const changed = fresh && d.ok && !d.blocked && ((d.changes || []).length || d.secrets_changed || d.access_changed);
       const why = !can('operator') ? tr('capi.acc.t.operator')
         : st.launched ? tr('capi.ren.t.launched')
           : !whats().length ? tr('capi.ren.pickWhat')
@@ -1500,13 +1500,14 @@ const CAPI = (() => {
       const ch = d.changes || [];
       const fs = (d.findings || []).map(f => `<div class="sto-finding ${f.level === 'block' ? 'sev-critical' : 'sev-watch'}" data-code="${esc(f.code)}">
           <div class="sto-finding-title">${esc(RENEW_FINDINGS[f.code] ? RENEW_FINDINGS[f.code](Object.assign({}, f.facts || {})) : f.code)}</div></div>`).join('');
-      box.innerHTML = (!ch.length && !d.secrets_changed)
+      box.innerHTML = (!ch.length && !d.secrets_changed && !d.access_changed)
         ? `<div class="sto-finding sev-watch" data-code="renew-nothing"><div class="sto-finding-title">${esc(tr('capi.ren.err.nothing'))}</div></div>`
         : `<p>${esc(tr('capi.ren.revision', { n: d.revision }))}</p>
           ${ch.map(c => `<div class="capi-ren-change"><strong><code>${esc(c.template)}</code></strong> <span class="badge dim">${esc(c.kind || '')}</span>
             <ul class="bm-paths">${(c.paths || []).slice(0, 12).map(x => `<li><code>${esc(x)}</code></li>`).join('')}
             ${(c.paths || []).length > 12 ? `<li class="form-hint">${esc(tr('capi.ren.more', { n: c.paths.length - 12 }))}</li>` : ''}</ul></div>`).join('')}
           ${d.secrets_changed ? `<p class="form-hint">${Icons.svg('info', { size: 12 })} ${esc(tr('capi.ren.secretsChanged'))}</p>` : ''}
+          ${d.access_changed ? `<p class="form-hint" data-access-changed>${Icons.svg('info', { size: 12 })} ${esc(tr('capi.ren.accessChanged'))}</p>` : ''}
           ${fs}`;
     }
     function paintSummary() {

@@ -333,9 +333,11 @@ def test_oidc_without_request_keeps_the_current_settings(run, capsys):
     assert "renew-nothing" in capsys.readouterr().err and mgmt.ops == []
 
 
-def test_oidc_kept_when_only_the_registries_are_requested(run, capsys):
+def test_oidc_kept_when_only_the_registries_are_requested(run, cli, capsys, monkeypatch):
     """I-3 : `--what oidc,registries` avec seulement les registres dans la
-    demande : le fichier OIDC de la copie est celui d'avant."""
+    demande : le fichier OIDC de la copie est celui d'avant (revue finale
+    I-2 : la liaison absente du groupe administrateur est livrée)."""
+    got = delivered(monkeypatch, cli)
     mgmt = world(registries=("amorcage",), oidc=FULL_OIDC)
     before = next(f for f in mgmt.objs[(cr.K_CP_TEMPLATE, NS, "harvester-rke2-control-plane")]["spec"]["template"]
                   ["spec"]["files"] if f["path"] == co.FILE)
@@ -345,6 +347,7 @@ def test_oidc_kept_when_only_the_registries_are_requested(run, capsys):
     ann = json.loads(next(o[3] for o in mgmt.ops if o[0] == "patch" and o[1] == cs.K_CLUSTER)
                      ["metadata"]["annotations"][co.ANNOTATION])
     assert ann["admin_group"] == "ops"
+    assert [subjects(d["objs"]) for d in got] == [[f"{FULL_OIDC.get('groups_prefix', 'oidc:')}ops"]]
 
 
 @pytest.mark.parametrize("cp,expect", [
@@ -542,3 +545,81 @@ def test_an_unreadable_mark_is_never_finished(run, capsys):
     assert run(mgmt, None, extra=["--finish"]) == 2
     assert "renew-marker-unreadable" in capsys.readouterr().err
     assert run(mgmt, None, extra=["--abandon"]) == 0
+
+
+# --- revue finale 2.8.0 I-2 : la liaison du groupe administrateur suit l'OIDC ---
+
+TEAM_NS = {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "equipe-a"}}
+
+
+def with_socle(mgmt, cli, group):
+    """Socle `hops-policies` déjà livré : un namespace d'équipe et, si
+    `group`, la liaison du groupe administrateur."""
+    import capi_manifests as mf
+    import child_policies as cpol
+    objs = [TEAM_NS] + ([cpol.admin_binding("oidc:", group)] if group else [])
+    cm = mf.docs(NS, CL, cpol.ITEM, "harvester-ops", "builtin", objs, {"plan": "site", "run": "r1"}, "alice")[0]
+    mgmt.objs[("configmaps", NS, mf.name_of(cpol.ITEM))] = cm
+    return mgmt
+
+
+def delivered(monkeypatch, cli, rc=0):
+    got = []
+
+    def deliver(kube, ns, cluster, item, package, version, objs, origin, by, timeout, secrets=()):
+        got.append({"item": item, "package": package, "origin": origin, "by": by, "objs": objs})
+        return rc
+    monkeypatch.setattr(cli, "deliver", deliver)
+    return got
+
+
+def subjects(objs):
+    return [s["name"] for o in objs if o["kind"] == "ClusterRoleBinding" for s in o["subjects"]]
+
+
+@pytest.mark.parametrize("before,after,expect", [
+    ({"admin_group": "contractors"}, {"admin_group": "ops"}, ["oidc:ops"]),            # groupe changé
+    ({}, {"admin_group": "ops"}, ["oidc:ops"]),                                         # groupe ajouté
+    ({"admin_group": "contractors"}, {}, []),                                           # groupe retiré
+    ({"admin_group": "ops"}, {"admin_group": "ops", "groups_prefix": "idp:"}, ["idp:ops"]),  # préfixe changé
+])
+def test_the_admin_binding_follows_an_oidc_renewal(run, cli, capsys, monkeypatch, before, after, expect):
+    got = delivered(monkeypatch, cli)
+    oidc = dict(t.OIDC, groups_prefix="oidc:", **before)
+    mgmt = with_socle(world(registries=(), oidc=oidc, machines=workers_stay()), cli, before.get("admin_group"))
+    assert run(mgmt, "oidc", {"oidc": dict(t.OIDC, groups_prefix=after.get("groups_prefix", "oidc:"),
+                                           **{k: v for k, v in after.items() if k != "groups_prefix"})}) == 0
+    [d] = got
+    assert d["item"] == "hops-policies" and d["origin"] == {"plan": "site", "run": "r1"} and d["by"] == "alice"
+    assert subjects(d["objs"]) == expect
+    assert any(o["kind"] == "Namespace" for o in d["objs"])                         # le reste du socle reste
+    assert cr.A_RENEWAL not in mgmt.objs[(cs.K_CLUSTER, NS, CL)]["metadata"]["annotations"]
+
+
+def test_an_unchanged_admin_group_delivers_nothing(run, cli, capsys, monkeypatch):
+    got = delivered(monkeypatch, cli)
+    oidc = dict(t.OIDC, groups_prefix="oidc:", admin_group="ops")
+    mgmt = with_socle(world(registries=(), oidc=oidc, machines=workers_stay()), cli, "ops")
+    assert run(mgmt, "oidc", {"oidc": dict(oidc, audience="k8s-2")}) == 0
+    assert got == []
+
+
+def test_a_failed_admin_delivery_keeps_the_mark_for_finish(run, cli, capsys, monkeypatch):
+    delivered(monkeypatch, cli, rc=1)
+    oidc = dict(t.OIDC, groups_prefix="oidc:", admin_group="contractors")
+    mgmt = with_socle(world(registries=(), oidc=oidc, machines=workers_stay()), cli, "contractors")
+    assert run(mgmt, "oidc", {"oidc": dict(oidc, admin_group="ops")}) == 1
+    ev, _cap = events(capsys)
+    assert ["access", "error"] == ev[-1][:2]
+    assert cr.A_RENEWAL in mgmt.objs[(cs.K_CLUSTER, NS, CL)]["metadata"]["annotations"]
+
+
+def test_a_group_change_alone_is_a_renewal_without_machines(run, cli, capsys, monkeypatch):
+    """Revue finale I-2 : le groupe administrateur n'est pas dans le fichier
+    de l'API ; aucun gabarit ne bouge, l'essai le dit (`access_changed`)."""
+    oidc = dict(t.OIDC, groups_prefix="oidc:", admin_group="contractors")
+    mgmt = with_socle(world(registries=(), oidc=oidc, machines=workers_stay()), cli, "contractors")
+    assert run(mgmt, "oidc", {"oidc": dict(oidc, admin_group="ops")}, extra=["--dry-run"]) == 0
+    _ev, cap = events(capsys)
+    out = json.loads(cap.out)
+    assert out["changes"] == [] and out["access_changed"] is True and out["secrets_changed"] is False

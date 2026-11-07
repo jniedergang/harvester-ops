@@ -226,3 +226,19 @@ def test_an_administrator_abandons_the_renewal(context, flask_server):
     x(win, "abandon").click()
     page.wait_for_timeout(600)
     assert calls["renew"][-1] == {"mode": "abandon"}
+
+
+def test_an_admin_group_change_alone_can_be_renewed(context, flask_server):
+    """Revue finale I-2 : un changement du seul groupe administrateur ne
+    touche aucun gabarit ; la différence le dit et le bouton s'active."""
+    calls = {}
+    access = {"cluster": "apps/apps", "revision": 2, "changes": [], "secrets_changed": False,
+              "access_changed": True, "findings": [], "blocked": False}
+    page, win = open_renew(context, flask_server, calls, lambda b: access, oidc=OIDC)
+    win.locator('[data-w="oidc"]').check()
+    win.locator('[data-win-tab="diff"]').click()
+    expect(win.locator("[data-access-changed]")).to_contain_text("administrator group", timeout=5000)
+    expect(win.locator('[data-code="renew-nothing"]')).to_have_count(0)
+    win.locator('[data-win-tab="confirm"]').click()
+    x(win, "understand").check()
+    expect(x(win, "go")).to_be_enabled()

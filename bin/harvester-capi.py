@@ -3504,7 +3504,13 @@ def _renew_start(args, kube, ns, cluster, whats, req):
                               for x in regs_same["secrets"])
     else:
         secrets_changed = sec is not None and {"registries", "ca"} & set(whats) != set()
-    if not changes and not secrets_changed:
+    # revue finale I-2 : un groupe administrateur changé seul ne touche aucun
+    # gabarit (il n'est pas dans le fichier de l'API) mais change l'annotation
+    # et la liaison livrée : renouvellement sans machine remplacée
+    ann_new = (co.public(co.check(spec["oidc"], version)[0]) if spec.get("oidc") else None) \
+        if "oidc" in whats else None
+    ann_changed = "oidc" in whats and ann_new != ((cl.get("metadata") or {}).get("annotations") or {}).get(co.ANNOTATION)
+    if not changes and not secrets_changed and not ann_changed:
         step("check", "error", "renew-nothing: the templates and the registry secrets already hold this content")
         if args.dry_run:
             print(json.dumps({"cluster": f"{ns}/{cluster}", "changes": [], "secrets_changed": False}))
@@ -3523,7 +3529,7 @@ def _renew_start(args, kube, ns, cluster, whats, req):
                           + ("; registry secrets differ" if secrets_changed else ""))
     if args.dry_run:
         print(json.dumps({"cluster": f"{ns}/{cluster}", "revision": revision, "changes": changes,
-                          "secrets_changed": secrets_changed, "findings": room}))
+                          "secrets_changed": secrets_changed, "access_changed": ann_changed, "findings": room}))
         return EXIT_OK
     wanted = cc.renew_templates(tdocs, spec, whats, regs_new)
     # revue 5-8 I-1 : seuls les gabarits qui changent sont copiés, seuls
@@ -3558,7 +3564,7 @@ def _renew_start(args, kube, ns, cluster, whats, req):
     mark = cr.marker(revision, names, roles, old, old_secrets)
     ann = {cr.A_RENEWAL: cr.marker_value(mark)}
     if "oidc" in whats:
-        ann[co.ANNOTATION] = co.public(co.check(spec["oidc"], version)[0]) if spec.get("oidc") else None
+        ann[co.ANNOTATION] = ann_new
     kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"annotations": ann}})
     if names:
         kube.patch(cr.K_CLASS, ns, cls["metadata"]["name"], cr.class_patch(cls, names))
@@ -3610,9 +3616,40 @@ def _renew_wait_finish(kube, ns, cluster, mark, timeout):
         except KubeError as e:
             if not _not_found(e):
                 raise
+    if _renew_admin_binding(kube, ns, cluster, max(60, min(900, int(deadline - time.monotonic())))) != EXIT_OK:
+        step("access", "error", "the OIDC administrator group of the cluster was not delivered; the mark is kept "
+                                "(renew --finish retries)")
+        return EXIT_FAIL
     kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"annotations": {cr.A_RENEWAL: None}}})
     step("done", "done", f"{ns}/{cluster} renewed (revision {mark['revision']}); removed: {', '.join(gone) or '-'}")
     return EXIT_OK
+
+
+def _renew_admin_binding(kube, ns, cluster, timeout):
+    """Revue finale 2.8.0 I-2 : la liaison `hops-oidc-admins` du socle suit
+    l'annotation OIDC du cluster (groupe administrateur changé, ajouté,
+    retiré, préfixe changé). Le reste du socle est relivré tel quel ; rien
+    n'est écrit quand la liaison livrée est déjà la bonne."""
+    want = _admin_binding_of(kube, ns, cluster)
+    cm = kube.get("configmaps", ns, mf.name_of(cp.ITEM))
+    objs = mf.objects_of(cm)
+
+    def is_admin(o):
+        return o.get("kind") == "ClusterRoleBinding" and (o.get("metadata") or {}).get("name") == cp.ADMIN_BINDING
+    have = next((o for o in objs if is_admin(o)), None)
+    if (have or {}).get("subjects") == (want or {}).get("subjects") and bool(have) == bool(want):
+        return EXIT_OK
+    keep = [o for o in objs if not is_admin(o)]
+    sec = kube.get("secrets", ns, mf.name_of(cp.ITEM))
+    meta = mf.artefact_of(cm) or {}
+    code = deliver(kube, ns, cluster, cp.ITEM, meta.get("package") or POLICIES_PACKAGE,
+                   meta.get("version") or POLICIES_VERSION, keep + ([want] if want else []),
+                   meta.get("origin") or {}, meta.get("by") or "", timeout,
+                   secrets=mf.secret_objects(sec) if mf.artefact_of(sec) else ())
+    if code == EXIT_OK:
+        step("access", "done", f"OIDC administrator group {want['subjects'][0]['name']} bound to cluster-admin"
+             if want else "OIDC administrator binding removed")
+    return code
 
 
 CHILD_COMMANDS = ("manifest-check", "manifest-deploy", "manifest-remove", "manifest-verify", "token",
