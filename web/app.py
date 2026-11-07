@@ -22453,7 +22453,62 @@ def api_capi_gitops_list(cluster):
     return jsonify(res[0])
 
 
-RENEW_KEYS = {"what", "registries", "oidc", "dry_run", "timeout"}
+RENEW_KEYS = {"what", "registries", "oidc", "dry_run", "timeout", "mode"}
+RENEW_PREFIX = "capi-renew:"
+RENEW_ABANDON_PREFIX = "capi-renew-abandon:"
+RENEW_MODES = ("finish", "abandon")
+
+
+def _renew_running(cluster):
+    """Renouvellement de machines en cours sur ce cluster Harvester (cette
+    console, hors essai), ou None. Ne pas appeler sous ACTIONS_LOCK."""
+    with ACTIONS_LOCK:
+        return next((r for r in ACTIONS.values()
+                     if r.cluster == cluster and not r.dry_run and r.status in ("starting", "running")
+                     and str(r.action).startswith((RENEW_PREFIX, RENEW_ABANDON_PREFIX))), None)
+
+
+def _renew_refusal(cluster):
+    """(corps, 409) si ce cluster Harvester est tenu : déroulé de plan (cette
+    console, ou verrou de fichier d'un autre processus : ligne de commande),
+    retrait de la pile, autre renouvellement (revue 5-8 I-9) ; sinon None.
+    L'outil relit le même verrou."""
+    busy = _deploy_busy(cluster)
+    if busy is not None:
+        return {"error": "a deployment plan is running on this cluster", "code": "renew-plan-running",
+                "running": busy.id}, 409
+    run = _renew_running(cluster)
+    if run is not None:
+        return {"error": "a machine renewal is already running on this cluster", "code": "renew-busy",
+                "running": run.id}, 409
+    refused = _capi_uninstall_refusal(cluster)
+    if refused:
+        return refused
+    holder = _deploy_lock_holder(cluster)
+    if holder:
+        if holder.get("action") == "capi-renew":
+            return {"error": "a machine renewal is already running on this cluster", "code": "renew-busy",
+                    "running": holder.get("run") or ""}, 409
+        return _capi_uninstall_refusal(cluster, holder) or (
+            {"error": "a deployment plan is running on this cluster", "code": "renew-plan-running",
+             "running": holder.get("run") or "", "plan": holder.get("plan") or ""}, 409)
+    return None
+
+
+def _capi_lock_refusal(cluster, holder=None):
+    """Refus d'un déroulé ou d'un défaire : retrait de la pile (2.7.1) ou
+    renouvellement de machines en cours (revue 5-8 I-9), de cette console ou
+    d'un autre processus (`holder`, note du verrou de fichier) ; sinon None."""
+    refused = _capi_uninstall_refusal(cluster, holder)
+    if refused:
+        return refused
+    run = _renew_running(cluster)
+    rid = run.id if run is not None else ((holder or {}).get("run") if (holder or {}).get("action")
+                                          == "capi-renew" else None)
+    if rid is None:
+        return None
+    return {"error": "a machine renewal of a child cluster is running on this cluster", "code": "renew-running",
+            "running": rid}, 409
 
 
 @app.route("/api/capi/<cluster>/renew/<namespace>/<name>", methods=["POST"])
@@ -22462,8 +22517,11 @@ RENEW_KEYS = {"what", "registries", "oidc", "dry_run", "timeout"}
 def api_capi_renew(cluster, namespace, name):
     """Renouvelle les machines d'un cluster enfant (2.8.0, point 233) :
     registres, OIDC ou CA en transition. Essai (`dry_run`) : la différence,
-    rien d'écrit ; sinon action suivie `capi-renew:<ns>/<c>`. Refusé pendant
-    un déroulé de plan sur ce cluster (`renew-plan-running`)."""
+    rien d'écrit ; sinon action suivie `capi-renew:<ns>/<c>`. Revue 5-8 :
+    `mode: finish` reprend un renouvellement pas fini (opérateur), `mode:
+    abandon` retire sa marque sans rien supprimer (administrateurs, action
+    `capi-renew-abandon:`). Refusé pendant un déroulé de plan, un retrait de
+    la pile ou un autre renouvellement sur ce cluster (I-9)."""
     import capi_renew as _cr
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -22472,36 +22530,58 @@ def api_capi_renew(cluster, namespace, name):
         return _artefact_error(f"{k}: unknown key", 400)
     if not all(_K8S_NAME_RE.match(x) for x in (namespace, name)):
         return _artefact_error("invalid name", 400)
-    what = body.get("what")
+    mode = body.get("mode")
+    if mode is not None and mode not in RENEW_MODES:
+        return _artefact_error(f"mode: one of {', '.join(RENEW_MODES)}", 400)
     try:
-        whats = _cr.check_whats(",".join(what) if isinstance(what, list) else what)
         timeout = int(body.get("timeout") or _cr.TIMEOUT[2])
         if not _cr.TIMEOUT[0] <= timeout <= _cr.TIMEOUT[1]:
             raise ValueError(f"timeout: {_cr.TIMEOUT[0]} to {_cr.TIMEOUT[1]} seconds")
+        if mode:
+            if set(body) & {"what", "registries", "oidc", "dry_run"}:
+                raise ValueError("mode takes neither what, registries, oidc nor dry_run")
+            whats = []
+        else:
+            what = body.get("what")
+            whats = _cr.check_whats(",".join(what) if isinstance(what, list) else what)
     except (ValueError, TypeError) as e:
         return _artefact_error(str(e), 400)
+    if mode == "abandon" and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return _artefact_error("abandoning a renewal: administrators only", 403, "renew-abandon-admin-only")
     spec = {k: body[k] for k in ("registries", "oidc") if k in body}
     if "registries" in spec and "registries" not in whats or "oidc" in spec and "oidc" not in whats:
         return _artefact_error("registries and oidc are given with the matching what", 400)
-    busy = _deploy_busy(cluster)
-    if busy is not None:
-        return jsonify({"error": "a deployment plan is running on this cluster", "code": "renew-plan-running",
-                        "running": busy.id}), 409
     cmd, err = _capi_child_base(cluster, "renew", namespace, name)
     if err:
         return err
-    args = ["--name", f"{namespace}/{name}", "--what", ",".join(whats), "--timeout", str(timeout)]
+    args = ["--name", f"{namespace}/{name}", "--timeout", str(timeout)]
+    args += [f"--{mode}"] if mode else ["--what", ",".join(whats)]
     if body.get("dry_run") is True:
+        refused = _renew_refusal(cluster)
+        if refused:
+            return jsonify(refused[0]), refused[1]
         res, err = _capi_run_json(cmd + args + ["--dry-run"] + (["--spec", "-"] if spec else []),
                                   spec=spec if spec else None, timeout=120)
         if err:
             return err
         out, rc = res
         return jsonify(dict(out or {}, blocked=rc != 0)), 200
-    run, err = _capi_action(cluster, f"capi-renew:{namespace}/{name}", cmd + args, spec=spec if spec else None)
+    label = f"{RENEW_ABANDON_PREFIX if mode == 'abandon' else RENEW_PREFIX}{namespace}/{name}"
+    with _DEPLOY_LAUNCH_LOCK:
+        refused = _renew_refusal(cluster)
+        if refused:
+            return jsonify(refused[0]), refused[1]
+        run, err = _cli_action(cluster, label, cmd + args, "harvester-capi", spec=spec if spec else None,
+                               after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None), id_arg=True,
+                               setup=(lambda r: setattr(r, "required_role", "admin")) if mode == "abandon"
+                               else None,
+                               busy_match=lambda r: r.cluster == cluster and (
+                                   str(r.action).startswith((RENEW_PREFIX, RENEW_ABANDON_PREFIX, DEPLOY_PREFIX))
+                                   or r.action == f"{CAPI_UNINSTALL_PREFIX}{cluster}"))
     if err:
         return err
-    return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}", "what": whats}), 202
+    return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}", "what": whats,
+                    **({"mode": mode} if mode else {})}), 202
 
 
 @app.route("/api/capi/<cluster>/artefacts/applied")
@@ -22935,7 +23015,7 @@ def _capi_uninstall_turtles(cluster, data):
         busy = _deploy_busy(cluster)
         holder = {"run": busy.id, "plan": (busy.result or {}).get("plan")} if busy else _deploy_lock_holder(cluster)
         if holder:
-            refused = _capi_uninstall_refusal(cluster, holder)
+            refused = _capi_lock_refusal(cluster, holder)
             if refused:
                 return jsonify(refused[0]), refused[1]
             return jsonify({"error": "a plan deployment holds this cluster", "code": "capi-plan-running",
@@ -22944,7 +23024,8 @@ def _capi_uninstall_turtles(cluster, data):
                                after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None),
                                setup=lambda r: setattr(r, "required_role", "admin"), id_arg=True,
                                busy_match=lambda r: r.cluster == cluster
-                               and str(r.action).startswith(CAPI_GESTURE_PREFIXES))
+                               and str(r.action).startswith(CAPI_GESTURE_PREFIXES
+                                                            + (RENEW_PREFIX, RENEW_ABANDON_PREFIX)))
     if err:
         return err
     return jsonify({"action_id": run.id, "mode": "turtles", "dry_run": dry, "remove_images": images}), 201
@@ -35473,7 +35554,7 @@ def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, clu
         if busy:
             return {"error": "a deployment is already running on this cluster", "code": "deploy-running",
                     "running": busy.id}, 409
-        refused = _capi_uninstall_refusal(cluster)
+        refused = _capi_lock_refusal(cluster)
         if refused:
             return refused
         with ACTIONS_LOCK:
@@ -35497,8 +35578,9 @@ def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, clu
             lock_fd, holder = _deploy_cluster_lock(cluster, run_id, dctx["plan"]["name"])
         if lock_fd is None:
             # un déroulé de l'autre processus (console ou ligne de commande),
-            # ou le retrait de la pile Turtles par l'outil (2.7.1)
-            return _capi_uninstall_refusal(cluster, holder) or (
+            # le retrait de la pile Turtles par l'outil (2.7.1) ou un
+            # renouvellement de machines (revue 5-8 I-9)
+            return _capi_lock_refusal(cluster, holder) or (
                 {"error": "a deployment is already running on this cluster", "code": "deploy-running",
                  "running": holder.get("run") or ""}, 409)
         try:
@@ -36412,7 +36494,7 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
         if busy:
             return {"error": "a deployment is running on this cluster", "code": "deploy-running",
                     "running": busy.id}, 409
-        refused = _capi_uninstall_refusal(cluster)
+        refused = _capi_lock_refusal(cluster)
         if refused:
             return refused
         run_id = uuid.uuid4().hex[:12]
@@ -36425,7 +36507,7 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
             time.sleep(0.05)
             lock_fd, holder = _deploy_cluster_lock(cluster, run_id, label)
         if lock_fd is None:
-            return _capi_uninstall_refusal(cluster, holder) or (
+            return _capi_lock_refusal(cluster, holder) or (
                 {"error": "a deployment or an undo is running on this cluster", "code": "deploy-running",
                  "running": holder.get("run") or ""}, 409)
         try:

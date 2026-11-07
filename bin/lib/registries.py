@@ -825,6 +825,37 @@ def cluster_registry_names(nodes_secret, auth_secrets=(), decls=None):
     return sorted(dict.fromkeys(names), key=rank)
 
 
+def entries_from_nodes_secret(nodes_secret, names, decls):
+    """Entrées [{registry[, mirrors]}] d'un cluster enfant existant, dans
+    l'ordre de `names`, avec les registres d'origine que chaque registre
+    sert réellement, relus dans `registries.yaml` du Secret des nœuds (revue
+    5-8 I-4 : un renouvellement ne miroite pas d'office toutes les origines
+    de la déclaration). `mirrors` absent quand il les sert toutes, comme à
+    la création."""
+    data = (nodes_secret or {}).get("data") or {}
+    try:
+        doc = json.loads(base64.b64decode(data.get("registries.yaml") or "").decode() or "{}")
+    except ValueError:
+        doc = {}
+    if not doc and (nodes_secret or {}).get("stringData"):
+        try:
+            doc = json.loads(nodes_secret["stringData"].get("registries.yaml") or "{}")
+        except ValueError:
+            doc = {}
+    mirrors = doc.get("mirrors") or {}
+    out = []
+    for n in names:
+        d = decls.get(n) or {}
+        e = {"registry": n}
+        ep = f"https://{d.get('endpoint')}"
+        declared = list(d.get("mirrors") or [])
+        served = [o for o in declared if ep in ((mirrors.get(o) or {}).get("endpoint") or [])]
+        if mirrors and d and served != declared:
+            e["mirrors"] = served
+        out.append(e)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 2.8.0 (point 236) : registre dans le réglage `containerd-registry` des
 # nœuds Harvester. Forme relue sur harvlab2 (plan 2.8.0, « Essais préalables

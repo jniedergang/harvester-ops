@@ -17,17 +17,23 @@ choix ; plan de contrôle et worker remplacés ensemble, API injoignable
 environ 65 s au passage d'un plan de contrôle unique, une adresse de plus
 prise pendant le renouvellement.
 
-Une machine se rapporte aux anciens gabarits si elle a été créée avant la
-bascule (annotation `harvester-ops.io/renewed-at` des copies, secondes
-UTC) : les machines d'un plan de contrôle ne portent pas le nom de leur
-gabarit, leur date de création si.
+Revue des tâches 5 à 8 (I-1, I-2) : seuls les gabarits dont le contenu
+change sont copiés (un gabarit recopié sans changement de `spec` est
+corrigé en place par la topologie, qui ne remplace alors aucune machine :
+l'attente ne finissait jamais). Les machines anciennes sont celles des
+rôles touchés, relevées par leur UID AVANT la bascule et rangées dans la
+marque `harvester-ops.io/renewal` du `Cluster` : aucune horloge n'est
+comparée (celle de la console contre celle du serveur). La marque dit
+aussi qu'un renouvellement n'est pas fini (`renew-busy`) ; `renew
+--finish` reprend l'attente et le ménage, `renew --abandon` (réservé aux
+administrateurs) retire la marque sans rien supprimer.
 
 Bibliothèque standard seulement ; ce module ne parle à aucun cluster
 (`current` lit par un `kube` injecté).
 """
 
-import calendar
 import copy
+import json
 import re
 import time
 
@@ -38,7 +44,11 @@ K_MACHINE = "machines.cluster.x-k8s.io"
 KINDS = {"RKE2ControlPlaneTemplate": K_CP_TEMPLATE, "RKE2ConfigTemplate": K_CONFIG_TEMPLATE}
 A_REVISION = "harvester-ops.io/template-revision"
 A_RENEWED = "harvester-ops.io/renewed-at"
+A_RENEWAL = "harvester-ops.io/renewal"
 L_CLUSTER = "cluster.x-k8s.io/cluster-name"
+L_CONTROL_PLANE = "cluster.x-k8s.io/control-plane"
+L_TOPOLOGY_MD = "topology.cluster.x-k8s.io/deployment-name"
+CONTROL_PLANE = "controlPlane"
 WHATS = ("registries", "oidc", "ca")
 TIMEOUT = (60, 10800, 3600)
 REV_RE = re.compile(r"^(?P<base>.+?)-r(?P<n>[0-9]{1,4})$")
@@ -205,14 +215,74 @@ def class_patch(cls, names):
 
 
 # ---------------------------------------------------------------------------
-# Progression
+# Rôles touchés, marque du renouvellement, progression
 # ---------------------------------------------------------------------------
-def _created(machine):
-    ts = ((machine or {}).get("metadata") or {}).get("creationTimestamp") or ""
+def changed(current_templates, wanted_docs):
+    """[(rôle, document actuel, document voulu)] des gabarits dont
+    `spec.template.spec` change (`current_templates` : [(rôle, document)]
+    de `current`, `wanted_docs` dans le même ordre). Revue 5-8 (I-1) : seuls
+    ceux-là sont copiés et seuls leurs rôles sont attendus."""
+    out = []
+    for (role, cur), want in zip(current_templates, wanted_docs):
+        if diff([cur], [want]):
+            out.append((role, cur, want))
+    return out
+
+
+def role_of(machine, cluster=None):
+    """Rôle d'une machine : `controlPlane` (étiquette du plan de contrôle),
+    `workers/<classe>` (classe du MachineDeployment de la topologie nommé
+    par son étiquette), `workers/?` sans moyen de le dire."""
+    labels = ((machine or {}).get("metadata") or {}).get("labels") or {}
+    if L_CONTROL_PLANE in labels:
+        return CONTROL_PLANE
+    md = labels.get(L_TOPOLOGY_MD)
+    topo = (((cluster or {}).get("spec") or {}).get("topology") or {})
+    for d in ((topo.get("workers") or {}).get("machineDeployments")) or []:
+        if md and d.get("name") == md and d.get("class"):
+            return f"workers/{d['class']}"
+    return "workers/?"
+
+
+def in_roles(machine, roles, cluster=None):
+    """La machine relève-t-elle d'un des rôles ? Une machine de worker dont
+    la classe ne se lit pas compte pour toute classe touchée (prudence)."""
+    r = role_of(machine, cluster)
+    return r in roles or (r == "workers/?" and any(x.startswith("workers/") for x in roles))
+
+
+def machine_id(m):
+    md = (m or {}).get("metadata") or {}
+    return md.get("uid") or md.get("name") or ""
+
+
+def marker(revision, names, roles, old, secrets):
+    """Marque du renouvellement (annotation `A_RENEWAL` du Cluster) :
+    révision, {ancien gabarit: nouveau}, rôles attendus, UID des machines
+    d'avant la bascule, Secrets à retirer à la fin. Aucun secret."""
+    return {"revision": int(revision), "names": dict(names), "roles": sorted(roles), "old": sorted(old),
+            "secrets": sorted(set(secrets))}
+
+
+def marker_value(mark):
+    return json.dumps(mark, sort_keys=True, separators=(",", ":"))
+
+
+def marker_of(cluster):
+    """Marque d'un renouvellement pas fini, ou None. Une marque illisible
+    compte comme présente (jamais prise pour « fini »)."""
+    raw = (((cluster or {}).get("metadata") or {}).get("annotations") or {}).get(A_RENEWAL)
+    if not raw:
+        return None
     try:
-        return calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))
+        d = json.loads(raw)
     except ValueError:
-        return 0
+        return {"revision": 0, "names": {}, "roles": [], "old": [], "secrets": [], "unreadable": True}
+    if not isinstance(d, dict):
+        return {"revision": 0, "names": {}, "roles": [], "old": [], "secrets": [], "unreadable": True}
+    return {"revision": int(d.get("revision") or 0), "names": dict(d.get("names") or {}),
+            "roles": list(d.get("roles") or []), "old": list(d.get("old") or []),
+            "secrets": list(d.get("secrets") or [])}
 
 
 def _machine_ready(m):
@@ -222,29 +292,19 @@ def _machine_ready(m):
     return (m.get("status") or {}).get("phase") == "Running"
 
 
-def since(templates):
-    """Heure de bascule des gabarits voulus (la plus ancienne), ou None."""
-    stamps = []
-    for d in templates or []:
-        try:
-            stamps.append(int((((d.get("metadata") or {}).get("annotations") or {}).get(A_RENEWED))))
-        except (TypeError, ValueError):
-            continue
-    return min(stamps) if stamps else None
-
-
-def progress(machines, wanted_templates):
-    """{"done", "old", "new", "message"} : machines créées avant la bascule
-    (anciens gabarits) et après ; fait quand plus aucune ancienne machine ne
-    reste et que les nouvelles sont prêtes. Sans heure de bascule (aucun
-    renouvellement fait par la console) : fait."""
-    t0 = since(wanted_templates)
-    live = [m for m in machines or [] if not ((m.get("metadata") or {}).get("deletionTimestamp"))]
-    going = [m for m in machines or [] if (m.get("metadata") or {}).get("deletionTimestamp")]
-    if t0 is None:
-        return {"done": True, "old": 0, "new": len(live), "message": "no renewal recorded"}
-    old = [m for m in live + going if _created(m) < t0]
-    new = [m for m in live if _created(m) >= t0]
+def progress(machines, mark, cluster=None):
+    """{"done", "old", "new", "message"} des machines des rôles de la
+    marque : anciennes = UID relevés avant la bascule (encore là, même en
+    suppression) ; nouvelles = les autres, vivantes. Fait quand plus aucune
+    ancienne ne reste et que les nouvelles sont prêtes. Sans rôle touché
+    (seuls des Secrets ont changé) : fait."""
+    roles = (mark or {}).get("roles") or []
+    olds = set((mark or {}).get("old") or [])
+    mine = [m for m in machines or [] if in_roles(m, roles, cluster)]
+    old = [m for m in mine if machine_id(m) in olds]
+    new = [m for m in mine if machine_id(m) not in olds and not (m.get("metadata") or {}).get("deletionTimestamp")]
+    if not roles:
+        return {"done": True, "old": 0, "new": len(new), "message": "no machine to replace"}
     ready = [m for m in new if _machine_ready(m)]
     done = not old and bool(new) and len(ready) == len(new)
     msg = (f"{len(ready)}/{len(new)} new machine(s) ready, {len(old)} old left" if not done
@@ -252,20 +312,16 @@ def progress(machines, wanted_templates):
     return {"done": done, "old": len(old), "new": len(new), "message": msg}
 
 
-def busy(machines, templates):
-    """Renouvellement en cours : des machines d'avant la dernière bascule
-    restent (machines de deux révisions)."""
-    p = progress(machines, templates)
-    return since(templates) is not None and p["old"] > 0
-
-
-def old_templates(current_templates, wanted_names):
-    """Gabarits d'une révision précédente du même nom de base, à supprimer
-    une fois le renouvellement fait (jamais un gabarit encore désigné)."""
-    keep = set(wanted_names)
+def old_templates(current_templates, wanted_names, replaced=(), designated=()):
+    """Gabarits d'une révision précédente du même nom de base, et ceux que
+    la marque dit remplacés (`replaced` : un nom raccourci n'a plus la même
+    base, revue 5-8 m-10), à supprimer une fois le renouvellement fait ;
+    jamais un gabarit voulu ni encore désigné par la ClusterClass."""
+    keep = set(wanted_names) | set(designated)
     bases = {base_name(n) for n in wanted_names}
     return [d for d in current_templates
-            if d["metadata"]["name"] not in keep and base_name(d["metadata"]["name"]) in bases]
+            if d["metadata"]["name"] not in keep
+            and (base_name(d["metadata"]["name"]) in bases or d["metadata"]["name"] in set(replaced))]
 
 
 def room_findings(pool, free_cpu_m, free_memory, cpu, memory_bytes, overcommit=None, vm_overhead=0):

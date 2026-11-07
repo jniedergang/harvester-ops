@@ -188,6 +188,34 @@ def of_cluster(cluster_obj):
     return d if isinstance(d, dict) and d.get("issuer_url") and d.get("audience") else None
 
 
+def of_template(cp_template, cluster_obj=None):
+    """Réglages complets lus dans le fichier `FILE` d'un
+    `RKE2ControlPlaneTemplate` (la source de vérité : revendications,
+    préfixes, CA de l'émetteur), le groupe administrateur dans l'annotation
+    du `Cluster` ; None sans OIDC (revue 5-8 I-3 : l'annotation publique
+    seule perdait revendications et CA)."""
+    inner = ((((cp_template or {}).get("spec") or {}).get("template") or {}).get("spec") or {})
+    f = next((x for x in inner.get("files") or [] if x.get("path") == FILE), None)
+    if f is None or not isinstance(f.get("content"), str):
+        return None
+    try:
+        doc = json.loads(f["content"])
+        jwt = doc["jwt"][0]
+        issuer, maps = jwt["issuer"], jwt.get("claimMappings") or {}
+        cfg = {"issuer_url": issuer["url"], "audience": (issuer.get("audiences") or [None])[0],
+               "username_claim": (maps.get("username") or {}).get("claim"),
+               "username_prefix": (maps.get("username") or {}).get("prefix"),
+               "groups_claim": (maps.get("groups") or {}).get("claim"),
+               "groups_prefix": (maps.get("groups") or {}).get("prefix"),
+               "ca_pem": issuer.get("certificateAuthority")}
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        return None
+    group = (of_cluster(cluster_obj) or {}).get("admin_group")
+    if group:
+        cfg["admin_group"] = group
+    return {k: v for k, v in cfg.items() if v is not None}
+
+
 def kubeconfig(cfg, server, ca_b64, cluster):
     """Kubeconfig remis aux personnes (point 230) : serveur et CA du cluster
     enfant, utilisateur `oidc` en greffon `exec` kubelogin. Aucun identifiant :

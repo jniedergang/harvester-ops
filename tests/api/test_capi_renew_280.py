@@ -66,8 +66,16 @@ def cluster_class(v1beta2=True, cp="harvester-rke2-control-plane", worker="harve
             "infrastructure": {"ref": {"kind": "HarvesterMachineTemplate", "name": "hmt"}}}}]}}}
 
 
-def machine(name, created, ready=True, deleting=False):
-    md = {"name": name, "namespace": NS, "creationTimestamp": created, "labels": {cr.L_CLUSTER: "web"}}
+def machine(name, created, ready=True, deleting=False, role=None):
+    """`role` : "cp" (plan de contrôle), "w" (worker de la classe
+    default-worker), sinon déduit du nom (`cp-…` ou `w-…`)."""
+    labels = {cr.L_CLUSTER: "web"}
+    role = role or ("cp" if name.startswith("cp") else "w")
+    if role == "cp":
+        labels[cr.L_CONTROL_PLANE] = ""
+    elif role == "w":
+        labels[cr.L_TOPOLOGY_MD] = "md-0"
+    md = {"name": name, "namespace": NS, "creationTimestamp": created, "labels": labels, "uid": f"uid-{name}"}
     if deleting:
         md["deletionTimestamp"] = NEW
     return {"metadata": md, "status": {"conditions": [{"type": "Ready", "status": "True" if ready else "False"}]}}
@@ -123,28 +131,70 @@ def test_class_patch_repoints_both_templates(v1beta2):
     assert "workers" not in only_cp["spec"]
 
 
-# --- progression ------------------------------------------------------------------
+# --- progression (revue 5-8 I-1, I-2 : rôles touchés, UID, aucune horloge) ----------
 
-NEW_TPL = cr.rotated([cp_template()], 1, now=1700000000)
+TOPO = {"spec": {"topology": {"workers": {"machineDeployments": [{"class": "default-worker", "name": "md-0"}]}}}}
+BOTH = cr.marker(1, {}, ["controlPlane", "workers/default-worker"], ["uid-cp-a", "uid-w-a"], [])
+CP_ONLY = cr.marker(1, {}, ["controlPlane"], ["uid-cp-a"], [])
 
 
-@pytest.mark.parametrize("machines,done,old,new", [
-    ([machine("a", OLD), machine("b", OLD)], False, 2, 0),
-    ([machine("a", OLD), machine("c", NEW, ready=False)], False, 1, 1),
-    ([machine("a", OLD, deleting=True), machine("c", NEW)], False, 1, 1),   # ancienne encore là
-    ([machine("c", NEW, ready=False), machine("d", NEW)], False, 0, 2),
-    ([machine("c", NEW), machine("d", NEW)], True, 0, 2),
+@pytest.mark.parametrize("mark,machines,done,old,new", [
+    (BOTH, [machine("cp-a", OLD), machine("w-a", OLD)], False, 2, 0),
+    (BOTH, [machine("cp-a", OLD), machine("cp-c", NEW, ready=False), machine("w-a", OLD)], False, 2, 1),
+    (BOTH, [machine("cp-a", OLD, deleting=True), machine("cp-c", NEW), machine("w-c", NEW)], False, 1, 2),
+    (BOTH, [machine("cp-c", NEW, ready=False), machine("w-c", NEW)], False, 0, 2),
+    (BOTH, [machine("cp-c", NEW), machine("w-c", NEW)], True, 0, 2),
+    # OIDC seul : les workers ne changent pas, ils ne sont pas attendus (I-1)
+    (CP_ONLY, [machine("cp-c", NEW), machine("w-a", OLD)], True, 0, 1),
+    (CP_ONLY, [machine("cp-a", OLD), machine("w-a", OLD)], False, 1, 0),
+    # horloge : une nouvelle machine datée d'AVANT la bascule (console en
+    # avance sur le serveur) est nouvelle, son UID n'était pas relevé (I-2)
+    (BOTH, [machine("cp-c", OLD), machine("w-c", OLD)], True, 0, 2),
+    # ancienne datée d'après : toujours ancienne
+    (BOTH, [machine("cp-a", NEW), machine("w-c", NEW)], False, 1, 1),
+    # worker sans étiquette de classe : compté pour la classe touchée
+    (BOTH, [machine("cp-c", NEW), machine("w-x", NEW, role="?"), machine("w-a", OLD, role="?")], False, 1, 2),
+    # rien à remplacer (Secrets seulement)
+    (cr.marker(1, {}, [], [], []), [machine("cp-a", OLD)], True, 0, 0),
 ])
-def test_progress(machines, done, old, new):
-    p = cr.progress(machines, NEW_TPL)
+def test_progress(mark, machines, done, old, new):
+    p = cr.progress(machines, mark, TOPO)
     assert (p["done"], p["old"], p["new"]) == (done, old, new)
 
 
-def test_busy_only_after_a_recorded_renewal():
-    assert cr.busy([machine("a", OLD)], NEW_TPL)
-    assert not cr.busy([machine("c", NEW)], NEW_TPL)
-    assert not cr.busy([machine("a", OLD)], [cp_template()])                  # jamais renouvelé
-    assert cr.progress([machine("a", OLD)], [cp_template()])["done"]
+@pytest.mark.parametrize("raw,expect", [
+    (None, None),
+    ("", None),
+    (cr.marker_value(cr.marker(3, {"a": "a-r3"}, ["controlPlane"], ["u1"], ["s"])),
+     {"revision": 3, "names": {"a": "a-r3"}, "roles": ["controlPlane"], "old": ["u1"], "secrets": ["s"]}),
+    ("{not json", "unreadable"),
+    ("[1]", "unreadable"),
+])
+def test_marker_of(raw, expect):
+    cl = {"metadata": {"annotations": {cr.A_RENEWAL: raw} if raw is not None else {}}}
+    got = cr.marker_of(cl)
+    if expect == "unreadable":
+        assert got is not None and got["unreadable"] is True          # jamais pris pour « fini »
+    else:
+        assert got == expect
+
+
+@pytest.mark.parametrize("labels,role", [
+    ({cr.L_CONTROL_PLANE: ""}, "controlPlane"),
+    ({cr.L_TOPOLOGY_MD: "md-0"}, "workers/default-worker"),
+    ({cr.L_TOPOLOGY_MD: "md-9"}, "workers/?"),
+    ({}, "workers/?"),
+])
+def test_role_of(labels, role):
+    assert cr.role_of({"metadata": {"labels": labels}}, TOPO) == role
+
+
+def test_only_the_changed_templates_move():
+    cur = [("controlPlane", cp_template()), ("workers/default-worker", cfg_template())]
+    want = [cp_template(args=["a=b"]), cfg_template()]
+    got = cr.changed(cur, want)
+    assert [(r, c["metadata"]["name"]) for r, c, _w in got] == [("controlPlane", "harvester-rke2-control-plane")]
+    assert cr.changed(cur, [cp_template(), cfg_template()]) == []
 
 
 def test_old_templates_never_the_designated_ones():
@@ -155,6 +205,16 @@ def test_old_templates_never_the_designated_ones():
                                                     "harvester-rke2-control-plane-r1"]
     keep = cr.old_templates(cur, ["harvester-rke2-control-plane-r1"])
     assert [d["metadata"]["name"] for d in keep] == ["harvester-rke2-control-plane"]
+    # jamais un gabarit encore désigné par la ClusterClass
+    assert cr.old_templates(cur, ["harvester-rke2-control-plane-r2"], designated=["harvester-rke2-control-plane-r1"]) \
+        == [cur[0]]
+    # revue 5-8 m-10 : un nom raccourci n'a plus la même base, la marque
+    # nomme le gabarit remplacé
+    long = cp_template(name="x" * 63)
+    short = cr.rotated([long], 1)[0]["metadata"]["name"]
+    assert cr.base_name(short) != "x" * 63
+    assert cr.old_templates([long], [short]) == []
+    assert cr.old_templates([long], [short], replaced=["x" * 63]) == [long]
 
 
 @pytest.mark.parametrize("pool,cpu,mem,codes", [
