@@ -1245,6 +1245,10 @@ def cmd_delete(args):
         print(json.dumps(destroy_plan(kube, ns, name)))
         return EXIT_OK
     cl = kube.get(cs.K_CLUSTER, ns, name)
+    refused = cc.run_mismatch(cl, getattr(args, "expect_run", None)) if cl is not None else None
+    if refused:
+        step("delete", "error", refused)
+        return EXIT_BLOCKED
     if cl is None:
         # Cluster déjà parti, identité restée (suppression précédente qui a
         # échoué sur un droit) : la reprise finit le nettoyage
@@ -1521,6 +1525,10 @@ def cmd_service_remove(args):
     if hcp is None:
         step("remove", "error", f"service {ns}/{name} not found")
         return EXIT_FAIL
+    refused = cc.run_mismatch(hcp, getattr(args, "expect_run", None))
+    if refused:
+        step("remove", "error", refused)
+        return EXIT_BLOCKED
     label = sv.label_of(name)
     kube.delete(sv.K_HCP, ns, name)
     step("remove", "running", f"service {ns}/{name} deleted, releases being uninstalled")
@@ -1908,6 +1916,10 @@ def cmd_manifest_remove(args):
         if o is not None and (lab.get(mf.L_CLUSTER) != cluster or lab.get(mf.L_ITEM) != item):
             step("remove", "error", f"artefact-taken: {ns}/{name} belongs to {lab.get(mf.L_CLUSTER) or 'something else'}")
             return EXIT_BLOCKED
+    refused = cc.run_mismatch(crs or cmap, getattr(args, "expect_run", None))
+    if refused:
+        step("remove", "error", refused)
+        return EXIT_BLOCKED
     # I3 : ce qu'un déploiement interrompu n'a pas encore retiré compte aussi
     objs = mf.objects_of(cmap)
     refs = [mf.ref_of(o) for o in objs]
@@ -2133,6 +2145,9 @@ def main(argv=None):
                             default=900 if name.startswith(("service", "manifest")) else 2400)
             if name == "create":
                 sp.add_argument("--no-wait", action="store_true")
+        if name in ("delete", "service-remove", "manifest-remove"):
+            sp.add_argument("--expect-run", default="", metavar="ID",
+                            help="refuse unless the object carries this plan run (the undo of a plan)")
         if "name" in extra:
             sp.add_argument("--name", required=True, help="namespace/name of the cluster")
         if "sname" in extra:

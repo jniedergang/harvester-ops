@@ -48,6 +48,7 @@ class FakeUndo(ta.FakeArt):
         self.__dict__.update({k: v for k, v in base.__dict__.items() if k in ("clusters", "applied")})
         self.removals = []
         self.fail_remove = set()
+        self.cmds = []
 
     def json(self, kc, sub, args, spec=None, timeout=180):
         if sub == "manifest-verify":
@@ -69,6 +70,7 @@ class FakeUndo(ta.FakeArt):
     def runner(self, run, cmd, capture=False, summarize=None):
         tool, sub = Path(cmd[1]).name, cmd[2]
         args = cmd[3:]
+        self.cmds.append((sub, list(args)))
         if tool == "harvester-registry.py":
             self.removals.append(("registry", args))
             rg.delete(self.state, args[0])
@@ -418,3 +420,16 @@ def test_terraform_goes_once_the_cluster_of_the_same_undo_is_gone(undo):
     assert next(i for i in body["items"] if i["id"] == TF)["details"].get("carried_by", []) == []
     run = finish(launch(undo))
     assert items_of(run)[TF]["status"] == "done" and undo["destroys"] == [(undo["decl"]["id"], "destroy")]
+
+
+def test_each_removal_tool_gets_the_run_it_must_find(undo):
+    """Revue finale 2.7.0 (m-b) : chaque outil relit la marque juste avant
+    d'écrire ; le Défaire lui passe l'exécution qu'il a jugée « à nous »."""
+    run = finish(launch(undo, include=[u["id"] for u in plan_of(undo).get_json()["items"]]))
+    assert run.status == "done", run.result
+    subs = {sub: args for sub, args in undo["undo"].cmds if sub in ("service-remove", "manifest-remove", "delete")}
+    subs["registry"] = next(args for sub, args in undo["undo"].cmds if sub == "delete" and args[0] == "amorcage")
+    for sub in ("service-remove", "manifest-remove", "registry"):
+        assert subs[sub][subs[sub].index("--expect-run") + 1] == "c0ffee000001", (sub, subs[sub])
+    deletes = [args for sub, args in undo["undo"].cmds if sub == "delete" and "--name" in args]
+    assert deletes and deletes[0][deletes[0].index("--expect-run") + 1] == "c0ffee000001"

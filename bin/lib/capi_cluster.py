@@ -450,6 +450,20 @@ def origin_of(cluster):
     return out
 
 
+def run_mismatch(obj, expected):
+    """Revue finale 2.7.0 (m-b) : le Défaire juge « à nous » puis lance la
+    suppression par nom ; l'outil relit la marque juste avant d'écrire.
+    None si `expected` est vide ou si `obj` porte cette exécution, sinon le
+    refus `undo-not-ours` (rien n'est supprimé)."""
+    if not expected:
+        return None
+    got = origin_of(obj).get("run")
+    if got == expected:
+        return None
+    return (f"undo-not-ours: recreated by run {got}, left untouched" if got
+            else f"undo-not-ours: no mark of run {expected} (recreated by hand?), left untouched")
+
+
 def masked(docs):
     """Pour un aperçu : le secret d'identité porte le kubeconfig Harvester."""
     out = []

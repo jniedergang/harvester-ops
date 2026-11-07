@@ -35505,16 +35505,20 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
         if seen == "foreign":
             data["recreated_by"] = run_id or ""
             return _dch.ItemOutcome("error", _undo_not_ours(run_id), data=data)
+        # revue finale 2.7.0 (m-b) : l'outil relit la marque juste avant
+        # d'écrire ; un objet recréé entre-temps n'est pas touché
+        expect = ["--expect-run", run_id] if run_id else []
         if kind == "chart":
             ns, _c, it = ref.split("/")
-            child, err = capi("service-remove", ["--name", f"{ns}/{it}", "--timeout", str(UNDO_CHART_TIMEOUT)],
+            child, err = capi("service-remove", ["--name", f"{ns}/{it}", "--timeout", str(UNDO_CHART_TIMEOUT)]
+                              + expect,
                               f"capi-service-remove:{ns}/{it}")
             timeout = None
         elif kind in ("manifest", "policies"):
-            child, err = capi("manifest-remove", ["--name", ref], f"capi-manifest-remove:{ref}")
+            child, err = capi("manifest-remove", ["--name", ref] + expect, f"capi-manifest-remove:{ref}")
             timeout = UNDO_MANIFEST_TIMEOUT
         elif kind == "capi-cluster":
-            child, err = capi("delete", ["--name", ref, "--timeout", str(UNDO_CLUSTER_TIMEOUT)],
+            child, err = capi("delete", ["--name", ref, "--timeout", str(UNDO_CLUSTER_TIMEOUT)] + expect,
                               f"capi-cluster-delete:{ref}")
             timeout = None
         elif kind == "registry":
@@ -35522,7 +35526,8 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
             cmd = _registry_cmd("delete")
             if cmd is None:
                 return _dch.ItemOutcome("error", f"{REGISTRY_SCRIPT} not deployed", data=data)
-            cmd += [name, "--cluster", cluster, "--kubeconfig", kc] + (["--delete-data"] if name in delete_data else [])
+            cmd += [name, "--cluster", cluster, "--kubeconfig", kc] + expect \
+                + (["--delete-data"] if name in delete_data else [])
             if (run.result or {}).get("plan"):
                 # le plan défait désigne son registre : il ne le retient pas
                 cmd += ["--ignore-plan", run.result["plan"]]

@@ -652,6 +652,19 @@ def cmd_delete(args):
         step("delete", "error", f"registry-in-use: {', '.join(sorted(set(used)))}")
         out({"registry": args.name, "deleted": False, "used_by": sorted(set(used))})
         return EXIT_REFUSED
+    if args.expect_run:
+        # revue finale 2.7.0 (m-b) : la marque relue juste avant d'écrire ;
+        # sans Deployment, la suppression précédente s'est arrêtée en route (I2)
+        try:
+            dep = kube.get("deployments", rs.NAMESPACE, args.name)
+        except KubeError as e:
+            step("delete", "error", f"state unreadable: {str(e)[:200]}")
+            return EXIT_FAIL
+        refused = cc.run_mismatch(dep, args.expect_run) if dep is not None else None
+        if refused:
+            step("delete", "error", refused)
+            out({"registry": args.name, "deleted": False})
+            return EXIT_REFUSED
     names = rg.secret_names(args.name)
     # revue finale 2.7.0 (I2) : le Deployment porte la marque de l'exécution
     # (plan-run) ; il part en DERNIER, après la fiche de la console. Une
@@ -754,6 +767,8 @@ def parser():
     s.add_argument("--delete-data", action="store_true")
     s.add_argument("--ignore-plan", action="append", metavar="PLAN",
                    help="a plan being undone: it does not count as a user")
+    s.add_argument("--expect-run", default="", metavar="ID",
+                   help="refuse unless the Deployment carries this plan run (the undo of a plan)")
     s.set_defaults(fn=cmd_delete)
     s = sub.add_parser("show", allow_abbrev=False)
     s.add_argument("name")

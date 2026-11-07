@@ -338,3 +338,19 @@ def test_a_delete_killed_at_the_console_record_keeps_the_deployment(world, capsy
     with pytest.raises(KeyboardInterrupt):
         cli.main(["delete", "amorcage", "--cluster", "harvlab2"])
     assert ("deployments", "amorcage") in world["kube"].objects
+
+
+@pytest.mark.parametrize("deployed_by,expect,code", [
+    ("0123456789ab", "0123456789ab", 0),
+    ("0123456789ac", "0123456789ab", 2),                    # recréé par une autre exécution
+    (None, "0123456789ab", 2),                              # recréé à la main
+])
+def test_delete_rereads_the_run_mark_before_writing(world, capsys, deployed_by, expect, code):
+    """Revue finale 2.7.0 (m-b) : `--expect-run` refuse un registre recréé
+    entre le jugement du Défaire et la suppression ; rien n'est supprimé."""
+    assert deploy(capsys, *(["--origin", f"plan=site,run={deployed_by}"] if deployed_by else []))[0] == 0
+    capsys.readouterr()
+    assert cli.main(["delete", "amorcage", "--cluster", "harvlab2", "--expect-run", expect]) == code
+    assert (world["kube"].deleted == []) is (code != 0)
+    if code:
+        assert "undo-not-ours" in capsys.readouterr().err and rg.load(world["state"], "amorcage") is not None
