@@ -381,8 +381,18 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   accounts (`test_deploy_plans_260.py`, `test_registry_routes_260.py`),
   end time of the short actions (`test_artefacts_routes_260.py`); the
   bootstrap registry CLI tests no longer dial the real bench address.
-- API suite 11635 passed, 5 skipped; e2e 1251 passed, after the bench
-  fixes.
+- From the final review: two clusters in one namespace
+  (`test_capi_registries_260.py`), forget as a tracked action with one step
+  per Secret and a refusal half way (`test_deploy_plans_260.py`,
+  `test_registry_routes_260.py`), leftovers of a failed deployment listed,
+  deleted and taken over by their plan (`test_registry_seed_cli_260.py`,
+  `test_registry_routes_260.py`, `test_deploy_registry_260.py`), the VM
+  network warning in the three checks, the mandatory `sha256` of an
+  acknowledgement, `remove` without PyYAML; e2e: forget window, leftover
+  row, Delete on the cluster of the registry, Check greyed for a viewer,
+  no late check after Launch. Each with a mutation, caught.
+- API suite 11653 passed, 5 skipped; e2e 1256 passed (one known flaky
+  test of the update tab passed alone).
 
 ## [2.5.0] - 2026-11-05 - Deployment plans: Cluster API and child clusters
 
