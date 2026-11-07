@@ -67,6 +67,12 @@ class FakeArt(tc.FakeCapi):
                     for (ns, it), a in self.applied.items() if a["type"] == "manifest"], 0, None
         if sub == "manifest-check":
             self.reads.append((sub, spec))
+            name = spec["cluster"].split("/")[1]
+            c = self.clusters.get(name)
+            if c is not None and not c.get("ready"):
+                # revue 4-8 I1 : cluster en échec, son kubeconfig ne s'ouvre pas
+                return {"blocked": True, "findings": [{"code": "child-kubeconfig-missing", "level": "block",
+                                                        "facts": {}}]}, 2, None
             blocked = any(f["level"] == "block" for f in self.check_findings)
             return {"blocked": blocked, "findings": list(self.check_findings)}, 2 if blocked else 0, None
         if sub == "manifest-verify":
@@ -127,9 +133,12 @@ def art(capi, monkeypatch):
     monkeypatch.setattr(wapp, "_deploy_capi_json", fake.json)
     monkeypatch.setattr(wapp, "_vm_transfer_runner", fake.runner)
     capi["admin"] = {"ok": True}
-    monkeypatch.setattr(wapp, "_child_admin_allowed",
-                        lambda kc, ns, c: (capi["admin"]["ok"], "") if capi["admin"]["ok"] is not None
-                        else (None, "no answer"))
+    def admin(kc, ns, c):
+        cl = fake.clusters.get(c)
+        if cl is not None and not cl.get("ready"):
+            return None, "no answer (cluster not ready)"          # revue 4-8 I1
+        return (capi["admin"]["ok"], "") if capi["admin"]["ok"] is not None else (None, "no answer")
+    monkeypatch.setattr(wapp, "_child_admin_allowed", admin)
     package(capi["state"])
     declare(capi["state"])
     capi["capi"] = fake
@@ -207,6 +216,8 @@ def test_an_item_of_another_origin_blocks_the_launch(art, origin, cluster):
 
 
 def test_a_failed_cluster_skips_its_items_only(art):
+    """Revue 4-8 I1 : les rangées d'un cluster en échec ne passent plus par
+    le `before` (leur kubeconfig ne s'ouvre pas), les autres vont au bout."""
     fake = art["capi"]
     fake.outcome["harvlab-b"] = "error"
     tc.seed(art["client"], plan(items=(dict(MAN, clusters=["{{cluster}}-a", "{{cluster}}-b"]),), policies=(),

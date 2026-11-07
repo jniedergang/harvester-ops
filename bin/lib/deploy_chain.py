@@ -161,7 +161,7 @@ def _run_simple(ctx, ph, state, sleep, now):
             return PhaseOutcome("cancelled", items=out.items, message="cancelled", data=out.data), None
 
 
-def _done_elsewhere(state, dep):
+def done_elsewhere(state, dep):
     """Dépendance `<phase>:<élément>` vers un élément d'une phase déjà
     déroulée : faite si cet élément y est `done`."""
     pid, _, iid = dep.partition(":")
@@ -195,7 +195,7 @@ def _run_items(ctx, ph, state, previous, progress=None):
         else:
             prev = prev_items.get(item.id)
             blocked = [d for d in item.depends_on
-                       if (not _done_elsewhere(state, d) if ":" in d else status_of.get(d) != "done")]
+                       if (not done_elsewhere(state, d) if ":" in d else status_of.get(d) != "done")]
             if blocked:
                 entry.update(status="skipped", message=f"depends on {', '.join(blocked)}, not done")
             elif prev and prev.get("status") == "done" and _verified(ph.verify_item, ctx, state, prev):

@@ -34526,7 +34526,12 @@ def _deploy_artefacts_phase(run, cluster, kc_ref, dctx):
     by = (run.result or {}).get("by") or ""
 
     def before(ctx, state):
-        found = _deploy_artefacts_checks(kc_ref(), list(rows.values()), plan, dctx["values"], set(), cluster)
+        # revue 4-8 I1 : les rangées d'un cluster pas fait dans la phase
+        # Clusters sont sautées par le moteur ; leur kubeconfig ne s'ouvre
+        # pas, les contrôler bloquerait la phase entière
+        live = [r for r in rows.values() if all(_dch.done_elsewhere(state, d) for d in r["depends_on"]
+                                                if d.startswith("clusters:"))]
+        found = _deploy_artefacts_checks(kc_ref(), live, plan, dctx["values"], set(), cluster)
         blocking = _deploy_blocking(found)
         if blocking:
             return _dch.PhaseOutcome("error", message="blocked by the pre-check: " + ", ".join(
