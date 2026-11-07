@@ -52,7 +52,9 @@ class FakeUndo(ta.FakeArt):
     def json(self, kc, sub, args, spec=None, timeout=180):
         if sub == "manifest-verify":
             ns, _c, item = args[args.index("--name") + 1].split("/")
-            return {"present": (ns, item) in self.applied, "ok": (ns, item) in self.applied}, 0, None
+            a = self.applied.get((ns, item)) or {}
+            return {"present": (ns, item) in self.applied, "ok": (ns, item) in self.applied,
+                    "origin": dict(a.get("origin") or {})}, 0, None
         if sub == "manifest-remove" and "--dry-run" in args:
             ns, c, item = args[args.index("--name") + 1].split("/")
             return {"item": item, "cluster": f"{ns}/{c}", "cluster_present": True,
@@ -104,6 +106,14 @@ def undo(art, monkeypatch):
     monkeypatch.setattr(wapp, "_deploy_capi_json", fake.json)
     monkeypatch.setattr(wapp, "_vm_transfer_runner", fake.runner)
     monkeypatch.setattr(wapp, "_registry_cmd", lambda verb: [sys.executable, "/x/harvester-registry.py", verb])
+    fake.registry_origin = {"plan": "site", "run": "c0ffee000001"}
+
+    def registry_json(kc, sub, args, timeout=120):
+        assert sub == "registry:status", sub
+        present = rg.load(art["state"], args[0]) is not None
+        return {"registry": args[0], "declared": present, "present": present,
+                "origin": dict(fake.registry_origin) if present else {}}, 0, None
+    monkeypatch.setattr(wapp, "_deploy_registry_json", registry_json)
     destroys = []
 
     def tf_launch(cluster, kc, decl_id, mode, **kw):
@@ -116,7 +126,7 @@ def undo(art, monkeypatch):
         return rid, "h"
     monkeypatch.setattr(wapp, "_tf_decl_launch", tf_launch)
     # ce que la chaîne a laissé : un cluster enfant, deux artefacts, un registre, une déclaration
-    fake.clusters["web"] = {"origin": {"plan": "site"}, "ready": True, "failed": False}
+    fake.clusters["web"] = {"origin": {"plan": "site", "run": "c0ffee000001"}, "ready": True, "failed": False}
     for it, kind in (("podinfo", "chart"), ("regles", "manifest")):
         fake.applied[("web", it)] = {"type": kind, "cluster": "web", "package": "socle", "version": "2026.11",
                                      "origin": {"plan": "site", "run": "c0ffee000001"}, "ready": True}
@@ -237,6 +247,8 @@ def test_registry_data_needs_its_own_typed_name(undo):
     rg.save(undo["state"], "amorcage", {"kind": "bootstrap", "endpoint": "172.16.2.76", "usage": ["images"],
                                         "mirrors": [], "clusters": ["harvlab"], "cluster": "harvlab",
                                         "address": "172.16.2.76", "size_gib": 8, "storage_class": "harv-rep1"})
+    for k in ("undone_by", "undone_at", "undone_status"):        # un déroulé neuf (C1 b : un défait ne se refait pas)
+        undo["orig"].result.pop(k, None)
     finish(launch(undo, include=[reg], delete_data=["amorcage"], confirm_registry={"amorcage": "amorcage"}))
     assert undo["undo"].removals[-1][1][-1] == "--delete-data"
 
@@ -281,8 +293,46 @@ def test_a_dry_run_is_not_a_target(undo):
 
 def test_no_undo_of_the_undo(undo):
     run = finish(launch(undo))
-    r = undo["client"].post("/api/deploy/harvlab/undo", json={"action_id": run.id, "confirm": "harvlab"})
-    assert r.status_code == 400 and r.get_json()["error"] == "not a deployment run"
+    for path in ("/api/deploy/harvlab/undo", "/api/deploy/harvlab/undo/plan"):
+        r = undo["client"].post(path, json={"action_id": run.id, "confirm": "harvlab"})
+        assert r.status_code == 400 and r.get_json()["code"] == "undo-of-undo", r.get_json()
+
+
+def test_a_run_already_fully_undone_is_refused(undo):
+    """Revue 4-8 C1 (b) : un déroulé entièrement défait ne se défait plus."""
+    run = finish(launch(undo))
+    assert undo["orig"].result["undone_status"] == "done"
+    removals = list(undo["undo"].removals)
+    r = launch(undo)
+    assert r.status_code == 409 and r.get_json()["code"] == "undo-already-done", r.get_json()
+    assert r.get_json()["undone_by"] == run.id
+    assert undo["undo"].removals == removals
+
+
+def test_undo_leaves_what_another_run_recreated(undo):
+    """Revue 4-8 C1 (a) : un objet du même nom recréé par une autre exécution
+    (ou à la main, sans marque) n'est jamais touché ; il est nommé."""
+    fake = undo["undo"]
+    fake.clusters["web"]["origin"] = {"plan": "site", "run": "beef00000002"}          # recréé par B
+    fake.applied[("web", "podinfo")]["origin"] = {"plan": "site", "run": "beef00000002"}
+    fake.applied[("web", "regles")]["origin"] = {}                                    # recréé à la main
+    fake.registry_origin = {"plan": "site", "run": "beef00000002"}
+    body = plan_of(undo, include=["chart-web/web/podinfo", "manifest-web/web/regles", "capi-cluster-web/web",
+                                  "registry-harvlab/amorcage"]).get_json()
+    by = {i["kind"]: i for i in body["items"]}
+    for kind in ("chart", "manifest", "capi-cluster", "registry"):
+        assert by[kind]["details"]["not_ours"] is True, (kind, by[kind]["details"])
+    run = finish(launch(undo, include=["chart-web/web/podinfo", "manifest-web/web/regles", "capi-cluster-web/web",
+                                       "registry-harvlab/amorcage"]))
+    got = items_of(run)
+    assert fake.removals == [] and undo["destroys"] == []
+    assert got["chart-web/web/podinfo"]["status"] == "error"
+    assert got["chart-web/web/podinfo"]["message"].startswith("undo-not-ours")
+    assert got["manifest-web/web/regles"]["message"].startswith("undo-not-ours")
+    assert got["capi-cluster-web/web"]["status"] in ("error", "skipped")
+    assert got["registry-harvlab/amorcage"]["message"].startswith("undo-not-ours")
+    assert "web" in fake.clusters and rg.load(undo["state"], "amorcage") is not None
+    assert run.result["status"] != "done"
 
 
 def test_a_run_of_another_cluster(undo):

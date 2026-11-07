@@ -35254,6 +35254,11 @@ def _undo_chain(cluster, action_id):
     """(exécution d'origine, résultats de sa chaîne, None) ou (None, None,
     (corps, statut)). Gardes : un déroulé `deploy:` de ce cluster, fini,
     pas un essai."""
+    a = _action_read(action_id)
+    if a and str(a.get("action") or "").startswith(DEPLOY_UNDO_PREFIX):
+        # point 214 : pas de « défaire le défaire », on relance le plan
+        return None, None, ({"error": "this is an undo: apply the plan again instead", "code": "undo-of-undo",
+                             "fields": ["action_id"]}, 400)
     prev, err = _deploy_previous(action_id)
     if err:
         return None, None, err
@@ -35284,29 +35289,61 @@ def _undo_collect(cluster, action_id):
         d = TF_DECLS.get(decl_id)
         return d if d and d.get("cluster") == cluster else None
     undos = _du.collect(results, tf_lookup, plan=(prev["result"] or {}).get("plan"), cluster=cluster)
+    # revue 4-8 C1 : les exécutions de la chaîne, seules à pouvoir prouver
+    # qu'un objet trouvé sous ce nom est bien celui qu'elles ont créé
+    prev["chain_runs"] = sorted({r["_run"] for r in results})
     return prev, undos, None
 
 
-def _undo_present(kc, cluster, u, services=None):
-    """Vrai si ce que désigne l'élément est encore là ; None si la lecture
-    échoue (jamais pris pour « parti »)."""
+def _undo_target(kc, cluster, u, runs, services=None):
+    """État de ce que désigne l'élément : (« absent » | « ours » |
+    « foreign », exécution lue) ou (None, None) si la lecture échoue
+    (jamais pris pour « parti »). Revue 4-8 C1 : un objet n'est à nous que
+    s'il porte l'annotation `plan-run` d'une exécution de la chaîne défaite
+    (`runs`) ; un objet du même nom recréé par un autre déroulé ou à la
+    main est « foreign » et n'est jamais touché. Une déclaration Terraform
+    se désigne par son identifiant, unique et jamais réattribué, et son
+    origine ne change jamais (tf_store) : sa présence suffit."""
     kind, ref = u["kind"], u["ref"]
+
+    def judge(present, origin):
+        if not present:
+            return "absent", None
+        run_id = (origin or {}).get("run")
+        return ("ours" if run_id in runs else "foreign"), run_id
     if kind == "chart":
         ns, _c, item = ref.split("/")
         if services is None:
             services, _rc, err = _deploy_capi_json(kc, "services", ["--json"], timeout=60)
             if err:
-                return None
-        return any((s.get("namespace"), s.get("name")) == (ns, item) for s in (services or {}).get("services") or [])
+                return None, None
+        s = next((x for x in (services or {}).get("services") or [] if (x.get("namespace"), x.get("name")) == (ns, item)),
+                 None)
+        art = (s or {}).get("artefact") or {}
+        return judge(s is not None, art.get("origin"))
     if kind in ("manifest", "policies"):
         out, _rc, err = _deploy_capi_json(kc, "manifest-verify", ["--name", ref], timeout=120)
-        return None if err else bool((out or {}).get("present"))
+        if err:
+            return None, None
+        return judge(bool((out or {}).get("present")), (out or {}).get("origin"))
     if kind == "capi-cluster":
         out, _rc, err = _deploy_capi_json(kc, "state", ["--name", ref, "--json"], timeout=60)
-        return None if err else bool((out or {}).get("present"))
+        if err:
+            return None, None
+        return judge(bool((out or {}).get("present")), (out or {}).get("origin"))
     if kind == "registry":
-        return _rg.load(_bm_profiles_state(), ref.split("/", 1)[1]) is not None
-    return TF_DECLS.get(ref) is not None
+        name = ref.split("/", 1)[1]
+        st, _rc, err = _deploy_registry_json(kc, "registry:status", [name, "--cluster", cluster])
+        if err:
+            return None, None
+        return judge(_rg.load(_bm_profiles_state(), name) is not None or bool((st or {}).get("present")),
+                     (st or {}).get("origin"))
+    return ("ours", None) if TF_DECLS.get(ref) is not None else ("absent", None)
+
+
+def _undo_not_ours(run_id):
+    return (f"undo-not-ours: recreated by run {run_id}, left untouched" if run_id
+            else "undo-not-ours: no mark of this run (recreated by hand?), left untouched")
 
 
 def _undo_details(kc, cluster, u, services):
@@ -35368,8 +35405,14 @@ def _undo_plan_body(cluster, kc, action_id, include=None):
     services, _rc, serr = _deploy_capi_json(kc, "services", ["--json"], timeout=60) if any(
         u["kind"] == "chart" for u in undos) else ({}, 0, None)
     items = []
+    runs = set(prev["chain_runs"])
     for u in sorted(undos, key=lambda x: _du.KINDS_ORDER.index(x["kind"])):
         det = {"error": serr} if serr and u["kind"] == "chart" else _undo_details(kc, cluster, u, services)
+        if "error" not in det:
+            seen, run_id = _undo_target(kc, cluster, u, runs, services)
+            if seen == "foreign":
+                # revue 4-8 C1 : dit avant, jamais touché pendant
+                det = dict(det, not_ours=True, note=_undo_not_ours(run_id), recreated_by=run_id or "")
         items.append(dict(u, selected=u["id"] in steps, details=det))
     res = prev["result"] or {}
     return {"undoes": action_id, "plan": res.get("plan"), "cluster": cluster, "items": items,
@@ -35398,10 +35441,12 @@ def _deploy_result_patch(action_id, patch):
         log_actions.warning("undo mark %s: %s", action_id, e)
 
 
-def _undo_phases(run, cluster, kc, steps, delete_data):
+def _undo_phases(run, cluster, kc, steps, delete_data, runs):
     """Phases du défaire (une par phase de deploy_undo.ORDER), branchées sur
-    les gestes existants en actions filles."""
+    les gestes existants en actions filles. `runs` : exécutions de la chaîne
+    défaite (revue 4-8 C1, seul ce qui en porte une est retiré)."""
     by_id = {s["id"]: s for s in steps}
+    runs = set(runs)
     state = _bm_profiles_state()
 
     def wait(child, timeout=None):
@@ -35420,11 +35465,14 @@ def _undo_phases(run, cluster, kc, steps, delete_data):
         u = by_id[item.id]
         kind, ref = u["kind"], u["ref"]
         data = {"kind": kind, "ref": ref, "actions": []}
-        present = _undo_present(kc, cluster, u)
-        if present is None:
+        seen, run_id = _undo_target(kc, cluster, u, runs)
+        if seen is None:
             return _dch.ItemOutcome("error", "state unreadable", data=data)
-        if not present:
+        if seen == "absent":
             return _dch.ItemOutcome("done", "already gone", data=data)
+        if seen == "foreign":
+            data["recreated_by"] = run_id or ""
+            return _dch.ItemOutcome("error", _undo_not_ours(run_id), data=data)
         if kind == "chart":
             ns, _c, it = ref.split("/")
             child, err = capi("service-remove", ["--name", f"{ns}/{it}", "--timeout", str(UNDO_CHART_TIMEOUT)],
@@ -35456,7 +35504,7 @@ def _undo_phases(run, cluster, kc, steps, delete_data):
             return _dch.ItemOutcome("error", err, data=data)
         data["actions"].append(child.id)
         status = wait(child, timeout)
-        if status == "done" and _undo_present(kc, cluster, u) is False:
+        if status == "done" and _undo_target(kc, cluster, u, runs)[0] == "absent":
             return _dch.ItemOutcome("done", "removed", data=data)
         return _dch.ItemOutcome("error", f"removal failed (action {child.id})", data=data)
 
@@ -35484,11 +35532,11 @@ def _undo_phases(run, cluster, kc, steps, delete_data):
 
     def verify_item(ctx, st, prev):
         u = by_id.get(prev.get("id"))
-        return bool(u) and _undo_present(kc, cluster, u) is False
+        return bool(u) and _undo_target(kc, cluster, u, runs)[0] == "absent"
     return _du.phases(steps, run_item, verify_item)
 
 
-def _undo_runner(run, cluster, kc, steps, delete_data, previous, orig_id, lock_fd):
+def _undo_runner(run, cluster, kc, steps, delete_data, previous, orig_id, lock_fd, runs):
     try:
         run.status = "running"
         run.emit({"type": "status", "status": "running", "ts": time.time()})
@@ -35496,7 +35544,7 @@ def _undo_runner(run, cluster, kc, steps, delete_data, previous, orig_id, lock_f
         ctx = _DeployCtx(run, base)
         res = None
         try:
-            res = _dch.run(ctx, _undo_phases(run, cluster, kc, steps, delete_data), previous=previous,
+            res = _dch.run(ctx, _undo_phases(run, cluster, kc, steps, delete_data, runs), previous=previous,
                            order=_du.ORDER, secrets=_sst.store())
         except BaseException as e:
             log.exception("undo %s", run.id)
@@ -35533,6 +35581,12 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
     prev, undos, err = _undo_collect(cluster, action_id)
     if err:
         return err
+    res = prev["result"] or {}
+    if res.get("undone_status") == "done":
+        # revue 4-8 C1 (b) : tout est déjà défait ; ce qui porte ces noms
+        # aujourd'hui a été recréé depuis, par un autre déroulé ou à la main
+        return {"error": "this run is already undone; apply the plan again to recreate it",
+                "code": "undo-already-done", "undone_by": res.get("undone_by") or ""}, 409
     chosen, err = _undo_include(undos, include)
     if err:
         return err
@@ -35550,7 +35604,6 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
             # point 210 : les données d'un registre partent sur un second nom tapé
             return {"error": f"type the registry name {name} to delete its data", "code": "confirm-name",
                     "fields": ["confirm_registry"]}, 400
-    res = prev["result"] or {}
     previous = None
     last = _action_read(res.get("undone_by"))
     if last and last["action"] == f"{DEPLOY_UNDO_PREFIX}{cluster}" and last["result"].get("undoes") == action_id:
@@ -35577,7 +35630,7 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
                 ACTIONS[run_id] = run
             READ_SHARE.invalidate("_activity")
             threading.Thread(target=_undo_runner, args=(run, cluster, kc, steps, set(delete_data), previous,
-                                                        action_id, lock_fd),
+                                                        action_id, lock_fd, prev["chain_runs"]),
                              daemon=True, name=f"undo-{run_id}").start()
         except BaseException:
             _flock_release(lock_fd)

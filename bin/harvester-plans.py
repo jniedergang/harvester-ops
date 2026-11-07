@@ -10,7 +10,7 @@
                   [--update-declarations]
   harvester-plans [--state-dir D] [--json] resume ACTION_ID [--secrets-file s.yaml | --secrets-stdin]
                   [--confirm-system HOST=NAME]...
-  harvester-plans [--state-dir D] [--json] undo ACTION_ID [--dry-run] [--include registry,unproven]
+  harvester-plans [--state-dir D] [--json] undo ACTION_ID [--dry-run] [--include registry,unproven,modified]
                   [--confirm CLUSTER] [--delete-registry-data NAME]...
   harvester-plans [--state-dir D] [--json] install PLAN --profile P --nodes nodes.csv --cluster-name C --vip V
                   [--iso I] [--vars vars.yaml] [--concurrency N] [--confirm-system HOST=NAME]...
@@ -32,9 +32,11 @@ enregistrée dans l'historique du répertoire d'état.
 chaîne de reprises ont créé, dans l'ordre inverse : artefacts, clusters
 enfants, registre d'amorçage, contenu Terraform ; jamais l'installation de
 Harvester ni la pile Cluster API. `--dry-run` rend le plan de destruction
-sans rien écrire. Par défaut, le registre d'amorçage et les déclarations
-dont la création n'est pas prouvée (ou modifiées depuis) restent ;
-`--include registry,unproven` les ajoute. Les données d'un registre ne
+sans rien écrire. Par défaut, le registre d'amorçage, les déclarations
+dont la création n'est pas prouvée et celles modifiées depuis restent ;
+`--include registry,unproven,modified` les ajoute (chaque catégorie à part).
+Seul ce qui porte encore la marque d'une exécution de la chaîne est retiré ;
+un objet du même nom recréé depuis est laissé et nommé (`undo-not-ours`). Les données d'un registre ne
 partent que par `--delete-registry-data NOM`. `--confirm` porte le nom du
 cluster Harvester ; relancer `undo` sur la même exécution reprend.
 
@@ -358,15 +360,19 @@ def cmd_install(args, state):
     return _launched(app, body, status)
 
 
-UNDO_CATEGORIES = ("registry", "unproven")
+UNDO_CATEGORIES = ("registry", "unproven", "modified")
 
 
 def cmd_undo(args, state):
     app = _console(state)
-    prev, err = app._deploy_previous(args.action_id)
-    if err:
-        raise Refused(err[0]["error"], err[0].get("code") or "refused")
-    cluster = str(prev["action"])[len(app.DEPLOY_PREFIX):]
+    a = app._action_read(args.action_id)
+    if a and str(a.get("action") or "").startswith(app.DEPLOY_UNDO_PREFIX):
+        cluster = str(a["action"])[len(app.DEPLOY_UNDO_PREFIX):]
+    else:
+        prev, err = app._deploy_previous(args.action_id)
+        if err:
+            raise Refused(err[0]["error"], err[0].get("code") or "refused")
+        cluster = str(prev["action"])[len(app.DEPLOY_PREFIX):]
     kc = _cluster_kc(app, cluster)
     cats = [c for c in (args.include or "").split(",") if c]
     bad = [c for c in cats if c not in UNDO_CATEGORIES]
@@ -379,7 +385,9 @@ def cmd_undo(args, state):
             raise Refused(uerr[0]["error"], uerr[0].get("code") or "refused")
         include = [u["id"] for u in undos if u["default"]
                    or ("registry" in cats and u["kind"] == "registry")
-                   or ("unproven" in cats and u["kind"] == "tf-declaration")]
+                   or ("unproven" in cats and u["kind"] == "tf-declaration" and u.get("proven") is False)
+                   or ("modified" in cats and u["kind"] == "tf-declaration"
+                       and app._du.MODIFIED in (u.get("note") or ""))]
     if args.dry_run:
         body, status = app._undo_plan_body(cluster, kc, args.action_id, include)
         if status != 200:
@@ -435,7 +443,8 @@ def build_parser():
     sp.add_argument("action_id")
     sp.add_argument("--dry-run", action="store_true", help="show the destruction plan, write nothing")
     sp.add_argument("--include", help="also undo: registry (bootstrap registry posed by the plan), "
-                                      "unproven (declarations whose creation is not proven or that changed)")
+                                      "unproven (declarations whose creation is not proven), "
+                                      "modified (declarations changed since they were applied)")
     sp.add_argument("--confirm", help="name of the Harvester cluster (required to undo)")
     sp.add_argument("--delete-registry-data", action="append", metavar="NAME",
                     help="also delete the data volume of this bootstrap registry")
