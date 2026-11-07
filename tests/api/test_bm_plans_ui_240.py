@@ -45,7 +45,9 @@ FINDING_CODES = ["plan-invalid", "phase-not-available", "template-missing", "var
                  "publish-later", "cluster-registry-later", "registry-address-answers", "registry-address-in-pool",
                  "registry-address-vip", "registry-room-short", "registry-not-attached", "registry-unreachable",
                  "publish-tag-differs", "cluster-registry-not-attached", "cluster-registry-no-fallback-system",
-                 "registry-vm-network-unchecked", "cluster-registry-vm-network-unchecked"]  # revue finale I-4
+                 "registry-vm-network-unchecked", "cluster-registry-vm-network-unchecked",  # revue finale I-4
+                 # 2.6.1 : sonde du réseau des VMs
+                 "cluster-registry-unreachable-from-vm-network", "cluster-registry-vm-network-ok"]
 
 
 # --- onglet, historique, page d'hôte (source) ----------------------------------

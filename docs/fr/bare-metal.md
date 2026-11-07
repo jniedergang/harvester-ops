@@ -899,10 +899,12 @@ registre existe déjà. Leurs constats apparaissent avec leurs propres codes
   publication est vérifiée une fois qu'il est là), `cluster-registry-later`
   (un cluster enfant emploie un registre de la phase Registre : revérifié
   au début de la phase Clusters).
-- Avertissement : `registry-vm-network-unchecked` et
-  `cluster-registry-vm-network-unchecked` (la joignabilité n'est vérifiée
-  que depuis le cluster Harvester, pas depuis le réseau des VMs ; voir
-  [artefacts.md](artefacts.md)).
+- Avertissement : `registry-vm-network-unchecked` (le registre d'amorçage
+  est sondé depuis le réseau des VMs au contrôle des clusters),
+  `cluster-registry-unreachable-from-vm-network` (bloquant quand le
+  cluster coupe le repli vers Internet) et
+  `cluster-registry-vm-network-unchecked` (la pod sonde n'a pas pu juger,
+  avec la raison) ; voir [artefacts.md](artefacts.md).
 
 **Reprise d'un registre.** Un registre d'amorçage posé par un plan porte
 son origine (l'étiquette `harvester-ops.io/plan`, l'annotation

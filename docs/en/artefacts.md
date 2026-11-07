@@ -228,25 +228,78 @@ they arrive on standard input, never in an argument.
   never leaves that namespace: child clusters get the read account only.
 
 **Check** (operators) reads the accounts on the cluster and probes the
-registry from the console, with each account, without writing. Findings:
-`registry-unknown`, `registry-not-attached`, `registry-unreachable`,
-`registry-ca-invalid`, `registry-auth-refused`, `registry-no-usage`
-(blocking); `registry-pull-is-push`, `registry-insecure`,
-`registry-vm-network-unchecked` (warnings). `registry-insecure` comes from
+registry from the console, with each account, without writing. Pick a
+**VM network** next to the button to probe it also from that network (see
+below). Findings: `registry-unknown`, `registry-not-attached`,
+`registry-unreachable`, `registry-ca-invalid`, `registry-auth-refused`,
+`registry-no-usage` (blocking); `registry-pull-is-push`,
+`registry-insecure`, `registry-write-port-open` (bootstrap registry whose
+write port accepts every address, see Settings > Registries),
+`registry-unreachable-from-vm-network`, `registry-vm-network-unchecked`
+(warnings); `registry-vm-network-ok` (information). `registry-insecure` comes from
 `insecure_skip_verify: true` in a declaration file: the nodes then do not
 check the certificate.
 
-**Registry reachability is checked from the Harvester cluster only, not
-from the VM network.** The console and the Harvester cluster probe the
-address; no check runs from the network of the child VMs. Every check says
-so with a warning: `registry-vm-network-unchecked` (Check, bootstrap
-registry window and plan checks) and `cluster-registry-vm-network-unchecked`
-(creation check of a child cluster, one per registry that serves images).
-A VM network that cannot route to the registry (VLAN without a route,
-firewall) is not detected: the nodes then fall back to the Internet, or
-fail to pull when `no_fallback` is set. Make sure the child VMs reach the
-address before you rely on it. A probe pod attached to the VM network
-comes in 2.6.1.
+**Reachability from the VM network (2.6.1).** The console and the
+Harvester cluster reaching a registry does not mean the child VMs do: a
+VM network can lack a route to it (VLAN without a route, firewall). So the
+checks run a short-lived **probe pod** attached to the VM network, as a VM
+would be:
+
+- It is a Job in its own namespace, `harvester-ops-probe`, attached by
+  Multus to the network (NetworkAttachmentDefinition), on the nodes that
+  carry its cluster network. The image is `bci-busybox`, shipped in the
+  registry bundle and pinned by digest; it is imported on the nodes with a
+  bootstrap registry (on a cluster without one, the node pulls it from
+  `registry.suse.com`, or the probe says the image is missing).
+- It takes an address the way a VM does: the one the IPAM of the network
+  gives, otherwise a DHCP lease, given back when the probe ends.
+- For each address it tests, in order: the name with the DNS server the
+  network gives (when the registry is a name), a route through the VM
+  network, a TCP connection, then a TLS handshake with the name sent as
+  SNI (an HTTP answer, 401 included). The CA itself is checked by the
+  console, not by the probe. The TLS client of the probe (BusyBox) reads
+  RSA and ECDSA certificates only.
+- An address given by the IPAM of the network without a gateway (for a
+  registry outside its subnet) or without a DNS server (for a registry
+  given by name) is not judged: a VM may receive them otherwise. The
+  finding then says so (`ipam-incomplete`) instead of "unreachable".
+- Least privilege: capabilities `NET_ADMIN` (address and routes) and
+  `NET_RAW` (DHCP socket) only, all others dropped, no service account
+  token, read-only filesystem but a 1 MiB `/tmp` in memory, 32 MiB of
+  memory. These are the capabilities the spike of 2.6.0 proved enough.
+- It is removed at the end of every check, success or failure; the Job
+  also has a deadline and `ttlSecondsAfterFinished`, so it goes away even
+  if the console stops in the middle.
+- It needs the right to create a Job in `harvester-ops-probe` (and the
+  namespace the first time). Without it, the check says so.
+
+Where it runs: **Check** of a registry with a VM network chosen (a fresh
+probe each time), and the creation check of a child cluster and the plan
+checks, from the main network of the cluster (`network`), once for all
+its registries that serve images. These checks are run again as you type
+in the creation window: a result is kept 5 minutes per Harvester cluster,
+network and addresses, so typing does not start a pod each time. A probe
+that could not judge is not kept (it often depends on the rights of the
+person). A
+bootstrap registry posed by a plan is probed when the Clusters phase
+starts (it does not answer before).
+
+Findings: `cluster-registry-vm-network-ok` (information, with the probe
+address), `cluster-registry-unreachable-from-vm-network` (with the step
+that failed: name, route, TCP or TLS; a warning, **blocking when the
+cluster cuts the fallback to the Internet**, since its nodes would then
+pull nothing), and `cluster-registry-vm-network-unchecked` when the probe
+cannot judge, with the reason: no VM network, network not found, rights
+missing, probe image missing, no address (no DHCP lease within 20 s and no
+IPAM), address of the IPAM without gateway or DNS, pod not started (the
+Multus or scheduling message), no result in time. Same codes without the `cluster-` prefix for Check. The bootstrap
+registry window says `registry-vm-network-unchecked`: the address is not
+served yet, it is probed when a child cluster or a plan uses it.
+
+Limits: the probe is a pod on a Harvester node, not a VM; it uses the main
+network of the cluster only; a firewall that treats pods and VMs
+differently (by MAC address, for instance) is not seen.
 
 **Forget** removes the Secrets of the registry (both accounts and the CA)
 from every attached Harvester cluster, with your identity, then the
@@ -300,10 +353,43 @@ authentication of Distribution has no rights (any account could write):
 | 443 | read only (any write gets 405) | `push` and `pull` |
 | 5443 | read and write | `push` only |
 
-The child clusters read on 443. The console publishes on 5443. Port 5443
-is open to every machine that reaches the address, the VM networks
-included: a write still needs the `push` account, and the `pull` account
-is refused there.
+The child clusters read on 443. The console publishes on 5443. Since
+2.6.1 the two ports are **two LoadBalancer Services at the same address**
+(`<name>` for 443, `<name>-write` for 5443), both served by the kube-vip of
+Harvester, so that the write port can be reserved to the console.
+
+**Write port reserved to the console (2.6.1).** Settings > Registries
+(administrators) holds the networks of the console allowed on 5443
+(IPv4 addresses or networks, comma separated). The window suggests the
+address the console leaves from toward each cluster that carries a
+bootstrap registry. The setting is read at each gesture, without restart.
+
+- It becomes `loadBalancerSourceRanges` on the `<name>-write` Service:
+  another host gets no answer on 5443 (the connection times out), port 443
+  stays open to every address. A single Service with source ranges would
+  cut 443 for the VMs too, hence the second Service.
+- Saving the setting brings every bootstrap registry the console declares
+  to it: one tracked action per Harvester cluster
+  (`registry-write-access:<cluster>`, `harvester-registry write-access`),
+  with your identity. This is also how a registry posed by 2.6.0 (5443 on
+  its main Service) is migrated: the port leaves the main Service first,
+  then the write Service is posed, so writes stop for a few seconds and
+  reads never. A new bootstrap registry is posed with the setting.
+- Empty, the write port accepts every address, as in 2.6.0, and Check
+  says `registry-write-port-open`. A damaged settings file is never read
+  as "open": deploying and `write-access` are refused until the setting is
+  saved again.
+- A bootstrap registry name cannot end with `-write` (the name of the
+  write Service of another registry), and Delete removes only the objects
+  labelled with the registry name.
+- What it protects: the write port from the other hosts of the networks
+  that reach the address (the child VMs included). What it does not: it is
+  not authentication (a write still needs the `push` account, and `pull`
+  is refused there); it does not see through a NAT or a proxy (the cluster
+  must see the real address of the console: behind a NAT, give the
+  translated address); and it filters on the address that reaches the
+  Harvester node, so a host that can borrow an allowed address gets
+  through.
 
 - **TLS always.** The console generates a CA (10 years) and a server
   certificate (2 years), or takes your certificate (`--cert`, `--key`,
@@ -492,7 +578,7 @@ as in 2.5.0.
 ```
 harvester-registry declare NAME --file r.yaml|- [--revision N]
 harvester-registry attach  NAME --cluster C          (accounts as JSON on stdin)
-harvester-registry check   NAME --cluster C
+harvester-registry check   NAME --cluster C [--vm-network NS/NAME]
 harvester-registry list | show NAME | forget NAME [--kubeconfig-for C=FILE ...]
 harvester-registry deploy  NAME --cluster C --address IP --size-gib N --storage-class S
                            [--dns-name N] [--mirrors h1,h2] [--cert F --key F --ca F]
@@ -500,10 +586,15 @@ harvester-registry deploy  NAME --cluster C --address IP --size-gib N --storage-
 harvester-registry status  NAME --cluster C
 harvester-registry leftovers   --cluster C
 harvester-registry delete  NAME --cluster C [--delete-data]
+harvester-registry write-access [NAME] --cluster C
+harvester-registry settings [--write-sources A,B | --clear]
 ```
 
 `attach` reads `{"push": {"username", "password"}, "pull": {...}}` on
-standard input. `deploy --dry-run` runs the checks only. Exit codes: 0
+standard input. `deploy --dry-run` runs the checks only. `check
+--vm-network` adds the probe from that VM network. `settings` shows or
+sets the networks of the console allowed on the write port; `write-access`
+brings the bootstrap registries of a cluster (or the one named) to it. Exit codes: 0
 success, 1 failure, 2 refused (a blocking finding, a registry in use...).
 
 ## Not in 2.6.0
@@ -519,19 +610,8 @@ success, 1 failure, 2 refused (a blocking finding, a registry in use...).
 - Pointing the `containerd-registry` setting of the Harvester nodes at the
   declared registries: the setting stays a manual gesture (Settings).
 - Garbage collection and resizing of a bootstrap registry.
-- Probing the registry from the VM network: the checks warn that
-  reachability is checked from the Harvester cluster only (see Check
-  above). The probe pod comes in 2.6.1; its image (`bci-busybox`) is
-  already in the registry bundle of 2.6.0, imported on the nodes with the
-  registry image, and used by nothing else yet.
-- Restricting the write port 5443 to the address of the console. Tried
-  on the bench: a second LoadBalancer Service on the same address, with
-  the write port only and `loadBalancerSourceRanges` set to the console
-  address, shares the address through the kube-vip of Harvester, and the
-  range is enforced (the console got 401 and then 200 with `push`, another
-  host of the LAN timed out, port 443 stayed open to all). Not delivered:
-  it needs the source address of the console as the cluster sees it,
-  which is a setting to design (NAT, container network).
+- The probe from the VM network and the write port reserved to the
+  console came in 2.6.1 (see above).
 
 **Seen for real (2.6.0).** Bench harvlab2 (Harvester v1.9.0, one nested
 node, 32 GiB), console of this release, 7 November 2026.
@@ -586,7 +666,34 @@ node, 32 GiB), console of this release, 7 November 2026.
   `storage-minimal-available-percentage` was lowered from 25 to 15 during
   each creation, then set back.
 
-Not verified for real: a client Harbor, a child cluster bootstrapped
+**Seen for real (2.6.1).** Bench harvlab2, console of this release,
+7 November 2026. Bootstrap registry of 8 GiB at 172.16.2.76.
+
+- **Probe from `default/lab-net`** (untagged, Pi-hole DHCP): lease
+  obtained and given back (absent from the DHCP leases after), TLS
+  handshake done, `registry-vm-network-ok` in 11 to 14 s; the creation
+  check of a child cluster on this network gave
+  `cluster-registry-vm-network-ok`. No Job nor pod left in
+  `harvester-ops-probe` after any check.
+- **Networks that cannot reach the registry**, made for the test on
+  VLAN 998 and 999: without DHCP nor IPAM, `registry-vm-network-unchecked`
+  with the reason `no-address` (28 s, the DHCP wait); a static IPAM
+  without gateway, the same with `ipam-incomplete` (7 s); a static IPAM
+  with a route through a gateway that does not exist,
+  `registry-unreachable-from-vm-network` (`tcp`), and in the creation
+  check of a child cluster that cuts the fallback,
+  `cluster-registry-unreachable-from-vm-network` blocking.
+- **Write port.** A registry shaped as in 2.6.0 (5443 on the main
+  Service, the port added by another field manager) was migrated by
+  saving `172.16.1.11/32`; a new registry was then posed with the setting.
+  Both times: two Services at the same address, 443 answering from node1
+  and from node2, 5443 answering from node1 (the console) and timing out
+  from node2. Check probed both accounts through it without finding.
+- The TLS step of the probe was also run against a TLS server behind a
+  reverse proxy on a local network: answer with the name in SNI, refused
+  without it.
+
+Not verified for real (2.6.0): a client Harbor, a child cluster bootstrapped
 entirely without the Internet (out of 2.6.0), a bootstrap registry on a
 cluster of several nodes, more than one child cluster on a registry at a
 time, packages of several gigabytes, and the resume of a publication

@@ -153,7 +153,8 @@ class Kube:
         return [s for s in self.secrets if all(s["metadata"].get("labels", {}).get(a) == b for a, b in want.items())]
 
     def get(self, kind, ns, name):
-        return {"metadata": {"name": name}}
+        # 2.6.1 : delete ne retire que les objets étiquetés au nom du registre
+        return {"metadata": {"name": name, "labels": {rg.LABEL: "amorcage"}}}
 
     def delete(self, kind, ns, name):
         self.deleted.append((kind, name))

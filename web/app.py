@@ -17548,7 +17548,9 @@ def _capi_registry_choices(cluster):
 @requires_auth
 @_rate_limit("30/minute")
 def api_capi_cluster_check(cluster):
-    """Contrôle préalable d'une demande de cluster. Ne modifie rien."""
+    """Contrôle préalable d'une demande de cluster. Ne modifie rien, sauf
+    la pod brève qui sonde ses registres depuis son réseau de VMs (2.6.1,
+    namespace harvester-ops-probe, retirée aussitôt)."""
     spec, err = _capi_spec_body()
     if err:
         return err
@@ -17558,7 +17560,7 @@ def api_capi_cluster_check(cluster):
     comp = _capi_components_dir()
     if comp:
         cmd += ["--components", str(comp)]
-    got, err = _capi_run_json(cmd + ["--spec", "-", "--json"], spec=spec, timeout=120)
+    got, err = _capi_run_json(cmd + ["--spec", "-", "--json"], spec=spec, timeout=180)
     if err:
         return err
     out, rc = got
@@ -35039,7 +35041,13 @@ def api_registry_attach(name, cluster):
 @_rate_limit("30/minute")
 def api_registry_check(name, cluster):
     """Constats d'un registre sur un cluster : Secrets posés, puis sondes de
-    lecture et d'écriture depuis la console, sans rien écrire."""
+    lecture et d'écriture depuis la console, sans rien écrire ; `vm_network`
+    (2.6.1, namespace/nom) : sonde aussi depuis ce réseau de VMs, par une pod
+    brève retirée aussitôt."""
+    b = request.get_json(silent=True) or {}
+    net = b.get("vm_network") if isinstance(b, dict) else None
+    if net and not (isinstance(net, str) and _cc.NS_NAME_RE.match(net)):
+        return jsonify({"error": "vm_network: expected namespace/name"}), 400
     if not _registry_name_ok(name) or _rg.load(_bm_profiles_state(), name) is None:
         return jsonify({"registry": name, "cluster": cluster,
                         "findings": _rg.check(None, {}, name), "blocked": True})
@@ -35049,13 +35057,113 @@ def api_registry_check(name, cluster):
     cmd = _registry_cmd("check")
     if cmd is None:
         return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
-    res, err = _capi_run_json(cmd + [name, "--cluster", cluster, "--kubeconfig", kc], timeout=90)
+    extra = ["--vm-network", net] if net else []
+    res, err = _capi_run_json(cmd + [name, "--cluster", cluster, "--kubeconfig", kc] + extra, timeout=180)
     if err:
         return err
     return jsonify(res[0])
 
 
 _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _registry_console_address(cluster):
+    """Adresse par laquelle la console sort vers le serveur d'API du
+    cluster (route du système, aucun paquet envoyé) : suggestion du réglage
+    du port d'écriture. None si elle ne se lit pas. Ce que le cluster voit
+    après une traduction d'adresses (NAT) n'est pas connaissable d'ici."""
+    import socket
+    from urllib.parse import urlparse
+    entry = _registry_cluster_entry(cluster)
+    host = None
+    try:
+        kc = yaml.safe_load(Path(entry["kubeconfig"]).read_text()) if entry and entry.get("kubeconfig") else None
+        host = urlparse(((kc or {}).get("clusters") or [{}])[0].get("cluster", {}).get("server") or "").hostname
+    except (OSError, ValueError, AttributeError, IndexError, yaml.YAMLError):
+        host = None
+    if not host:
+        return None
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as so:
+            so.connect((host, 6443))
+            ip = so.getsockname()[0]
+    except OSError:
+        return None
+    return ip if _IPV4_RE.match(ip) else None
+
+
+def _registry_cluster_entry(cluster):
+    for c in (load_config_ro().get("clusters") or []):
+        if isinstance(c, dict) and c.get("name") == cluster:
+            return c
+    return None
+
+
+def _registry_bootstrap_clusters():
+    """{cluster: [registres d'amorçage]} des déclarations de la console."""
+    out = {}
+    for s in _rg.list_decls(_bm_profiles_state()):
+        if not s.get("invalid") and s.get("kind") == "bootstrap" and s.get("cluster"):
+            out.setdefault(s["cluster"], []).append(s["name"])
+    return out
+
+
+@app.route("/api/registries/settings", methods=["GET"])
+@requires_auth
+def api_registries_settings_get():
+    """Réglages des registres (2.6.1) : réseaux de la console admis sur le
+    port d'écriture des registres d'amorçage, et la suggestion (adresse de
+    sortie de la console vers chaque cluster qui porte un tel registre, ou
+    vers `cluster` donné)."""
+    clusters = sorted(set(_registry_bootstrap_clusters()) | ({request.args["cluster"]}
+                                                           if request.args.get("cluster") else set()))
+    suggested = {}
+    for c in clusters:
+        ip = _registry_console_address(c)
+        if ip:
+            suggested[c] = f"{ip}/32"
+    try:
+        cur = _rg.settings(_bm_profiles_state())
+    except _rg.SettingsError as e:
+        cur = {"write_sources": [], "error": str(e)}
+    return jsonify(dict(cur, suggested=suggested, bootstrap=_registry_bootstrap_clusters()))
+
+
+@app.route("/api/registries/settings", methods=["PUT"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_registries_settings_put():
+    """Enregistre les réseaux de la console admis sur le port d'écriture
+    (vide : ouvert à toute adresse), puis porte chaque registre d'amorçage
+    au réglage : une action suivie `registry-write-access:<cluster>` par
+    cluster, avec l'identité de la personne (`harvester-registry
+    write-access`)."""
+    b = request.get_json(silent=True)
+    if not isinstance(b, dict) or set(b) != {"write_sources"}:
+        return jsonify({"error": "expected write_sources"}), 400
+    try:
+        saved = _rg.save_settings(_bm_profiles_state(), b["write_sources"])
+    except ValueError as e:
+        return jsonify({"error": str(e), "code": "invalid"}), 400
+    src = saved["write_sources"]
+    aid = _art_done_action("registries-settings", [(
+        "settings", (f"write port of the bootstrap registries reserved to {', '.join(src)}" if src
+                     else "write port of the bootstrap registries open to every address")
+        + f" (by {current_user() or '?'})")])
+    actions, skipped = [], []
+    for cluster in sorted(_registry_bootstrap_clusters()):
+        kc = _kubectl_for_cluster(cluster)
+        cmd = _registry_cmd("write-access")
+        if not kc or cmd is None:
+            skipped.append(cluster)
+            continue
+        run, err = _cli_action(cluster, f"registry-write-access:{cluster}",
+                               cmd + ["--cluster", cluster, "--kubeconfig", kc], "harvester-registry")
+        if err:
+            skipped.append(cluster)
+            continue
+        actions.append({"cluster": cluster, "action_id": run.id})
+    return jsonify(dict(saved, action_id=aid, actions=actions, skipped=skipped))
 
 
 @app.route("/api/registries/bootstrap/<cluster>", methods=["POST"])
@@ -35075,6 +35183,8 @@ def api_registry_bootstrap_deploy(cluster):
     errors = []
     if not _registry_name_ok(name) or name in _rg.RESERVED:
         errors.append(("name", f"RFC 1123, {_rg.NAME_MAX} characters at most"))
+    elif name.endswith(_rg.WRITE_NAME_SUFFIX):
+        errors.append(("name", f"cannot end with {_rg.WRITE_NAME_SUFFIX} (name of the write service)"))
     if not _IPV4_RE.match(address):
         errors.append(("address", "an IPv4 address"))
     if isinstance(size, bool) or not isinstance(size, int) or not 5 <= size <= 2048:

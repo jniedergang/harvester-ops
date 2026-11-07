@@ -4,6 +4,103 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.6.1] - 2026-11-07 - Registry reachability from the VM network, write port restricted to the console
+
+### Added
+- **Probe from the VM network** (point 192 of the 2.6.0 plan, promised for
+  2.6.1). The checks run a short-lived probe pod attached by Multus to the
+  VM network, as a VM would be: it takes the address of the network IPAM
+  or a DHCP lease (given back at the end), then tests, for each registry
+  address, the name with the DNS of the network, a route through it, TCP
+  and the TLS handshake. Job in its own namespace `harvester-ops-probe`,
+  image `bci-busybox` of the registry bundle (pinned), capabilities
+  `NET_ADMIN` and `NET_RAW` only, no service account token, read-only
+  filesystem; removed after each check, with a deadline and
+  `ttlSecondsAfterFinished` as a second net.
+  - Child cluster creation check and plan checks: from the main network
+    of the cluster, for its registries that serve images.
+    `cluster-registry-vm-network-ok`,
+    `cluster-registry-unreachable-from-vm-network` (with the failed step;
+    blocking when the cluster cuts the fallback to the Internet), and
+    `cluster-registry-vm-network-unchecked` with the reason when the probe
+    cannot judge (no network, network not found, rights, image missing,
+    no address, address of the IPAM without gateway or DNS, pod not
+    started, no result in time). A probed result is kept 5 minutes, so
+    typing in the creation window does not start a pod each time; a probe
+    that could not judge is not kept.
+  - TLS handshake by BusyBox `ssl_client` on the connection, with the
+    name as SNI (RSA and ECDSA certificates).
+  - Check of a registry: a **VM network** picker next to the button
+    (`harvester-registry check --vm-network NS/NAME`, `vm_network` in the
+    request); same codes without the `cluster-` prefix.
+- **Write port 5443 restricted to the console.** Settings > Registries
+  (administrators): the networks of the console allowed on the write port
+  of the bootstrap registries, with the address the console leaves from
+  toward each cluster suggested. Read at each gesture. The write port is
+  now a second LoadBalancer Service `<name>-write` at the same kube-vip
+  address, with `loadBalancerSourceRanges`; the main Service keeps 443
+  only, open to every address. `harvester-registry settings` and
+  `harvester-registry write-access`.
+- `registry-write-port-open` (warning) on Check of a bootstrap registry
+  whose write port accepts every address.
+
+### Changed
+- The warning "checked from the Harvester cluster only" is replaced by the
+  probe result. The bootstrap registry window still warns
+  (`registry-vm-network-unchecked`, reason `at-use`): the address is not
+  served yet, it is probed when a child cluster or a plan uses it.
+- The child cluster check route allows 180 s (the probe pod).
+- `settings` is a reserved registry name (route `/api/registries/settings`),
+  and a bootstrap registry name cannot end with `-write`.
+- Delete of a bootstrap registry removes only the objects labelled with
+  its name.
+- A damaged registry settings file refuses deploy and `write-access`
+  instead of opening the write port.
+
+### Upgrade and rollback
+- A bootstrap registry posed by 2.6.0 keeps 5443 on its main Service
+  until the setting is saved: saving brings every bootstrap registry the
+  console declares to it, one tracked action per Harvester cluster
+  (`registry-write-access:<cluster>`). The port leaves the main Service
+  first (merge patch, whatever field manager owns it), then the write
+  Service is posed: writes stop for a few seconds, reads never.
+- Back to 2.6.0: the registry keeps working for reads; 2.6.0 does not know
+  the `<name>-write` Service, so its deletion leaves it (remove it by
+  hand), and a redeploy by 2.6.0 puts 5443 back on the main Service.
+
+### Verified for real
+- harvlab2, bootstrap registry of 8 GiB at 172.16.2.76. Probe from
+  `default/lab-net`: DHCP lease obtained and given back, TLS handshake,
+  `registry-vm-network-ok` in 11 to 14 s, and
+  `cluster-registry-vm-network-ok` in the creation check of a child
+  cluster; nothing left in `harvester-ops-probe`. Test networks on VLAN
+  998 and 999: no address (`no-address`), static IPAM without gateway
+  (`ipam-incomplete`), route through a missing gateway (`tcp`, blocking in
+  the child check that cuts the fallback).
+- A registry shaped as in 2.6.0 migrated by saving `172.16.1.11/32`, then
+  a new registry posed with the setting: 443 open from node1 and node2,
+  5443 open from node1 (the console) and timing out from node2; Check
+  probed both accounts through it.
+- An independent review found false "unreachable" results on IPAM
+  networks, a missing SNI, a name collision with `-write` and a damaged
+  settings file read as open: fixed with tests, the final code run again
+  on the bench.
+- The first migration showed that applying the main Service server-side
+  did not remove a port owned by another field manager: the migration now
+  removes it by a merge patch.
+
+### Tests
+- `test_vm_probe_261.py`: manifest at least privilege, log parsing, each
+  path of a probe that cannot judge, cleanup on every path, cache, findings
+  and the child cluster check. `test_registry_write_access_261.py`:
+  sources, setting, migration of a 2.6.0 registry, CLI, routes and roles.
+  `test_registries_261.py` (e2e): VM network picker and translated
+  findings, Settings > Registries. Mutations checked (capabilities, cleanup,
+  blocking when the fallback is cut, migration patch, source ranges on the
+  wrong Service, cache, image reasons, 0.0.0.0/0, open write port, missing
+  network).
+- API `pytest tests/api/ -q -n 12`: 11779 passed, 5 skipped (two tests known to be intermittent under load passed on their own). e2e `pytest tests/e2e/ -q -n 8`: 1260 passed.
+
 ## [2.6.0] - 2026-11-07 - Artefact packages and registries
 
 ### Added
