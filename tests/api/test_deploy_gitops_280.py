@@ -517,3 +517,26 @@ def test_the_command_line_reads_the_git_secrets_from_the_secrets_file(tmp_path):
     f.chmod(0o600)
     got, err = wapp._deploy_gitops_secrets(web_loader.read_secrets(str(f)).get("gitops_secrets"))
     assert err is None and got == {"depot": {"username": "u", "password": "p"}}
+
+
+@pytest.mark.parametrize("external,tool,codes", [
+    (True, "auto", {("clusters", "rancher-session-in-chain"), ("gitops", "rancher-session-in-chain")}),
+    (True, "fleet", {("clusters", "rancher-session-in-chain"), ("gitops", "rancher-session-in-chain")}),
+    (False, "auto", set()),
+])
+def test_a_chain_that_installs_the_cluster_refuses_rancher_at_launch(git, external, tool, codes):
+    """Revue finale 2.8.0 I-3 : une chaîne qui installe le cluster Harvester
+    n'a pas de session Rancher ; l'import externe et Fleet sont refusés au
+    lancement, pas des heures plus tard."""
+    seed(git, plan([entry(tool=tool)]), rancher_external=external)
+    with wapp.app.test_request_context():
+        res = wapp._deploy_install_precheck("site", {"equipe": "ops"}, "harvlab", "172.16.2.70")
+    found = set()
+    if res is not None:
+        body, status = res
+        assert status == 400
+        found = {(f["phase"], f["code"]) for f in body.get_json()["findings"]
+                 if f["code"] == "rancher-session-in-chain"}
+        assert all(f["level"] == "blocking" for f in body.get_json()["findings"]
+                   if f["code"] == "rancher-session-in-chain")
+    assert found == codes

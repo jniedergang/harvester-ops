@@ -67,7 +67,8 @@ FINDING_CODES = ["plan-invalid", "template-missing", "var-missing", "var-invalid
                  "rancher-agent-image-fallback", "oidc-invalid", "oidc-issuer-invalid", "oidc-audience-invalid",
                  "oidc-claim-invalid", "oidc-prefix-required", "oidc-prefix-system", "oidc-ca-unreadable",
                  "oidc-admin-group-invalid", "oidc-version-too-old", "oidc-with-rancher", "offline-needs-no-fallback",
-                 "offline-rke2-missing", "offline-rke2-version-mismatch"]
+                 "offline-rke2-missing", "offline-rke2-version-mismatch",
+                 "rancher-session-in-chain"]  # revue finale 2.8.0 I-3
 
 
 # --- onglet, historique, page d'hôte (source) ----------------------------------

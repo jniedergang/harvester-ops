@@ -184,6 +184,7 @@ const BMPlans = (() => {
     'gitops-invalid': () => tr('dpw.f.gitopsInvalid'),
     'gitops-cluster-missing': () => tr('dpw.f.gitopsClusterMissing'),
     'rancher-session-needed': () => tr('dpw.f.rancherSessionNeeded'),
+    'rancher-session-in-chain': () => tr('dpw.f.rancherSessionInChain'),
     'rancher-import-conflict': () => tr('dpw.f.rancherImportConflict'),
     'rancher-name-invalid': () => tr('dpw.f.rancherNameInvalid'),
     'rancher-name-taken': () => tr('dpw.f.rancherNameTaken'),

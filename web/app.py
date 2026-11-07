@@ -33318,6 +33318,7 @@ DEPLOY_FINDING_LEVELS = {
     "gitops-invalid": "blocking", "gitops-secret-missing": "blocking", "gitops-flux-missing": "blocking",
     "gitops-fleet-needs-rancher": "blocking", "gitops-source-unsupported": "blocking",
     "gitops-privileges-admin-only": "blocking", "gitops-fleet-admin-only": "blocking",
+    "rancher-session-in-chain": "blocking",
     "gitops-package-not-published": "blocking", "gitops-taken": "blocking", "gitops-check-failed": "blocking",
     "gitops-var-missing": "blocking", "gitops-later": "info", "gitops-flux-in-plan": "info",
 }
@@ -33621,6 +33622,23 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
     arts = _deploy_artefacts_prepare(kc, plan, values, install, findings, capi["entries"], cluster, later)
     gops = _deploy_gitops_prepare(kc, plan, values, install, findings, capi["entries"], arts["rows"], cluster,
                                   later, gitops_secrets, role)
+    if install:
+        # revue finale 2.8.0 I-3 : une chaîne qui installe le cluster Harvester
+        # n'a ni session Rancher (kubeconfig de la console) ni cluster connu
+        # de ce Rancher : l'import externe et Fleet échoueraient des heures
+        # plus tard ; refusés au lancement.
+        for e in capi["entries"]:
+            if e["spec"].get("rancher_external"):
+                findings.append(_deploy_finding(
+                    "rancher-session-in-chain", "clusters",
+                    f"{e['name']}: an external Rancher import needs a Harvester cluster known to your Rancher "
+                    "session, not possible in a chain that installs it"))
+        for r in gops["summary"]:
+            if r.get("tool") == "fleet":
+                findings.append(_deploy_finding(
+                    "rancher-session-in-chain", "gitops",
+                    f"{r['entry']} on {r['ref']}: Fleet needs a Harvester cluster known to your Rancher session, "
+                    "not possible in a chain that installs it"))
     estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) \
         + (30 if install else 0) + reg["estimate"] + capi["estimate"] + arts["estimate"] + gops["estimate"]
     summary = {"declarations": decls, "estimate_minutes": estimate, "capi": capi["capi"],
