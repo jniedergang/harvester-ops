@@ -186,19 +186,24 @@ def forget(state, name, used_by=()):
     return delete(state, name)
 
 
-def detach(kube, name):
+def detach(kube, name, on_gone=None):
     """Retire les Secrets d'un registre du client d'un cluster Harvester
     (comptes d'écriture et de lecture, CA) ; un Secret déjà absent compte
-    comme retiré. Rend les noms retirés ; KubeError sur un refus (droits)."""
+    comme retiré. Rend les noms retirés ; KubeError sur un refus (droits).
+    `on_gone(nom)` à chaque Secret retiré, avant le suivant : un refus en
+    cours de route laisse la trace de ce qui est déjà parti."""
     from kube import KubeError
     gone = []
     for sname in secret_names(name).values():
         try:
             kube.delete("secrets", NAMESPACE, sname)
-            gone.append(sname)
         except KubeError as e:
             if "(NotFound)" not in str(e):
                 raise
+            continue
+        gone.append(sname)
+        if on_gone:
+            on_gone(sname)
     return gone
 
 

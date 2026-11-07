@@ -189,3 +189,33 @@ def test_publish_shows_the_checks_before_the_button_and_follows(context, flask_s
     expect(m.locator('[data-x="progress"]')).to_contain_text("Published", timeout=5000)
     assert sent[-1] == {"cluster": "harv-fake", "registry": "amorcage", "items": None}
     assert page.evaluate("window.__pwned") is None
+
+
+def test_forget_uses_a_page_dialog_with_translated_refusals_then_follows_the_action(context, flask_server):
+    """Revue finale 2.6.0 : m-4 (fenêtre de la page, refus traduits, jamais
+    de boîte native) et I-3 (l'oubli est une action suivie)."""
+    calls = {}
+    harbor = {"name": "harbor", "kind": "external", "endpoint": "h.example:443", "usage": ["images"],
+              "mirrors": [], "clusters": ["harv-fake"], "published": 0}
+    page, _ = open_registries(context, flask_server, calls, registries=[harbor])
+    natives = []
+    page.on("dialog", lambda d: natives.append(d.type))
+    answers = [({"error": "registry-in-use: plan:site", "code": "registry-in-use", "used_by": ["plan:site"]}, 409),
+               ({"action_id": "f1f1f1f1f1f1", "registry": "harbor"}, 202)]
+
+    def one(route, req):
+        if req.method == "DELETE":
+            calls.setdefault("forget", []).append(req.url)
+            body, status = answers.pop(0)
+            return fulfill(route, body, status)
+        fulfill(route, dict(harbor, used_by=[]))
+    page.route(re.compile(r".*/api/registries/harbor(\?.*)?$"), one)
+    page.locator('.reg-row[data-reg="harbor"]').click()
+    page.locator("#registries-detail [data-reg-delete]").click()
+    m = page.locator(".reg-modal")
+    expect(m).to_contain_text("Its accounts are removed from the attached Harvester clusters")
+    m.locator("[data-reg-go]").click()
+    expect(m.locator('[data-x="feedback"]')).to_have_text("Refused: harbor is used by plan:site.")
+    m.locator("[data-reg-go]").click()
+    expect(m.locator('[data-x="feedback"]')).to_contain_text("f1f1f1f1f1f1")
+    assert natives == [] and len(calls["forget"]) == 2

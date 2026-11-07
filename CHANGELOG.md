@@ -187,10 +187,17 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   account and the CA of one of them only.
 - Forgetting a client registry removes its Secrets (both accounts and the
   CA) from every attached Harvester cluster, with the identity of the
-  person, before the declaration; a refusal keeps the declaration
-  (`registry-detach-failed`). Forget is tracked in Activity
-  (`registry-forget:<name>`). Before, the client's write account stayed
-  on the Harvester cluster with nothing in the console to show it.
+  person, before the declaration. Before, the client's write account
+  stayed on the Harvester cluster with nothing in the console to show it.
+  Forget is an action of `harvester-registry forget` (parity with the
+  command line), tracked in Activity (`registry-forget:<name>`) before any
+  cluster is touched: one step per Secret removed. A refusal on a cluster
+  ends the action in error with the steps already done, and the
+  declaration stays. An attached cluster no longer in the console is named
+  in a step instead of being skipped in silence. The route answers 202
+  with the action; usage refusals stay immediate (409, with `used_by`).
+- Forget opens a window of the page, with the refusals translated in the
+  five languages, instead of the browser's confirm and alert boxes.
 - The creation check of a child cluster blocks a root disk smaller than
   the virtual size of the image (`disk-smaller-than-image`, creation
   window and clusters phase). Longhorn refuses such a volume and the VM

@@ -231,3 +231,28 @@ def test_cli_forget_removes_the_accounts_from_the_attached_clusters(regcli, monk
     assert (rg.load(tmp_path, "client") is None) is (code == 0), "the declaration stays for a new try"
     err = capsys.readouterr().err
     assert "Forbidden" in err if refuse else "accounts removed from harvlab2" in err
+
+
+def test_cli_forget_records_each_secret_and_stops_at_the_cluster_that_refuses(regcli, monkeypatch, tmp_path,
+                                                                             capsys):
+    """Revue finale 2.6.0 (I-3) : deux clusters rattachés, le second refuse.
+    Chaque Secret retiré du premier est une étape, le refus du second finit
+    en erreur, la déclaration reste ; les kubeconfigs donnés par la console
+    (identité de la personne) l'emportent sur la configuration."""
+    monkeypatch.setenv("HARVESTER_OPS_STATE_DIR", str(tmp_path))
+    rg.save(tmp_path, "client", {"kind": "external", "endpoint": "h.example:443", "usage": ["images"],
+                                 "clusters": ["harvlab", "harvlab2", "gone"]})
+    names = {"client-push", "client-pull", "client-ca"}
+    kubes = {"/kc/harvlab": SecretsKube(names), "/kc/harvlab2": SecretsKube(names, refuse=True)}
+    monkeypatch.setattr(regcli, "Kube", lambda kc, **kw: kubes[kc])
+    monkeypatch.setattr(regcli, "_cluster_kube", lambda c: pytest.fail("the configuration is not read"))
+    args = argparse.Namespace(name="client", kubeconfig_for=["harvlab=/kc/harvlab", "harvlab2=/kc/harvlab2"])
+    assert regcli.cmd_forget(args) == regcli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    done = [ln for ln in err.splitlines() if ln.startswith("STEP_EVENT|detach|done|secret ")]
+    assert sorted(ln.rsplit("|", 1)[1] for ln in done) == sorted(
+        f"secret {rg.NAMESPACE}/{n} removed from harvlab" for n in names)
+    assert "STEP_EVENT|detach|error|accounts of client kept on harvlab2" in err
+    assert kubes["/kc/harvlab"].names == set() and kubes["/kc/harvlab2"].names == names
+    assert rg.load(tmp_path, "client") is not None
+    assert "gone" in err, "a cluster no longer in the console is named, not skipped in silence"

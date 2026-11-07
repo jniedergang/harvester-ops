@@ -6,7 +6,7 @@
     harvester-registry check   NOM --cluster C [--kubeconfig K]
     harvester-registry list
     harvester-registry show    NOM
-    harvester-registry forget  NOM
+    harvester-registry forget  NOM [--kubeconfig-for C=K ...]
     harvester-registry deploy  NOM --cluster C --address IP --size-gib N --storage-class S
                                [--dns-name N] [--mirrors h1,h2] [--cert F --key F --ca F]
                                [--spec F] [--timeout S] [--dry-run]
@@ -205,14 +205,34 @@ def _cluster_kube(c):
     return Kube(entry["kubeconfig"])
 
 
+def _forget_kubes(args, clusters):
+    """({cluster: Kube}, [clusters sans accès]). La console passe un
+    kubeconfig par cluster, à l'identité de la personne
+    (`--kubeconfig-for C=chemin`) ; sinon la configuration."""
+    given = dict(a.partition("=")[::2] for a in getattr(args, "kubeconfig_for", None) or [])
+    kubes, missing = {}, []
+    for c in clusters:
+        k = Kube(given[c]) if given.get(c) else (None if given else _cluster_kube(c))
+        if k is None:
+            missing.append(c)
+        else:
+            kubes[c] = k
+    return kubes, missing
+
+
 def cmd_forget(args):
     d = rg.load(state(), args.name)
-    used = []
-    if d is not None and d.get("kind") != "bootstrap":
+    used, kubes = [], {}
+    client = d is not None and d.get("kind") != "bootstrap"
+    if client:
         try:
             # un cluster retiré de la configuration n'emploie plus rien d'ici
-            known = [c for c in d.get("clusters") or [] if _cluster_kube(c) is not None]
-            used = users(args.name, known, _cluster_kube)
+            kubes, missing = _forget_kubes(args, d.get("clusters") or [])
+            for c in missing:
+                # revue finale 2.6.0 (m-10) : dit, jamais sauté en silence
+                step("detach", "running", f"{c} is not in the console: the accounts of {args.name} "
+                                          f"in {rg.NAMESPACE} there are left as they are")
+            used = users(args.name, list(kubes), kubes.get)
         except (KubeError, SystemExit) as e:
             step("forget", "error", f"registry-usage-unknown: {str(e)[:200]}")
             return EXIT_REFUSED
@@ -220,12 +240,15 @@ def cmd_forget(args):
         step("forget", "error", f"registry-in-use: {', '.join(sorted(set(used)))}")
         return EXIT_REFUSED
     # 2.6.0, vu en réel : le compte d'écriture du client ne reste pas dans
-    # un Secret du cluster Harvester une fois la déclaration oubliée
-    for c in known if d is not None and d.get("kind") != "bootstrap" else []:
+    # un Secret du cluster Harvester une fois la déclaration oubliée ; une
+    # étape par Secret retiré (revue finale I-3 : un refus en cours de route
+    # laisse la trace de ce qui est déjà parti)
+    for c, kube in kubes.items():
         try:
-            gone = rg.detach(_cluster_kube(c), args.name)
+            gone = rg.detach(kube, args.name, on_gone=lambda n, c=c: step(
+                "detach", "done", f"secret {rg.NAMESPACE}/{n} removed from {c}"))
         except KubeError as e:
-            step("forget", "error", f"accounts of {args.name} kept on {c}: {str(e)[:200]}")
+            step("detach", "error", f"accounts of {args.name} kept on {c}: {str(e)[:200]}")
             return EXIT_REFUSED
         step("detach", "done", f"accounts removed from {c} ({len(gone)} secret(s))")
     try:
@@ -236,7 +259,7 @@ def cmd_forget(args):
     except ValueError as e:
         step("forget", "error", str(e))
         return EXIT_REFUSED
-    step("forget", "done", args.name)
+    step("forget", "done", f"{args.name} forgotten")
     return EXIT_OK
 
 
@@ -532,10 +555,14 @@ def parser():
     cluster_args(s)
     s.add_argument("--delete-data", action="store_true")
     s.set_defaults(fn=cmd_delete)
-    for name, fn in (("show", cmd_show), ("forget", cmd_forget)):
-        s = sub.add_parser(name, allow_abbrev=False)
-        s.add_argument("name")
-        s.set_defaults(fn=fn)
+    s = sub.add_parser("show", allow_abbrev=False)
+    s.add_argument("name")
+    s.set_defaults(fn=cmd_show)
+    s = sub.add_parser("forget", allow_abbrev=False)
+    s.add_argument("name")
+    s.add_argument("--kubeconfig-for", action="append", metavar="CLUSTER=PATH",
+                   help="kubeconfig of an attached cluster (the console passes the person's)")
+    s.set_defaults(fn=cmd_forget)
     return p
 
 

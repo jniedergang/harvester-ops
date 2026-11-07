@@ -381,18 +381,43 @@ const Registries = (() => {
   // -------------------------------------------------------------------------
   // Suppression : nom retapé pour supprimer les données
   // -------------------------------------------------------------------------
+  // Oubli d'un registre du client (revue finale m-4 : fenêtre de la page,
+  // refus traduits ; I-3 : action suivie, progression dans le dock)
+  const forgetError = (name, r) => {
+    const code = r.d && r.d.code;
+    if (code === 'registry-in-use') {
+      return tr('reg.forget.inUse', 'Refused: {registry} is used by {users}.', { registry: name, users: (r.d.used_by || []).join(', ') });
+    }
+    if (code === 'registry-usage-unknown') {
+      return tr('reg.forget.usageUnknown', 'Refused: what uses {registry} cannot be read ({error}).', { registry: name, error: r.d.error || '' });
+    }
+    if (code === 'registry-bootstrap') return tr('reg.forget.bootstrap', 'A bootstrap registry is removed with Delete, not forgotten.');
+    if (code === 'registry-unknown') return tr('reg.forget.unknown', 'The registry {registry} is not declared any more.', { registry: name });
+    return (r.d && r.d.error) || `HTTP ${r.status}`;
+  };
+
+  function openForget(name) {
+    const m = overlay(tr('reg.forgetTitle', 'Forget a client registry'), name,
+      `<p>${esc(tr('reg.confirmForget', 'Forget the declaration of {registry}? Its accounts are removed from the attached Harvester clusters. The registry itself is not touched.', { registry: name }))}</p>`,
+      btn('data-reg-go', 'btn-danger', 'trash', tr('reg.forget', 'Forget'),
+        tr('reg.t.forgetGo', 'Remove its accounts from each attached Harvester cluster, then the declaration; each step is in Activity')));
+    const go = m.querySelector('[data-reg-go]');
+    go.addEventListener('click', async () => {
+      if (go.disabled) return;
+      go.disabled = true;
+      const r = await json('DELETE', `/api/registries/${enc(name)}`);
+      const fb = m.querySelector('[data-x="feedback"]');
+      if (!r.ok) { fb.textContent = forgetError(name, r); go.disabled = false; return; }
+      fb.textContent = tr('reg.forgetStarted', 'Forgetting (action {id}), see the dock.', { id: r.d.action_id });
+      selected = null;
+      setTimeout(refresh, 1500);
+    });
+  }
+
   function openDelete() {
     const name = selected;
     const d = (list || []).find(x => x.name === name) || {};
-    if (d.kind !== 'bootstrap') {
-      if (!window.confirm(tr('reg.confirmForget', 'Forget the declaration of {registry}? Its accounts are removed from the attached Harvester clusters. The registry itself is not touched.', { registry: name }))) return;
-      json('DELETE', `/api/registries/${enc(name)}`).then(r => {
-        if (!r.ok) { window.alert(r.d.error || `HTTP ${r.status}`); return; }
-        selected = null;
-        refresh();
-      });
-      return;
-    }
+    if (d.kind !== 'bootstrap') { openForget(name); return; }
     const m = overlay(tr('reg.deleteTitle', 'Delete a bootstrap registry'), name, `
       <p>${esc(tr('reg.deleteIntro', 'The registry leaves the cluster. Its volume is kept: a new deployment finds its images again.'))}</p>
       <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('reg.t.deleteData', 'Also delete the volume and every image and chart it holds'))}">

@@ -235,9 +235,13 @@ declaration file: the nodes then do not check the certificate.
 **Forget** removes the Secrets of the registry (both accounts and the CA)
 from every attached Harvester cluster, with your identity, then the
 declaration. It is refused while a plan, a cluster template or a child
-cluster uses the registry, and it keeps the declaration when a cluster
-refuses the removal (`registry-detach-failed`), so that you can try again.
-It is tracked in Activity (`registry-forget:<name>`).
+cluster uses the registry; the window then names what uses it. Forget is
+an action of `harvester-registry forget`, tracked in Activity
+(`registry-forget:<name>`) from the start: each Secret removed is a step.
+When a cluster refuses the removal, the action ends in error with the
+steps already done, and the declaration stays so that you can try again.
+An attached cluster that is no longer in the console is named in a step:
+its Secrets stay there, remove them by hand.
 
 ### Bootstrap registry
 
@@ -458,7 +462,7 @@ as in 2.5.0.
 harvester-registry declare NAME --file r.yaml|- [--revision N]
 harvester-registry attach  NAME --cluster C          (accounts as JSON on stdin)
 harvester-registry check   NAME --cluster C
-harvester-registry list | show NAME | forget NAME
+harvester-registry list | show NAME | forget NAME [--kubeconfig-for C=FILE ...]
 harvester-registry deploy  NAME --cluster C --address IP --size-gib N --storage-class S
                            [--dns-name N] [--mirrors h1,h2] [--cert F --key F --ca F]
                            [--timeout S] [--dry-run]

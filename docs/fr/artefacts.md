@@ -243,9 +243,13 @@ vérifient alors pas le certificat.
 **Oublier** retire les Secrets du registre (les deux comptes et la CA) de
 chaque cluster Harvester rattaché, avec votre identité, puis la
 déclaration. C'est refusé tant qu'un plan, un modèle de cluster ou un
-cluster enfant emploie le registre, et la déclaration reste quand un
-cluster refuse le retrait (`registry-detach-failed`), pour réessayer. Le
-geste est suivi dans l'Activité (`registry-forget:<nom>`).
+cluster enfant emploie le registre ; la fenêtre dit alors ce qui
+l'emploie. L'oubli est une action de `harvester-registry forget`, suivie
+dans l'Activité (`registry-forget:<nom>`) dès le départ : chaque Secret
+retiré est une étape. Quand un cluster refuse le retrait, l'action finit
+en erreur avec les étapes déjà faites, et la déclaration reste pour
+réessayer. Un cluster rattaché qui n'est plus dans la console est nommé
+dans une étape : ses Secrets y restent, à retirer à la main.
 
 ### Registre d'amorçage
 
@@ -472,7 +476,7 @@ personne, comme en 2.5.0.
 harvester-registry declare NOM --file r.yaml|- [--revision N]
 harvester-registry attach  NOM --cluster C          (comptes en JSON sur stdin)
 harvester-registry check   NOM --cluster C
-harvester-registry list | show NOM | forget NOM
+harvester-registry list | show NOM | forget NOM [--kubeconfig-for C=FICHIER ...]
 harvester-registry deploy  NOM --cluster C --address IP --size-gib N --storage-class S
                            [--dns-name N] [--mirrors h1,h2] [--cert F --key F --ca F]
                            [--timeout S] [--dry-run]

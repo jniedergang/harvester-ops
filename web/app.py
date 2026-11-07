@@ -34930,48 +34930,40 @@ def api_registry_put(name):
 @requires_auth
 @_rate_limit("30/minute")
 def api_registry_delete(name):
+    """Oublie un registre : action suivie `registry-forget:<nom>` de
+    `harvester-registry forget` (revue finale I-3, parité CLI), créée avant
+    de toucher un cluster. L'outil retire les Secrets de chaque cluster
+    Harvester rattaché avec le kubeconfig de la personne, une étape par
+    Secret, puis la déclaration ; un refus en cours de route finit l'action
+    en erreur avec ce qui est déjà parti. L'usage est lu ici d'abord, pour
+    rendre le refus et la liste à la fenêtre."""
     if not _registry_name_ok(name):
         return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
     d = _rg.load(_bm_profiles_state(), name)
-    used, why = ([], None) if d is None or d.get("kind") == "bootstrap" else _registry_users(name, d.get("clusters"))
+    if d is None:
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    if d.get("kind") == "bootstrap":
+        return jsonify({"error": "a bootstrap registry leaves with its deployment (Delete)",
+                        "code": "registry-bootstrap"}), 409
+    used, why = _registry_users(name, d.get("clusters"))
     if why:
         return jsonify({"error": why, "code": "registry-usage-unknown"}), 409
     if used:
-        return jsonify({"error": f"registry-in-use: {', '.join(used)}", "code": "registry-in-use"}), 409
-    steps = []
-    if d is not None and d.get("kind") != "bootstrap":
-        # 2.6.0, vu en réel : le compte d'écriture du client ne reste pas
-        # dans un Secret du cluster Harvester une fois la déclaration oubliée
-        steps, why = _registry_detach(name, d.get("clusters"))
-        if why:
-            return jsonify({"error": why, "code": "registry-detach-failed"}), 409
-    try:
-        _rg.forget(_bm_profiles_state(), name, used)
-    except KeyError:
-        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
-    except ValueError as e:
-        code = "registry-in-use" if str(e).startswith("registry-in-use") else "registry-bootstrap"
-        return jsonify({"error": str(e), "code": code}), 409
-    _art_done_action(f"registry-forget:{name}", steps + [("forget", f"{name} forgotten (by {current_user() or '?'})")])
-    return "", 204
-
-
-def _registry_detach(name, clusters):
-    """Secrets d'un registre du client retirés de chaque cluster Harvester
-    rattaché, avec l'identité de la personne : (étapes, None) ou (étapes,
-    raison) au premier refus (la déclaration reste, pour réessayer)."""
-    from kube import Kube as _Kube, KubeError as _KubeError
-    steps = []
-    for c in clusters or []:
+        return jsonify({"error": f"registry-in-use: {', '.join(used)}", "code": "registry-in-use",
+                        "used_by": used}), 409
+    cmd = _registry_cmd("forget")
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    kcs = []
+    for c in d.get("clusters") or []:
         kc = _kubectl_for_cluster(c) if _valid_k8s_name(c) else None
-        if not kc:
-            continue
-        try:
-            gone = _rg.detach(_Kube(kc, timeout=30), name)
-        except _KubeError as e:
-            return steps, f"accounts of {name} kept on {c}: {str(e)[:160]}"
-        steps.append(("detach", f"accounts removed from {c} ({len(gone)} secret(s))"))
-    return steps, None
+        if kc:
+            kcs.append(f"--kubeconfig-for={c}={kc}")
+    run, err = _cli_action("", f"registry-forget:{name}", cmd + [name] + kcs, "harvester-registry",
+                           check_busy=False)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "registry": name}), 202
 
 
 def _registry_users(name, clusters):

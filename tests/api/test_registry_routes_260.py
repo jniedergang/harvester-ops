@@ -5,6 +5,7 @@ identifiants jamais renvoyés ni en argument de l'outil ; limites lisibles."""
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -68,7 +69,15 @@ def test_declare_read_update_and_forget(env):
     assert r.status_code == 200 and r.get_json()["clusters"] == []          # jamais écrit par le formulaire
     assert [x["name"] for x in c.get("/api/registries").get_json()["registries"]] == ["harbor"]
     assert c.get("/api/registries/harbor").get_json()["mirrors"] == ["quay.io"]
-    assert c.delete("/api/registries/harbor").status_code == 204
+    r = c.delete("/api/registries/harbor")
+    assert r.status_code == 202                     # action suivie de l'outil (revue finale I-3)
+    run = wapp.ACTIONS[r.get_json()["action_id"]]
+    for _ in range(300):
+        if run.status not in ("pending", "running"):
+            break
+        time.sleep(0.05)
+    assert run.status == "done", run.status
+    assert run.action == "registry-forget:harbor"
     assert c.get("/api/registries/harbor").status_code == 404
     assert c.delete("/api/registries/harbor").status_code == 404
 
@@ -252,41 +261,51 @@ def test_attach_of_a_bootstrap_registry_is_refused(env, monkeypatch):
     assert r.status_code == 409 and r.get_json()["code"] == "registry-bootstrap"
 
 
-@pytest.mark.parametrize("refuse,status,left", [(False, 204, set()), (True, 409, {"harbor-push", "harbor-pull"})])
-def test_forget_removes_the_accounts_from_the_attached_clusters_and_is_tracked(env, monkeypatch, refuse, status,
-                                                                               left):
-    """2.6.0, vu sur harvlab2 : oublier un registre du client laissait son
-    compte d'écriture dans les Secrets du cluster Harvester."""
+def test_forget_is_an_action_of_the_tool_created_before_any_cluster_is_touched(env, monkeypatch):
+    """Revue finale 2.6.0 (I-3) : oublier part en action suivie de
+    `harvester-registry forget`, avec le kubeconfig de la personne pour
+    chaque cluster rattaché ; la route ne retire rien elle-même, et la
+    déclaration reste jusqu'à ce que l'outil ait tout retiré."""
     import kube as kube_mod
     from registries import update
     c = env["client"]
     c.put("/api/registries/harbor", json=body())
-    update(wapp._bm_profiles_state(), "harbor", lambda d: d.update(clusters=["harvlab"]))
-    names = {"harbor-push", "harbor-pull"}
+    update(wapp._bm_profiles_state(), "harbor", lambda d: d.update(clusters=["harvlab", "harvlab2"]))
 
     class K:
         def __init__(self, kc, timeout=None):
-            assert kc == "/kc-of-the-person"
+            assert kc.startswith("/kc-of-the-person/")
 
         def list(self, kind, ns=None, selector=None):
             return []
 
-        def delete(self, kind, ns, name):
-            if refuse:
-                raise kube_mod.KubeError("Error from server (Forbidden): secrets is forbidden")
-            if name not in names:
-                raise kube_mod.KubeError(f"Error from server (NotFound): secrets \"{name}\" not found")
-            names.discard(name)
+        def delete(self, *a, **k):
+            pytest.fail("the route deletes nothing itself")
     monkeypatch.setattr(kube_mod, "Kube", K)
-    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda cl: "/kc-of-the-person")
-    before = set(wapp.ACTIONS)
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda cl: f"/kc-of-the-person/{cl}")
+    seen = []
+
+    class Run:
+        id = "f0f0f0f0f0f0"
+    monkeypatch.setattr(wapp, "_cli_action", lambda cluster, label, cmd, tool, spec=None, **kw:
+                        seen.append((label, cmd, tool, kw)) or (Run(), None))
     r = c.delete("/api/registries/harbor")
-    assert r.status_code == status, r.get_data(as_text=True)
-    assert names == left
-    if refuse:
-        assert r.get_json()["code"] == "registry-detach-failed"
-        assert c.get("/api/registries/harbor").status_code == 200
-    else:
-        run = next(wapp.ACTIONS[i] for i in set(wapp.ACTIONS) - before)
-        assert run.action == "registry-forget:harbor"
-        assert c.get("/api/registries/harbor").status_code == 404
+    assert r.status_code == 202, r.get_data(as_text=True)
+    assert r.get_json()["action_id"] == "f0f0f0f0f0f0"
+    label, cmd, tool, kw = seen[0]
+    assert label == "registry-forget:harbor" and tool == "harvester-registry"
+    assert cmd[3:5] == ["forget", "harbor"]
+    assert [a for a in cmd if a.startswith("--kubeconfig-for=")] == [
+        "--kubeconfig-for=harvlab=/kc-of-the-person/harvlab", "--kubeconfig-for=harvlab2=/kc-of-the-person/harvlab2"]
+    assert kw.get("check_busy") is False
+    assert c.get("/api/registries/harbor").status_code == 200, "the tool forgets, not the route"
+
+
+def test_forget_in_use_is_refused_with_the_users_and_starts_nothing(env, monkeypatch):
+    c = env["client"]
+    c.put("/api/registries/harbor", json=body())
+    monkeypatch.setattr(wapp, "_registry_users", lambda name, clusters: (["plan:site"], None))
+    monkeypatch.setattr(wapp, "_cli_action", lambda *a, **k: pytest.fail("no action expected"))
+    r = c.delete("/api/registries/harbor")
+    assert r.status_code == 409
+    assert r.get_json()["code"] == "registry-in-use" and r.get_json()["used_by"] == ["plan:site"]
