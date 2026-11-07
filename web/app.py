@@ -35351,6 +35351,23 @@ def _undo_not_ours(run_id):
             else "undo-not-ours: no mark of this run (recreated by hand?), left untouched")
 
 
+UNDO_TF_CARRIES = "undo-tf-carries-cluster"
+
+
+def _undo_carriers_present(kc, refs):
+    """Revue finale 2.7.0 (I1) : clusters enfants de `refs` (ceux que la
+    chaîne nomme) encore là, qu'ils soient à nous, recréés ou repris :
+    (liste, None) ou (None, erreur de lecture)."""
+    out = []
+    for ref in refs or []:
+        st, _rc, err = _deploy_capi_json(kc, "state", ["--name", ref, "--json"], timeout=60)
+        if err:
+            return None, err
+        if (st or {}).get("present"):
+            out.append(ref)
+    return out, None
+
+
 def _undo_details(kc, cluster, u, services):
     """Ce qui partira pour un élément (lectures seules, suppressions jugées
     par le serveur pour les objets d'un cluster enfant)."""
@@ -35419,6 +35436,16 @@ def _undo_plan_body(cluster, kc, action_id, include=None):
                 # revue 4-8 C1 : dit avant, jamais touché pendant
                 det = dict(det, not_ours=True, note=_undo_not_ours(run_id), recreated_by=run_id or "")
         items.append(dict(u, selected=u["id"] in steps, details=det))
+    tfs = [i for i in items if i["kind"] == "tf-declaration" and i["details"].get("present")]
+    if tfs:
+        # revue finale 2.7.0 (I1) : un cluster de la chaîne qui restera (non
+        # choisi, recréé, repris) garde le contenu Terraform ; dit ici
+        going = {i["ref"] for i in items if i["kind"] == "capi-cluster" and i["selected"]
+                 and not i["details"].get("not_ours") and "error" not in i["details"]}
+        present, cerr = _undo_carriers_present(kc, tfs[0].get("carries"))
+        for i in tfs:
+            i["details"] = dict(i["details"], error=cerr) if cerr else dict(
+                i["details"], carried_by=[r for r in present if r not in going])
     res = prev["result"] or {}
     return {"undoes": action_id, "plan": res.get("plan"), "cluster": cluster, "items": items,
             "limits": list(UNDO_LIMITS), "undone_by": res.get("undone_by")}, 200
@@ -35507,7 +35534,7 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
             timeout = None
             data["data_kept"] = name not in delete_data
         else:
-            return _undo_tf(ctx, ref, data)
+            return _undo_tf(ctx, u, data)
         if err:
             return _dch.ItemOutcome("error", err, data=data)
         data["actions"].append(child.id)
@@ -35516,7 +35543,17 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
             return _dch.ItemOutcome("done", "removed", data=data)
         return _dch.ItemOutcome("error", f"removal failed (action {child.id})", data=data)
 
-    def _undo_tf(ctx, decl_id, data):
+    def _undo_tf(ctx, u, data):
+        decl_id = u["ref"]
+        # revue finale 2.7.0 (I1) : jamais sous un cluster de la chaîne resté
+        # là, choisi ou non, à nous ou non ; relu juste avant la destruction
+        present, err = _undo_carriers_present(kc, u.get("carries"))
+        if err:
+            return _dch.ItemOutcome("error", "state unreadable", data=data)
+        if present:
+            data["carried_by"] = present
+            return _dch.ItemOutcome("error", f"{UNDO_TF_CARRIES}: {', '.join(present)} still present, its Terraform "
+                                             "content is kept; remove the cluster first", data=data)
         if not _tf_decl_hold(decl_id, run.id):
             return _dch.ItemOutcome("error", "declaration-busy", data=data)
         try:

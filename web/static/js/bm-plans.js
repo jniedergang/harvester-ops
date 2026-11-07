@@ -1840,7 +1840,11 @@ const BMPlans = (() => {
       return `<p>${esc(tr('udw.registryGoes', { address: d.address || '' }))}</p>
         <p class="form-hint">${esc(tr('udw.registryVolume', { volume: d.volume || '' }))}</p>`;
     }
-    return `<p>${esc(tr('udw.declGoes', { name: d.name || u.ref, n: (d.resources || []).length }))}</p>
+    // revue finale 2.7.0 (I1) : un cluster de la chaîne qui reste garde ce contenu
+    const carried = (d.carried_by || []).length
+      ? `<div class="bm-refusal bm-warning udw-carried">${icon('warn', { size: 13 })} ${esc(tr('udw.carriedBy', { clusters: d.carried_by.join(', ') }))}</div>`
+      : '';
+    return `${carried}<p>${esc(tr('udw.declGoes', { name: d.name || u.ref, n: (d.resources || []).length }))}</p>
       ${(d.resources || []).length ? `<ul class="bm-paths udw-resources">${li(d.resources)}</ul>` : ''}`;
   }
 

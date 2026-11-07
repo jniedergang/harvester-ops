@@ -181,3 +181,20 @@ def test_phases_go_on_after_a_failure_and_skip_dependents():
     # la dernière phase n'a rien fait : `error` pour le moteur, que le
     # lanceur du défaire rend `partial` (une partie est défaite)
     assert out["status"] == "error" and "capi-cluster-web/web" not in calls and "tf-declaration-d1" not in calls
+
+
+def test_declarations_name_every_cluster_of_the_chain_created_or_adopted():
+    """Revue finale 2.7.0 (I1) : le contenu Terraform peut porter tout cluster
+    que la phase Clusters de la chaîne nomme, créé par elle ou repris ; la
+    collecte les donne à chaque déclaration (`carries`)."""
+    runs = [dict(result({"terraform": [item("tf-declaration", "d1")],
+                         "clusters": [item("capi-cluster", "web/web", cluster="web"),
+                                      {"status": "done", "cluster": "api", "ref": "api/api", "created": False,
+                                       "message": "already present, adopted"}]}), _run=A),
+            dict(result({"clusters": [{"status": "error", "cluster": "outils", "created": False}]}, resumes=A),
+                 _run=B)]
+    got = {u["kind"]: u for u in du.collect(runs)}
+    assert got["tf-declaration"]["carries"] == ["api/api", "outils/outils", "web/web"]
+    assert "carries" not in got["capi-cluster"]
+    steps = du.plan(list(got.values()), include={got["tf-declaration"]["id"]})
+    assert steps[0]["carries"] == ["api/api", "outils/outils", "web/web"]    # le lanceur la relit

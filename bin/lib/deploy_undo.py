@@ -89,11 +89,17 @@ def collect(results, tf_lookup=None, plan=None, cluster=None):
     {id, kind, ref, phase, run, proven, default, note}. `tf_lookup(id)` rend
     {origin, revision} d'une déclaration encore là (None sinon) : elle sert
     aux exécutions d'avant 2.7.0 (déclaration de l'origine `plan` sans
-    marque) et aux déclarations modifiées depuis."""
-    found = {}
+    marque) et aux déclarations modifiées depuis.
+
+    Revue finale 2.7.0 (I1) : chaque déclaration reçoit `carries`, les
+    clusters enfants que la phase Clusters de la chaîne nomme, créés ou
+    repris. Tant que l'un d'eux est là, son contenu Terraform reste."""
+    found, carriers = {}, set()
     for res in results:
         for ph in res.get("phases") or []:
             for it in ph.get("items") or []:
+                if ph.get("id") == "clusters" and (it.get("ref") or it.get("cluster")):
+                    carriers.add(it.get("ref") or f"{it['cluster']}/{it['cluster']}")
                 u = it.get("undo") or {}
                 if it.get("created") and u.get("kind") in KINDS_ORDER and isinstance(u.get("ref"), str):
                     key = (u["kind"], u["ref"])
@@ -117,6 +123,8 @@ def collect(results, tf_lookup=None, plan=None, cluster=None):
                                       "revision_applied": it.get("revision_applied")}
     out = list(found.values())
     for u in out:
+        if u["kind"] == "tf-declaration":
+            u["carries"] = sorted(carriers)
         if u["kind"] == "tf-declaration" and tf_lookup is not None:
             d = tf_lookup(u["ref"])
             if d is not None and u.get("revision_applied") is not None \

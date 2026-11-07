@@ -372,6 +372,49 @@ def test_a_failed_undo_after_a_partial_one_keeps_partial(undo):
     finish(launch(undo, include=["chart-web/web/podinfo"]))
     assert undo["orig"].result["undone_status"] == "partial"
     undo["undo"].fail_remove.add(undo["decl"]["id"])
+    undo["undo"].clusters.pop("web")            # I1 : sinon la garde refuse avant la destruction
     run = finish(launch(undo, include=["tf-declaration-" + undo["decl"]["id"]]))
     assert run.result["status"] == "error"
+    assert undo["destroys"] == [(undo["decl"]["id"], "destroy")]
     assert undo["orig"].result["undone_status"] == "partial"
+
+
+TF = "tf-declaration-d1d1d1d1d1d1"
+
+
+@pytest.mark.parametrize("case", ["unticked", "foreign", "adopted"])
+def test_terraform_content_is_kept_while_a_cluster_of_the_chain_stays(undo, case):
+    """Revue finale 2.7.0 (I1) : un cluster de la chaîne resté là (décoché,
+    recréé par une autre exécution ou repris sans marque) peut employer le
+    réseau, la classe de stockage ou l'image d'une déclaration : elle n'est
+    pas détruite (`undo-tf-carries-cluster`), et le plan de destruction le dit."""
+    fake = undo["undo"]
+    include = ["chart-web/web/podinfo", "manifest-web/web/regles", TF]
+    if case == "foreign":
+        fake.clusters["web"]["origin"] = {"plan": "site", "run": "beef00000002"}
+        include = [TF]                              # l'ancien conseil du dépannage : décocher le cluster
+    elif case == "adopted":
+        fake.clusters["api"] = {"origin": {"plan": "site"}, "ready": True, "failed": False}
+        undo["orig"].result["phases"][2]["items"].append(
+            {"status": "done", "cluster": "api", "ref": "api/api", "created": False,
+             "message": "already present, adopted"})
+        include = None
+    body = plan_of(undo, **({"include": include} if include else {})).get_json()
+    tf = next(i for i in body["items"] if i["id"] == TF)
+    expected = ["api/api"] if case == "adopted" else ["web/web"]
+    assert tf["details"]["carried_by"] == expected, tf["details"]
+    run = finish(launch(undo, **({"include": include} if include else {})))
+    got = items_of(run)[TF]
+    assert got["status"] == "error" and got["message"].startswith("undo-tf-carries-cluster"), got
+    assert expected[0] in got["message"]
+    assert undo["destroys"] == [] and wapp.TF_DECLS.get(undo["decl"]["id"]) is not None
+    assert undo["orig"].result["undone_status"] in ("partial", "error")
+
+
+def test_terraform_goes_once_the_cluster_of_the_same_undo_is_gone(undo):
+    """Le cluster retiré par le même défaire ne retient plus rien : le plan
+    ne le compte pas, le défaire détruit la déclaration après lui."""
+    body = plan_of(undo).get_json()
+    assert next(i for i in body["items"] if i["id"] == TF)["details"].get("carried_by", []) == []
+    run = finish(launch(undo))
+    assert items_of(run)[TF]["status"] == "done" and undo["destroys"] == [(undo["decl"]["id"], "destroy")]

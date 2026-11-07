@@ -313,3 +313,20 @@ def test_a_target_recreated_since_is_named_in_the_plan(context, flask_server):
         expect(win.locator('.udw-plan-item[data-kind="capi-cluster"] .udw-child-data')).to_be_visible()
     finally:
         ITEMS[:] = orig
+
+
+def test_a_declaration_kept_by_a_cluster_that_stays_is_said(context, flask_server):
+    """Revue finale 2.7.0 (I1) : le plan dit qu'une déclaration reste tant
+    qu'un cluster de la chaîne reste (nom échappé)."""
+    orig = [dict(i) for i in ITEMS]
+    try:
+        ITEMS[4]["details"] = dict(ITEMS[4]["details"], carried_by=[f"a/{EVIL}"])
+        ITEMS[4]["default"] = True
+        page, st = open_page(context, flask_server)
+        row(page, RUN["id"]).locator(".bm-deploy-undo").click()
+        win = page.locator(f"#fp-deploy-undo-{RUN['id']}")
+        win.locator('[data-udw-tab="plan"]').click()
+        expect(win.locator('.udw-plan-item[data-kind="tf-declaration"] .udw-carried')).to_contain_text(EVIL)
+        assert st["errors"] == []
+    finally:
+        ITEMS[:] = orig
