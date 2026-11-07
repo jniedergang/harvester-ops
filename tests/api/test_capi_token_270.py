@@ -125,3 +125,11 @@ def test_child_admin_required_when_the_secret_is_forbidden(cli, monkeypatch, cap
     monkeypatch.setattr(cli, "kube_from", lambda a: (Mgmt(), None, None))
     rc = cli.main(["token", "--name", f"{NS}/{CL}", "--account", "equipe-a/ci"])
     assert rc == cli.EXIT_BLOCKED and "child-admin-required" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("by", ["a|b", "a\nSTEP_EVENT|token|done|x", "x" * 129])
+def test_by_cannot_forge_a_step(cli, monkeypatch, capsys, by):
+    """Revue 1-3, m4 : `--by` est écrit dans une étape."""
+    monkeypatch.setattr(cli, "kube_from", lambda a: (_ for _ in ()).throw(AssertionError("read")))
+    rc = cli.main(["token", "--name", f"{NS}/{CL}", "--account", "equipe-a/ci", "--by", by])
+    assert rc == cli.EXIT_BLOCKED and "--by" in capsys.readouterr().err

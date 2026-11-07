@@ -15,6 +15,7 @@ dans un fichier, une étape ni un message d'erreur.
 import base64
 import contextlib
 import json
+import time
 from pathlib import Path
 
 import work_dir
@@ -53,10 +54,32 @@ def read(kube, ns, cluster):
     return base64.b64decode(value).decode()
 
 
+PREFIX, SUFFIX = "hops-child-", ".kubeconfig"
+# Une session ne dure que le temps de quelques lectures ou suppressions : un
+# fichier plus vieux est le reste d'un outil tué (SIGKILL), effacé.
+STALE_SECONDS = 15 * 60
+
+
+def sweep(now=None):
+    """Efface les kubeconfigs de cluster enfant laissés dans l'espace de
+    travail par un outil tué (revue 1-3, I4) ; rend leur nombre."""
+    now = time.time() if now is None else now
+    n = 0
+    for f in work_dir.path().glob(f"{PREFIX}*{SUFFIX}"):
+        try:
+            if now - f.stat().st_mtime > STALE_SECONDS:
+                f.unlink()
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
 def kubeconfig(kube, ns, cluster):
     """Chemin d'un fichier 0600 de l'espace de travail ; à effacer par
     l'appelant (préférer `session`)."""
-    return work_dir.private_file(read(kube, ns, cluster), prefix="hops-child-", suffix=".kubeconfig")
+    sweep()
+    return work_dir.private_file(read(kube, ns, cluster), prefix=PREFIX, suffix=SUFFIX)
 
 
 @contextlib.contextmanager

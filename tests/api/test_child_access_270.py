@@ -67,3 +67,63 @@ def test_the_session_file_is_erased_on_error(tmp_path, monkeypatch):
             seen.append(path)
             raise RuntimeError("boom")
     assert seen and not Path(seen[0]).exists()
+
+
+# --- revue 1-3, I4 : kubeconfig effacé même à l'arrêt (SIGTERM) -------------
+def test_stale_child_kubeconfigs_are_swept(tmp_path, monkeypatch):
+    import os
+    import time
+    wd = tmp_path / "wd"
+    monkeypatch.setenv("HARVESTER_OPS_WORK_DIR", str(wd))
+    wd.mkdir(mode=0o700)
+    old, fresh, other = wd / "hops-child-a.kubeconfig", wd / "hops-child-b.kubeconfig", wd / "keep.kubeconfig"
+    for f in (old, fresh, other):
+        f.write_text("x")
+    past = time.time() - ca.STALE_SECONDS - 5
+    os.utime(old, (past, past))
+    os.utime(other, (past, past))
+    assert ca.sweep() == 1
+    assert not old.exists() and fresh.exists() and other.exists()
+
+
+SCRIPT = r'''
+import base64, importlib.util, signal, sys, time
+sys.path.insert(0, sys.argv[1] + "/bin/lib")
+spec = importlib.util.spec_from_file_location("hc", sys.argv[1] + "/bin/harvester-capi.py")
+hc = importlib.util.module_from_spec(spec); spec.loader.exec_module(hc)
+class M:
+    def get(self, kind, ns, name):
+        return {"data": {"value": base64.b64encode(b"apiVersion: v1").decode()}}
+signal.signal(signal.SIGTERM, hc._exit_cancelled)
+with hc.ca.session(M(), "a", "b") as path:
+    print(path, flush=True)
+    time.sleep(30)
+'''
+
+
+def test_sigterm_inside_a_session_erases_the_file(tmp_path):
+    import os
+    import signal
+    import subprocess
+    env = dict(os.environ, HARVESTER_OPS_WORK_DIR=str(tmp_path / "wd"))
+    p = subprocess.Popen([sys.executable, "-c", SCRIPT, str(ROOT)], stdout=subprocess.PIPE, text=True, env=env)
+    path = Path(p.stdout.readline().strip())
+    assert path.exists()
+    p.send_signal(signal.SIGTERM)
+    assert p.wait(timeout=20) == 3
+    assert not path.exists()
+
+
+def test_opening_a_session_sweeps_leftovers(tmp_path, monkeypatch):
+    import os
+    import time
+    wd = tmp_path / "wd"
+    monkeypatch.setenv("HARVESTER_OPS_WORK_DIR", str(wd))
+    wd.mkdir(mode=0o700)
+    left = wd / "hops-child-dead.kubeconfig"
+    left.write_text("x")
+    past = time.time() - ca.STALE_SECONDS - 5
+    os.utime(left, (past, past))
+    sec = {"data": {"value": base64.b64encode(b"apiVersion: v1\n").decode()}}
+    with ca.session(Mgmt({("secrets", NS, f"{CL}-kubeconfig"): sec}), NS, CL):
+        assert not left.exists()

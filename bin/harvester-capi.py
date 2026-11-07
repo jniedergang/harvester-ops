@@ -1467,6 +1467,10 @@ def manifest_objects(spec):
         objs = cp.objects(spec["policies"])
         return objs, mf.check(objs, spec["cluster"], item)
     ref = f"{spec['package']}-{spec['version']}"
+    if item == cp.ITEM or spec["package"] == POLICIES_PACKAGE:
+        # revue 1-3, m3 : le socle de la console ne se confond avec aucun
+        # élément de paquet (ses comptes reçoivent des jetons, point 208)
+        return [], [mf.finding("artefact-name-reserved", item=item, package=spec["package"])]
     try:
         pkg = art.load_package(_state(), spec["package"], spec["version"])
     except art.ArtefactError:
@@ -1777,6 +1781,9 @@ def cmd_token(args):
     """Jeton `TokenRequest` d'un compte d'automatisation : sur la sortie
     standard seulement ({token, expires_at}), jamais en étape."""
     seconds = ca.check_seconds(args.seconds)
+    if len(args.by) > BY_MAX or any(c in args.by for c in "\n\r|"):
+        # revue 1-3, m4 : `--by` est écrit dans une étape
+        raise ValueError(f"--by: one line, {BY_MAX} characters at most, no '|'")
     ns, cluster = _child_name(args.name)
     tns, account = _child_name(args.account)
     kube, _, _ = kube_from(args)
@@ -1794,6 +1801,13 @@ def cmd_token(args):
     sys.stdout.flush()
     step("token", "done", f"token issued for {tns}/{account} on {cluster}, {seconds} s, by {args.by or '?'}")
     return EXIT_OK
+
+
+CHILD_COMMANDS = ("manifest-check", "manifest-deploy", "manifest-remove", "token")
+
+
+def _exit_cancelled(signum, frame):
+    raise SystemExit(EXIT_CANCELLED)
 
 
 def main(argv=None):
@@ -1885,6 +1899,11 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if getattr(args, "state_dir", None):
         os.environ["HARVESTER_OPS_STATE_DIR"] = os.path.abspath(args.state_dir)
+    if args.cmd in CHILD_COMMANDS:
+        # revue 1-3, I4 : l'arrêt de la console (SIGTERM) passe par les
+        # `finally` : le kubeconfig du cluster enfant est effacé
+        signal.signal(signal.SIGTERM, _exit_cancelled)
+        signal.signal(signal.SIGINT, _exit_cancelled)
     try:
         return args.fn(args)
     except ValueError as e:
