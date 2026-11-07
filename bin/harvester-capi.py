@@ -561,7 +561,30 @@ def registry_findings(kube, spec, harvester):
         except KubeError:
             attached[n] = False
     return rg.check_child(spec["registries"], decls, harvester, attached,
-                          rg.system_ready_registries(_state(), decls))
+                          rg.system_ready_registries(_state(), decls),
+                          vm_probe=_vm_network_probe(kube, spec, decls, harvester))
+
+
+def _vm_network_probe(kube, spec, decls, harvester):
+    """2.6.1 (point 192) : sonde des registres depuis le réseau des VMs du
+    cluster enfant (pod brève, bin/lib/vm_probe.py), gardée 5 minutes : la
+    fenêtre de création relance ses contrôles à chaque saisie. None sans
+    registre d'images connu."""
+    import vm_probe
+    endpoints = rg.child_probe_endpoints(spec["registries"], decls)
+    if not endpoints:
+        return None
+    if not spec.get("network"):
+        return {"network": "", "status": "unchecked", "reason": "no-network", "detail": "", "results": {}}
+    return VM_PROBE(_state(), harvester, kube, spec["network"], endpoints, vm_probe.probe_image(_state()))
+
+
+def _vm_probe_cached(state, cluster, kube, network, endpoints, image):
+    import vm_probe
+    return vm_probe.cached_run(state, cluster, kube, network, endpoints, image)
+
+
+VM_PROBE = _vm_probe_cached     # remplacé par les tests
 
 
 def registry_config(kube, spec, harvester, hidden=False):

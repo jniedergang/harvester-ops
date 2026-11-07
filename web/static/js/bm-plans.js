@@ -127,6 +127,8 @@ const BMPlans = (() => {
     'cluster-registry-no-fallback-system': () => tr('dpw.f.clusterRegistryNoFallbackSystem'),
     'registry-vm-network-unchecked': () => tr('dpw.f.registryVmNetworkUnchecked'),
     'cluster-registry-vm-network-unchecked': () => tr('dpw.f.clusterRegistryVmNetworkUnchecked'),
+    'cluster-registry-unreachable-from-vm-network': () => tr('dpw.f.clusterRegistryUnreachableFromVmNetwork'),
+    'cluster-registry-vm-network-ok': () => tr('dpw.f.clusterRegistryVmNetworkOk'),
   };
   const LEVELS = {
     blocking: () => tr('dpw.lvl.blocking'), warning: () => tr('dpw.lvl.warning'), info: () => tr('dpw.lvl.info'),

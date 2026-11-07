@@ -854,10 +854,12 @@ Their findings appear with their own codes (`registry-address-answers`,
   checked once it is there), `cluster-registry-later` (a child cluster
   uses a registry of the Registry phase: checked again at the start of the
   Clusters phase).
-- Warning: `registry-vm-network-unchecked` and
-  `cluster-registry-vm-network-unchecked` (reachability is checked from
-  the Harvester cluster only, not from the VM network; see
-  [artefacts.md](artefacts.md)).
+- Warning: `registry-vm-network-unchecked` (the bootstrap registry is
+  probed from the VM network when the clusters are checked),
+  `cluster-registry-unreachable-from-vm-network` (blocking when the
+  cluster cuts the fallback to the Internet) and
+  `cluster-registry-vm-network-unchecked` (the probe pod could not judge,
+  with the reason); see [artefacts.md](artefacts.md).
 
 **Adoption.** A bootstrap registry posed by a plan carries its origin (the
 label `harvester-ops.io/plan`, the annotation `harvester-ops.io/plan-run`

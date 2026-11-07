@@ -3,7 +3,7 @@
 
     harvester-registry declare NOM --file r.yaml|- [--revision N]
     harvester-registry attach  NOM --cluster C [--kubeconfig K]     (identifiants JSON sur l'entrée standard)
-    harvester-registry check   NOM --cluster C [--kubeconfig K]
+    harvester-registry check   NOM --cluster C [--kubeconfig K] [--vm-network NS/NOM]
     harvester-registry list
     harvester-registry show    NOM
     harvester-registry forget  NOM [--kubeconfig-for C=K ...]
@@ -13,6 +13,8 @@
     harvester-registry status  NOM --cluster C [--kubeconfig K]
     harvester-registry delete  NOM --cluster C [--kubeconfig K] [--delete-data]
     harvester-registry leftovers   --cluster C [--kubeconfig K]
+    harvester-registry write-access [NOM] --cluster C [--kubeconfig K]
+    harvester-registry settings [--write-sources A,B | --clear]
 
 Une déclaration (bin/lib/registries.py) ne porte aucun secret : adresse,
 CA publique, usage (images, charts), registres d'origine miroités. Les
@@ -28,6 +30,12 @@ importées sur chaque nœud par ctr, objets appliqués avec l'identité de la
 personne, attente de `/v2/` (401 sans compte, puis 200 avec le compte de
 lecture), déclaration et Secrets posés. `delete` garde le volume sauf
 `--delete-data` (point 193).
+
+2.6.1 : `check --vm-network` sonde le registre depuis une pod brève du
+réseau des VMs (bin/lib/vm_probe.py) ; le port d'écriture 5443 des
+registres d'amorçage est servi par un second Service limité aux réseaux de
+la console (`settings --write-sources`, lu à chaque geste), et
+`write-access` y porte les registres déjà posés.
 
 Progression sur stderr au format STEP_EVENT|<étape>|<statut>|<message> ;
 résultat en JSON sur stdout. Codes : 0 succès, 1 échec, 2 refus.
@@ -53,6 +61,7 @@ import cluster_decl  # noqa: E402
 import deploy_plans as dp  # noqa: E402
 import registries as rg  # noqa: E402
 import registry_seed as rs  # noqa: E402
+import vm_probe  # noqa: E402
 from kube import Kube, KubeError, cluster_config  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_REFUSED = 0, 1, 2
@@ -154,13 +163,36 @@ def cmd_attach(args):
     return EXIT_OK
 
 
+def write_open(kube, d, cluster):
+    """Vrai si le port d'écriture d'un registre d'amorçage s'ouvre à toute
+    adresse (Service non porté au réglage, ou réglage vide). Seulement sur
+    le cluster qui le porte, et s'il y a bien un Service (revue 2.6.1)."""
+    if (d or {}).get("kind") != "bootstrap" or d.get("cluster") != cluster:
+        return False
+    main = kube.get("services", rs.NAMESPACE, d["name"])
+    if main is None:
+        return False
+    return not rs.write_access(main, kube.get("services", rs.NAMESPACE, rs.write_service_name(d["name"])))["sources"]
+
+
 def cmd_check(args):
     d = rg.load(state(), args.name)
     findings = []
     if d is not None:
         kube, _ = kube_from(args)
         try:
-            findings = rg.check(d, rg.facts(kube, d, args.cluster))
+            facts = rg.facts(kube, d, args.cluster)
+            if args.vm_network and not cc.NS_NAME_RE.match(args.vm_network):
+                step("vm-network", "error", "--vm-network: expected namespace/name")
+                return EXIT_REFUSED
+            if facts.get("attached"):
+                if args.vm_network:
+                    step("vm-network", "running", f"probe pod on {args.vm_network}")
+                    facts["vm_probe"] = vm_probe.cached_run(state(), args.cluster, kube, args.vm_network,
+                                                            [d["endpoint"]], vm_probe.probe_image(state()),
+                                                            fresh=True)
+                facts["write_open"] = write_open(kube, d, args.cluster)
+            findings = rg.check(d, facts)
         except KubeError as e:
             findings = [cc.finding("cluster-unreachable", "block", error=str(e)[:200])]
     else:
@@ -282,7 +314,8 @@ def _leftover_of(kube, name):
     if rg.load(state(), name) is not None:
         return None
     objs, origin, address = [], {}, None
-    for kind, n in (("deployments", name), ("services", name), ("configmaps", f"{name}-config"),
+    for kind, n in (("deployments", name), ("services", name), ("services", rs.write_service_name(name)),
+                    ("configmaps", f"{name}-config"),
                     ("secrets", f"{name}-tls"), ("secrets", f"{name}-htpasswd"),
                     *[("secrets", x) for x in rg.secret_names(name).values()]):
         o = kube.get(kind, rs.NAMESPACE, n)
@@ -318,8 +351,10 @@ def deploy_facts(kube, spec, answers=None, origin=None):
         longhorn = {"nodes": lh_nodes, "over": over, "minimal": minimal}
     except KubeError:
         longhorn = None
+    wsvc = kube.get("services", rs.NAMESPACE, rs.write_service_name(spec["name"]))
     taken = rg.load(state(), spec["name"]) is not None or \
-        kube.get("deployments", rs.NAMESPACE, spec["name"]) is not None
+        kube.get("deployments", rs.NAMESPACE, spec["name"]) is not None or \
+        (wsvc is not None and ((wsvc.get("metadata") or {}).get("labels") or {}).get(rs.LABEL) != spec["name"])
     own = None
     if taken and (origin or {}).get("plan"):
         left = _leftover_of(kube, spec["name"])
@@ -386,6 +421,10 @@ def cmd_deploy(args):
     if not dp.NAME_RE.match(args.name) or len(args.name) > rg.NAME_MAX or args.name in rg.RESERVED:
         step("check", "error", f"invalid registry name (RFC 1123, {rg.NAME_MAX} characters at most)")
         return EXIT_REFUSED
+    if args.name.endswith(rg.WRITE_NAME_SUFFIX):
+        # revue 2.6.1 : `<a>-write` est le Service d'écriture du registre `a`
+        step("check", "error", f"a bootstrap registry name cannot end with {rg.WRITE_NAME_SUFFIX}")
+        return EXIT_REFUSED
     if not 5 <= args.size_gib <= 2048:
         step("check", "error", "size: an integer from 5 to 2048 GiB")
         return EXIT_REFUSED
@@ -413,6 +452,12 @@ def cmd_deploy(args):
         return EXIT_REFUSED if blocked else EXIT_OK
     step("check", "done", "no blocking finding")
     try:
+        # avant tout geste : un réglage abîmé n'ouvre jamais le port d'écriture
+        sources = rg.settings(state())["write_sources"]
+    except rg.SettingsError as e:
+        step("check", "error", str(e))
+        return EXIT_REFUSED
+    try:
         client_tls = _client_tls(args)
     except (OSError, ValueError) as e:
         step("tls", "error", str(e))
@@ -437,7 +482,9 @@ def cmd_deploy(args):
         node_images.import_on_nodes(entry, [b["tar"]], step, sid="images")
         step("apply", "running", f"namespace {rs.NAMESPACE}: pod, volume of {args.size_gib} GiB, address "
                                  f"{args.address}")
-        kube.apply(rs.manifests(spec, tls, htp, origin) + rg.attach_manifests(decl, creds)[1:])
+        kube.apply(rs.manifests(spec, tls, htp, origin, write_sources=sources) + rg.attach_manifests(decl, creds)[1:])
+        step("apply", "running", f"port {rs.WRITE_PORT}: " + (f"reserved to {', '.join(sources)}" if sources else
+                                 "open to every address (Settings > Registries restricts it to the console)"))
         step("apply", "done", f"{args.name}: deployment, service, volume, secrets")
         step("ready", "running", f"waiting for https://{args.address}/v2/")
         why = wait_ready(decl, creds["pull"], args.timeout)
@@ -467,6 +514,7 @@ def cmd_status(args):
         dep = kube.get("deployments", rs.NAMESPACE, args.name)
         pvc = kube.get("persistentvolumeclaims", rs.NAMESPACE, f"{args.name}-data")
         svc = kube.get("services", rs.NAMESPACE, args.name)
+        wsvc = kube.get("services", rs.NAMESPACE, rs.write_service_name(args.name))
         present = {r: kube.get("secrets", rs.NAMESPACE, n) is not None for r, n in rg.secret_names(args.name).items()}
         used = None
         vol = ((pvc or {}).get("spec") or {}).get("volumeName")
@@ -496,7 +544,8 @@ def cmd_status(args):
          "address": ingress.get("ip") or (d or {}).get("address"),
          "volume": {"size": (((pvc or {}).get("spec") or {}).get("resources") or {}).get("requests", {}).get("storage"),
                     "phase": ((pvc or {}).get("status") or {}).get("phase"), "used_bytes": used} if pvc else None,
-         "accounts": present, "repositories": repos})
+         "accounts": present, "repositories": repos,
+         "write_access": rs.write_access(svc, wsvc) if svc else None})
     return EXIT_OK
 
 
@@ -519,6 +568,57 @@ def cmd_leftovers(args):
     return EXIT_OK
 
 
+def cmd_write_access(args):
+    """Porte les registres d'amorçage du cluster (ou le seul nommé) au
+    réglage courant du port d'écriture (2.6.1) : c'est la reprise des
+    registres posés par la 2.6.0, faite à l'enregistrement du réglage."""
+    try:
+        sources = rg.settings(state())["write_sources"]
+    except rg.SettingsError as e:
+        step("write-access", "error", str(e))
+        return EXIT_REFUSED
+    names = [args.name] if args.name else [
+        s["name"] for s in rg.list_decls(state())
+        if not s.get("invalid") and s.get("kind") == "bootstrap" and s.get("cluster") == args.cluster]
+    kube, _ = kube_from(args)
+    done = []
+    for n in names:
+        d = rg.load(state(), n)
+        if d is None or d.get("kind") != "bootstrap" or d.get("cluster") != args.cluster:
+            step("write-access", "error", f"{n} is not a bootstrap registry of {args.cluster}")
+            return EXIT_REFUSED
+        try:
+            res = rs.reconcile_write_access(kube, n, sources, step)
+        except KubeError as e:
+            step("write-access", "error", f"{n}: {str(e)[:300]}")
+            return EXIT_FAIL
+        if res["missing"]:
+            step("write-access", "running", f"{n}: no service on {args.cluster} (registry removed by hand?)")
+        done.append(dict(res, registry=n))
+    changed = [x["registry"] for x in done if x["changed"]]
+    step("write-access", "done", (f"{', '.join(changed)} brought to " if changed else "already at ")
+         + (", ".join(sources) if sources else "an open write port") + f" ({len(names)} registry(ies))")
+    out({"cluster": args.cluster, "write_sources": sources, "registries": done})
+    return EXIT_OK
+
+
+def cmd_settings(args):
+    if args.write_sources is not None or args.clear:
+        try:
+            cur = rg.save_settings(state(), [] if args.clear else args.write_sources)["write_sources"]
+        except ValueError as e:
+            step("settings", "error", str(e))
+            return EXIT_REFUSED
+        step("settings", "done", "write port reserved to " + ", ".join(cur) if cur
+             else "write port open to every address")
+    try:
+        out(rg.settings(state()))
+    except rg.SettingsError as e:
+        step("settings", "error", str(e))
+        return EXIT_FAIL
+    return EXIT_OK
+
+
 def cmd_delete(args):
     d = rg.load(state(), args.name)
     if d is not None and d.get("kind") != "bootstrap":
@@ -535,16 +635,23 @@ def cmd_delete(args):
         out({"registry": args.name, "deleted": False, "used_by": sorted(set(used))})
         return EXIT_REFUSED
     names = rg.secret_names(args.name)
-    objs = [("deployments", args.name), ("services", args.name), ("configmaps", f"{args.name}-config"),
+    objs = [("deployments", args.name), ("services", args.name), ("services", rs.write_service_name(args.name)),
+            ("configmaps", f"{args.name}-config"),
             ("secrets", f"{args.name}-tls"), ("secrets", f"{args.name}-htpasswd"),
             ("secrets", names["push"]), ("secrets", names["pull"]), ("secrets", names["ca"])]
     if args.delete_data:
         objs.append(("persistentvolumeclaims", f"{args.name}-data"))
     try:
         for kind, n in objs:
-            if kube.get(kind, rs.NAMESPACE, n) is not None:
-                kube.delete(kind, rs.NAMESPACE, n)
-                step("delete", "running", f"{kind} {n}")
+            o = kube.get(kind, rs.NAMESPACE, n)
+            if o is None:
+                continue
+            if ((o.get("metadata") or {}).get("labels") or {}).get(rs.LABEL) != args.name:
+                # revue 2.6.1 : jamais l'objet d'un autre registre
+                step("delete", "running", f"{kind} {n} kept: it does not belong to {args.name}")
+                continue
+            kube.delete(kind, rs.NAMESPACE, n)
+            step("delete", "running", f"{kind} {n}")
     except KubeError as e:
         step("delete", "error", str(e)[:300])
         return EXIT_FAIL
@@ -579,7 +686,17 @@ def parser():
     s = sub.add_parser("check", allow_abbrev=False)
     s.add_argument("name")
     cluster_args(s)
+    s.add_argument("--vm-network", help="namespace/name: probe the registry from this VM network (pod)")
     s.set_defaults(fn=cmd_check)
+    s = sub.add_parser("write-access", allow_abbrev=False)
+    s.add_argument("name", nargs="?")
+    cluster_args(s)
+    s.set_defaults(fn=cmd_write_access)
+    s = sub.add_parser("settings", allow_abbrev=False)
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--write-sources", help="networks of the console allowed on the write port, comma separated")
+    g.add_argument("--clear", action="store_true", help="open the write port to every address")
+    s.set_defaults(fn=cmd_settings)
     s = sub.add_parser("list", allow_abbrev=False)
     s.set_defaults(fn=cmd_list)
     s = sub.add_parser("deploy", allow_abbrev=False)

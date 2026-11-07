@@ -13,6 +13,9 @@ const CapiCreate = (() => {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const tr = (k, vars) => i18n.t(k, vars);
+  // 2.6.1 : raison et étape de la sonde du réseau des VMs, traduites par
+  // l'onglet Registres (une seule table)
+  const vmFacts = (v) => (window.Registries && Registries.vmFacts ? Registries.vmFacts(v) : v);
   const enc = encodeURIComponent;
   const bytes = (n) => (window.XferProgress ? XferProgress.bytes(n) : `${n} B`);
   const GIB = 1024 ** 3;
@@ -67,7 +70,9 @@ const CapiCreate = (() => {
     'cluster-registry-no-images': (v) => tr('capi.new.fd.cluster-registry-no-images', v),
     'cluster-registry-mirror-unknown': (v) => tr('capi.new.fd.cluster-registry-mirror-unknown', v),
     'cluster-registry-no-fallback-system': (v) => tr('capi.new.fd.cluster-registry-no-fallback-system', v),
-    'cluster-registry-vm-network-unchecked': (v) => tr('capi.new.fd.cluster-registry-vm-network-unchecked', v),
+    'cluster-registry-vm-network-unchecked': (v) => tr('capi.new.fd.cluster-registry-vm-network-unchecked', vmFacts(v)),
+    'cluster-registry-vm-network-ok': (v) => tr('capi.new.fd.cluster-registry-vm-network-ok', vmFacts(v)),
+    'cluster-registry-unreachable-from-vm-network': (v) => tr('capi.new.fd.cluster-registry-unreachable-from-vm-network', vmFacts(v)),
   };
   const LEVEL_CLASS = { block: 'sev-critical', warn: 'sev-watch', ok: 'sev-info' };
   const LEVEL_RANK = { block: 0, warn: 1, ok: 2 };
@@ -115,6 +120,7 @@ const CapiCreate = (() => {
     'cluster-registry-unknown': 'registries', 'cluster-registry-not-attached': 'registries',
     'cluster-registry-no-images': 'registries', 'cluster-registry-mirror-unknown': 'registries',
     'cluster-registry-no-fallback-system': 'registries', 'cluster-registry-vm-network-unchecked': 'registries',
+    'cluster-registry-vm-network-ok': 'registries', 'cluster-registry-unreachable-from-vm-network': 'registries',
   };
   // Point 198 : registres d'origine des images système de RKE2. Couper le
   // repli vers Internet pour eux n'est proposé que si un registre qui les

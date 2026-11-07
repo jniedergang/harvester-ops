@@ -30,19 +30,33 @@ def test_every_object_is_labelled_in_the_registry_namespace():
     assert set(o) == {("Namespace", "harvester-ops-registry"), ("Secret", "amorcage-tls"),
                       ("Secret", "amorcage-htpasswd"), ("ConfigMap", "amorcage-config"),
                       ("PersistentVolumeClaim", "amorcage-data"), ("Deployment", "amorcage"),
-                      ("Service", "amorcage")}
+                      ("Service", "amorcage"), ("Service", "amorcage-write")}
     for (kind, _), x in o.items():
         if kind != "Namespace":
             assert x["metadata"]["namespace"] == "harvester-ops-registry"
             assert x["metadata"]["labels"] == {"harvester-ops.io/registry": "amorcage"}
 
 
-def test_the_service_gets_its_fixed_address_from_harvester_kube_vip():
-    svc = objs()[("Service", "amorcage")]
+@pytest.mark.parametrize("name,ports", [
+    ("amorcage", [("read", 443, 5000)]),
+    # 2.6.1 : le port d'écriture dans un Service à lui, à la même adresse
+    ("amorcage-write", [("write", 5443, 5001)]),
+])
+def test_each_service_gets_the_fixed_address_from_harvester_kube_vip(name, ports):
+    svc = objs()[("Service", name)]
     assert svc["metadata"]["annotations"] == {"kube-vip.io/loadbalancerIPs": "172.16.2.76"}
-    assert svc["spec"]["type"] == "LoadBalancer"
-    assert [(p["name"], p["port"], p["targetPort"]) for p in svc["spec"]["ports"]] == \
-        [("read", 443, 5000), ("write", 5443, 5001)]
+    assert svc["spec"]["type"] == "LoadBalancer" and svc["spec"]["allocateLoadBalancerNodePorts"] is False
+    assert svc["spec"]["selector"] == {"harvester-ops.io/registry": "amorcage"}
+    assert [(p["name"], p["port"], p["targetPort"]) for p in svc["spec"]["ports"]] == ports
+    assert "loadBalancerSourceRanges" not in svc["spec"]          # aucun réglage : ouvert à tous
+
+
+@pytest.mark.parametrize("sources", [["172.16.1.11/32"], ["10.0.0.0/8", "172.16.1.11/32"]])
+def test_only_the_write_service_is_restricted_to_the_console(sources):
+    o = {(x["kind"], x["metadata"]["name"]): x for x in rs.manifests(SPEC, TLS, HTP, write_sources=sources)}
+    assert o[("Service", "amorcage-write")]["spec"]["loadBalancerSourceRanges"] == sources
+    # 443 reste ouvert aux nœuds des clusters enfants
+    assert "loadBalancerSourceRanges" not in o[("Service", "amorcage")]["spec"]
 
 
 def test_the_pod_runs_two_bounded_instances_of_the_imported_image():

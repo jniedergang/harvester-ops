@@ -236,25 +236,82 @@ commande, ils arrivent sur l'entrée standard, jamais dans un argument.
 
 **Vérifier** (opérateurs) lit les comptes sur le cluster et sonde le
 registre depuis la console, avec chaque compte, sans rien écrire.
-Constats : `registry-unknown`, `registry-not-attached`,
-`registry-unreachable`, `registry-ca-invalid`, `registry-auth-refused`,
-`registry-no-usage` (bloquants) ; `registry-pull-is-push`,
-`registry-insecure`, `registry-vm-network-unchecked` (avertissements).
+Choisissez un **réseau des VMs** à côté du bouton pour le sonder aussi
+depuis ce réseau (voir plus bas). Constats : `registry-unknown`,
+`registry-not-attached`, `registry-unreachable`, `registry-ca-invalid`,
+`registry-auth-refused`, `registry-no-usage` (bloquants) ;
+`registry-pull-is-push`, `registry-insecure`, `registry-write-port-open`
+(registre d'amorçage dont le port d'écriture accepte toute adresse, voir
+Paramètres > Registres), `registry-unreachable-from-vm-network`,
+`registry-vm-network-unchecked` (avertissements) ; `registry-vm-network-ok`
+(information).
 `registry-insecure` vient de `insecure_skip_verify: true` dans un fichier
 de déclaration : les nœuds ne vérifient alors pas le certificat.
 
-**La joignabilité du registre n'est vérifiée que depuis le cluster
-Harvester, pas depuis le réseau des VMs.** La console et le cluster
-Harvester sondent l'adresse ; aucun contrôle ne part du réseau des VMs des
-clusters enfants. Chaque vérification le dit par un avertissement :
-`registry-vm-network-unchecked` (Vérifier, fenêtre du registre
-d'amorçage et constats des plans) et `cluster-registry-vm-network-unchecked`
-(contrôle de création d'un cluster enfant, un par registre qui sert des
-images). Un réseau de VMs qui ne route pas vers le registre (VLAN sans
-route, pare-feu) n'est pas détecté : les nœuds se replient alors sur
-Internet, ou échouent à tirer quand `no_fallback` est posé. Assurez-vous
-que les VMs enfants atteignent l'adresse avant de compter dessus. Une
-sonde par un pod attaché au réseau des VMs arrive en 2.6.1.
+**Joignabilité depuis le réseau des VMs (2.6.1).** Que la console et le
+cluster Harvester joignent un registre ne dit pas que les VMs enfants le
+joignent : un réseau de VMs peut ne pas y avoir de route (VLAN sans route,
+pare-feu). Les contrôles lancent donc une **pod sonde** brève attachée au
+réseau des VMs, comme le serait une VM :
+
+- C'est un Job dans son propre namespace, `harvester-ops-probe`, attaché
+  par Multus au réseau (NetworkAttachmentDefinition), sur les nœuds qui
+  portent son réseau de cluster. L'image est `bci-busybox`, livrée dans le
+  paquet du registre et épinglée par empreinte ; elle est importée sur les
+  nœuds avec un registre d'amorçage (sur un cluster qui n'en a pas, le
+  nœud la tire de `registry.suse.com`, ou la sonde dit que l'image manque).
+- Elle prend une adresse comme une VM : celle que donne l'IPAM du réseau,
+  sinon un bail DHCP, rendu à la fin de la sonde.
+- Pour chaque adresse, elle essaie dans l'ordre : le nom avec le serveur
+  DNS que donne le réseau (si le registre est un nom), une route par le
+  réseau des VMs, une connexion TCP, puis une poignée de main TLS, le nom
+  envoyé en SNI (une réponse HTTP, 401 compris). La CA elle-même est
+  vérifiée par la console, pas par la sonde. Le client TLS de la sonde
+  (BusyBox) ne lit que les certificats RSA et ECDSA.
+- Une adresse donnée par l'IPAM du réseau sans passerelle (pour un
+  registre hors de son sous-réseau) ou sans serveur DNS (pour un registre
+  donné par son nom) n'est pas jugée : une VM peut les recevoir autrement.
+  Le constat le dit alors (`ipam-incomplete`) au lieu de « injoignable ».
+- Moindre privilège : capacités `NET_ADMIN` (adresse et routes) et
+  `NET_RAW` (socket DHCP) seulement, toutes les autres retirées, aucun
+  jeton de compte de service, système de fichiers en lecture seule sauf un
+  `/tmp` de 1 Mio en mémoire, 32 Mio de mémoire. Ce sont les capacités que
+  l'essai préalable de la 2.6.0 a prouvées suffisantes.
+- Elle est retirée à la fin de chaque contrôle, réussi ou non ; le Job a
+  aussi un délai et `ttlSecondsAfterFinished`, il disparaît donc même si
+  la console s'arrête en route.
+- Il faut le droit de créer un Job dans `harvester-ops-probe` (et le
+  namespace la première fois). Sans lui, le contrôle le dit.
+
+Où elle part : **Vérifier** un registre avec un réseau des VMs choisi
+(une sonde neuve à chaque fois), et le contrôle de création d'un cluster
+enfant et les contrôles des plans, depuis le réseau principal du cluster
+(`network`), une fois pour tous ses registres qui servent des images. Ces
+contrôles se relancent à la saisie dans la fenêtre de création : un
+résultat est gardé 5 minutes par cluster Harvester, réseau et adresses,
+pour que la saisie ne lance pas une pod à chaque fois. Une sonde qui n'a
+pas pu juger n'est pas gardée (cela dépend souvent des droits de la
+personne). Un registre
+d'amorçage posé par un plan est sondé au début de la phase Clusters (il ne
+répond pas avant).
+
+Constats : `cluster-registry-vm-network-ok` (information, avec l'adresse
+de la sonde), `cluster-registry-unreachable-from-vm-network` (avec
+l'étape qui a échoué : nom, route, TCP ou TLS ; un avertissement,
+**bloquant quand le cluster coupe le repli vers Internet**, ses nœuds ne
+tirant alors plus rien), et `cluster-registry-vm-network-unchecked` quand
+la sonde ne peut pas juger, avec la raison : aucun réseau des VMs, réseau
+introuvable, droits manquants, image de la sonde absente, aucune adresse
+(pas de bail DHCP en 20 s et pas d'IPAM), adresse de l'IPAM sans
+passerelle ni DNS, pod non démarrée (message de Multus ou de
+l'ordonnanceur), pas de résultat à temps. Mêmes codes sans le
+préfixe `cluster-` pour Vérifier. La fenêtre du registre d'amorçage dit
+`registry-vm-network-unchecked` : l'adresse n'est pas encore servie, elle
+est sondée quand un cluster enfant ou un plan l'emploie.
+
+Limites : la sonde est une pod sur un nœud Harvester, pas une VM ; elle ne
+part que du réseau principal du cluster ; un pare-feu qui traite pods et
+VMs différemment (par adresse MAC, par exemple) n'est pas vu.
 
 **Oublier** retire les Secrets du registre (les deux comptes et la CA) de
 chaque cluster Harvester rattaché, avec votre identité, puis la
@@ -308,10 +365,45 @@ compte pourrait écrire) :
 | 443 | lecture seule (toute écriture reçoit 405) | `push` et `pull` |
 | 5443 | lecture et écriture | `push` seulement |
 
-Les clusters enfants lisent sur 443. La console publie sur 5443. Le port
-5443 est ouvert à toute machine qui joint l'adresse, réseaux des VMs
-compris : une écriture exige toujours le compte `push`, et le compte
-`pull` y est refusé.
+Les clusters enfants lisent sur 443. La console publie sur 5443. Depuis
+la 2.6.1, les deux ports sont **deux Services LoadBalancer à la même
+adresse** (`<nom>` pour 443, `<nom>-write` pour 5443), servis tous deux
+par le kube-vip de Harvester, pour que le port d'écriture puisse être
+réservé à la console.
+
+**Port d'écriture réservé à la console (2.6.1).** Paramètres > Registres
+(administrateurs) garde les réseaux de la console admis sur 5443
+(adresses ou réseaux IPv4, séparés par des virgules). La fenêtre suggère
+l'adresse par laquelle la console sort vers chaque cluster qui porte un
+registre d'amorçage. Le réglage est lu à chaque geste, sans redémarrage.
+
+- Il devient `loadBalancerSourceRanges` du Service `<nom>-write` : un
+  autre hôte n'a pas de réponse sur 5443 (la connexion expire), le port
+  443 reste ouvert à toute adresse. Un seul Service à plages limitées
+  couperait aussi 443 aux VMs, d'où le second Service.
+- Enregistrer le réglage y porte chaque registre d'amorçage que la console
+  déclare : une action suivie par cluster Harvester
+  (`registry-write-access:<cluster>`, `harvester-registry write-access`),
+  avec votre identité. C'est aussi la reprise d'un registre posé par la
+  2.6.0 (5443 sur son Service principal) : le port quitte d'abord le
+  Service principal, puis le Service d'écriture est posé ; les écritures
+  s'arrêtent quelques secondes, les lectures jamais. Un nouveau registre
+  d'amorçage est posé avec le réglage.
+- Vide, le port d'écriture accepte toute adresse, comme en 2.6.0, et
+  Vérifier dit `registry-write-port-open`. Un fichier de réglages abîmé
+  n'est jamais lu comme « ouvert » : le déploiement et `write-access` sont
+  refusés tant que le réglage n'est pas réenregistré.
+- Le nom d'un registre d'amorçage ne peut pas finir par `-write` (le nom
+  du Service d'écriture d'un autre registre), et Supprimer ne retire que
+  les objets étiquetés au nom du registre.
+- Ce que cela protège : le port d'écriture contre les autres hôtes des
+  réseaux qui joignent l'adresse (VMs enfants comprises). Ce que cela ne
+  fait pas : ce n'est pas une authentification (une écriture exige
+  toujours le compte `push`, et `pull` y est refusé) ; cela ne voit pas à
+  travers une traduction d'adresses ou un proxy (le cluster doit voir la
+  vraie adresse de la console : derrière un NAT, donnez l'adresse
+  traduite) ; et le filtre porte sur l'adresse qui arrive au nœud
+  Harvester, donc un hôte qui peut emprunter une adresse admise passe.
 
 - **TLS toujours.** La console génère une CA (10 ans) et un certificat
   serveur (2 ans), ou prend votre certificat (`--cert`, `--key`, `--ca`).
@@ -507,7 +599,7 @@ personne, comme en 2.5.0.
 ```
 harvester-registry declare NOM --file r.yaml|- [--revision N]
 harvester-registry attach  NOM --cluster C          (comptes en JSON sur stdin)
-harvester-registry check   NOM --cluster C
+harvester-registry check   NOM --cluster C [--vm-network NS/NOM]
 harvester-registry list | show NOM | forget NOM [--kubeconfig-for C=FICHIER ...]
 harvester-registry deploy  NOM --cluster C --address IP --size-gib N --storage-class S
                            [--dns-name N] [--mirrors h1,h2] [--cert F --key F --ca F]
@@ -515,10 +607,16 @@ harvester-registry deploy  NOM --cluster C --address IP --size-gib N --storage-c
 harvester-registry status  NOM --cluster C
 harvester-registry leftovers   --cluster C
 harvester-registry delete  NOM --cluster C [--delete-data]
+harvester-registry write-access [NOM] --cluster C
+harvester-registry settings [--write-sources A,B | --clear]
 ```
 
 `attach` lit `{"push": {"username", "password"}, "pull": {...}}` sur
-l'entrée standard. `deploy --dry-run` ne fait que les vérifications. Codes
+l'entrée standard. `deploy --dry-run` ne fait que les vérifications.
+`check --vm-network` ajoute la sonde depuis ce réseau de VMs. `settings`
+montre ou pose les réseaux de la console admis sur le port d'écriture ;
+`write-access` y porte les registres d'amorçage d'un cluster (ou celui
+nommé). Codes
 de sortie : 0 succès, 1 échec, 2 refus (constat bloquant, registre
 employé...).
 
@@ -536,20 +634,8 @@ employé...).
 - Brancher le réglage `containerd-registry` des nœuds Harvester sur les
   registres déclarés : le réglage reste un geste manuel (Réglages).
 - Le ramasse-miettes et l'agrandissement d'un registre d'amorçage.
-- Sonder le registre depuis le réseau des VMs : les vérifications
-  avertissent que la joignabilité n'est vue que depuis le cluster
-  Harvester (voir Vérifier plus haut). La sonde par un pod arrive en
-  2.6.1 ; son image (`bci-busybox`) est déjà dans le paquet du registre de
-  la 2.6.0, importée sur les nœuds avec l'image du registre, et ne sert
-  encore à rien d'autre.
-- Restreindre le port d'écriture 5443 à l'adresse de la console. Essayé
-  sur le banc : un second service LoadBalancer à la même adresse, avec le
-  seul port d'écriture et `loadBalancerSourceRanges` à l'adresse de la
-  console, partage l'adresse par le kube-vip de Harvester, et la plage est
-  appliquée (la console a reçu 401 puis 200 avec `push`, un autre hôte du
-  LAN est resté sans réponse, le port 443 ouvert à tous). Pas livré : il
-  faut l'adresse source de la console telle que le cluster la voit, un
-  réglage à concevoir (NAT, réseau des conteneurs).
+- La sonde depuis le réseau des VMs et le port d'écriture réservé à la
+  console sont arrivés en 2.6.1 (voir plus haut).
 
 **Vu en réel (2.6.0).** Banc harvlab2 (Harvester v1.9.0, un nœud
 imbriqué, 32 Gio), console de cette version, 7 novembre 2026.
@@ -607,7 +693,35 @@ imbriqué, 32 Gio), console de cette version, 7 novembre 2026.
   réglage Longhorn `storage-minimal-available-percentage` a été abaissé
   de 25 à 15 pendant chaque création, puis remis.
 
-Non vérifié en réel : un Harbor du client, un cluster enfant amorcé
+**Vu en réel (2.6.1).** Banc harvlab2, console de cette version,
+7 novembre 2026. Registre d'amorçage de 8 Gio en 172.16.2.76.
+
+- **Sonde depuis `default/lab-net`** (sans VLAN, DHCP de Pi-hole) : bail
+  obtenu puis rendu (absent des baux DHCP ensuite), poignée de main TLS
+  faite, `registry-vm-network-ok` en 11 à 14 s ; le contrôle de création
+  d'un cluster enfant sur ce réseau a rendu
+  `cluster-registry-vm-network-ok`. Aucun Job ni pod resté dans
+  `harvester-ops-probe` après chaque contrôle.
+- **Réseaux qui ne joignent pas le registre**, faits pour l'essai sur les
+  VLAN 998 et 999 : sans DHCP ni IPAM, `registry-vm-network-unchecked`
+  avec la raison `no-address` (28 s, l'attente du DHCP) ; un IPAM statique
+  sans passerelle, le même avec `ipam-incomplete` (7 s) ; un IPAM statique
+  avec une route par une passerelle qui n'existe pas,
+  `registry-unreachable-from-vm-network` (`tcp`), et dans le contrôle de
+  création d'un cluster enfant qui coupe le repli,
+  `cluster-registry-unreachable-from-vm-network` bloquant.
+- **Port d'écriture.** Un registre façonné comme en 2.6.0 (5443 sur le
+  Service principal, port ajouté par un autre gestionnaire de champs) a été
+  repris en enregistrant `172.16.1.11/32` ; un nouveau registre a ensuite
+  été posé avec le réglage. Les deux fois : deux Services à la même
+  adresse, 443 répond depuis node1 et depuis node2, 5443 répond depuis
+  node1 (la console) et expire depuis node2. Vérifier a sondé les deux
+  comptes à travers lui sans constat.
+- L'étape TLS de la sonde a aussi été jouée contre un serveur TLS derrière
+  un mandataire inverse, sur un réseau local : réponse avec le nom en SNI,
+  refus sans lui.
+
+Non vérifié en réel (2.6.0) : un Harbor du client, un cluster enfant amorcé
 entièrement sans Internet (hors de la 2.6.0), un registre d'amorçage sur
 un cluster de plusieurs nœuds, plus d'un cluster enfant à la fois sur un
 registre, des paquets de plusieurs gigaoctets, et la reprise d'une

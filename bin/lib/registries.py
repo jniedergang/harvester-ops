@@ -146,12 +146,84 @@ def check_decl(doc):
 
 # /api/registries/bootstrap/<cluster> est le geste d'amorçage ;
 # /api/registries/bootstrap/<cluster>/leftovers, les restes (revue finale I-2)
-RESERVED = ("bootstrap", "leftovers")
+RESERVED = ("bootstrap", "leftovers", "settings")
+WRITE_NAME_SUFFIX = "-write"         # Service d'écriture d'un registre d'amorçage (2.6.1)
+
+
+# ---------------------------------------------------------------------------
+# Réglages des registres (2.6.1) : adresses de la console pour le port
+# d'écriture des registres d'amorçage
+# ---------------------------------------------------------------------------
+SETTINGS_FILE = "registries-settings.json"
+SOURCES_MAX = 16
+
+
+def normalize_sources(value):
+    """Liste triée de réseaux IPv4 `a.b.c.d/n` (une adresse seule devient
+    /32) depuis une liste ou un texte séparé par des virgules ou des
+    espaces ; ValueError sinon. 0.0.0.0/0 refusé : c'est l'absence de
+    restriction, qui s'écrit par une liste vide."""
+    import ipaddress
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else re.split(r"[\s,]+", str(value))
+    out = []
+    for raw in items:
+        if not isinstance(raw, str):
+            raise ValueError("write sources: IPv4 addresses or networks")
+        v = raw.strip()
+        if not v:
+            continue
+        try:
+            net = ipaddress.IPv4Network(v, strict=False)
+        except ValueError:
+            raise ValueError(f"{v[:60]}: an IPv4 address or network (a.b.c.d/n)") from None
+        if net.prefixlen == 0:
+            raise ValueError("0.0.0.0/0 opens the port to every address: leave the list empty instead")
+        if str(net) not in out:
+            out.append(str(net))
+    if len(out) > SOURCES_MAX:
+        raise ValueError(f"{SOURCES_MAX} networks at most")
+    return sorted(out, key=lambda n: (int(ipaddress.IPv4Network(n).network_address), n))
+
+
+class SettingsError(ValueError):
+    """Fichier de réglages illisible : jamais lu comme « ouvert à tous »."""
+
+
+def settings(state):
+    """{"write_sources": [...]} : lu à chaque usage (modifiable à chaud).
+    Fichier absent : aucune restriction. Fichier abîmé : SettingsError
+    (revue 2.6.1 : le lire comme vide ouvrirait le port d'écriture)."""
+    from pathlib import Path
+    path = Path(state) / SETTINGS_FILE
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return {"write_sources": []}
+    except OSError as e:
+        raise SettingsError(f"{SETTINGS_FILE}: unreadable ({e.strerror})") from None
+    try:
+        doc = json.loads(text)
+        return {"write_sources": normalize_sources(doc.get("write_sources") or [])}
+    except (ValueError, AttributeError) as e:
+        raise SettingsError(f"{SETTINGS_FILE}: invalid ({str(e)[:120]}); save the setting again") from None
+
+
+def save_settings(state, sources):
+    from pathlib import Path
+    import self_update as su
+    doc = {"write_sources": normalize_sources(sources)}
+    su.write_json_atomic(Path(state) / SETTINGS_FILE, doc, mode=0o600)
+    return doc
 
 
 def save(state, name, doc, revision=None):
     if name in RESERVED:
         raise dp.ProfileError([("name", "reserved name")])
+    if name.endswith(WRITE_NAME_SUFFIX) and (doc or {}).get("kind") == "bootstrap":
+        # revue 2.6.1 : `<a>-write` est le Service d'écriture du registre `a`
+        raise dp.ProfileError([("name", f"a bootstrap registry name cannot end with {WRITE_NAME_SUFFIX}")])
     return dp._save(state, DIR, name, doc, revision, check_decl)
 
 
@@ -296,12 +368,43 @@ def read_creds(kube, name, role):
 # ---------------------------------------------------------------------------
 VM_NETWORK_WARNING = "registry-vm-network-unchecked"
 CHILD_VM_NETWORK_WARNING = "cluster-registry-vm-network-unchecked"
+# 2.6.1 (point 192) : sonde par une pod du réseau des VMs (bin/lib/vm_probe.py)
+VM_NETWORK_OK = "registry-vm-network-ok"
+VM_NETWORK_UNREACHABLE = "registry-unreachable-from-vm-network"
+CHILD_VM_NETWORK_OK = "cluster-registry-vm-network-ok"
+CHILD_VM_NETWORK_UNREACHABLE = "cluster-registry-unreachable-from-vm-network"
+VM_NETWORK_CODES = (VM_NETWORK_WARNING, VM_NETWORK_OK, VM_NETWORK_UNREACHABLE)
+CHILD_VM_NETWORK_CODES = (CHILD_VM_NETWORK_WARNING, CHILD_VM_NETWORK_OK, CHILD_VM_NETWORK_UNREACHABLE)
+
+
+def vm_network_findings(registry, endpoint, probe, child=False, block=False):
+    """Constat de joignabilité depuis le réseau des VMs d'un point d'accès,
+    d'après le résultat de `vm_probe.run` (None : aucune sonde faite, aucun
+    réseau donné). `block` : le cluster enfant coupe le repli vers Internet,
+    un registre injoignable l'empêche alors de tirer ses images."""
+    codes = CHILD_VM_NETWORK_CODES if child else VM_NETWORK_CODES
+    base = {"registry": registry, "endpoint": endpoint}
+    if not probe or probe.get("status") != "probed":
+        probe = probe or {"reason": "no-network"}
+        return [cc.finding(codes[0], "warn", **base, network=probe.get("network") or "",
+                           reason=probe.get("reason") or "no-network", detail=probe.get("detail") or "")]
+    r = (probe.get("results") or {}).get(endpoint) or {"ok": False, "failed": "tcp"}
+    if r.get("unknown"):
+        # adresse de l'IPAM sans passerelle ni DNS : la sonde ne juge pas
+        return [cc.finding(codes[0], "warn", **base, network=probe["network"], reason="ipam-incomplete",
+                           detail="")]
+    facts = dict(base, network=probe["network"], address=probe.get("address") or "")
+    if r.get("ok"):
+        return [cc.finding(codes[1], "ok", **facts)]
+    return [cc.finding(codes[2], "block" if block else "warn", **facts, failed=r.get("failed") or "tcp")]
 
 
 def check(decl, facts, name=None):
     """Constats d'un registre sur un cluster Harvester. `facts` :
     {"attached": bool, "reachable": bool, "ca_ok": bool,
-     "auth": {"pull": bool|None, "push": bool|None}, "pull_is_push": bool}."""
+     "auth": {"pull": bool|None, "push": bool|None}, "pull_is_push": bool,
+     "vm_probe": résultat de vm_probe.run (2.6.1, réseau choisi) ou absent,
+     "write_open": bool (2.6.1, port d'écriture ouvert à toute adresse)}."""
     if decl is None:
         return [cc.finding("registry-unknown", "block", registry=name)]
     n = decl["name"]
@@ -323,10 +426,10 @@ def check(decl, facts, name=None):
             out.append(cc.finding("registry-auth-refused", "block", registry=n, accounts=refused))
     if facts.get("pull_is_push"):
         out.append(cc.finding("registry-pull-is-push", "warn", registry=n))
-    # Revue finale 2.6.0 (I-4, point 192 en repli) : la sonde part de la
-    # console et du cluster Harvester, jamais du réseau des VMs (sonde par
-    # un pod de ce réseau en 2.6.1)
-    out.append(cc.finding(VM_NETWORK_WARNING, "warn", registry=n, endpoint=decl.get("endpoint")))
+    if facts.get("write_open"):
+        out.append(cc.finding("registry-write-port-open", "warn", registry=n, endpoint=decl.get("push_endpoint")))
+    # 2.6.1 (point 192) : vu du réseau des VMs choisi, sinon dit non vérifié
+    out += vm_network_findings(n, decl.get("endpoint"), facts.get("vm_probe"))
     return out
 
 
@@ -425,12 +528,25 @@ def fallback_findings(no_fallback, entries, decls, system_ready=()):
     return [cc.finding("cluster-registry-no-fallback-system", "block", origins=", ".join(missing))] if missing else []
 
 
-def check_child(entries, decls, cluster, attached, system_ready=()):
+def child_probe_endpoints(entries, decls):
+    """Points d'accès que les VMs d'un cluster enfant joignent : ceux des
+    registres connus qui servent des images (les charts sont tirés par
+    CAAPH, sur le cluster Harvester)."""
+    out = []
+    for e in normalize_entries(entries):
+        d = decls.get(e["registry"])
+        if d and "images" in (d.get("usage") or []) and d.get("endpoint") not in out:
+            out.append(d.get("endpoint"))
+    return out
+
+
+def check_child(entries, decls, cluster, attached, system_ready=(), vm_probe=None):
     """Constats de la liste de registres d'un cluster enfant (tâche 9) :
     `decls` {nom: déclaration} (absent = inconnu), `cluster` le cluster
     Harvester, `attached` {nom: bool} (compte de lecture posé sur ce
     cluster), `system_ready` les registres qui portent les images système
-    de RKE2."""
+    de RKE2, `vm_probe` le résultat de vm_probe.run depuis le réseau des
+    VMs du cluster enfant (2.6.1 ; None : non vérifié)."""
     out = []
     seen = set()
     for e in normalize_entries(entries):
@@ -450,11 +566,14 @@ def check_child(entries, decls, cluster, attached, system_ready=()):
         if bad:
             out.append(cc.finding("cluster-registry-mirror-unknown", "block", registry=n, mirrors=", ".join(bad)))
     known = [e for e in normalize_entries(entries) if e["registry"] in decls]
-    out += fallback_findings(fallback_asked(known), known, decls, system_ready)
-    # revue finale I-4 : joignabilité vue du cluster Harvester seulement
-    out += [cc.finding(CHILD_VM_NETWORK_WARNING, "warn", registry=e["registry"],
-                       endpoint=decls[e["registry"]].get("endpoint"))
-            for e in known if "images" in (decls[e["registry"]].get("usage") or [])]
+    cut = fallback_asked(known)
+    out += fallback_findings(cut, known, decls, system_ready)
+    # 2.6.1 (point 192) : joignabilité vue du réseau des VMs du cluster
+    # enfant ; bloquante quand le repli vers Internet est coupé
+    for e in known:
+        if "images" in (decls[e["registry"]].get("usage") or []):
+            out += vm_network_findings(e["registry"], decls[e["registry"]].get("endpoint"), vm_probe,
+                                       child=True, block=cut)
     return out
 
 

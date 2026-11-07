@@ -129,7 +129,7 @@ signer.
 Since 2.6.0 the package carries the images of the **bootstrap registry**
 in `bundles/registry`: CNCF Distribution 3.1 in the SUSE image
 (`registry.suse.com/suse/registry:3.1`) and `registry.suse.com/bci/bci-busybox:16.0`
-(the image of the VM network probe of 2.6.1, not used by 2.6.0), both
+(the image of the probe pod that checks a registry from the VM network, 2.6.1), both
 pinned by digest in `scripts/registry-bundle.json`. `package.sh`
 builds them with `harvester-artefacts pack`, which checks every manifest
 and layer against these digests, then writes `registry-images.tar` (the
