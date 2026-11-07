@@ -2521,6 +2521,7 @@ const BMPlans = (() => {
     // (jamais rangés, effacés après l'envoi) ; hors du conteneur repeint
     const gop = document.createElement('div');
     gop.className = 'bmpl-pick-gop';
+    gop.style.gridColumn = '1 / -1';           // toute la largeur de la fenêtre, comme le choix du plan
     gop.hidden = true;
     box.insertAdjacentElement('afterend', gop);
     async function loadGop() {
