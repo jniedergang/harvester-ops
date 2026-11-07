@@ -22389,6 +22389,57 @@ def api_capi_gitops_list(cluster):
     return jsonify(res[0])
 
 
+RENEW_KEYS = {"what", "registries", "oidc", "dry_run", "timeout"}
+
+
+@app.route("/api/capi/<cluster>/renew/<namespace>/<name>", methods=["POST"])
+@requires_auth
+@_rate_limit("6/minute")
+def api_capi_renew(cluster, namespace, name):
+    """Renouvelle les machines d'un cluster enfant (2.8.0, point 233) :
+    registres, OIDC ou CA en transition. Essai (`dry_run`) : la différence,
+    rien d'écrit ; sinon action suivie `capi-renew:<ns>/<c>`. Refusé pendant
+    un déroulé de plan sur ce cluster (`renew-plan-running`)."""
+    import capi_renew as _cr
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - RENEW_KEYS):
+        return _artefact_error(f"{k}: unknown key", 400)
+    if not all(_K8S_NAME_RE.match(x) for x in (namespace, name)):
+        return _artefact_error("invalid name", 400)
+    what = body.get("what")
+    try:
+        whats = _cr.check_whats(",".join(what) if isinstance(what, list) else what)
+        timeout = int(body.get("timeout") or _cr.TIMEOUT[2])
+        if not _cr.TIMEOUT[0] <= timeout <= _cr.TIMEOUT[1]:
+            raise ValueError(f"timeout: {_cr.TIMEOUT[0]} to {_cr.TIMEOUT[1]} seconds")
+    except (ValueError, TypeError) as e:
+        return _artefact_error(str(e), 400)
+    spec = {k: body[k] for k in ("registries", "oidc") if k in body}
+    if "registries" in spec and "registries" not in whats or "oidc" in spec and "oidc" not in whats:
+        return _artefact_error("registries and oidc are given with the matching what", 400)
+    busy = _deploy_busy(cluster)
+    if busy is not None:
+        return jsonify({"error": "a deployment plan is running on this cluster", "code": "renew-plan-running",
+                        "running": busy.id}), 409
+    cmd, err = _capi_child_base(cluster, "renew", namespace, name)
+    if err:
+        return err
+    args = ["--name", f"{namespace}/{name}", "--what", ",".join(whats), "--timeout", str(timeout)]
+    if body.get("dry_run") is True:
+        res, err = _capi_run_json(cmd + args + ["--dry-run"] + (["--spec", "-"] if spec else []),
+                                  spec=spec if spec else None, timeout=120)
+        if err:
+            return err
+        out, rc = res
+        return jsonify(dict(out or {}, blocked=rc != 0)), 200
+    run, err = _capi_action(cluster, f"capi-renew:{namespace}/{name}", cmd + args, spec=spec if spec else None)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}", "what": whats}), 202
+
+
 @app.route("/api/capi/<cluster>/artefacts/applied")
 @requires_auth
 def api_capi_artefacts_applied(cluster):

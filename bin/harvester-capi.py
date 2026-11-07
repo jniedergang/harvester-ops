@@ -759,7 +759,7 @@ def _vm_probe_cached(state, cluster, kube, network, endpoints, image):
 VM_PROBE = _vm_probe_cached     # remplacé par les tests
 
 
-def registry_config(kube, spec, harvester, hidden=False):
+def registry_config(kube, spec, harvester, hidden=False, nodes_secret=None):
     """{config, files, secrets} pour capi_cluster.postprocess, None sans
     registre. Compte de lecture lu dans le Secret `-pull` du cluster
     Harvester (jamais le compte d'écriture, point 188) ; `hidden` (aperçu,
@@ -779,7 +779,8 @@ def registry_config(kube, spec, harvester, hidden=False):
         except KeyError as e:
             raise ValueError(f"cluster-registry-not-attached: {e.args[0]} on {harvester}") from None
     doc, files, secrets = rg.rke2_config(spec["registries"], decls,
-                                         {"name": spec["name"], "namespace": spec["namespace"]}, creds)
+                                         {"name": spec["name"], "namespace": spec["namespace"]}, creds,
+                                         nodes_secret=nodes_secret)
     return {"files": files, "secrets": secrets, "mirrors": sorted(doc.get("mirrors") or {}),
             "no_fallback": any(f["path"] == rg.NO_FALLBACK_FILE for f in files)}
 
@@ -1299,7 +1300,8 @@ def _registry_secrets_of(generated, ns, name):
     (`<c>-registries`, et pour chaque registre étiqueté `-registry-<r>-auth`,
     `-registry-<r>-ca`, `-chart-<r>`) : un cluster `web2` n'emporte rien de
     `web`."""
-    wanted = {rg.nodes_secret_name(name)}
+    wanted = {(s.get("metadata") or {}).get("name") for s in generated
+              if rg.is_nodes_secret_of((s.get("metadata") or {}).get("name"), name)}
     for s in generated:
         reg = ((s.get("metadata") or {}).get("labels") or {}).get(rg.LABEL)
         if reg:
@@ -2389,7 +2391,9 @@ def _session_findings(kube, spec):
 def _registries_doc(kube, ns, cluster):
     """`registries.yaml` du cluster enfant (Secret `<c>-registries`), CA par
     registre, et repli coupé ou non (fichier config.yaml.d des gabarits)."""
-    sec = kube.get("secrets", ns, rg.nodes_secret_name(cluster))
+    cps = kube.list("rke2controlplanetemplates.controlplane.cluster.x-k8s.io", ns)
+    # 2.8.0 : après un renouvellement, `<c>-registries-r<N>`
+    sec = kube.get("secrets", ns, rg.nodes_secret_from(cps) or rg.nodes_secret_name(cluster))
     if sec is None:
         return {}, {}, False
     data = {k: base64.b64decode(v).decode() for k, v in (sec.get("data") or {}).items()}
@@ -2400,7 +2404,7 @@ def _registries_doc(kube, ns, cluster):
         doc = yaml.safe_load(data.get("registries.yaml") or "") or {}
     cas = {k[3:-4]: v for k, v in data.items() if k.startswith("ca-") and k.endswith(".crt")}
     no_fallback = any(f.get("path") == rg.NO_FALLBACK_FILE
-                      for t in kube.list("rke2controlplanetemplates.controlplane.cluster.x-k8s.io", ns)
+                      for t in cps
                       for f in ((((t.get("spec") or {}).get("template") or {}).get("spec") or {}).get("files") or []))
     return doc, cas, no_fallback
 
@@ -3150,9 +3154,213 @@ def cmd_gitops_status(args):
     return EXIT_OK
 
 
+# ---------------------------------------------------------------------------
+# 2.8.0 : renouvellement des machines (bin/lib/capi_renew.py)
+# ---------------------------------------------------------------------------
+RENEW_KEYS = {"registries", "oidc"}
+RENEW_POLL = 15
+
+
+def _renew_request(path):
+    """Demande facultative de `renew` : {registries: [...], oidc: {...} | null}."""
+    if not path:
+        return {}
+    raw = json.load(sys.stdin) if path == "-" else json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        raise ValueError("the request is not an object")
+    for k in sorted(set(raw) - RENEW_KEYS):
+        raise ValueError(f"unknown key: {k}")
+    return raw
+
+
+def _cluster_var(cl, name):
+    for v in ((((cl or {}).get("spec") or {}).get("topology") or {}).get("variables")) or []:
+        if v.get("name") == name:
+            return v.get("value")
+    return None
+
+
+def _renew_entries(kube, ns, cluster, cur):
+    """Registres actuels du cluster (les deux formes de marque d'usage, revue
+    finale 2.6.0 m-14) et repli coupé ou non, lus sur le cluster Harvester."""
+    cps = [d for _r, d in cur["templates"] if d.get("kind") == "RKE2ControlPlaneTemplate"]
+    sname = rg.nodes_secret_from(cps)
+    sec = kube.get("secrets", ns, sname) if sname else None
+    auth = [x for x in kube.list("secrets", ns, selector=f"{cc.GENERATED}=true")
+            if (x.get("metadata") or {}).get("name", "").startswith(f"{cluster}-registry-")
+            and x["metadata"]["name"].endswith("-auth")]
+    names = rg.cluster_registry_names(sec, auth)
+    decls = {n: rg.load(_state(), n) for n in names}
+    names = rg.cluster_registry_names(sec, auth, {n: d for n, d in decls.items() if d})
+    cut = any(f.get("path") == rg.NO_FALLBACK_FILE for t in cps
+              for f in ((((t.get("spec") or {}).get("template") or {}).get("spec") or {}).get("files") or []))
+    entries = [{"registry": n} for n in names]
+    if entries and cut:
+        entries[0]["no_fallback"] = True
+    return entries, sname, sec, auth
+
+
+def _secret_data(sec):
+    out = {}
+    for k, v in ((sec or {}).get("data") or {}).items():
+        try:
+            out[k] = base64.b64decode(v).decode()
+        except ValueError:
+            out[k] = v
+    out.update((sec or {}).get("stringData") or {})
+    return out
+
+
+def cmd_renew(args):
+    """Renouvelle les machines d'un cluster enfant (point 233) : gabarits
+    RKE2 copiés en `-r<N>` avec le nouveau contenu (registres, OIDC, CA en
+    transition), ClusterClass repointée, attente du remplacement, anciens
+    gabarits et Secrets retirés ensuite. `--dry-run` rend la différence."""
+    import capi_renew as cr
+    import child_oidc as co
+    kube, _kc, _ = kube_from(args)
+    ns, cluster = _child_name(args.name)
+    whats = cr.check_whats(args.what)
+    if not cr.TIMEOUT[0] <= args.timeout <= cr.TIMEOUT[1]:
+        raise ValueError(f"--timeout: {cr.TIMEOUT[0]} to {cr.TIMEOUT[1]} seconds")
+    req = _renew_request(args.spec)
+    try:
+        cur = cr.current(kube, ns, cluster)
+    except cr.RenewError as e:
+        step("check", "error", f"{e.code}: {e}")
+        return EXIT_BLOCKED
+    cl, cls = cur["cluster"], cur["class"]
+    tdocs = [d for _r, d in cur["templates"]]
+    machines = [m for m in kube.list(cr.K_MACHINE, ns)
+                if ((m.get("metadata") or {}).get("labels") or {}).get(cr.L_CLUSTER) == cluster]
+    if cr.busy(machines, tdocs):
+        step("check", "error", "renew-busy: a renewal is in progress (machines of two revisions)")
+        return EXIT_BLOCKED
+    version = (((cl.get("spec") or {}).get("topology") or {}).get("version")) or ""
+    spec = {"name": cluster, "namespace": ns, "k8s_version": version}
+    revision = cur["revision"] + 1
+    regs_same = regs_new = None
+    sname = sec = None
+    auth = []
+    if {"registries", "ca"} & set(whats):
+        entries, sname, sec, auth = _renew_entries(kube, ns, cluster, cur)
+        if "registries" in whats and "registries" in req:
+            entries = cc.normalize_registry_entries(req["registries"])
+            errs = [m for k, m in cc.validate(cc.normalize(dict(spec, registries=entries, k8s_version="v1.34.0")))
+                    if k == "registries"]
+            if errs:
+                raise ValueError(f"registries: {errs[0]}")
+        spec["registries"] = entries
+        found = [f for f in registry_findings(kube, dict(spec), _harvester(args)) if f["level"] == "block"]
+        if found:
+            for f in found:
+                step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
+            return EXIT_BLOCKED
+        regs_same = registry_config(kube, spec, _harvester(args), nodes_secret=sname) if entries else None
+        regs_new = registry_config(kube, spec, _harvester(args),
+                                   nodes_secret=f"{cluster}-registries-r{revision}") if entries else None
+    old_oidc = co.of_cluster(cl)
+    if "oidc" in whats:
+        new_oidc = req.get("oidc") if "oidc" in req else old_oidc
+        if new_oidc is not None:
+            cfg, found = co.check(new_oidc, version)
+            if co.blocking(found):
+                step("check", "error", f"{co.blocking(found)[0]['code']}: the oidc option is refused")
+                return EXIT_BLOCKED
+            spec["oidc"] = new_oidc
+    try:
+        wanted_same = cc.renew_templates(tdocs, spec, whats, regs_same)
+    except ValueError as e:
+        step("check", "error", str(e)[:300])
+        return EXIT_BLOCKED
+    changes = cr.diff(tdocs, wanted_same)
+    current_secrets = {sname: _secret_data(sec)} if sec is not None else {}
+    if regs_same:
+        secrets_changed = any(x["metadata"]["name"] == sname and x.get("stringData") != current_secrets.get(sname)
+                              for x in regs_same["secrets"])
+    else:
+        secrets_changed = sec is not None and {"registries", "ca"} & set(whats) != set()
+    if not changes and not secrets_changed:
+        step("check", "error", "renew-nothing: the templates and the registry secrets already hold this content")
+        if args.dry_run:
+            print(json.dumps({"cluster": f"{ns}/{cluster}", "changes": [], "secrets_changed": False}))
+        return EXIT_BLOCKED
+    pool = kube.get("ippools.loadbalancer.harvesterhci.io", None, _cluster_var(cl, "ipPoolRef") or "") \
+        if _cluster_var(cl, "ipPoolRef") else None
+    free_cpu, free_mem = _free_capacity(kube)
+    room = cr.room_findings(cc.pool_info(pool) if pool else None, free_cpu, free_mem,
+                            int(_cluster_var(cl, "cpuCount") or 0), cc._bytes(_cluster_var(cl, "memorySize") or "0Mi"),
+                            _overcommit(kube), cc.VM_MEMORY_OVERHEAD)
+    for f in room:
+        step("check", "error" if f["level"] == "block" else "running", f"{f['code']} {json.dumps(f['facts'])}")
+    if [f for f in room if f["level"] == "block"]:
+        return EXIT_BLOCKED
+    step("check", "done", f"{ns}/{cluster}: {', '.join(whats)}; {len(changes)} template(s) differ"
+                          + ("; registry secrets differ" if secrets_changed else ""))
+    if args.dry_run:
+        print(json.dumps({"cluster": f"{ns}/{cluster}", "revision": revision, "changes": changes,
+                          "secrets_changed": secrets_changed, "findings": room}))
+        return EXIT_OK
+    wanted = cc.renew_templates(tdocs, spec, whats, regs_new)
+    new_docs = cr.rotated(wanted, revision)
+    names = {d["metadata"]["name"]: n["metadata"]["name"] for d, n in zip(tdocs, new_docs)}
+    # Secrets de registre nouveaux d'abord ; les anciens restent jusqu'à la fin
+    if regs_new:
+        kube.apply(regs_new["secrets"], timeout=120)
+        step("secrets", "done", f"{len(regs_new['secrets'])} registry secret(s) of revision {revision}")
+    kube.apply(new_docs, timeout=120)
+    step("templates", "done", ", ".join(names.values()))
+    if "oidc" in whats:
+        kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"annotations": {
+            co.ANNOTATION: co.public(co.check(spec["oidc"], version)[0]) if spec.get("oidc") else None}}})
+    kube.patch(cr.K_CLASS, ns, cls["metadata"]["name"], cr.class_patch(cls, names))
+    step("class", "done", f"ClusterClass {cls['metadata']['name']} points at revision {revision}")
+    deadline = time.time() + args.timeout
+    while True:
+        ms = [m for m in kube.list(cr.K_MACHINE, ns)
+              if ((m.get("metadata") or {}).get("labels") or {}).get(cr.L_CLUSTER) == cluster]
+        p = cr.progress(ms, new_docs)
+        if p["done"]:
+            break
+        if time.time() > deadline:
+            step("wait", "error", f"not renewed after {args.timeout} s ({p['message']}); the old templates and "
+                                  "secrets are kept")
+            return EXIT_FAIL
+        step("wait", "running", p["message"])
+        time.sleep(RENEW_POLL)
+    step("wait", "done", p["message"])
+    gone = []
+    for d in cr.old_templates(tdocs + [x for k in (cr.K_CP_TEMPLATE, cr.K_CONFIG_TEMPLATE) for x in kube.list(k, ns)
+                                       if x["metadata"]["name"] not in {t["metadata"]["name"] for t in tdocs}],
+                              list(names.values())):
+        try:
+            kube.delete(cr.KINDS[d["kind"]], ns, d["metadata"]["name"])
+            gone.append(d["metadata"]["name"])
+        except KubeError as e:
+            if not _not_found(e):
+                raise
+    if {"registries", "ca"} & set(whats):
+        # ancien Secret des nœuds, ancienne forme `-auth` (m-14) et CA des
+        # registres sortis de la liste : plus aucune machine ne les lit
+        kept = {e["registry"] for e in spec.get("registries") or []}
+        before = rg.cluster_registry_names(sec, auth)
+        old = ([sname] if sname and sname != f"{cluster}-registries-r{revision}" else []) \
+            + [a["metadata"]["name"] for a in auth] \
+            + [rg.child_secret_names(cluster, r)["ca"] for r in before if r not in kept]
+        for n in old:
+            try:
+                kube.delete("secrets", ns, n)
+                gone.append(n)
+            except KubeError as e:
+                if not _not_found(e):
+                    raise
+    step("done", "done", f"{ns}/{cluster} renewed (revision {revision}); removed: {', '.join(gone) or '-'}")
+    return EXIT_OK
+
+
 CHILD_COMMANDS = ("manifest-check", "manifest-deploy", "manifest-remove", "manifest-verify", "token",
                   "rancher-import", "rancher-unimport", "oidc-kubeconfig", "gitops-check", "gitops-deploy",
-                  "gitops-remove")
+                  "gitops-remove", "renew")
 
 
 def _exit_cancelled(signum, frame):
@@ -3201,7 +3409,8 @@ def main(argv=None):
             ("gitops-check", cmd_gitops_check, ("gspec",)),
             ("gitops-deploy", cmd_gitops_deploy, ("gspec", "timeout")),
             ("gitops-remove", cmd_gitops_remove, ("mname", "dry")),
-            ("gitops-status", cmd_gitops_status, ("json", "optname"))):
+            ("gitops-status", cmd_gitops_status, ("json", "optname")),
+            ("renew", cmd_renew, ("name", "dry", "renew"))):
         sp = sub.add_parser(name, allow_abbrev=False)
         common(sp)
         sp.set_defaults(fn=fn)
@@ -3262,6 +3471,10 @@ def main(argv=None):
         if "runimport" in extra:
             sp.add_argument("--timeout", type=int, default=ri.UNIMPORT_WAIT,
                             help="seconds to wait for the cluster to leave Rancher")
+        if "renew" in extra:
+            sp.add_argument("--what", required=True, help="registries, oidc, ca (comma-separated)")
+            sp.add_argument("--spec", default="", help="JSON request {registries, oidc}, '-' for stdin")
+            sp.add_argument("--timeout", type=int, default=3600, help="seconds to wait (60 to 10800)")
         if "pspec" in extra:
             sp.add_argument("--spec", required=True, help="JSON policies request, '-' for stdin")
         if "token" in extra:

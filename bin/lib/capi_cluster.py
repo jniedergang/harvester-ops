@@ -391,6 +391,42 @@ def _apply_oidc(docs, spec):
     return docs
 
 
+def renew_templates(docs, spec, whats, registries=None):
+    """2.8.0 (renouvellement, point 233) : gabarits RKE2 d'un cluster
+    existant portés à la demande `spec` (copie) pour les gestes `whats` :
+    `registries` et `ca`, fichiers de registres retirés puis ceux de
+    `registries` ({files} de registries.rke2_config) posés dans les deux
+    gabarits (`_apply_registries`) ; `oidc`, fichier et argument de
+    child_oidc retirés du gabarit du plan de contrôle puis reposés
+    (`_apply_oidc`) si la demande en porte. Les autres documents passent
+    tels quels. Même code que la création, un seul endroit."""
+    import child_oidc
+    import registries as rg
+    out = copy.deepcopy(docs)
+
+    def managed(path):
+        return path in (rg.REGISTRIES_FILE, rg.NO_FALLBACK_FILE) or path.startswith(rg.CA_DIR + "/")
+    for d in out:
+        if d.get("kind") not in RKE2_TEMPLATE_KINDS:
+            continue
+        inner = d.setdefault("spec", {}).setdefault("template", {}).setdefault("spec", {})
+        if {"registries", "ca"} & set(whats):
+            inner["files"] = [f for f in inner.get("files") or [] if not managed(f.get("path") or "")]
+        if "oidc" in whats and d.get("kind") == "RKE2ControlPlaneTemplate":
+            inner["files"] = [f for f in inner.get("files") or [] if f.get("path") != child_oidc.FILE]
+            api = (inner.get("serverConfig") or {}).get("kubeAPIServer") or {}
+            if "extraArgs" in api:
+                api["extraArgs"] = [a for a in api["extraArgs"]
+                                    if str(a).lstrip("-").split("=", 1)[0] != child_oidc.ARG]
+        if not inner.get("files"):
+            inner.pop("files", None)
+    if "oidc" in whats and spec.get("oidc") is not None:
+        _apply_oidc(out, spec)
+    if {"registries", "ca"} & set(whats) and registries:
+        out = _apply_registries(out, {"files": registries.get("files") or []})
+    return out
+
+
 def postprocess(docs, spec, origin=None, registries=None):
     """Corrige les documents produits par le générateur ; rend une copie.
 

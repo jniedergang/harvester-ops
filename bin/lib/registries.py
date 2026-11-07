@@ -641,7 +641,7 @@ def nodes_secret_name(cluster_name):
     return f"{cluster_name}-registries"
 
 
-def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
+def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None, nodes_secret=None):
     """(registries.yaml, files, secrets) d'un cluster enfant (pur).
 
     `entries` : liste ordonnée de registres (noms ou {registry}) ;
@@ -666,7 +666,11 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
     registre : ils disent quels clusters l'emploient (`child_users`) et la
     CA sert aux services tirés du registre (CAAPH). Tous étiquetés
     `GENERATED` pour partir avec le cluster ; `insecure_skip_verify` jamais
-    posé sauf demande explicite (vérification active)."""
+    posé sauf demande explicite (vérification active).
+
+    2.8.0 : `nodes_secret` nomme le Secret des nœuds d'un renouvellement
+    (`<cluster>-registries-r<N>`, capi_renew) : les nouvelles machines
+    lisent le nouveau, les anciennes gardent le leur jusqu'à leur départ."""
     ents = normalize_entries(entries)
     used = {}
     for e in ents:
@@ -705,7 +709,7 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
     doc = {"mirrors": mirrors, "configs": configs} if mirrors or configs else {}
     files = []
     if doc:
-        src = nodes_secret_name(cname)
+        src = nodes_secret or nodes_secret_name(cname)
         secrets.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
                         "metadata": {"name": src, "namespace": ns, "labels": {cc.GENERATED: "true"}},
                         # JSON : du YAML valide, lu tel quel par RKE2
@@ -719,3 +723,75 @@ def rke2_config(entries, decls, cluster, pull_creds, no_fallback=None):
         files.append({"path": NO_FALLBACK_FILE, "owner": "root:root", "permissions": "0600",
                       "content": "disable-default-registry-endpoint: true\n"})
     return doc, files, secrets
+
+
+# ---------------------------------------------------------------------------
+# 2.8.0 : registres d'un cluster enfant existant (renouvellement)
+# ---------------------------------------------------------------------------
+NODES_SECRET_REV_RE = re.compile(r"^(?P<base>.+)-registries(?:-r(?P<n>[0-9]{1,4}))?$")
+
+
+def nodes_secret_from(templates):
+    """Nom du Secret des nœuds que désigne `registries.yaml` dans les
+    gabarits du plan de contrôle d'un cluster (celui de la révision la plus
+    haute), ou None sans registre."""
+    best = (-1, None)
+    for t in templates or []:
+        try:
+            rev = int((((t.get("metadata") or {}).get("annotations") or {}).get("harvester-ops.io/template-revision"))
+                      or 0)
+        except ValueError:
+            rev = 0
+        for f in ((((t.get("spec") or {}).get("template") or {}).get("spec") or {}).get("files")) or []:
+            if f.get("path") == REGISTRIES_FILE:
+                name = (((f.get("contentFrom") or {}).get("secret")) or {}).get("name")
+                if name and rev > best[0]:
+                    best = (rev, name)
+    return best[1]
+
+
+def is_nodes_secret_of(name, cluster_name):
+    """`<c>-registries` ou `<c>-registries-r<N>` de ce cluster (jamais d'un
+    cluster `<c>-x`)."""
+    m = NODES_SECRET_REV_RE.match(name or "")
+    return bool(m) and m.group("base") == cluster_name
+
+
+USED_LABEL_PREFIX = "harvester-ops.io/registry-"
+
+
+def used_label(registry):
+    """Revue finale 2.6.0 (m-14), 2.8.0 : marque d'usage d'un registre par un
+    cluster enfant, étiquette du Secret des nœuds `<c>-registries`."""
+    return f"{USED_LABEL_PREFIX}{registry}"
+
+
+def cluster_registry_names(nodes_secret, auth_secrets=(), decls=None):
+    """Registres qu'emploie un cluster enfant, dans l'ordre de préférence :
+    étiquettes `used_label` du Secret des nœuds (forme 2.8.0) et Secrets
+    `<c>-registry-<r>-auth` étiquetés (forme d'avant), ordonnés par la
+    première apparition de leur point d'accès dans `registries.yaml`."""
+    names = []
+    for k, v in (((nodes_secret or {}).get("metadata") or {}).get("labels") or {}).items():
+        if k.startswith(USED_LABEL_PREFIX) and v == "used":
+            names.append(k[len(USED_LABEL_PREFIX):])
+    for sec in auth_secrets or []:
+        n = (((sec.get("metadata") or {}).get("labels")) or {}).get(LABEL)
+        if n and n not in names:
+            names.append(n)
+    data = (nodes_secret or {}).get("data") or {}
+    try:
+        doc = json.loads(base64.b64decode(data.get("registries.yaml") or "").decode() or "{}")
+    except ValueError:
+        doc = {}
+    order = []
+    for m in (doc.get("mirrors") or {}).values():
+        for ep in m.get("endpoint") or []:
+            if ep not in order:
+                order.append(ep)
+    decls = decls or {}
+
+    def rank(n):
+        ep = f"https://{(decls.get(n) or {}).get('endpoint')}"
+        return order.index(ep) if ep in order else len(order)
+    return sorted(dict.fromkeys(names), key=rank)
