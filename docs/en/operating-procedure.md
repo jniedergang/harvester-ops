@@ -518,3 +518,44 @@ section 4.
 6. **Delete a child cluster** from Cluster API > Clusters. If the deletion
    ends with "object(s) kept", fix the right that is missing and delete
    again: it resumes where it stopped.
+
+## 16. Deliver content to child clusters without Internet (2.6.0)
+
+Give child clusters their images and charts from a registry instead of the
+Internet. Full reference: [artefacts.md](artefacts.md); the plan phase:
+[bare-metal.md](bare-metal.md), section "Deployment plans: Registry phase".
+
+1. **On a connected machine:** write the description (charts, images,
+   manifests) and run `harvester-artefacts pack DESCRIPTION --sign-key
+   KEY`. Credentials of the sources go in a private file (`--creds`), never
+   in an argument. Carry the `.tar.gz` and its `.sig` to the console.
+2. **Admin, once:** in Settings > Artefacts, add the public key of your
+   organisation to the trusted keys; switch strict mode on if only signed
+   packages may enter.
+3. **Admin: import.** Cluster API > Artefacts > **Import**: send the archive
+   and the signature, read the trust state, **Accept**. An unsigned
+   package, or one of an unknown key, needs the acknowledgement checkbox
+   (refused in strict mode).
+4. **A registry.** Either (admin) **Bootstrap registry** in Cluster API >
+   Registries: a free address outside the IP pools, a volume, a storage
+   class, the origin registries it mirrors; read **Checks**, then
+   **Launch**. Or (admin) **Declare a client registry**, then (operator)
+   **Attach** it to the Harvester cluster with its write and read accounts,
+   and **Check**.
+5. **Operator: publish.** On the package, **Publish** to the registry.
+   Read the checks first: a tag that exists with another content blocks
+   everything (`publish-tag-differs`). Publishing again resumes and skips
+   what is there.
+6. **Operator: create the child cluster** with the registries, in the
+   **Registries** menu of the creation window (or in a cluster template).
+   They are set at creation only. Leave **No fallback to Internet** off
+   unless the registry carries the RKE2 system images.
+7. **Operator: services.** Cluster API > Services, **From a registry**:
+   the chart published in the registry, pulled by CAAPH with the read
+   account and the CA.
+
+A plan does steps 4 and 5 before its clusters (Registry phase); posing a
+bootstrap registry from a plan needs the admin role. Roles: reading is open
+to viewers; importing, keys, strict mode, declaring and posing registries
+are admin; attaching, checking, publishing and creating clusters with
+registries are operator.

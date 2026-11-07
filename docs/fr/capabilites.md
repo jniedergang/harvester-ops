@@ -2470,6 +2470,11 @@ Adresses `#automation/capi/<onglet>` ; `#automation/capi` ouvre Clusters.
 sur le cluster de gestion, Clusters le dit, avec ce qui manque et un lien
 vers Installation (rien n'est dit quand le cluster ne peut pas être lu).
 
+**Six onglets (2.6.0).** **Registres** et **Artefacts** viennent après
+Services : Clusters, Services, Registres, Artefacts, Historique,
+Installation (`#automation/capi/registries`, `#automation/capi/artefacts`).
+Voir « Paquets d'artefacts et registres (2.6.0) » plus bas.
+
 ### Installer la pile (1.48.0)
 
 - **Harvester v1.9 et suivants** embarquent Rancher Turtles, qui fait déjà
@@ -2665,10 +2670,68 @@ v0.6.4) :
   de cloud Harvester, sur les nœuds du plan de contrôle), et dans un
   cluster plus ancien avec son premier service ; le contrôle préalable le
   signale.
-- **Pas encore** : les charts et leurs images viennent d'Internet (le
-  cluster de gestion télécharge le chart, le cluster créé tire les images) ;
-  les servir depuis le paquet viendra ensuite. Les serveurs DHCP et NTP ne
+- **Depuis un registre (2.6.0)** : un chart publié depuis un paquet
+  d'artefacts dans un registre rattaché au cluster, tiré par CAAPH avec le
+  compte de lecture et la CA du registre (section suivante). Sinon, les
+  charts et leurs images viennent d'Internet. Les serveurs DHCP et NTP ne
   sont pas au catalogue.
+
+### Paquets d'artefacts et registres (2.6.0)
+
+Livrer des images et des charts à des clusters enfants qui ne joignent pas
+Internet. Référence complète : **[artefacts.md](artefacts.md)**.
+
+- **Paquets d'artefacts signés.** `harvester-artefacts pack` construit un
+  `<nom>-<version>.tar.gz` sur une machine connectée, avec la seule
+  bibliothèque standard de Python : charts (OCI ou dépôt Helm), images en
+  disposition OCI (une plateforme, couches partagées une fois, `as` pour
+  renommer), manifestes, et `SHA256SUMS` en premier. `sign` le signe par
+  `ssh-keygen -Y` (espace de noms `harvester-artefacts`) ; `verify` et
+  `inspect` le lisent sans l'extraire.
+- **Onglet Artefacts.** **Importer** envoie l'archive et sa `.sig`, montre
+  l'état de confiance, puis importe. Permissif par défaut : un paquet non
+  signé, ou signé par une clé inconnue, est accepté après un acquittement
+  explicite, noté au journal avec le nom de la personne et gardé dans
+  `trust.json` ; une signature ou une empreinte fausse est toujours
+  refusée. Chaque paquet montre un badge (Signé, Clé inconnue, Non signé),
+  ses éléments, ses images et les registres où il a été publié.
+- **Paramètres > Artefacts** (administrateurs) : **Mode strict** (seuls les
+  paquets signés par une clé de confiance ; verrouillé par `artefacts:
+  {strict: true}` dans `config.yaml`, qui verrouille le mode, pas les
+  clés) et les **Clés de confiance** (lignes d'un fichier `allowed_signers`
+  d'OpenSSH).
+- **Onglet Registres.** Les registres déclarés dans la console, sans aucun
+  secret : **Déclarer un registre du client** (adresse, CA, usage images
+  et/ou charts, registres d'origine qu'il miroite), **Rattacher** à un
+  cluster Harvester (comptes d'écriture et de lecture posés en Secrets dans
+  `harvester-ops-registry`, jamais réaffichés), **Vérifier** (sondé depuis
+  la console avec chaque compte), et **Registre d'amorçage** : CNCF
+  Distribution 3.1 (image de SUSE, livrée avec la release) posé sur le
+  cluster Harvester, volume Longhorn, adresse servie par kube-vip, TLS
+  toujours, instance en lecture seule sur 443 et instance en écriture sur
+  5443 dans le même pod. Son détail montre l'adresse, l'occupation du
+  volume, les paquets publiés et ce qui l'emploie.
+- **Publier** sur un paquet recopie ses images et ses charts couche par
+  couche dans un registre (`<registre>/<hôte d'origine>/<chemin>:<tag>`,
+  `<registre>/charts/<chart>:<version>`) : vérifications avant toute
+  écriture, tag d'un autre contenu refusé (`publish-tag-differs`), couches
+  déjà présentes sautées, reprise possible.
+- **Clusters enfants** : une liste ordonnée de registres posée à la
+  création (menu **Registres** de la fenêtre de création, modèles de
+  cluster, plans) : miroirs RKE2 avec réécriture, compte de lecture et CA
+  de chaque registre. Le repli vers Internet n'est jamais coupé par défaut ;
+  **Pas de repli vers Internet** le coupe, et c'est refusé tant que les
+  images système de RKE2 seraient coupées.
+- **Services** : un chart peut s'installer **Depuis un registre**
+  (ci-dessus).
+- **Phase Registre** dans les plans de déploiement, entre Terraform et
+  Cluster API : voir section 6.
+- Ligne de commande : `harvester-artefacts pack | sign | verify | inspect |
+  import | list | remove | publish`, `harvester-registry declare | attach |
+  check | list | show | forget | deploy | status | delete`.
+- **Pas encore** : la phase Artefacts des plans (2.7), un cluster enfant
+  amorcé entièrement sans Internet, changer les registres d'un cluster
+  existant, le ramasse-miettes d'un registre d'amorçage.
 
 ### Paquets et CLI
 
@@ -2881,6 +2944,15 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   pools et droits de la personne sont contrôlés pour tous les clusters
   ensemble avant que rien ne commence. Les actions filles sont rangées sous
   l'action `deploy:` dans l'Activité et dans le dock.
+
+- **Phase Registre dans les plans (2.6.0)** : entre Terraform et Cluster
+  API, la phase **registry** pose un registre d'amorçage sur le cluster
+  Harvester (admin) ou vérifie un registre du client, puis publie les
+  paquets d'artefacts choisis ; les clusters enfants du plan désignent ces
+  registres. Un registre posé par un plan est repris par ses exécutions
+  suivantes, jamais supprimé par la chaîne. La phase **artefacts** reste
+  grisée, « à venir (2.7) ». Détails dans [bare-metal.md](bare-metal.md)
+  et [artefacts.md](artefacts.md).
 
 - **Une machine qui porte déjà un système est gardée (2.2.0)** : la
   fenêtre d'installation liste ce que montre le BMC (entrées de démarrage
@@ -5061,6 +5133,7 @@ cluster.
 | Juste un shutdown/startup sûr | Les scripts CLI seuls (pas d'UI, pas de podman) |
 | Un dashboard + gestion VM | La console web |
 | Provisionner des clusters downstream | Console web + un bundle airgap CAPHV |
+| Des clusters enfants qui reçoivent leurs images et leurs charts sans Internet | Console web + un paquet d'artefacts construit par `harvester-artefacts pack` sur une machine connectée, et un registre d'amorçage (livré) ou un registre à vous |
 | Des VMs gérées par Terraform | Console web + le binaire du provider Terraform |
 | Un fonctionnement 100 % hors-ligne | Le tarball : wheels bundlés + image OCI |
 | Des hôtes KVM et leurs VMs | La console web ou `bin/harvester-kvm.py`, et un accès SSH par clé à un compte du groupe `libvirt` de chaque hôte |

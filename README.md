@@ -283,6 +283,7 @@ show; the [changelog](CHANGELOG.md) tells each story.
 [Architecture](docs/en/architecture.md) ·
 [Install](docs/en/install.md) ·
 [Bare-metal](docs/en/bare-metal.md) ·
+[Artefacts and registries](docs/en/artefacts.md) ·
 [Sizing](docs/en/sizing.md) ·
 [Troubleshooting](docs/en/troubleshooting.md) ·
 [Changelog](CHANGELOG.md)

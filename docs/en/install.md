@@ -126,6 +126,29 @@ offline filesystem mirror under both registry names, so OpenTofu never
 downloads them. The Installation tab of Terraform shows its version and the
 signer.
 
+Since 2.6.0 the package carries the images of the **bootstrap registry**
+in `bundles/registry`: CNCF Distribution 3.1 in the SUSE image
+(`registry.suse.com/suse/registry:3.1`) and `registry.suse.com/bci/bci-busybox:16.0`,
+both pinned by digest in `scripts/registry-bundle.json`. `package.sh`
+builds them with `harvester-artefacts pack`, which checks every manifest
+and layer against these digests, then writes `registry-images.tar` (the
+archive `ctr images import` reads), `registry-images.json` (the pinned
+names) and their `SHA256SUMS`. The installer checks `SHA256SUMS` and
+places the three files in `/var/lib/harvester-ops/registry-bundle`; a
+checksum mismatch leaves them out, with a warning. The console checks the
+sums again before each deployment (`registry-images-missing` otherwise),
+and `harvester-registry deploy` imports the archive on the nodes of the
+Harvester cluster. Nothing is pulled from the Internet. See
+[artefacts.md](artefacts.md).
+
+The console image also carries `openssl` (CA and certificate of the
+bootstrap registry) and `apache2-utils` (`htpasswd`, for the bcrypt entries
+of its accounts). Two scripts join the others in `/usr/local/bin`:
+`harvester-artefacts` (packages) and `harvester-registry` (registries).
+`harvester-artefacts pack`, `sign`, `verify` and `inspect` also run on any
+connected machine with Python 3 and, for signatures, `ssh-keygen` 8.2 or
+later: copy `bin/harvester-artefacts.py` and `bin/lib/` there.
+
 ### 3. Provide kubeconfigs and SSH keys
 
 For each cluster you intend to manage:

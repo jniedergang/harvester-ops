@@ -548,3 +548,47 @@ Capacités, section 4.
 6. **Supprimer un cluster enfant** depuis Cluster API > Clusters. Si la
    suppression se termine par « object(s) kept », rétablir le droit qui
    manque et supprimer à nouveau : elle reprend là où elle s'est arrêtée.
+
+## 16. Livrer du contenu aux clusters enfants sans Internet (2.6.0)
+
+Donner aux clusters enfants leurs images et leurs charts depuis un registre
+plutôt que depuis Internet. Référence complète : [artefacts.md](artefacts.md) ;
+la phase des plans : [bare-metal.md](bare-metal.md), section « Plans de
+déploiement : phase Registre ».
+
+1. **Sur une machine connectée :** écrire la description (charts, images,
+   manifestes) et lancer `harvester-artefacts pack DESCRIPTION --sign-key
+   CLÉ`. Les identifiants des sources vont dans un fichier privé
+   (`--creds`), jamais dans un argument. Apporter le `.tar.gz` et sa `.sig`
+   à la console.
+2. **Admin, une fois :** dans Paramètres > Artefacts, ajouter la clé
+   publique de votre organisation aux clés de confiance ; activer le mode
+   strict si seuls des paquets signés peuvent entrer.
+3. **Admin : importer.** Cluster API > Artefacts > **Importer** : envoyer
+   l'archive et la signature, lire l'état de confiance, **Accepter**. Un
+   paquet non signé, ou d'une clé inconnue, demande la case d'acquittement
+   (refusé en mode strict).
+4. **Un registre.** Soit (admin) **Registre d'amorçage** dans Cluster API >
+   Registres : une adresse libre hors des pools d'adresses, un volume, une
+   classe de stockage, les registres d'origine qu'il miroite ; lire
+   **Vérifications**, puis **Lancer**. Soit (admin) **Déclarer un registre
+   du client**, puis (opérateur) le **Rattacher** au cluster Harvester avec
+   ses comptes d'écriture et de lecture, et **Vérifier**.
+5. **Opérateur : publier.** Sur le paquet, **Publier** dans le registre.
+   Lire d'abord les vérifications : un tag qui existe avec un autre contenu
+   bloque tout (`publish-tag-differs`). Publier à nouveau reprend et saute
+   ce qui est là.
+6. **Opérateur : créer le cluster enfant** avec les registres, dans le menu
+   **Registres** de la fenêtre de création (ou dans un modèle de cluster).
+   Ils sont posés à la création seulement. Laisser **Pas de repli vers
+   Internet** désactivé, sauf si le registre porte les images système de
+   RKE2.
+7. **Opérateur : services.** Cluster API > Services, **Depuis un
+   registre** : le chart publié dans le registre, tiré par CAAPH avec le
+   compte de lecture et la CA.
+
+Un plan fait les étapes 4 et 5 avant ses clusters (phase Registre) ; poser
+un registre d'amorçage depuis un plan demande le rôle admin. Rôles : la
+lecture est ouverte aux lecteurs ; importer, les clés, le mode strict,
+déclarer et poser des registres relèvent de l'admin ; rattacher, vérifier,
+publier et créer des clusters à registres relèvent de l'opérateur.

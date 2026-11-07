@@ -1,6 +1,6 @@
 # Parité avec l'interface de Harvester
 
-État au 2026-11-05, console **v2.5.0**, comparée à l'interface de **Harvester v1.9** (menus relevés dans le code de harvester-ui-extension v1.9.0 et la documentation v1.9).
+État au 2026-11-07, console **v2.6.0**, comparée à l'interface de **Harvester v1.9** (menus relevés dans le code de harvester-ui-extension v1.9.0 et la documentation v1.9).
 
 Sur 136 fonctions de l'interface de Harvester : **133 faites**, **3 partielles**, **0 manquantes** ; 1 hors périmètre. Une fonction manquante porte la version où elle est prévue.
 
@@ -276,8 +276,9 @@ Menu Harvester : *VM Imports / VM Migration*
 | Arrêt et démarrage gracieux d'un cluster entier | Console seulement | 1.0 | Harvester le décrit comme une procédure manuelle |
 | Transfert de VM entre clusters, export / import | Console seulement | 1.45 |  |
 | Terraform : déclarations gardées par la console | Console seulement | 1.54 | écran en onglets Déclarations, Ressources, Historique, Installation (2.2) ; cible cluster Harvester ou hôte KVM, modèle RKE2 sur VMs libvirt (2.3) ; formulaires réseau, classe de stockage, pool d'adresses (2.4) |
-| Clusters RKE2 par Cluster API, services par CAAPH | Console seulement | 1.48 | Rancher les crée aussi, par son pilote de nœud Harvester ; la console le fait sans Rancher ; écran en onglets Clusters, Services, Historique, Installation (2.2) |
-| Installation bare-metal de Harvester par Redfish | Console seulement | 1.19 | configuration complète de l'installeur, import d'un fichier existant et aperçu (1.77) ; découverte des disques, rôles, pools, cluster déclaré tout seul (1.78) ; écran en onglets Machines, Profils, Images, Historique, dernière découverte gardée (2.1) ; machine qui porte déjà un système gardée, séries de profils comprises (2.2) ; plans de déploiement : disponibilité puis contenu Terraform, suivis et reprenables (2.4) |
+| Clusters RKE2 par Cluster API, services par CAAPH | Console seulement | 1.48 | Rancher les crée aussi, par son pilote de nœud Harvester ; la console le fait sans Rancher ; écran en onglets Clusters, Services, Historique, Installation (2.2), plus Registres et Artefacts (2.6) |
+| Paquets d'artefacts signés et registres des clusters enfants | Console seulement | 2.6 | paquet construit sur une machine connectée (bibliothèque standard seulement) et importé hors ligne, confiance permissive ou stricte, registre d'amorçage sur le cluster Harvester ou registre du client, publication reprenable, miroirs RKE2 posés à la création, charts par CAAPH depuis le registre ; Harvester n'a que le réglage containerd-registry de ses propres nœuds |
+| Installation bare-metal de Harvester par Redfish | Console seulement | 1.19 | configuration complète de l'installeur, import d'un fichier existant et aperçu (1.77) ; découverte des disques, rôles, pools, cluster déclaré tout seul (1.78) ; écran en onglets Machines, Profils, Images, Historique, dernière découverte gardée (2.1) ; machine qui porte déjà un système gardée, séries de profils comprises (2.2) ; plans de déploiement : disponibilité puis contenu Terraform, suivis et reprenables (2.4), Cluster API et clusters enfants (2.5), registres et publication de paquets (2.6) |
 | Activité : chaque geste suivi, dock des actions | Console seulement | 1.6 |  |
 | Notes collaboratives sur les VMs et nœuds | Console seulement | 1.4 |  |
 | Allouable Longhorn réel par classe | Console seulement | 1.29 |  |

@@ -2247,6 +2247,11 @@ installed on the management cluster, Clusters says so, with what is
 missing and a link to Installation (nothing is said when the cluster cannot
 be read).
 
+**Six tabs (2.6.0).** **Registries** and **Artefacts** come after Services:
+Clusters, Services, Registries, Artefacts, History, Installation
+(`#automation/capi/registries`, `#automation/capi/artefacts`). See
+"Artefact packages and registries (2.6.0)" below.
+
 ### Installing the stack (1.48.0)
 
 - **Harvester v1.9 and later** embed Rancher Turtles, which already runs the
@@ -2430,10 +2435,66 @@ API, through the Cluster API add-on provider for Helm (CAAPH v0.6.4):
   console adds it to every cluster it creates (from the Harvester cloud
   provider chart, on the control plane nodes), and to an older cluster
   with its first service; the pre-check says so.
-- **Not yet**: charts and their images come from the Internet (the
-  management cluster fetches the chart, the created cluster pulls the
-  images); serving them from the bundle comes later. DHCP and NTP servers
-  are not in the catalog.
+- **From a registry (2.6.0)**: a chart published from an artefact package
+  in a registry attached to the cluster, pulled by CAAPH with the read
+  account and the CA of the registry (next section). Otherwise charts and
+  their images come from the Internet. DHCP and NTP servers are not in the
+  catalog.
+
+### Artefact packages and registries (2.6.0)
+
+Deliver images and charts to child clusters that cannot reach the
+Internet. Full reference: **[artefacts.md](artefacts.md)**.
+
+- **Signed artefact packages.** `harvester-artefacts pack` builds a
+  `<name>-<version>.tar.gz` on a connected machine, with the Python
+  standard library only: charts (OCI or Helm repository), images in OCI
+  layout (one platform, shared layers once, `as` to rename), manifests,
+  and `SHA256SUMS` first. `sign` signs it with `ssh-keygen -Y` (namespace
+  `harvester-artefacts`); `verify` and `inspect` read it without
+  extracting.
+- **Artefacts tab.** **Import** sends the archive and its `.sig`, shows the
+  trust state, then imports. Permissive by default: an unsigned package,
+  or one signed by an unknown key, is accepted after an explicit
+  acknowledgement, written to the journal with the name of the person and
+  kept in `trust.json`; a wrong signature or checksum is always refused.
+  Each package shows a badge (Signed, Unknown key, Unsigned), its items,
+  images and the registries it was published in.
+- **Settings > Artefacts** (administrators): **Strict mode** (only
+  packages signed by a trusted key; locked on by `artefacts: {strict:
+  true}` in `config.yaml`, which locks the mode, not the keys) and the
+  **Trusted keys** (lines of an OpenSSH `allowed_signers` file).
+- **Registries tab.** The registries declared in the console, without any
+  secret: **Declare a client registry** (address, CA, usage images and/or
+  charts, the origin registries it mirrors), **Attach** to a Harvester
+  cluster (write and read accounts posed as Secrets in
+  `harvester-ops-registry`, never shown again), **Check** (probed from the
+  console with each account), and **Bootstrap registry**: CNCF
+  Distribution 3.1 (SUSE image, shipped in the release) posed on the
+  Harvester cluster, Longhorn volume, address served by kube-vip, TLS
+  always, read-only instance on 443 and write instance on 5443 in the same
+  pod. Its details show the address, volume use, packages published and
+  what uses it.
+- **Publish** on a package copies its images and charts layer by layer into
+  a registry (`<registry>/<origin host>/<path>:<tag>`,
+  `<registry>/charts/<chart>:<version>`): checks before any write, a tag of
+  another content refused (`publish-tag-differs`), layers already there
+  skipped, resumable.
+- **Child clusters** get an ordered list of registries at creation (the
+  **Registries** menu of the creation window, cluster templates, plans):
+  RKE2 mirrors with a rewrite, the read account and CA of each registry.
+  The fallback to the Internet is never cut by default; **No fallback to
+  Internet** cuts it, and is refused while the RKE2 system images would be
+  cut.
+- **Services** can install a chart **From a registry** (above).
+- **Registry phase** in the deployment plans, between Terraform and Cluster
+  API: see section 6.
+- Command line: `harvester-artefacts pack | sign | verify | inspect |
+  import | list | remove | publish`, `harvester-registry declare | attach |
+  check | list | show | forget | deploy | status | delete`.
+- **Not yet**: the Artefacts phase of the plans (2.7), a child cluster
+  bootstrapped entirely without Internet, changing the registries of an
+  existing cluster, garbage collection of a bootstrap registry.
 
 ### Bundles and CLI
 
@@ -2629,6 +2690,15 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   rights of the person are checked for all the clusters together before
   anything starts. Child actions are nested under the `deploy:` action in
   Activity and in the dock.
+
+- **Registry phase in plans (2.6.0)**: between Terraform and Cluster API,
+  the **registry** phase poses a bootstrap registry on the Harvester
+  cluster (admin) or checks a client registry, then publishes the chosen
+  artefact packages; child clusters of the plan name these registries. A
+  registry posed by a plan is adopted by its next runs, never deleted by
+  the chain. The **artefacts** phase stays greyed, "coming in 2.7".
+  Details in [bare-metal.md](bare-metal.md) and
+  [artefacts.md](artefacts.md).
 
 - **A machine that already carries a system is guarded (2.2.0)**: the
   install window lists what the BMC shows (UEFI boot entries of a loader
@@ -4644,6 +4714,7 @@ cluster.
 | Just safe shutdown/startup | CLI scripts only (no UI, no podman) |
 | A dashboard + VM management | Web console |
 | Provision downstream clusters | Web console + a CAPHV airgap bundle |
+| Child clusters that get their images and charts without Internet | Web console + an artefact package built by `harvester-artefacts pack` on a connected machine, and a bootstrap registry (shipped) or a registry of your own |
 | Terraform-managed VMs | Web console + the Terraform provider binary |
 | Fully offline operation | The tarball: bundled wheels + OCI image |
 | KVM hosts and their VMs | Web console or `bin/harvester-kvm.py`, and SSH access by key to an account in the `libvirt` group of each host |

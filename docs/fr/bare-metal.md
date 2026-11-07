@@ -534,7 +534,8 @@ installation bare-metal. En 2.4.0, les phases sont :
 | **readiness** (disponibilité) | Attend que le cluster soit utilisable : nœuds Ready, objets `ManagedChart` prêts, nœuds et volumes Longhorn sains, une classe de stockage par défaut. Relue toutes les 15 s, 20 minutes par défaut (`phases.readiness.timeout_minutes`, de 1 à 180). |
 | **terraform** | Fait de chaque **modèle de déclaration** du plan une déclaration Terraform ordinaire, `<plan>-<modèle>`, puis la planifie et l'applique. |
 | capi, clusters | Disponibles depuis la 2.5.0 : voir « Plans de déploiement : Cluster API et clusters enfants » plus bas. |
-| registry, artefacts | Présentes dans le modèle, grisées avec « à venir (2.6+) ». Un fichier de plan qui en active une est refusé. |
+| registry (registre) | Disponible depuis la 2.6.0 : voir « Plans de déploiement : phase Registre (2.6.0) » plus bas. |
+| artefacts | Présente dans le modèle, grisée avec « à venir (2.7) ». Un fichier de plan qui l'active est refusé. |
 
 **Où.** L'onglet **Plans** (`#automation/pxe/plans`, entre Profils et
 Images) liste les plans à gauche et en ouvre un à droite : une carte par
@@ -818,6 +819,127 @@ ns/nom`.
 
 **Vu en réel (2.5.0).** Voir le CHANGELOG de la 2.5.0 pour les bancs, les
 durées et ce qui n'est pas vérifié.
+
+### Plans de déploiement : phase Registre (2.6.0)
+
+Avant les clusters enfants, un plan sait poser ou vérifier leurs registres
+et y publier des paquets d'artefacts. Les paquets, les registres et le
+comportement des clusters enfants sont décrits dans
+[artefacts.md](artefacts.md).
+
+| Phase | Ce qu'elle fait |
+|---|---|
+| **registry** (registre) | Un élément par registre du plan : un registre **bootstrap** (d'amorçage) est posé sur le cluster Harvester (`harvester-registry deploy`, action fille `registry-deploy:<cluster>/<nom>`), ou repris si ce plan l'a posé ; un registre **external** (du client), déclaré et rattaché d'avance, est seulement vérifié. Puis un élément par publication (`harvester-artefacts publish`, action fille `artefacts-publish:<nom>-<version>@<registre>`), après son registre quand le registre est du plan. |
+| artefacts | Montrée grisée avec « à venir (2.7) ». Un fichier de plan qui l'active est refusé. |
+
+L'ordre de la chaîne est install, readiness, terraform, **registry**, capi,
+clusters : les clusters ont besoin de leur registre à leur création, et le
+registre peut employer une classe de stockage créée par Terraform.
+
+Dans un fichier de plan :
+
+```yaml
+phases:
+  registry:
+    enabled: true
+    timeout_minutes: 10            # registre d'amorçage prêt sous, de 1 à 60
+    publish_timeout_minutes: 60    # chaque publication, de 5 à 600
+    registries:
+      - name: amorcage
+        mode: bootstrap
+        address: "{{registre_ip}}"
+        size_gib: 20               # de 5 à 2048
+        storage_class: harv-rep1
+        mirrors: [docker.io, ghcr.io]
+        dns_name: registre.site1.example   # facultatif
+      - name: harbor-client
+        mode: external             # déclaré et rattaché d'avance
+    publish:
+      - {package: socle, version: "2026.11", registry: amorcage}
+  clusters:
+    enabled: true
+    items:
+      - name: site1-apps
+        template: rke2-petit
+        registries: [amorcage, harbor-client]
+```
+
+- Noms de registre : 30 caractères au plus, `bootstrap` réservé ; 8
+  registres et 32 publications au plus par plan.
+- Un registre d'amorçage du plan ne porte aucun compte : la console les
+  génère. Les variables du plan sont admises dans l'adresse, la classe de
+  stockage, les miroirs et le nom DNS.
+- Un registre `external` ne prend que `name` et `mode`.
+- Une publication désigne un paquet importé et un registre du plan ou un
+  registre déclaré.
+- **Registres des clusters enfants.** Un modèle de cluster et une entrée de
+  plan prennent `registries` : des noms, ou `{registry, mirrors,
+  no_fallback}`, dans l'ordre, avec des `{{variables}}`. La liste d'une
+  entrée de plan remplace celle de son modèle. Une entrée désigne un
+  registre de la phase Registre par son nom.
+
+**Contrôles avant d'agir.** Les vérifications de `harvester-registry
+deploy --dry-run` pour chaque registre à poser (adresse libre, place
+Longhorn, nom libre, images embarquées, outils), `check` pour chaque
+registre du client, et `publish --dry-run` pour chaque publication dont le
+registre existe déjà. Leurs constats apparaissent avec leurs propres codes
+(`registry-address-answers`, `registry-room-short`,
+`publish-tag-differs`...). En plus :
+
+- Bloquants : `registry-name-taken` (un registre de même nom existe et n'a
+  pas été posé par ce plan), `registry-address-differs` (le registre de ce
+  plan répond à une autre adresse : un plan ne déplace jamais un registre),
+  `registry-unknown`, `registry-admin`, `registry-check-failed`,
+  `registry-package-too-big` (les paquets à publier dépassent 90 % du
+  volume), `artefact-package-missing`, `package-untrusted-strict`,
+  `registry-var-missing`.
+- Information : `registry-exists` (posé par ce plan, repris),
+  `registry-later` (vérifié au début de la phase, après une installation),
+  `publish-later` (le registre est posé par cette exécution : la
+  publication est vérifiée une fois qu'il est là), `cluster-registry-later`
+  (un cluster enfant emploie un registre de la phase Registre : revérifié
+  au début de la phase Clusters).
+
+**Reprise d'un registre.** Un registre d'amorçage posé par un plan porte
+son origine (l'étiquette `harvester-ops.io/plan`, l'annotation
+`harvester-ops.io/plan-run` sur ses objets). Une nouvelle exécution du même
+plan le reprend, s'il répond à la même adresse. Un registre de même nom
+sans cette origine bloque.
+
+**Suivre une exécution.** Étape `phase-registry`, puis une sous-étape par
+élément : `reg-<registre>` et `pub-<paquet>-<version>-<registre>`. Les
+actions filles sont rangées sous `deploy:` dans l'Activité. Une
+publication qui dépasse `publish_timeout_minutes` est arrêtée.
+**Reprendre** revérifie chaque élément terminé : registre prêt à la même
+adresse, chaque image et chaque chart présents à la bonne empreinte (un
+`HEAD` chacun) ; une publication reprise saute les couches déjà envoyées.
+L'**essai à blanc** ne pose et ne publie rien.
+
+**Jamais de suppression.** La chaîne ne supprime jamais un registre, même
+après un échec. Une exécution consigne `undo: {kind: registry, ref:
+<cluster>/<nom>}` pour un registre qu'elle a créé, pour le retour arrière
+du déploiement qui vient avec la 2.7. Un registre se retire depuis Cluster
+API > Registres.
+
+**Rôles.**
+
+| Geste | Rôle |
+|---|---|
+| Un plan qui pose un registre d'amorçage (`registry-admin` sinon, contrôlé au lancement et de nouveau au début de la phase) | admin |
+| Un plan dont les registres existent déjà, les publications, les clusters enfants à registres | opérateur |
+
+**Ligne de commande.** `harvester-plans check` et `apply` couvrent la
+phase ; `harvester-registry deploy --origin plan=P,run=ID` pose l'origine.
+
+**Vu en réel (2.6.0).** Sur harvlab2 (Harvester v1.9.0, un nœud
+imbriqué), un plan avec la phase Registre (registre d'amorçage de 8 Gio à
+172.16.2.76, registre du client, publication d'un paquet de 31 Mio) et un
+cluster enfant 1+1 : contrôle en 12 s ; registre posé et prêt en 37 s,
+publication en 3 s, cluster disponible en 10 minutes environ. Une reprise
+a revérifié le registre et la publication puis les a sautés
+(`already done (checked)`) ; les exécutions suivantes ont adopté le
+registre (`registry-exists`). Détail : [artefacts.md](artefacts.md),
+« Vu en réel ».
 
 ### Historique des actions bare-metal (2.1.0)
 
