@@ -193,3 +193,35 @@ def test_resources_member_target_takes_a_child_cluster_id(scope, cid, want):
         return
     target, path, qs = hres._members_target({"cid": "c-sg2q6"}, args)
     assert target == want and qs == f"?clusterId={want}"
+
+
+def test_details_read_the_full_oidc_settings_from_the_template(env, monkeypatch):
+    """Revue 5-8 I-3 : la fenêtre Renouveler part des réglages complets
+    (revendications, préfixes, CA de l'émetteur) du gabarit du plan de
+    contrôle, pas de l'annotation publique seule."""
+    import capi_cluster as cc
+    import child_oidc as co
+    from test_child_oidc_280 import CA
+    full = {"issuer_url": "https://idp.example", "audience": "k8s", "username_claim": "preferred_username",
+            "groups_claim": "roles", "username_prefix": "idp:", "groups_prefix": "idp-g:", "ca_pem": CA,
+            "admin_group": "ops"}
+    cp = cc.renew_templates([{"kind": "RKE2ControlPlaneTemplate", "metadata": {"name": "cp"},
+                              "spec": {"template": {"spec": {}}}}],
+                            {"k8s_version": "v1.34.11", "oidc": full}, ["oidc"])[0]
+    cl = {"metadata": {"name": "web", "namespace": "web", "annotations": {
+        co.ANNOTATION: co.public(co.check(full, "v1.34.11")[0])}},
+          "spec": {"topology": {"classRef": {"name": "cc"}}}, "status": {}}
+    cls = {"metadata": {"name": "cc"}, "spec": {"controlPlane": {"templateRef": {
+        "kind": "RKE2ControlPlaneTemplate", "name": "cp"}}}}
+
+    def kubectl(argv, **kw):
+        out = {"cluster.cluster.x-k8s.io": cl, "clusterclasses.cluster.x-k8s.io": cls,
+               "rke2controlplanetemplates.controlplane.cluster.x-k8s.io": cp,
+               "machines.cluster.x-k8s.io": {"items": []}}
+        for k, v in out.items():
+            if k in argv:
+                return SimpleNamespace(returncode=0, stdout=json.dumps(v), stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="not found")
+    monkeypatch.setattr(wapp, "_kubectl_run", kubectl)
+    d = env.client.get("/api/capi/harvlab2/cluster/web/web/details").get_json()
+    assert d["oidc"] == full

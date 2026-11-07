@@ -58,7 +58,7 @@ def open_renew(context, flask_server, calls, answer, oidc=None, role="operator")
         if body.get("dry_run"):
             a = answer(body)
             return fulfill(route, a[0], a[1]) if isinstance(a, tuple) else fulfill(route, a)
-        fulfill(route, {"action_id": "ren000000001", "cluster": "apps/apps", "what": body["what"]}, 202)
+        fulfill(route, {"action_id": "ren000000001", "cluster": "apps/apps", "what": body.get("what") or []}, 202)
     page.route(re.compile(r".*/api/capi/harv-fake/renew/apps/apps$"), renew)
     page.route(re.compile(r".*/api/stream/ren000000001$"), lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body=sse([
@@ -177,8 +177,8 @@ def test_refusals_are_translated(context, flask_server):
         {"error": "renew-busy: a renewal is in progress (machines of two revisions)"}, 502))
     win.locator('[data-w="registries"]').check()
     win.locator('[data-win-tab="diff"]').click()
-    expect(x(win, "diff")).to_contain_text("already in progress", timeout=5000)
-    expect(x(win, "go-wrap")).to_have_attribute("data-tip", re.compile("Blocked: A renewal is already in progress"))
+    expect(x(win, "diff")).to_contain_text("is not finished", timeout=5000)
+    expect(x(win, "go-wrap")).to_have_attribute("data-tip", re.compile("Blocked: A renewal of this child cluster"))
 
 
 def test_a_viewer_sees_renew_greyed(context, flask_server):
@@ -190,3 +190,39 @@ def test_a_viewer_sees_renew_greyed(context, flask_server):
     page.wait_for_timeout(900)
     expect(x(win, "go")).to_be_disabled()
     expect(x(win, "go-wrap")).to_have_attribute("data-tip", re.compile("operator role"))
+
+
+# --- revue 5-8 (I-1, m-2) : renouvellement pas fini, Finir et Abandonner ------------
+
+BUSY = ({"error": "renew-busy: the renewal of revision 2 is not finished; renew --finish resumes it"}, 502)
+
+
+@pytest.mark.parametrize("role,finish_on,abandon_on", [("operator", True, False), ("admin", True, True),
+                                                       ("viewer", False, False)])
+def test_an_unfinished_renewal_offers_finish_and_abandon(context, flask_server, role, finish_on, abandon_on):
+    calls = {}
+    page, win = open_renew(context, flask_server, calls, lambda b: BUSY, role=role)
+    expect(x(win, "unfinished")).to_be_hidden()
+    win.locator('[data-w="registries"]').check()
+    expect(x(win, "unfinished")).to_be_visible(timeout=5000)
+    for k, on in (("finish", finish_on), ("abandon", abandon_on)):
+        btn = x(win, k)
+        (expect(btn).to_be_enabled() if on else expect(btn).to_be_disabled())
+        assert x(win, f"{k}-wrap").get_attribute("data-tip")
+    if not abandon_on and role != "viewer":
+        expect(x(win, "abandon-wrap")).to_have_attribute("data-tip", re.compile("administrator"))
+    if finish_on:
+        x(win, "finish").click()
+        page.wait_for_timeout(600)
+        assert calls["renew"][-1] == {"mode": "finish", "timeout": 3600}
+        expect(x(win, "line")).to_contain_text("ren000000001", timeout=5000)
+
+
+def test_an_administrator_abandons_the_renewal(context, flask_server):
+    calls = {}
+    page, win = open_renew(context, flask_server, calls, lambda b: BUSY, role="admin")
+    win.locator('[data-w="ca"]').check()
+    expect(x(win, "abandon")).to_be_enabled(timeout=5000)
+    x(win, "abandon").click()
+    page.wait_for_timeout(600)
+    assert calls["renew"][-1] == {"mode": "abandon"}

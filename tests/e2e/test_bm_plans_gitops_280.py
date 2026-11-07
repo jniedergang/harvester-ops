@@ -261,3 +261,58 @@ def test_undo_window_groups_gitops_and_rancher_import_in_removal_order(context, 
     expect(win.locator(".udw-delete")).to_contain_text("cattle-admin")
     assert page.evaluate("window.__gop280") is None
     assert st["errors"] == []
+
+
+def test_batch_window_asks_the_git_secrets_of_the_chained_plan(context, flask_server, monkeypatch):
+    """Revue 5-8 (I-10) : une série enchaînée à un plan dont la phase GitOps
+    a une entrée Git avec secret demande ce secret ; il part dans
+    `gitops_secrets` de la série, puis les champs sont vidés."""
+    import test_bm_plans_240 as t240
+    import test_bm_profiles_180 as t180
+    plan = copy.deepcopy(t240.PLAN)
+    plan["phases"]["gitops"] = {"enabled": True, "timeout_minutes": 10, "entries": [
+        {"name": "apps", "clusters": ["{{cluster}}-apps"], "target_namespace": "equipe",
+         "source": {"type": "git", "url": "ssh://git@h/x.git", "branch": "main", "secret": "depot"}}]}
+    monkeypatch.setattr(t240, "PLAN", plan)
+    page, st = t240.open_page(context, flask_server, "#automation/pxe/profiles")
+    batches = []
+    prof = dict(t180.PROFILE, plan="site-std")
+
+    def profiles(route, req):
+        url, method = req.url.split("?")[0], req.method
+        if url.endswith("/profiles") and method == "GET":
+            return fulfill(route, t180.LIST)
+        if url.endswith("/profiles/rack-a") and method == "GET":
+            return fulfill(route, prof)
+        if url.endswith("/system-check"):
+            return fulfill(route, {"machines": [{"row": 1, "bmc_host": "198.51.100.1", "state": "absent",
+                                                 "evidence": [], "confirm_name": "x", "source": "hpe-oem"}]})
+        if url.endswith("/batch"):
+            batches.append(req.post_data_json)
+            return fulfill(route, {"action_id": "dep000000280", "cluster": "rack-a", "nodes": 1, "plan": "site-std"},
+                           202)
+        return fulfill(route, {"error": "unexpected"}, 500)
+    page.route(re.compile(r".*/api/baremetal/profiles.*"), profiles)
+    page.route("**/api/isos", lambda r, q: fulfill(r, {"isos": [{"name": "harvester.iso", "size": 1}], "disk_free": 1}))
+    page.locator('#tab-automation [data-bm-tab="images"]').click()
+    page.locator('#tab-automation [data-bm-tab="profiles"]').click()
+    page.locator('#bmp-table tr[data-profile="rack-a"] .bmp-batch').click()
+    win = page.locator('[id="fp-bm-batch-rack-a"]')
+    block = win.locator('.bmpl-pick-gop .dpw-gop-secret[data-gop-secret="depot"]')
+    expect(block).to_be_visible(timeout=5000)
+    assert all(t.get_attribute("data-tip") for t in win.locator(".bmpl-pick-gop .tip").all())
+    block.locator('[data-gop-k="identity"]').fill(KEY)
+    win.locator('.bmp-plan-pick [data-pp-var="vlan"]').fill("3999")
+    row = win.locator(".bmp-nodes tbody tr").first
+    row.locator('[data-col="bmc_host"]').fill("198.51.100.1")
+    for k, v in {"hostname": "node1", "ip": "192.0.2.11", "storage_ip": "172.18.122.101"}.items():
+        row.locator(f'[data-var="{k}"]').fill(v)
+    win.locator('[name="cluster_name"]').fill("rack-a")
+    win.locator('[name="vip"]').fill("192.0.2.100")
+    win.locator('[name="token"]').fill("TOK")
+    win.locator('[name="bmc_password"]').fill("BMC")
+    win.locator('button[type="submit"]').click()
+    expect(win.locator(".bmp-result a.dpw-action-link")).to_have_attribute("href", "#activity/action/dep000000280")
+    assert batches[0]["gitops_secrets"] == {"depot": {"identity": KEY}}
+    expect(block.locator('[data-gop-k="identity"]')).to_have_value("")          # jamais gardé
+    assert not st["errors"]

@@ -115,9 +115,28 @@ def test_renew_cert_without_a_kept_key_needs_new_ca(seeded, capsys):
     assert kube.applied == [] and kube.patched == []
 
 
-def child_nodes_secret(kube, ca_text):
-    kube.objects[("secrets", "web-registries")] = {
-        "kind": "Secret", "metadata": {"name": "web-registries", "namespace": "web",
+def child_cluster(kube, nodes_secret="web-registries", mark=None):
+    """Cluster enfant `web/web` : Cluster, ClusterClass et gabarit du plan
+    de contrôle qui désigne le Secret des nœuds (revue 5-8 I-6 : c'est le
+    Secret DÉSIGNÉ qui compte, pas n'importe lequel)."""
+    import capi_renew as cr
+    ann = {cr.A_RENEWAL: mark} if mark else {}
+    kube.objects[("clusters.cluster.x-k8s.io", "web")] = {
+        "metadata": {"name": "web", "namespace": "web", "annotations": ann},
+        "spec": {"topology": {"classRef": {"name": "harvester-rke2"}}}}
+    kube.objects[(cr.K_CLASS, "harvester-rke2")] = {"metadata": {"name": "harvester-rke2"}, "spec": {
+        "controlPlane": {"templateRef": {"kind": "RKE2ControlPlaneTemplate", "name": "cp"}}}}
+    kube.objects[(cr.K_CP_TEMPLATE, "cp")] = {"kind": "RKE2ControlPlaneTemplate", "metadata": {"name": "cp"},
+                                              "spec": {"template": {"spec": {"files": [
+                                                  {"path": rg.REGISTRIES_FILE, "contentFrom": {"secret": {
+                                                      "name": nodes_secret, "key": "registries.yaml"}}}]}}}}
+
+
+def child_nodes_secret(kube, ca_text, name="web-registries"):
+    if ("clusters.cluster.x-k8s.io", "web") not in kube.objects:
+        child_cluster(kube)
+    kube.objects[("secrets", name)] = {
+        "kind": "Secret", "metadata": {"name": name, "namespace": "web",
                                        "labels": {rg.used_label("amorcage"): "used", "harvester-ops.io/generated": "true"}},
         "data": {"ca-amorcage.crt": base64.b64encode(ca_text.encode()).decode()}}
 
@@ -132,7 +151,7 @@ def test_new_ca_in_three_steps(seeded, capsys, tmp_path):
     kube.applied.clear()
     # 1) nouvelle CA gardée en transition ; un cluster ne la croit pas : refus
     code, out, err = renew(capsys, "--new-ca")
-    assert code == 2 and "registry-ca-transition-pending" in err and json.loads(out)["clusters"] == ["web"]
+    assert code == 2 and "registry-ca-transition-pending" in err and json.loads(out)["clusters"] == ["web/web"]
     [nxt] = applied(kube, "amorcage-ca-next")
     d = rg.load(seeded["state"], "amorcage")
     assert d["ca_next_pem"] == nxt["stringData"]["ca.crt"] and d["ca_pem"] == old_ca
@@ -173,4 +192,16 @@ def test_status_says_the_missing_key_and_the_pending_transition(seeded, capsys, 
     assert cli.main(["status", "amorcage", "--cluster", "harvlab2", "--kubeconfig", "/kc"]) == 0
     got = {f["code"]: f for f in json.loads(capsys.readouterr().out)["findings"]}
     assert got["registry-ca-key-missing"]["level"] == "ok"
-    assert got["registry-ca-transition-pending"]["facts"]["clusters"] == "web"
+    assert got["registry-ca-transition-pending"]["facts"]["clusters"] == "web/web (nodes)"
+
+
+def test_a_switch_stopped_after_the_next_ca_went_is_refused_cleanly(seeded, capsys):
+    """Revue 5-8 m-6 : la CA suivante retirée mais la déclaration pas encore
+    mise à jour : refus nommé, plus de KeyError."""
+    kube = seeded["kube"]
+    kube.objects.pop(("secrets", "amorcage-ca-key"))
+    rg.update(seeded["state"], "amorcage", lambda x: x.update(ca_next_pem=x["ca_pem"]))
+    kube.applied.clear()
+    code, out, err = renew(capsys)
+    assert code == 2 and "registry-ca-signer-missing" in err
+    assert json.loads(out)["blocked"] is True and not applied(kube, "amorcage-tls")

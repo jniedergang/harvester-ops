@@ -927,6 +927,7 @@ const CAPI = (() => {
       case 'capi-gitops': return tr('capi.hist.kind.gitops');
       case 'capi-gitops-remove': return tr('capi.hist.kind.gitopsRemove');
       case 'capi-renew': return tr('capi.hist.kind.renew');
+      case 'capi-renew-abandon': return tr('capi.hist.kind.renewAbandon');
       default: return verb;
     }
   }
@@ -1349,6 +1350,11 @@ const CAPI = (() => {
     'renew-class-missing': () => tr('capi.ren.err.classMissing'),
     'renew-template-missing': () => tr('capi.ren.err.templateMissing'),
     'child-admin-required': () => tr('capi.ren.err.childAdmin'),
+    // revue 5-8 (I-1, I-9) : renouvellement pas fini, abandon, verrou du cluster
+    'renew-not-running': () => tr('capi.ren.err.notRunning'),
+    'renew-marker-unreadable': () => tr('capi.ren.err.markerUnreadable'),
+    'renew-abandon-admin-only': () => tr('capi.ren.err.abandonAdmin'),
+    'capi-uninstall-running': () => tr('capi.ren.err.uninstallRunning'),
   };
   const RENEW_FINDINGS = {
     'renew-pool-missing': (v) => tr('capi.ren.fd.renew-pool-missing', v),
@@ -1407,6 +1413,13 @@ const CAPI = (() => {
           <ul class="reg-summary" data-x="summary"></ul>
           <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('capi.ren.t.understand'))}"><input type="checkbox" data-x="understand"><span class="tf-label">${esc(tr('capi.ren.understand'))}</span></label>
         </section>
+        <div class="bm-refusal bm-warning capi-ren-unfinished" data-x="unfinished" hidden>
+          <p>${Icons.svg('warn', { size: 13 })} ${esc(tr('capi.ren.unfinished'))}</p>
+          <div class="apply-bar">
+            <span class="tip" data-x="finish-wrap"><button type="button" class="btn btn-secondary btn-sm" data-x="finish">${Icons.svg('play')} ${esc(tr('capi.ren.finish'))}</button></span>
+            <span class="tip" data-x="abandon-wrap"><button type="button" class="btn btn-danger btn-sm" data-x="abandon">${Icons.svg('close')} ${esc(tr('capi.ren.abandon'))}</button></span>
+          </div>
+        </div>
         <div class="apply-bar" style="margin-top:10px;">
           <span class="tip" data-x="go-wrap"><button type="button" class="btn btn-primary btn-sm" data-x="go" disabled>${Icons.svg('refresh')} ${esc(tr('capi.ren.go'))}</button></span>
           <span class="apply-result" data-x="line" hidden></span>
@@ -1442,6 +1455,39 @@ const CAPI = (() => {
                   : !changed ? tr('capi.ren.err.nothing')
                     : !q('understand').checked ? tr('capi.ren.t.needUnderstand') : tr('capi.ren.t.go');
       gate(q('go-wrap'), q('go'), can('operator') && !st.launched && !!changed && q('understand').checked, why);
+      paintUnfinished();
+    }
+    // revue 5-8 (I-1, m-2) : un renouvellement pas fini (marque du Cluster)
+    // se reprend (opérateur) ou s'abandonne sans rien supprimer (admin)
+    function paintUnfinished() {
+      const d = st.diff;
+      const code = d && !d.ok ? (d.code || (/^([a-z][a-z0-9-]+):/.exec(d.error || '') || [])[1]) : '';
+      const busy = code === 'renew-busy' || code === 'renew-marker-unreadable';
+      q('unfinished').hidden = !busy && !st.unfinishedLaunched;
+      const fin = can('operator') && !st.launched && code === 'renew-busy';
+      gate(q('finish-wrap'), q('finish'), fin, !can('operator') ? tr('capi.acc.t.operator')
+        : st.launched ? tr('capi.ren.t.launched') : tr('capi.ren.t.finish'));
+      const ab = can('admin') && !st.launched && busy;
+      gate(q('abandon-wrap'), q('abandon'), ab, !can('admin') ? tr('capi.ren.t.abandonAdmin')
+        : st.launched ? tr('capi.ren.t.launched') : tr('capi.ren.t.abandon'));
+    }
+    async function launchMode(mode) {
+      if (!confirm(mode === 'abandon' ? tr('capi.ren.confirmAbandon', { name: ref }) : tr('capi.ren.confirmFinish', { name: ref }))) return;
+      st.launched = true;
+      st.unfinishedLaunched = true;
+      paintGo();
+      const t = Math.max(1, Math.min(180, Number(q('timeout').value) || 60)) * 60;
+      const r = await jsonCall('POST', `/api/capi/${enc(cluster)}/renew/${enc(namespace)}/${enc(name)}`,
+        mode === 'abandon' ? { mode } : { mode, timeout: t });
+      const line = q('line');
+      if (!r.ok) {
+        st.launched = false;
+        line.hidden = false;
+        line.textContent = renewErrorText(r.d);
+        paintGo();
+        return;
+      }
+      followAction(r.d.action_id, line, () => setTimeout(refreshK8sClustersPanel, 800));
     }
     function paintDiff() {
       const d = st.diff;
@@ -1522,6 +1568,8 @@ const CAPI = (() => {
     });
     q('timeout').addEventListener('change', later);
     q('understand').addEventListener('change', paintGo);
+    q('finish').addEventListener('click', () => { if (!q('finish').disabled) launchMode('finish'); });
+    q('abandon').addEventListener('click', () => { if (!q('abandon').disabled) launchMode('abandon'); });
     q('go').addEventListener('click', async () => {
       if (q('go').disabled) return;
       const b = body();

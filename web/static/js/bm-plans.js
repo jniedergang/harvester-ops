@@ -1767,43 +1767,15 @@ const BMPlans = (() => {
 
     // --- 2.8.0 : secrets Git de la phase GitOps ------------------------------
     /** Secrets complets saisis : {nom: {identity[, known_hosts]} | {username, password}}. */
-    function gopValues() {
-      const out = {};
-      form.querySelectorAll('.dpw-gop-secret').forEach(b => {
-        const v = (k) => ((b.querySelector(`[data-gop-k="${k}"]`) || {}).value || '');
-        const kind = (b.querySelector('[data-gop-k="kind"]') || {}).value;
-        if (kind === 'basic') {
-          if (v('username') && v('password')) out[b.dataset.gopSecret] = { username: v('username'), password: v('password') };
-        } else if (v('identity').trim()) {
-          out[b.dataset.gopSecret] = Object.assign({ identity: v('identity') }, v('known_hosts').trim() ? { known_hosts: v('known_hosts') } : {});
-        }
-      });
-      return out;
-    }
-    function gopClear() {
-      form.querySelectorAll('.dpw-gop-secret textarea, .dpw-gop-secret input').forEach(el => { el.value = ''; });
-    }
+    function gopValues() { return gopRead(form); }
+    function gopClear() { gopWipe(form); }
     function paintGopSecrets() {
       const fs = $('.dpw-gop-secrets');
       fs.hidden = !s.gopSecrets.length;
       const box = $('.dpw-gop-secrets-box');
       const have = [...box.querySelectorAll('.dpw-gop-secret')].map(b => b.dataset.gopSecret);
       if (JSON.stringify(have) === JSON.stringify(s.gopSecrets)) return;   // les saisies restent
-      box.innerHTML = s.gopSecrets.map(n => `<div class="dpw-gop-secret" data-gop-secret="${esc(n)}">
-          <h5><code>${esc(n)}</code></h5>
-          <label class="tip" data-tip="${esc(tr('dpw.t.gopKind'))}">${esc(tr('dpw.f.gopKind'))}
-            <select data-gop-k="kind" aria-label="${esc(tr('dpw.f.gopKind'))}">
-              <option value="ssh">${esc(tr('dpw.gopKind.ssh'))}</option><option value="basic">${esc(tr('dpw.gopKind.basic'))}</option></select></label>
-          <label class="tip dpw-gop-ssh" data-tip="${esc(tr('dpw.t.gopIdentity'))}">${esc(tr('dpw.f.gopIdentity'))}
-            <textarea data-gop-k="identity" rows="3" spellcheck="false" autocomplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                      aria-label="${esc(tr('dpw.f.gopIdentity'))}"></textarea></label>
-          <label class="tip dpw-gop-ssh" data-tip="${esc(tr('dpw.t.gopKnownHosts'))}">${esc(tr('dpw.f.gopKnownHosts'))}
-            <textarea data-gop-k="known_hosts" rows="2" spellcheck="false" autocomplete="off" aria-label="${esc(tr('dpw.f.gopKnownHosts'))}"></textarea></label>
-          <label class="tip dpw-gop-basic" data-tip="${esc(tr('dpw.t.gopUser'))}" hidden>${esc(tr('dpw.f.gopUser'))}
-            <input data-gop-k="username" autocomplete="off" spellcheck="false" aria-label="${esc(tr('dpw.f.gopUser'))}"></label>
-          <label class="tip dpw-gop-basic" data-tip="${esc(tr('dpw.t.gopPassword'))}" hidden>${esc(tr('dpw.f.gopPassword'))}
-            <input data-gop-k="password" type="password" autocomplete="new-password" aria-label="${esc(tr('dpw.f.gopPassword'))}"></label>
-        </div>`).join('');
+      box.innerHTML = gopSecretsHtml(s.gopSecrets);
     }
     /** Noms des secrets demandés par la phase GitOps du plan choisi. */
     async function loadGopSecrets() {
@@ -1812,8 +1784,7 @@ const BMPlans = (() => {
       let doc = null;
       try { const r = await api('GET', `/api/baremetal/plans/${enc(name)}`); doc = r.ok ? r.d : null; } catch { doc = null; }
       if (name !== s.plan || !form.isConnected) return;
-      const ph = ((doc || {}).phases || {}).gitops || {};
-      s.gopSecrets = ph.enabled ? [...new Set((ph.entries || []).map(e => ((e || {}).source || {}).secret).filter(Boolean))].sort() : [];
+      s.gopSecrets = gopSecretNames(doc);
       paintGopSecrets();
     }
 
@@ -2054,6 +2025,11 @@ const BMPlans = (() => {
         msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('dpw.running'))} ${actionLink(r.d.running)}</div>`;
         return;
       }
+      if (r.d.code === 'renew-running' && r.d.running) {
+        // revue 5-8 I-9 : un renouvellement de machines tient ce cluster
+        msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('dpw.renewRunning'))} ${actionLink(r.d.running)}</div>`;
+        return;
+      }
       msg.innerHTML = refusal(r.d, r.status);
     }
 
@@ -2065,14 +2041,7 @@ const BMPlans = (() => {
     });
     form.addEventListener('change', (e) => {
       if (e.target.classList.contains('dpw-update')) { s.updateDiffering = e.target.checked; runCheck(); return; }
-      const gk = e.target.closest('.dpw-gop-secret [data-gop-k="kind"]');
-      if (gk) {
-        const b = gk.closest('.dpw-gop-secret');
-        b.querySelectorAll('.dpw-gop-ssh').forEach(x => { x.hidden = gk.value !== 'ssh'; });
-        b.querySelectorAll('.dpw-gop-basic').forEach(x => { x.hidden = gk.value !== 'basic'; });
-        later();
-        return;
-      }
+      if (gopKindChange(e.target)) { later(); return; }
       if (e.target.name === 'cluster') { s.cluster = e.target.value; later(); }
       if (e.target.name === 'plan') {
         s.plan = e.target.value;
@@ -2430,6 +2399,11 @@ const BMPlans = (() => {
         msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('dpw.running'))} ${actionLink(r.d.running)}</div>`;
         return;
       }
+      if (r.d.code === 'renew-running' && r.d.running) {
+        // revue 5-8 I-9 : un renouvellement de machines tient ce cluster
+        msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('dpw.renewRunning'))} ${actionLink(r.d.running)}</div>`;
+        return;
+      }
       msg.innerHTML = refusal(r.d, r.status);
     }
 
@@ -2466,6 +2440,59 @@ const BMPlans = (() => {
   }
 
   // =========================================================================
+  // 2.8.0 : secrets Git de la phase GitOps (fenêtre Déployer, et revue 5-8
+  // I-10 : champ Plan des fenêtres d'installation et de série)
+  // =========================================================================
+  /** Noms des secrets que demandent les entrées Git de la phase GitOps d'un plan. */
+  function gopSecretNames(doc) {
+    const ph = ((doc || {}).phases || {}).gitops || {};
+    return ph.enabled ? [...new Set((ph.entries || []).map(e => ((e || {}).source || {}).secret).filter(Boolean))].sort() : [];
+  }
+  function gopSecretsHtml(names) {
+    return names.map(n => `<div class="dpw-gop-secret" data-gop-secret="${esc(n)}">
+          <h5><code>${esc(n)}</code></h5>
+          <label class="tip" data-tip="${esc(tr('dpw.t.gopKind'))}">${esc(tr('dpw.f.gopKind'))}
+            <select data-gop-k="kind" aria-label="${esc(tr('dpw.f.gopKind'))}">
+              <option value="ssh">${esc(tr('dpw.gopKind.ssh'))}</option><option value="basic">${esc(tr('dpw.gopKind.basic'))}</option></select></label>
+          <label class="tip dpw-gop-ssh" data-tip="${esc(tr('dpw.t.gopIdentity'))}">${esc(tr('dpw.f.gopIdentity'))}
+            <textarea data-gop-k="identity" rows="3" spellcheck="false" autocomplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                      aria-label="${esc(tr('dpw.f.gopIdentity'))}"></textarea></label>
+          <label class="tip dpw-gop-ssh" data-tip="${esc(tr('dpw.t.gopKnownHosts'))}">${esc(tr('dpw.f.gopKnownHosts'))}
+            <textarea data-gop-k="known_hosts" rows="2" spellcheck="false" autocomplete="off" aria-label="${esc(tr('dpw.f.gopKnownHosts'))}"></textarea></label>
+          <label class="tip dpw-gop-basic" data-tip="${esc(tr('dpw.t.gopUser'))}" hidden>${esc(tr('dpw.f.gopUser'))}
+            <input data-gop-k="username" autocomplete="off" spellcheck="false" aria-label="${esc(tr('dpw.f.gopUser'))}"></label>
+          <label class="tip dpw-gop-basic" data-tip="${esc(tr('dpw.t.gopPassword'))}" hidden>${esc(tr('dpw.f.gopPassword'))}
+            <input data-gop-k="password" type="password" autocomplete="new-password" aria-label="${esc(tr('dpw.f.gopPassword'))}"></label>
+        </div>`).join('');
+  }
+  /** Secrets complets saisis : {nom: {identity[, known_hosts]} | {username, password}}. */
+  function gopRead(root) {
+    const out = {};
+    root.querySelectorAll('.dpw-gop-secret').forEach(b => {
+      const v = (k) => ((b.querySelector(`[data-gop-k="${k}"]`) || {}).value || '');
+      const kind = (b.querySelector('[data-gop-k="kind"]') || {}).value;
+      if (kind === 'basic') {
+        if (v('username') && v('password')) out[b.dataset.gopSecret] = { username: v('username'), password: v('password') };
+      } else if (v('identity').trim()) {
+        out[b.dataset.gopSecret] = Object.assign({ identity: v('identity') }, v('known_hosts').trim() ? { known_hosts: v('known_hosts') } : {});
+      }
+    });
+    return out;
+  }
+  function gopWipe(root) {
+    root.querySelectorAll('.dpw-gop-secret textarea, .dpw-gop-secret input').forEach(el => { el.value = ''; });
+  }
+  /** Bascule clé SSH / compte d'un bloc ; vrai si l'événement le concernait. */
+  function gopKindChange(t) {
+    const gk = t.closest('.dpw-gop-secret [data-gop-k="kind"]');
+    if (!gk) return false;
+    const b = gk.closest('.dpw-gop-secret');
+    b.querySelectorAll('.dpw-gop-ssh').forEach(x => { x.hidden = gk.value !== 'ssh'; });
+    b.querySelectorAll('.dpw-gop-basic').forEach(x => { x.hidden = gk.value !== 'basic'; });
+    return true;
+  }
+
+  // =========================================================================
   // Historique : « Reprendre » sur un déroulé arrêté
   // =========================================================================
   /** 2.5.0 : un cluster enfant créé par un plan, lien vers Cluster API > Clusters. */
@@ -2489,7 +2516,29 @@ const BMPlans = (() => {
    *  plan absent est signalé) ; `withVars` : ses variables à saisir. Aucun
    *  champ nommé (FormData de la fenêtre ne le voit pas). */
   function mountPicker(box, initial, withVars) {
-    const ctl = { plan: initial || '', values: {}, plans: [], loaded: false };
+    const ctl = { plan: initial || '', values: {}, plans: [], loaded: false, gopNames: [] };
+    // revue 5-8 I-10 : secrets Git de la phase GitOps du plan, saisis ici
+    // (jamais rangés, effacés après l'envoi) ; hors du conteneur repeint
+    const gop = document.createElement('div');
+    gop.className = 'bmpl-pick-gop';
+    gop.hidden = true;
+    box.insertAdjacentElement('afterend', gop);
+    async function loadGop() {
+      const name = ctl.plan;
+      if (!withVars || !name) { ctl.gopNames = []; paintGop(); return; }
+      let doc = null;
+      try { const r = await api('GET', `/api/baremetal/plans/${enc(name)}`); doc = r.ok ? r.d : null; } catch { doc = null; }
+      if (name !== ctl.plan || !box.isConnected) return;
+      ctl.gopNames = gopSecretNames(doc);
+      paintGop();
+    }
+    function paintGop() {
+      gop.hidden = !ctl.gopNames.length;
+      gop.innerHTML = ctl.gopNames.length ? `<fieldset class="dpw-gop-secrets"><legend>${esc(tr('dpw.fs.gopSecrets'))}</legend>
+        <p class="form-hint" style="grid-column:1/-1;">${esc(tr('dpw.gopSecretsHint'))}</p>
+        <div class="dpw-gop-secrets-box" style="grid-column:1/-1;">${gopSecretsHtml(ctl.gopNames)}</div></fieldset>` : '';
+    }
+    gop.addEventListener('change', (e) => { gopKindChange(e.target); });
     function paintPicker() {
       const names = ctl.plans.filter(p => !p.invalid).map(p => p.name);
       const missing = ctl.plan && ctl.loaded && !names.includes(ctl.plan);
@@ -2508,7 +2557,7 @@ const BMPlans = (() => {
         ${ctl.plan ? `<p class="form-hint">${esc(tr('bmpl.pick.hint'))}</p>` : ''}`;
     }
     box.addEventListener('change', (e) => {
-      if (e.target.matches('[data-pp="plan"]')) { ctl.plan = e.target.value; ctl.values = {}; paintPicker(); }
+      if (e.target.matches('[data-pp="plan"]')) { ctl.plan = e.target.value; ctl.values = {}; paintPicker(); loadGop(); }
     });
     box.addEventListener('input', (e) => {
       const v = e.target.closest('[data-pp-var]');
@@ -2518,9 +2567,14 @@ const BMPlans = (() => {
       if (!ctl.plan) return null;
       const vars = {};
       Object.entries(ctl.values).forEach(([k, v]) => { if (v) vars[k] = v; });
-      return withVars ? { plan: ctl.plan, plan_variables: vars } : { plan: ctl.plan };
+      if (!withVars) return { plan: ctl.plan };
+      const gsec = gopRead(gop);
+      return Object.assign({ plan: ctl.plan, plan_variables: vars }, Object.keys(gsec).length ? { gitops_secrets: gsec } : {});
     };
+    /** Efface les secrets Git saisis (après l'envoi). */
+    ctl.clearSecrets = () => gopWipe(gop);
     paintPicker();
+    loadGop();
     api('GET', '/api/baremetal/plans').then(r => {
       ctl.plans = r.ok ? (r.d.plans || []) : [];
       ctl.loaded = r.ok;

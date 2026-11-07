@@ -2967,7 +2967,8 @@ def _flux_render(kube, spec):
         url = f"oci://{decl['endpoint']}/{fa.repo_of(src['package'], src['item'])}"
         secrets["pull"] = {"host": decl["endpoint"], "username": creds["username"], "password": creds["password"]}
         if decl.get("ca_pem"):
-            secrets["ca"] = decl["ca_pem"]
+            # revue 5-8 I-6 : pendant une transition, l'ancienne et la nouvelle
+            secrets["ca"] = rg.ca_bundle(decl)
         package, version, revision = src["package"], src["version"], src["version"]
     else:
         url = src["url"]
@@ -3064,6 +3065,12 @@ def _fleet_deploy(kube, spec, harvester, timeout):
     if st == 200 and not cg.fleet_ours(cur, harvester, ns, cluster, entry):
         step("check", "error", f"gitops-name-taken: {name} exists in Fleet for something else")
         return EXIT_BLOCKED
+    have_plan = (((cur or {}).get("metadata") or {}).get("annotations") or {}).get(cg.A_PLAN) if st == 200 else None
+    if spec["origin"].get("plan") and have_plan != spec["origin"]["plan"] and st == 200:
+        # revue 5-8 I-11 : posée par un autre plan (ou hors plan), jamais reprise
+        step("check", "error", f"gitops-taken: {name} was set by {('plan ' + have_plan) if have_plan else 'hand'}, "
+                               f"not by plan {spec['origin']['plan']}")
+        return EXIT_BLOCKED
     for suffix in ("-auth", "-pull"):
         if not _fleet_secret_ours(api, f"{name}{suffix}", labels)[1]:
             step("check", "error", f"gitops-name-taken: the secret {name}{suffix} exists in Fleet for something else")
@@ -3096,10 +3103,11 @@ def _fleet_deploy(kube, spec, harvester, timeout):
         secret_name = f"{name}-pull"
         data = {"username": creds["username"], "password": creds["password"]}
         if decl.get("ca_pem"):
-            data["cacerts"] = decl["ca_pem"]
+            data["cacerts"] = rg.ca_bundle(decl)              # revue 5-8 I-6 : transition comprise
         _fleet_secret(api, secret_name, labels, data, "Opaque")
     obj = cg.fleet_object(entry, have["name"], harvester, ns, cluster, chart_repo=chart_repo,
-                          secret_name=secret_name, by=spec["by"], run=spec["origin"].get("run"))
+                          secret_name=secret_name, by=spec["by"], run=spec["origin"].get("run"),
+                          plan=spec["origin"].get("plan"))
     if st == 200:
         obj["metadata"]["resourceVersion"] = (cur.get("metadata") or {}).get("resourceVersion")
         st2, out = api.call("PUT", f"{FLEET_PATH}/{plural}/{name}", obj)
@@ -3167,6 +3175,11 @@ def cmd_gitops_remove(args):
         step("remove", "error", f"gitops-entry-missing: no Flux entry {entry_name} on {ns}/{cluster}"
                                 + ("" if r else " (a Fleet entry needs a Rancher session)"))
         return EXIT_BLOCKED
+    if args.role != "admin":
+        # tâche 9, constat 1 : retirer une entrée Fleet est réservé à
+        # l'administrateur, comme la poser (revue 1-4 I-4)
+        step("remove", "error", "gitops-fleet-admin-only: removing a Fleet entry is for administrators")
+        return EXIT_BLOCKED
     api = RANCHER(r)
     entry = {"name": entry_name}
     for plural, obj in _fleet_entries(api, harvester, ns, cluster):
@@ -3222,7 +3235,8 @@ def cmd_gitops_status(args):
             out.append({"tool": "fleet", "namespace": lab.get("harvester-ops.io/child-namespace"),
                         "cluster": lab.get("harvester-ops.io/child"), "entry": lab.get(cg.L_ENTRY),
                         "kind": obj.get("kind"), "name": obj["metadata"]["name"], "state": cg.state_fleet(obj),
-                        "origin": {"run": ann.get(ri.A_RUN)} if ann.get(ri.A_RUN) else {}})
+                        "origin": {k: v for k, v in (("run", ann.get(ri.A_RUN)), ("plan", ann.get(cg.A_PLAN)))
+                                   if v}})
     print(json.dumps({"entries": out, "session": bool(r)}))
     return EXIT_OK
 
@@ -3684,6 +3698,9 @@ def main(argv=None):
                             default=900 if name.startswith(("service", "manifest", "gitops")) else 2400)
             if name == "create":
                 sp.add_argument("--no-wait", action="store_true")
+        if name == "gitops-remove":
+            sp.add_argument("--role", default="admin", choices=("viewer", "operator", "admin"),
+                            help="role of the person in the console (a Fleet entry is removed by an administrator)")
         if name in ("delete", "service-remove", "manifest-remove", "rancher-unimport", "gitops-remove"):
             sp.add_argument("--expect-run", default="", metavar="ID",
                             help="refuse unless the object carries this plan run (the undo of a plan)")

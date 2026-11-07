@@ -89,6 +89,9 @@ def test_remove_and_list(env):
     assert run.action == "capi-gitops-remove:web/web:demo"
     argv = calls(env)[-1]["argv"]
     assert argv[0] == "gitops-remove" and argv[argv.index("--name") + 1] == "web/web/demo"
+    # tâche 9, constat 1 : le rôle part avec la commande, l'outil refuse Fleet
+    # à qui n'est pas administrateur
+    assert argv[argv.index("--role") + 1] == "operator"
     assert env.client.delete("/api/capi/harvlab2/gitops/web/web/Bad_").status_code == 400
     (env.fake / "gitops-status.json").write_text('{"entries": [], "session": false}')
     r = env.client.get("/api/capi/harvlab2/gitops")

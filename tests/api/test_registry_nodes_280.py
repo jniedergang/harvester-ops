@@ -26,18 +26,42 @@ CURRENT = {"Mirrors": {"quay.io": {"Endpoints": ["https://172.16.1.11:5005"], "R
 
 
 class Kube:
-    def __init__(self, value):
+    """Cluster Harvester simulé. `moves` : le contrôleur du réglage de
+    Harvester 1.9 (containerd_registry.go) retire `Auth` du réglage et range
+    les identifiants dans un Secret `rke.cattle.io/auth-config` de
+    `fleet-local`, étiqueté au réglage, clé `host`."""
+    def __init__(self, value, moves=True):
         self.settings = {"containerd-registry": {"value": value}, "additional-ca": {"value": "CA-X\n"}}
         self.patched = []
+        self.secret_flags = []
+        self.moves = moves
+        self.secrets = []
 
     def get(self, kind, ns, name):
         if kind == "settings.harvesterhci.io":
             return self.settings.get(name)
         return None
 
-    def patch(self, kind, ns, name, body, dry_run=False):
+    def list(self, kind, ns=None, selector=None):
+        assert (kind, ns, selector) == ("secrets", "fleet-local", "harvesterhci.io/setting=containerd-registry")
+        return list(self.secrets)
+
+    def patch(self, kind, ns, name, body, dry_run=False, secret=False):
         self.patched.append((name, body["value"]))
+        self.secret_flags.append(secret)
         self.settings[name] = {"value": body["value"]}
+        if name == "containerd-registry" and self.moves:
+            import base64
+            doc = json.loads(body["value"])
+            for host, conf in (doc.get("Configs") or {}).items():
+                auth = conf.get("Auth")
+                if auth:
+                    self.secrets.append({"type": "rke.cattle.io/auth-config", "metadata": {
+                        "name": "harvester-containerd-registry-0011223344556677"},
+                        "data": {k: base64.b64encode(v.encode()).decode() for k, v in
+                                 (("host", host), ("username", auth["Username"]), ("password", auth["Password"]))}})
+                    conf["Auth"] = None
+            self.settings[name] = {"value": json.dumps(doc)}
 
 
 @pytest.fixture
@@ -62,6 +86,9 @@ def nodes(capsys, *extra):
 def test_merge_writes_the_setting_and_returns_the_previous_value_masked(world, capsys):
     code, out, err = nodes(capsys)
     assert code == 0, err
+    assert world["kube"].secret_flags == [True]                # corps hors de la ligne de commande (I-7)
+    assert out["auth_secret"] == "fleet-local/harvester-containerd-registry-0011223344556677"
+    assert PULL_PW not in world["kube"].settings["containerd-registry"]["value"]
     [(name, value)] = world["kube"].patched
     assert name == "containerd-registry"
     got = json.loads(value)
@@ -84,13 +111,68 @@ def test_dry_run_writes_nothing(world, capsys):
 def test_a_mirror_conflict_writes_nothing(world, capsys):
     world["kube"].settings["containerd-registry"]["value"] = json.dumps(
         {"Mirrors": {"docker.io": {"Endpoints": ["https://other"], "Rewrites": {"^(.*)$": "x/$1"}}}})
-    code, _out, err = nodes(capsys)
+    code, out, err = nodes(capsys)
     assert code == 2 and "harvester-nodes-mirror-conflict" in err and world["kube"].patched == []
+    # tâche 9, constat 2 : refus rendu en JSON comme renew-cert
+    assert out["blocked"] is True and [f["code"] for f in out["findings"]] == ["harvester-nodes-mirror-conflict"]
 
 
-def test_a_registry_not_attached_to_the_cluster_is_refused(world, capsys):
-    code = cli.main(["harvester-nodes", "amorcage", "--cluster", "harv1", "--kubeconfig", "/kc"])
-    assert code == 2 and "registry-not-attached" in capsys.readouterr().err
+@pytest.mark.parametrize("argv,code_,finding", [
+    (["--cluster", "harv1"], 2, "registry-not-attached"),
+])
+def test_a_registry_not_attached_to_the_cluster_is_refused(world, capsys, argv, code_, finding):
+    code = cli.main(["harvester-nodes", "amorcage", *argv, "--kubeconfig", "/kc"])
+    o = capsys.readouterr()
+    assert code == code_ and finding in o.err
+    out = json.loads(o.out)
+    assert out["blocked"] is True and out["findings"][0]["code"] == finding
+
+
+def test_no_read_account_is_refused_in_json(world, capsys, monkeypatch):
+    monkeypatch.setattr(cli.rg, "read_creds", lambda k, n, role: None)
+    code, out, err = nodes(capsys)
+    assert code == 2 and out["blocked"] is True and out["findings"][0]["code"] == "registry-not-attached"
+
+
+def test_a_password_left_in_the_setting_is_an_error(world, capsys, monkeypatch):
+    """I-7 : Harvester doit ranger le compte dans son Secret auth-config et
+    le retirer du réglage ; sinon l'action échoue et le dit."""
+    world["kube"].moves = False
+    monkeypatch.setattr(cli, "time", __import__("types").SimpleNamespace(
+        monotonic=lambda: 0.0, sleep=lambda s: None, time=lambda: 0.0, strftime=__import__("time").strftime,
+        gmtime=__import__("time").gmtime))
+    code, out, err = nodes(capsys, "--wait", "0")
+    assert code == 1 and "harvester-nodes-auth-inline" in err
+    assert out["blocked"] is True and out["findings"][-1]["code"] == "harvester-nodes-auth-inline"
+    assert PULL_PW not in json.dumps(out) and PULL_PW not in err
+
+
+def test_the_next_ca_joins_additional_ca(world, capsys, monkeypatch):
+    """I-6 : pendant une transition, les nœuds Harvester croient les deux CA."""
+    decl = dict(rg.load(world["state"], "amorcage"), ca_pem="CA-OLD", ca_next_pem="CA-NEW")
+    monkeypatch.setattr(cli.rg, "load", lambda st, n: dict(decl))
+    code, out, _err = nodes(capsys)
+    assert code == 0
+    assert world["kube"].settings["additional-ca"]["value"] == "CA-X\nCA-OLD\nCA-NEW\n"
+
+
+def test_kube_patch_with_a_secret_never_puts_it_in_argv(monkeypatch, tmp_path):
+    """I-7 : `Kube.patch(secret=True)` : corps dans un fichier 0600 effacé
+    aussitôt, rien dans la ligne de commande."""
+    import kube as kmod
+    seen = {}
+
+    def fake_run(argv, input=None, capture_output=None, text=None, timeout=None):
+        seen["argv"] = list(argv)
+        path = argv[argv.index("--patch-file") + 1]
+        seen["mode"] = __import__("os").stat(path).st_mode & 0o777
+        seen["body"] = Path(path).read_text()
+        seen["path"] = path
+        return __import__("types").SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(kmod.subprocess, "run", fake_run)
+    kmod.Kube("/kc").patch("settings.harvesterhci.io", None, "containerd-registry", {"value": PULL_PW}, secret=True)
+    assert PULL_PW not in " ".join(seen["argv"]) and PULL_PW in seen["body"]
+    assert seen["mode"] == 0o600 and not Path(seen["path"]).exists()
 
 
 @pytest.mark.skipif(not __import__("shutil").which("openssl"), reason="openssl needed")

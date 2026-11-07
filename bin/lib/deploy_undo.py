@@ -105,6 +105,8 @@ def _collect_one(found, it, u, res):
                   "default": u["kind"] != "registry",
                   "note": REGISTRY_NOTE if u["kind"] == "registry" else "",
                   "revision_applied": it.get("revision_applied")}
+    if u["kind"] == "gitops" and u.get("tool") in ("flux", "fleet"):
+        found[key]["tool"] = u["tool"]        # revue 5-8 I-8 : Fleet ne se voit qu'avec une session
 
 
 def collect(results, tf_lookup=None, plan=None, cluster=None):

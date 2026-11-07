@@ -336,16 +336,22 @@ def fleet_labels(harvester, ns, cluster, entry):
             "harvester-ops.io/child": cluster, L_ENTRY: entry["name"]}
 
 
+A_PLAN = "harvester-ops.io/plan"
+
+
 def fleet_object(entry, fleet_cluster, harvester, ns, cluster, chart_repo=None, secret_name=None,
-                 by="", run=None):
+                 by="", run=None, plan=None):
     """`GitRepo` (source git) ou `HelmOp` (source chart) de `fleet-default`,
     ciblé sur le cluster Fleet du cluster importé. `chart_repo` :
     `oci://<registre>/<chemin du chart>` ; `secret_name` : Secret de
-    `fleet-default` (clé SSH ou compte de lecture)."""
+    `fleet-default` (clé SSH ou compte de lecture). `plan` (revue 5-8
+    I-11) : le plan qui la pose, comparé à la reprise comme pour Flux."""
     src = entry["source"]
     ann = {mf.A_BY: by or ""}
     if run:
         ann["harvester-ops.io/plan-run"] = run
+    if plan:
+        ann[A_PLAN] = plan
     meta = {"name": fleet_name(harvester, ns, cluster, entry), "namespace": FLEET_NAMESPACE,
             "labels": fleet_labels(harvester, ns, cluster, entry), "annotations": ann}
     targets = [{"clusterName": fleet_cluster}]

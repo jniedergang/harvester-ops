@@ -1665,6 +1665,7 @@ const BMC = (() => {
           body: JSON.stringify(body),
         });
         const d = await r.json().catch(() => ({}));
+        if (r.ok && planPick && planPick.clearSecrets) planPick.clearSecrets();   // secrets Git jamais gardés
         if (r.ok) {
           res.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${d.plan && window.BMPlans
             ? BMPlans.actionLink(d.action_id) : esc(d.action_id)}</span>`;

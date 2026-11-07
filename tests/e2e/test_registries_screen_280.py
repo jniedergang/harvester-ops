@@ -174,3 +174,44 @@ def test_operator_sees_both_gestures_greyed_and_hostile_name_is_escaped(context,
     expect(d.locator("[data-reg-renew]")).to_be_disabled()
     expect(d.locator("[data-reg-renew]")).to_have_attribute("title", re.compile("admin role"))
     assert page.evaluate("window.__pwned") is None
+
+
+def test_pending_copies_of_the_ca_are_listed_with_their_reason(context, flask_server):
+    """Revue 5-8 (I-6) : chaque copie de la CA qui manque est dite, avec ce
+    qu'il faut faire (traduit, échappé)."""
+    def renew(b):
+        return {"registry": "amorcage", "code": "registry-ca-transition-pending", "blocked": True,
+                "clusters": ["web/web", "harvester"],
+                "pending": [{"where": "web/web", "reason": "renewing"}, {"where": "web/web", "reason": "rke2-fetch"},
+                            {"where": HOSTILE, "reason": "flux:" + HOSTILE},
+                            {"where": "harvester", "reason": "harvester-nodes"}]}
+    page = open_detail(context, flask_server, {}, renew=renew)
+    page.locator("#registries-detail [data-reg-renew]").click()
+    m = page.locator(".reg-modal")
+    m.locator('[data-f="newca"]').check()
+    m.locator('[data-reg-tab="checks"]').click()
+    items = m.locator('[data-x="pending"] li')
+    expect(items).to_have_count(4, timeout=5000)
+    expect(items.nth(0)).to_contain_text("machine renewal not finished")
+    expect(items.nth(1)).to_contain_text("RKE2 download without Internet")
+    expect(items.nth(2)).to_contain_text("Flux entry")
+    expect(items.nth(3)).to_contain_text("additional-ca of the Harvester nodes")
+    expect(m.locator("[data-reg-launch]")).to_be_disabled()
+    assert page.evaluate("window.__pwned") is None
+
+
+def test_harvester_nodes_refusal_in_json_gives_the_reason(context, flask_server):
+    """Tâche 9 (constat 2) : l'outil rend ses refus en JSON ; la raison de la
+    bulle est le premier constat bloquant, traduit."""
+    def nodes(b):
+        return 200, {"changed": True, "previous": "{}", "value": "{}", "additional_ca_changed": False, "blocked": True,
+                     "findings": [{"code": "harvester-nodes-auth-inline", "level": "block",
+                                   "facts": {"registry": "amorcage", "seconds": 60}}]}
+    page = open_detail(context, flask_server, {}, nodes=nodes)
+    page.locator("#registries-detail [data-reg-nodes]").click()
+    m = page.locator(".reg-modal")
+    m.locator('[data-f="rke2"]').check()
+    m.locator('[data-reg-tab="checks"]').click()
+    expect(m.locator('[data-code="harvester-nodes-auth-inline"]')).to_contain_text("still in the setting", timeout=5000)
+    expect(m.locator("[data-reg-launch]")).to_be_disabled()
+    expect(m.locator('[data-x="launch-wrap"]')).to_have_attribute("data-tip", re.compile("still in the setting"))

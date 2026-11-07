@@ -62,7 +62,25 @@ const Registries = (() => {
     'registry-ca-transition-pending': (v) => tr('reg.fd.registry-ca-transition-pending', 'A new CA of {registry} is in transition: child clusters that do not trust it yet: {clusters}.', v),
     'harvester-nodes-mirror-conflict': (v) => tr('reg.fd.harvester-nodes-mirror-conflict', 'The Harvester nodes already mirror {origin} through {endpoints}: remove that entry first.', v),
     'harvester-rke2-restart': (v) => tr('reg.fd.harvester-rke2-restart', 'Harvester restarts RKE2 on every node to apply the setting {setting}.', v),
+    // revue 5-8 (I-7) et tâche 9 (constat 2) : refus rendus en JSON par l'outil
+    'harvester-nodes-auth-inline': (v) => tr('reg.fd.harvester-nodes-auth-inline', 'After {seconds} s the read password of {registry} is still in the setting: Harvester did not move it into its auth-config Secret.', v),
+    'harvester-nodes-value-unreadable': (v) => tr('reg.fd.harvester-nodes-value-unreadable', 'The current value of containerd-registry cannot be read: nothing is written.', v),
+    'harvester-nodes-write-failed': (v) => tr('reg.fd.harvester-nodes-write-failed', 'The setting could not be written on the Harvester cluster.', v),
   };
+  // revue 5-8 (I-6) : copie de la CA qui ne porte pas encore la nouvelle
+  const PENDING = {
+    renewing: () => tr('reg.pend.renewing', 'machine renewal not finished (Renew > Finish)'),
+    nodes: () => tr('reg.pend.nodes', 'the nodes do not trust it yet (Renew > CA)'),
+    'rke2-fetch': () => tr('reg.pend.rke2-fetch', 'RKE2 download without Internet (Renew > CA)'),
+    'service-ca': () => tr('reg.pend.service-ca', 'CA of the chart services (Renew > CA)'),
+    flux: (v) => tr('reg.pend.flux', 'Flux entry {entry} (deploy it again from the GitOps tab)', v),
+    'harvester-nodes': () => tr('reg.pend.harvester-nodes', 'additional-ca of the Harvester nodes (Harvester nodes window)'),
+  };
+  function pendingText(p) {
+    const r = String(p.reason || '');
+    const [k, entry] = r.startsWith('flux:') ? ['flux', r.slice(5)] : [r, ''];
+    return PENDING[k] ? PENDING[k]({ entry }) : r;
+  }
   // 2.6.1 : raison d'une sonde impossible, étape qui a échoué (un appel
   // littéral par texte, contrôle de parité des traductions)
   const REASONS = {
@@ -430,8 +448,11 @@ const Registries = (() => {
         reason = fs.length ? findingText(fs[0]) : (blocked ? (d.error || '?') : '');
         m.querySelector('[data-x="report"]').innerHTML = findingsHtml(fs)
           || `<div class="sto-finding sev-info"><div class="sto-finding-title">${esc(tr('reg.noBlocker', 'No blocker.'))}</div></div>`;
-        if (d.code === 'registry-ca-transition-pending' && (d.clusters || []).length) {
-          m.querySelector('[data-x="report"]').insertAdjacentHTML('beforeend', `<ul class="reg-used" data-x="pending">${d.clusters.map(x => `<li><code>${esc(x)}</code></li>`).join('')}</ul>`);
+        if (d.code === 'registry-ca-transition-pending' && ((d.pending || []).length || (d.clusters || []).length)) {
+          const items = (d.pending || []).length
+            ? d.pending.map(x => `<li><code>${esc(x.where)}</code> ${esc(pendingText(x))}</li>`)
+            : d.clusters.map(x => `<li><code>${esc(x)}</code></li>`);
+          m.querySelector('[data-x="report"]').insertAdjacentHTML('beforeend', `<ul class="reg-used" data-x="pending">${items.join('')}</ul>`);
         }
       }
       m.querySelector('[data-x="count"]').textContent = String(blocked ? Math.max(fs.length, 1) : 0);
@@ -512,7 +533,9 @@ const Registries = (() => {
         m.querySelector('[data-x="count"]').textContent = '1';
       } else {
         const fs = d.findings || [];
-        last = { ok: true, sig: mine, blocked: !!d.blocked, changed: !!d.changed, reason: d.error || '?' };
+        const firstBlock = fs.find(f => f.level === 'block');
+        last = { ok: true, sig: mine, blocked: !!d.blocked, changed: !!d.changed,
+          reason: firstBlock ? findingText(firstBlock) : (d.error || '?') };
         rep.innerHTML = findingsHtml(fs) + (d.changed ? '' : `<div class="sto-finding sev-info" data-code="nothing"><div class="sto-finding-title">${esc(tr('reg.t.nodesNothing', 'Nothing to change: the nodes already have this value'))}</div></div>`)
           + `<h4>${esc(tr('reg.nodesPrevious', 'Current value (masked)'))}</h4><pre class="capi-yaml reg-setting" data-x="previous">${esc(d.previous || '-')}</pre>
              <h4>${esc(tr('reg.nodesNew', 'New value (masked)'))}</h4><pre class="capi-yaml reg-setting" data-x="value">${esc(d.value || '-')}</pre>

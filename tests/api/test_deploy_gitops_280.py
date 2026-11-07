@@ -56,13 +56,16 @@ class FakeGit(ta.FakeArt):
         self.gspecs = []
         self.gcheck = []
         self.removals = []
+        self.session = True           # sans session Rancher, les entrées Fleet ne se lisent pas
 
     def json(self, kc, sub, args, spec=None, timeout=180):
         if sub == "gitops-status":
             ns, c = args[args.index("--name") + 1].split("/")
             self.reads.append((sub, f"{ns}/{c}"))
             return {"entries": [dict(v, namespace=k[0], cluster=k[1], entry=k[2])
-                                for k, v in self.entries.items() if k[:2] == (ns, c)], "session": True}, 0, None
+                                for k, v in self.entries.items() if k[:2] == (ns, c)
+                                and (self.session or v.get("tool") != "fleet")],
+                    "session": self.session}, 0, None
         if sub == "gitops-check":
             self.reads.append((sub, spec))
             c = spec["cluster"].split("/")[1]
@@ -201,7 +204,7 @@ def test_chain_clusters_flux_then_gitops(git):
     assert spec["role"] == "admin" and spec["by"] == "alice" and spec["secrets"] == {}
     it = gitops_items(run)["gitops-harvlab-apps-apps"]
     assert it["status"] == "done" and it["created"] is True and it["tool"] == "flux"
-    assert it["undo"] == {"kind": "gitops", "ref": "harvlab-apps/harvlab-apps/apps"}
+    assert it["undo"] == {"kind": "gitops", "ref": "harvlab-apps/harvlab-apps/apps", "tool": "flux"}
     labels = {k.action for k in tc.children(run.id)}
     assert "capi-gitops:harvlab-apps/harvlab-apps:apps" in labels
 
@@ -234,6 +237,34 @@ def test_a_git_secret_reaches_the_tool_and_never_the_result(git):
     conn.close()
     assert rows and "GITKEY-1618" not in json.dumps(rows, default=str)
     assert wapp._sst.store().refs("plan-run", run.id) == []            # effacé à la fin
+
+
+@pytest.mark.parametrize("reads_with_value,where", [
+    (0, "before"),          # m-4 : le contrôle de la phase lit le magasin, pas la liste du plan
+    (1, "item"),            # m-3 : la valeur disparue entre le contrôle et l'élément
+])
+def test_a_git_secret_missing_from_the_run_store_is_never_sent_empty(git, monkeypatch, reads_with_value, where):
+    """Revue 5-8 m-3, m-4 : un secret absent du magasin du déroulé n'est
+    jamais envoyé vide (Flux retirerait son Secret, Fleet écrirait un compte
+    vide sur un compte qui marche)."""
+    fake = git["capi"]
+    seed(git, plan([entry(source=dict(GIT))]))
+    real = wapp._deploy_gitops_secret_get
+    count = {"n": 0}
+
+    def get(store, run_id, name):
+        count["n"] += 1
+        return real(store, run_id, name) if count["n"] <= reads_with_value else {}
+    monkeypatch.setattr(wapp, "_deploy_gitops_secret_get", get)
+    r = launch(git, gitops_secrets={"depot": {"identity": SSH_KEY}})
+    assert r.status_code == 202, r.get_json()
+    run = trn.wait(r.get_json()["action_id"])
+    assert run.status == "error" and fake.gspecs == []
+    ph = tc.phase(run, "gitops")
+    text = json.dumps(ph)
+    assert "gitops-secret-missing" in text
+    if where == "item":
+        assert gitops_items(run)["gitops-harvlab-apps-apps"]["status"] == "error"
 
 
 @pytest.mark.parametrize("body,code", [
@@ -290,6 +321,29 @@ def test_an_entry_of_another_origin_blocks(git):
     seed(git, plan([entry(clusters=["outils/outils"])], flux=False))
     r = launch(git)
     assert r.status_code == 400 and "gitops-taken" in tc.found(r.get_json())
+
+
+def test_a_fleet_entry_of_another_plan_blocks(git):
+    """Revue 5-8 I-11 : une entrée Fleet posée par un AUTRE plan (une
+    exécution, mais pas celle de ce plan) n'est jamais reprise."""
+    fake = git["capi"]
+    fake.clusters["outils"] = {"origin": {}, "ready": True, "failed": False}
+    fake.entries[("outils", "outils", "apps")] = {"tool": "fleet", "origin": {"plan": "autre", "run": OLD_RUN},
+                                                  "state": {}}
+    seed(git, plan([entry(clusters=["outils/outils"])], flux=False))
+    r = launch(git)
+    assert r.status_code == 400 and "gitops-taken" in tc.found(r.get_json())
+
+
+@pytest.mark.parametrize("origin,ours", [
+    ({"plan": "site", "run": OLD_RUN}, True),
+    ({"plan": "autre", "run": OLD_RUN}, False),
+    ({"run": OLD_RUN}, False),                       # Fleet d'avant la marque du plan
+    ({}, False),
+])
+@pytest.mark.parametrize("tool", ["flux", "fleet"])
+def test_gitops_ours_compares_the_plan(origin, ours, tool):
+    assert wapp._deploy_gitops_ours({"tool": tool, "origin": origin}, "site") is ours
 
 
 def test_an_entry_of_an_earlier_run_is_adopted_without_mark(git):
@@ -387,11 +441,28 @@ def test_undo_removes_gitops_then_chart_then_import_then_cluster(git):
     assert r.status_code == 202, r.get_json()
     u = trn.wait(r.get_json()["action_id"])
     assert u.status == "done", u.result
-    assert [x[0] for x in fake.removals] == ["gitops-remove", "service-remove", "rancher-unimport", "delete"]
+    # revue 5-8 m-1 : le cluster part dans le même défaire, sa suppression
+    # retire l'import (rien lu dans le cluster enfant) : pas d'étape à part
+    assert [x[0] for x in fake.removals] == ["gitops-remove", "service-remove", "delete"]
     assert fake.removals[0] == ("gitops-remove", "harvlab-apps/harvlab-apps/apps")
+    got = {i["id"]: i for p in u.result["phases"] for i in p.get("items") or []}
+    assert got["rancher-import-harvlab-apps/harvlab-apps"]["message"] == "left to the removal of its cluster"
     labels = {k.action for k in tc.children(u.id)}
-    assert {"capi-gitops-remove:harvlab-apps/harvlab-apps:apps", "capi-rancher-unimport:harvlab-apps/harvlab-apps"} \
-        <= labels
+    assert "capi-gitops-remove:harvlab-apps/harvlab-apps:apps" in labels
+    assert not [x for x in labels if x.startswith("capi-rancher-unimport:")]
+
+
+def test_undo_of_an_import_alone_still_unimports(git):
+    """Revue 5-8 m-1 : sans son cluster dans le défaire, l'import part par
+    son propre geste."""
+    fake = git["capi"]
+    seed(git, plan([entry(source={"type": "git", "url": "https://git.client/x.git"})]), rancher_external=True)
+    run = trn.start(git)
+    r = git["client"].post("/api/deploy/harvlab/undo", json={"action_id": run.id, "confirm": "harvlab",
+                                                             "include": ["rancher-import-harvlab-apps/harvlab-apps"]})
+    assert r.status_code == 202, r.get_json()
+    u = trn.wait(r.get_json()["action_id"])
+    assert ("rancher-unimport", "harvlab-apps/harvlab-apps") in fake.removals, u.result
 
 
 def test_undo_never_touches_an_entry_recreated_by_another_run(git):
@@ -407,6 +478,35 @@ def test_undo_never_touches_an_entry_recreated_by_another_run(git):
     assert ("gitops-remove", "harvlab-apps/harvlab-apps/apps") not in fake.removals
     # le chart de Flux et le cluster restent : ils attendaient l'entrée
     assert got["chart-harvlab-apps/harvlab-apps/flux"]["status"] == "skipped"
+
+
+@pytest.mark.parametrize("tool,removed", [("fleet", False), ("flux", True)])
+def test_undo_without_a_rancher_session(git, tool, removed):
+    """Revue 5-8 I-8 : sans session Rancher, une entrée Fleet ne se voit pas ;
+    le Défaire dit « non retirée, session Rancher nécessaire », jamais
+    « déjà partie ». Une entrée Flux se juge sans session."""
+    fake = git["capi"]
+    if tool == "fleet":
+        seed(git, plan([entry(source={"type": "git", "url": "https://git.client/x.git"})], flux=False),
+             rancher_external=True)
+    else:
+        seed(git, plan())
+    run = trn.start(git)
+    assert run.status == "done", run.result
+    assert gitops_items(run)["gitops-harvlab-apps-apps"]["undo"]["tool"] == tool
+    fake.session = False
+    r = git["client"].post("/api/deploy/harvlab/undo", json={"action_id": run.id, "confirm": "harvlab",
+                                                             "include": ["gitops-harvlab-apps/harvlab-apps/apps"]})
+    assert r.status_code == 202, r.get_json()
+    u = trn.wait(r.get_json()["action_id"])
+    got = {i["id"]: i for p in u.result["phases"] for i in p.get("items") or []}
+    item = got["gitops-harvlab-apps/harvlab-apps/apps"]
+    if removed:
+        assert item["status"] == "done" and ("gitops-remove", "harvlab-apps/harvlab-apps/apps") in fake.removals
+    else:
+        assert item["status"] == "error" and "rancher-session-needed" in item["message"]
+        assert ("gitops-remove", "harvlab-apps/harvlab-apps/apps") not in fake.removals
+        assert u.status != "done"
 
 
 def test_the_command_line_reads_the_git_secrets_from_the_secrets_file(tmp_path):

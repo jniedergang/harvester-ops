@@ -128,7 +128,7 @@ def world(tmp_path, monkeypatch, cli):
         monkeypatch.setattr(cli, "Kube", lambda path, **kw: box["child"])
         monkeypatch.setattr(cli, "deliver", lambda *a, **k: box["delivered"].append((a, k)) or 0)
         return cli.main(argv)
-    return {"run": run, "box": box, "tmp": tmp_path}
+    return {"run": run, "box": box, "tmp": tmp_path, "decl": decl}
 
 
 class Child:
@@ -272,6 +272,71 @@ def test_remove_of_a_flux_entry_is_the_removal_of_its_item(cli, world, monkeypat
     monkeypatch.setattr(cli, "cmd_manifest_remove", lambda a: got.append(a.name) or 0)
     assert world["run"](mgmt, ["gitops-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}/demo"]) == 0
     assert got == [f"{NS}/{CL}/gitops-demo"]
+
+
+@pytest.mark.parametrize("role,code", [("admin", 0), ("operator", 2), ("viewer", 2)])
+def test_remove_of_a_fleet_entry_is_for_administrators(cli, world, capsys, role, code):
+    """Tâche 9, constat 1 : retirer une entrée Fleet est réservé à
+    l'administrateur, comme la poser ; rien n'est supprimé sinon."""
+    e = cg.normalize(entry(source={"type": "git", "url": "https://h/r.git"}))
+    obj = cg.fleet_object(e, "f", H, NS, CL)
+    r = Rancher({("gitrepos", obj["metadata"]["name"]): obj})
+    argv = ["gitops-remove", "--kubeconfig", "/x", "--harvester-name", H, "--name", f"{NS}/{CL}/demo", "--role", role]
+    assert world["run"](Mgmt({}), argv, rancher=r) == code
+    assert (("gitrepos", obj["metadata"]["name"]) in r.objs) is bool(code)
+    if code:
+        assert "gitops-fleet-admin-only" in capsys.readouterr().err and not [c for c in r.calls if c[0] == "DELETE"]
+
+
+def test_remove_of_a_flux_entry_stays_open_to_operators(cli, world, monkeypatch):
+    import capi_manifests as mf
+    mgmt = Mgmt({(mf.K_CRS, NS, "art-gitops-demo"): {"metadata": {}}})
+    got = []
+    monkeypatch.setattr(cli, "cmd_manifest_remove", lambda a: got.append(a.name) or 0)
+    assert world["run"](mgmt, ["gitops-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}/demo",
+                               "--role", "operator"]) == 0 and got
+
+
+@pytest.mark.parametrize("have_plan,want_plan,code", [
+    ("site", "site", 0),               # son propre plan : repris
+    ("autre", "site", 2),              # un autre plan : jamais (revue 5-8 I-11)
+    (None, "site", 2),                 # posée hors plan
+    ("autre", None, 0),                # geste de la console hors plan : comme avant
+])
+def test_fleet_deploy_never_takes_the_entry_of_another_plan(cli, world, capsys, have_plan, want_plan, code):
+    mgmt = Mgmt({(cs.K_CLUSTER, NS, CL): capi_cluster(imported=True)})
+    e = cg.normalize(entry(source={"type": "git", "url": "https://h/r.git"}))
+    obj = cg.fleet_object(e, "f", H, NS, CL, run="0123456789ab", plan=have_plan)
+    r = Rancher({("gitrepos", FLEET_NAME): obj})
+    g = entry(source={"type": "git", "url": "https://h/r.git"})
+    origin = {"plan": want_plan, "run": "fedcba987654"} if want_plan else {}
+    assert world["run"](mgmt, ["gitops-deploy", "--kubeconfig", "/x", "--harvester-name", H],
+                        req(entry=g, role="admin", origin=origin), rancher=r) == code
+    if code:
+        assert "gitops-taken" in capsys.readouterr().err and not [c for c in r.calls if c[0] in ("POST", "PUT")]
+    elif want_plan:
+        assert r.objs[("gitrepos", FLEET_NAME)]["metadata"]["annotations"][cg.A_PLAN] == want_plan
+
+
+def test_status_returns_the_plan_of_a_fleet_entry(cli, world, capsys):
+    e = cg.normalize(entry(name="web", source={"type": "git", "url": "https://h/r.git"}))
+    fleet = cg.fleet_object(e, "f", H, NS, CL, run="0123456789ab", plan="site")
+    r = Rancher({("gitrepos", fleet["metadata"]["name"]): fleet})
+    assert world["run"](Mgmt({}), ["gitops-status", "--kubeconfig", "/x", "--harvester-name", H, "--json"],
+                        rancher=r) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["entries"][0]["origin"] == {"run": "0123456789ab", "plan": "site"}
+
+
+def test_flux_oci_trusts_both_cas_during_a_transition(cli, world, capsys):
+    """Revue 5-8 I-6 : une entrée Flux posée pendant une transition de CA
+    croit l'ancienne et la nouvelle (sinon elle casse à la bascule)."""
+    world["decl"]["ca_next_pem"] = "CA-NEXT"
+    world["box"]["child"] = Child()
+    assert world["run"](flux_world(), ["gitops-deploy", "--kubeconfig", "/x"], req()) == 0
+    (args, kw), = world["box"]["delivered"]
+    ca = next(x for x in kw["secrets"] if x["metadata"]["name"].endswith("-ca"))
+    assert ca["stringData"]["ca.crt"] == "CA-PEM\nCA-NEXT"
 
 
 @pytest.mark.parametrize("expect,code", [("", 0), ("ffffffffffff", 2)])
