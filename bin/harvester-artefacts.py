@@ -316,6 +316,9 @@ def _http_opener():
     for handler in (urllib.request.ProxyHandler(), urllib.request.HTTPHandler(), urllib.request.HTTPSHandler(),
                     urllib.request.HTTPDefaultErrorHandler(), op._NoRedirect(), urllib.request.HTTPErrorProcessor()):
         opener.add_handler(handler)
+    # get.rke2.io refuse l'agent par défaut de Python (HTTP 403, vu sur le
+    # banc 2.8.0) : l'outil se nomme.
+    opener.addheaders = [("User-Agent", "harvester-ops")]
     return opener
 
 
