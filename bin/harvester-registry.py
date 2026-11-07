@@ -653,28 +653,36 @@ def cmd_delete(args):
         out({"registry": args.name, "deleted": False, "used_by": sorted(set(used))})
         return EXIT_REFUSED
     names = rg.secret_names(args.name)
-    objs = [("deployments", args.name), ("services", args.name), ("services", rs.write_service_name(args.name)),
+    # revue finale 2.7.0 (I2) : le Deployment porte la marque de l'exécution
+    # (plan-run) ; il part en DERNIER, après la fiche de la console. Une
+    # suppression arrêtée en route le laisse : le Défaire reconnaît encore
+    # le registre et finit le retrait quand on le relance
+    objs = [("services", args.name), ("services", rs.write_service_name(args.name)),
             ("configmaps", f"{args.name}-config"),
             ("secrets", f"{args.name}-tls"), ("secrets", f"{args.name}-htpasswd"),
             ("secrets", names["push"]), ("secrets", names["pull"]), ("secrets", names["ca"])]
     if args.delete_data:
         objs.append(("persistentvolumeclaims", f"{args.name}-data"))
+
+    def remove(kind, n):
+        o = kube.get(kind, rs.NAMESPACE, n)
+        if o is None:
+            return
+        if ((o.get("metadata") or {}).get("labels") or {}).get(rs.LABEL) != args.name:
+            # revue 2.6.1 : jamais l'objet d'un autre registre
+            step("delete", "running", f"{kind} {n} kept: it does not belong to {args.name}")
+            return
+        kube.delete(kind, rs.NAMESPACE, n)
+        step("delete", "running", f"{kind} {n}")
     try:
         for kind, n in objs:
-            o = kube.get(kind, rs.NAMESPACE, n)
-            if o is None:
-                continue
-            if ((o.get("metadata") or {}).get("labels") or {}).get(rs.LABEL) != args.name:
-                # revue 2.6.1 : jamais l'objet d'un autre registre
-                step("delete", "running", f"{kind} {n} kept: it does not belong to {args.name}")
-                continue
-            kube.delete(kind, rs.NAMESPACE, n)
-            step("delete", "running", f"{kind} {n}")
+            remove(kind, n)
+        if d is not None:
+            rg.delete(state(), args.name)
+        remove("deployments", args.name)
     except KubeError as e:
         step("delete", "error", str(e)[:300])
         return EXIT_FAIL
-    if d is not None:
-        rg.delete(state(), args.name)
     kept = "" if args.delete_data else f"; volume {args.name}-data kept (its images stay for a new deployment)"
     step("delete", "done", f"{args.name} removed{kept}")
     out({"registry": args.name, "deleted": True, "data_kept": not args.delete_data})
