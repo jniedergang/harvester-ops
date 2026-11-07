@@ -553,6 +553,40 @@ def finding(code, level, **facts):
     return {"code": code, "level": level, "facts": facts}
 
 
+K_HARVESTERCLUSTER = "harvesterclusters.infrastructure.cluster.x-k8s.io"
+
+
+def harvester_cluster_brief(obj):
+    """Ce que `check` lit d'un HarvesterCluster : propriétaires `Cluster`
+    (nom, uid), suppression en cours, finaliseurs."""
+    md = obj.get("metadata") or {}
+    return {"owners": [{"name": o.get("name"), "uid": o.get("uid")} for o in md.get("ownerReferences") or []
+                       if o.get("kind") == "Cluster"],
+            "deleting": bool(md.get("deletionTimestamp")), "finalizers": list(md.get("finalizers") or [])}
+
+
+def harvester_cluster_findings(ref, facts):
+    """2.7.0 (m7, décision 216) : un HarvesterCluster `ref` laissé par un
+    cluster supprimé empêche le nouveau de démarrer : bloquant quand son
+    `Cluster` propriétaire n'existe plus (ou porte un autre uid), ou quand il
+    est en suppression et retenu par un finaliseur. Sans propriétaire, la
+    topologie l'adopte (essai 7 de la 2.7.0) : simple avertissement.
+    `facts["harvester_clusters"]` : {ref: harvester_cluster_brief},
+    `facts["cluster_uids"]` : {"ns/nom": uid}."""
+    hc = (facts.get("harvester_clusters") or {}).get(ref)
+    if hc is None:
+        return []
+    ns = ref.split("/", 1)[0]
+    uids = facts.get("cluster_uids") or {}
+    stale = [o for o in hc["owners"] if uids.get(f"{ns}/{o['name']}") != o["uid"]]
+    if stale or (hc["deleting"] and hc["finalizers"]):
+        return [finding("harvester-cluster-leftover", "block", name=ref,
+                        finalizers=", ".join(hc["finalizers"]) or "-")]
+    if not hc["owners"]:
+        return [finding("harvester-cluster-orphan", "warn", name=ref)]
+    return []
+
+
 def check(spec, facts):
     """Constats sur une demande, à partir de ce qu'on a lu du cluster.
 
@@ -588,6 +622,7 @@ def check(spec, facts):
                            cluster=neighbours[0]))
     elif ns in set(facts.get("namespaces") or []):
         out.append(finding("namespace-exists", "warn", namespace=ns))
+    out += harvester_cluster_findings(f"{ns}/{name}", facts)
     img = (facts.get("images") or {}).get(spec.get("image"))
     if spec.get("image") and img is None:
         out.append(finding("image-missing", "block", image=spec.get("image")))
@@ -602,8 +637,9 @@ def check(spec, facts):
         # VM en Scheduling jusqu'au délai, sans autre signe
         out.append(finding("disk-smaller-than-image", "block", image=spec.get("image"),
                            disk=spec.get("disk_size"), image_size=f"{-(-img['virtual_size'] // _QUANTITY['Gi'])}Gi"))
-    elif img and img.get("os") == "sles":
-        # Vu sur harv1 : une image SLES non enregistrée n'a aucun dépôt,
+    if img and img.get("ready") and not img.get("iso") and img.get("os") == "sles":
+        # 2.7.0 (m-17) : rendu aussi avec disk-smaller-than-image (un `elif`
+        # le cachait). Vu sur harv1 : une image SLES non enregistrée n'a aucun dépôt,
         # cloud-init n'installe ni iptables ni qemu-guest-agent, et les pods
         # à port d'hôte (ingress-nginx) restent en ContainerCreating.
         out.append(finding("image-sles-repos", "warn", image=spec.get("image")))

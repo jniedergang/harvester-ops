@@ -21800,14 +21800,44 @@ def _capi_cached_read(cluster, sub):
     return res[0], None
 
 
+_CAPI_REGISTRY_CHARTS_CACHE = {}
+
+
+def _capi_registry_charts_key(state):
+    """Date de modification des déclarations de registres et des paquets
+    rangés : la liste des charts ne change qu'avec elles."""
+    import artefacts as _artm
+    import registries as _rgm
+    key = []
+    for d in (Path(state) / _rgm.DIR, _artm.packages_dir(state)):
+        try:
+            key.append(d.stat().st_mtime_ns)
+            key += sorted((f.name, f.stat().st_mtime_ns) for f in d.iterdir())
+        except OSError:
+            key.append(None)
+    return tuple(key)
+
+
 def _capi_registry_charts(cluster):
     """2.6.0 (tâche 10) : charts publiés dans les registres rattachés à ce
     cluster Harvester qui servent des charts, lus dans l'état (paquets
-    rangés) : de quoi remplir « Depuis un registre »."""
+    rangés) : de quoi remplir « Depuis un registre ». 2.7.0 (m-16) : gardé
+    par date de modification de l'état ; le relevé des Services (toutes les
+    5 s) ne rouvre plus chaque chart."""
+    state = _bm_profiles_state()
+    key = _capi_registry_charts_key(state)
+    hit = _CAPI_REGISTRY_CHARTS_CACHE.get((state, cluster))
+    if hit and hit[0] == key:
+        return [dict(x) for x in hit[1]]
+    out = _capi_registry_charts_read(state, cluster)
+    _CAPI_REGISTRY_CHARTS_CACHE[(state, cluster)] = (key, out)
+    return [dict(x) for x in out]
+
+
+def _capi_registry_charts_read(state, cluster):
     import artefacts as _artm
     import oci_layout as _olm
     import registries as _rgm
-    state = _bm_profiles_state()
     out = []
     for summary in _rgm.list_decls(state):
         d = _rgm.load(state, summary["name"])
@@ -22544,8 +22574,54 @@ def _capi_uninstall_runner(run, cluster, kc, nodes_ips, ssh_user, ssh_key,
     run.close()
 
 
+def _capi_uninstall_turtles(cluster, data):
+    """2.7.0 (décision 215) : retrait de la pile Turtles posée par la
+    console, par `harvester-capi uninstall` en action suivie. Rôle admin
+    (ADMIN_ONLY_SUFFIXES), nom du cluster retapé ; refusé pendant un
+    déroulé de plan sur ce cluster (l'outil relit aussi le verrou)."""
+    if data.get("confirm") != cluster:
+        return jsonify({"error": "type the cluster name to uninstall its Cluster API providers",
+                        "code": "confirm-name"}), 400
+    busy = _deploy_busy(cluster)
+    holder = {"run": busy.id, "plan": (busy.result or {}).get("plan")} if busy else _deploy_lock_holder(cluster)
+    if holder:
+        return jsonify({"error": "a plan deployment holds this cluster", "code": "capi-plan-running",
+                        "run": holder.get("run"), "plan": holder.get("plan")}), 409
+    cmd, err = _capi_base(cluster, "uninstall")
+    if err:
+        return err
+    dry = bool(data.get("dry_run"))
+    images = bool(data.get("remove_images"))
+    cmd += (["--dry-run"] if dry else []) + (["--cluster", cluster, "--remove-images"] if images else [])
+    run, err = _cli_action(cluster, f"capi-uninstall:{cluster}", cmd, "harvester-capi", dry_run=dry,
+                           after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None),
+                           setup=lambda r: setattr(r, "required_role", "admin"))
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "mode": "turtles", "dry_run": dry, "remove_images": images}), 201
+
+
+@app.route("/api/capi/<cluster>/uninstall/plan")
+@requires_auth
+def api_capi_uninstall_plan(cluster):
+    """Ce que retirerait la désinstallation de la pile Turtles (fenêtre de
+    confirmation) : fournisseurs, refus, ce qui reste. Lecture seule
+    (`uninstall --dry-run --json`), réservée à l'administrateur comme le
+    geste."""
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return jsonify({"error": "forbidden", "required": "admin"}), 403
+    cmd, err = _capi_base(cluster, "uninstall")
+    if err:
+        return err
+    got, err = _capi_run_json(cmd + ["--dry-run", "--json"], timeout=120)
+    if err:
+        return err
+    return jsonify(got[0])
+
+
 @app.route("/api/capi/<cluster>/uninstall", methods=["POST"])
 @requires_auth
+@_rate_limit("6 per minute")
 def api_capi_uninstall(cluster):
     """Uninstall the CAPI/CAPHV stack from the target cluster + clean the
     container images off the Harvester nodes. Reverse of `/install`.
@@ -22561,14 +22637,15 @@ def api_capi_uninstall(cluster):
         return jsonify({"error": "kubeconfig missing"}), 400
     # Revue 2.5.0 (D2) : ce retrait d'avant Turtles supprime des namespaces
     # et des images, pas les objets CAPIProvider ; sur une pile Turtles il
-    # casserait ce que Harvester et les plans ont déclaré. Refusé, le bouton
-    # est grisé avec la raison (réécriture prévue).
+    # casserait ce que Harvester et les plans ont déclaré : celle-ci passe
+    # par `harvester-capi uninstall` (2.7.0, _capi_uninstall_turtles).
     stack_cmd, err = _capi_base(cluster, "status")
     if not err:
         got, _err = _capi_run_json(stack_cmd + ["--json"], timeout=90)
         if got and (got[0] or {}).get("turtles"):
-            return jsonify({"error": "this stack is managed by Rancher Turtles: the legacy uninstall "
-                                     "would break it", "code": "turtles-stack"}), 409
+            # 2.7.0 : la pile Turtles a son propre retrait (l'ancien
+            # supprimerait des namespaces que Harvester et les plans emploient)
+            return _capi_uninstall_turtles(cluster, request.get_json(force=True, silent=True) or {})
     data = request.get_json(force=True, silent=True) or {}
     dry_run = bool(data.get("dry_run", False))
     keep_cm = bool(data.get("keep_cert_manager", True))
@@ -33255,6 +33332,7 @@ def _deploy_registry_prepare(kc, plan, values, install, findings, role=None):
                                                 f"{r.get('address')}: the plan never moves a registry"))
                 continue
             findings.append(_deploy_finding("registry-exists", "registry", f"{r['name']} exists: it is adopted"))
+            findings += _deploy_tool_findings(st, "registry", f"{r['name']}: ")    # 2.7.0 : registry-cert-expiring
             ready.add(r["name"])
             continue
         out["created_here"].add(r["name"])
@@ -33366,8 +33444,9 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=(
         try:
             name = _dpl.render_cluster_name(e["name"], values)
             spec = _dpl.render_capi_template(t, values, name)
-            if e.get("registries"):
+            if e.get("registries") is not None:
                 # 2.6.0 : les registres de l'entrée remplacent ceux du modèle
+                # (2.7.0, m-13 : une liste vide explicite aussi)
                 spec["registries"] = _dpl.render_registries(e["registries"], values,
                                                             f"clusters[{e['name']}].registries")
         except _dpl.ProfileError as ex:

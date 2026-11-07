@@ -4,6 +4,7 @@
     harvester-capi status    --cluster C [--components DIR] [--json]
     harvester-capi install   --cluster C --components DIR [--push-images]
     harvester-capi cleanup-legacy --cluster C [--dry-run]
+    harvester-capi uninstall --cluster C [--dry-run] [--remove-images] [--timeout 600] [--json]
     harvester-capi inventory --cluster C [--components DIR] --json
     harvester-capi check     --cluster C --spec FICHIER [--components DIR] [--identity I] [--many] [--json]
     harvester-capi render    --cluster C --spec FICHIER [--show-secrets]
@@ -335,11 +336,15 @@ def inventory(kube, desc):
     except KubeError:
         longhorn = None
     free_cpu, free_mem = _free_capacity(kube)
+    capi_clusters = kube.list(cs.K_CLUSTER)
     return dict(base, **{
         "unreachable": False,
         "stack": stack,
         "namespaces": sorted(n["metadata"]["name"] for n in kube.list("namespaces")),
-        "clusters": sorted(_ref(c) for c in kube.list(cs.K_CLUSTER)),
+        "clusters": sorted(_ref(c) for c in capi_clusters),
+        # 2.7.0 (m7) : HarvesterCluster restés d'un cluster supprimé
+        "cluster_uids": {_ref(c): (c.get("metadata") or {}).get("uid") for c in capi_clusters},
+        "harvester_clusters": {_ref(h): cc.harvester_cluster_brief(h) for h in kube.list(cc.K_HARVESTERCLUSTER)},
         "images": sorted(images, key=_image_rank),
         "keypairs": sorted(_ref(k) for k in kube.list("keypairs.harvesterhci.io")),
         "networks": sorted(nets, key=lambda n: n["ref"]),
@@ -371,6 +376,7 @@ def facts_from(inv):
         "free_cpu_m": inv["free_cpu_m"], "free_memory": inv["free_memory"],
         "overcommit": inv["overcommit"],
         "class_replicas": inv.get("class_replicas") or {}, "longhorn": inv.get("longhorn"),
+        "cluster_uids": inv.get("cluster_uids") or {}, "harvester_clusters": inv.get("harvester_clusters") or {},
     }
 
 
@@ -514,6 +520,66 @@ def cmd_cleanup(args):
     except (RuntimeError, KubeError) as e:
         step("legacy", "error", str(e)[:300])
         return EXIT_FAIL
+    return EXIT_OK
+
+
+def deploy_holder(harvester):
+    """{"run", "plan"} du déroulé de plan qui tient le cluster Harvester
+    `harvester` (verrou `<état>/deploy.d/<cluster>.lock` de la console,
+    pris par flock), ou None. Le verrou est essayé sans attendre et rendu
+    aussitôt ; un fichier absent ou libre = personne."""
+    import fcntl
+    import re
+    # même forme de nom que le verrou de la console (_DEPLOY_LOCK_NAME_RE)
+    if not harvester or not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$", harvester) or ".." in harvester:
+        return None
+    path = Path(_state()) / "deploy.d" / f"{harvester}.lock"
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return None
+        except OSError:
+            note = os.pread(fd, 512, 0).decode(errors="replace").strip()
+        try:
+            holder = json.loads(note or "{}")
+        except ValueError:
+            holder = {}
+        return holder if isinstance(holder, dict) and holder else {"run": "?", "plan": "?"}
+    finally:
+        os.close(fd)
+
+
+def cmd_uninstall(args):
+    """Retrait de la pile Turtles posée par la console (2.7.0, décision
+    215) : refusé tant qu'un Cluster, un HelmChartProxy (CAAPH retiré) ou un
+    déroulé de plan existe ; les CRD restent toujours. `--remove-images` :
+    images des fournisseurs retirés effacées des nœuds par SSH."""
+    kube, _, entry = kube_from(args)
+    if args.remove_images and not entry:
+        raise SystemExit("--remove-images needs --cluster (nodes and SSH come from the configuration)")
+    running = deploy_holder(_harvester(args))
+    try:
+        plan = cs.uninstall(kube, step, dry_run=args.dry_run, timeout=args.timeout, running=running)
+    except (RuntimeError, KubeError) as e:
+        step("providers", "error", str(e)[:300])
+        return EXIT_FAIL
+    if args.json:
+        print(json.dumps(plan))
+    if plan["blocked"]:
+        return EXIT_BLOCKED
+    if args.remove_images and plan["images"]:
+        if args.dry_run:
+            step("images", "running", "would remove " + ", ".join(plan["images"]))
+        else:
+            try:
+                node_images.remove_on_nodes(entry, plan["images"], step)
+            except RuntimeError as e:
+                step("images", "error", f"{e}; the providers are removed")
+                return EXIT_FAIL
     return EXIT_OK
 
 
@@ -1002,12 +1068,46 @@ def _undo(kube, ns, name, ns_created, applied, timeout=2400):
         step("cancel", "error", f"could not delete {ns}/{name}: {str(e)[:200]}")
 
 
+HC_LEFTOVER_TIMEOUT = 120
+
+
+def _remove_leftover_hc(kube, ns, name, now, sleep):
+    """2.7.0 (m7, décision 216) : un HarvesterCluster resté sans son
+    Cluster est supprimé, puis attendu HC_LEFTOVER_TIMEOUT secondes. Encore
+    là : étape en erreur qui nomme le finaliseur qui le retient ; la console
+    ne retire JAMAIS un finaliseur (CAPHV le lève quand ce qu'il garde est
+    nettoyé). Rend None, ou le code de sortie de l'échec."""
+    try:
+        kube.delete(cc.K_HARVESTERCLUSTER, ns, name)
+    except KubeError as e:
+        if not _not_found(e):
+            raise
+    step("delete", "running", f"HarvesterCluster {ns}/{name} left without its Cluster: removing it")
+    deadline = now() + HC_LEFTOVER_TIMEOUT
+    while True:
+        hc = kube.get(cc.K_HARVESTERCLUSTER, ns, name)
+        if hc is None:
+            step("delete", "running", f"HarvesterCluster {ns}/{name} removed")
+            return None
+        if now() > deadline:
+            fins = ((hc.get("metadata") or {}).get("finalizers")) or []
+            step("delete", "error", f"HarvesterCluster {ns}/{name} still there after {HC_LEFTOVER_TIMEOUT} s, "
+                                    f"held by the finalizer(s) {', '.join(fins) or '-'}; the console never removes "
+                                    "a finalizer: fix what holds it (CAPHV, its identity), then run delete again")
+            return EXIT_FAIL
+        sleep(5)
+
+
 def remove_cluster(kube, ns, name, timeout, sleep=None, now=None):
     """Ordre imposé : le Cluster, attente de sa disparition (CAPHV a besoin
     de son identité pour supprimer VMs, volumes, répartiteur et pool), puis
     l'identité, puis ce que la console a rendu et le namespace qu'elle a
     créé. Rend un code de sortie."""
     now, sleep = now or time.time, sleep or time.sleep
+    if kube.get(cs.K_CLUSTER, ns, name) is None and kube.get(cc.K_HARVESTERCLUSTER, ns, name) is not None:
+        failed = _remove_leftover_hc(kube, ns, name, now, sleep)
+        if failed:
+            return failed
     if kube.get(cs.K_CLUSTER, ns, name) is not None:
         kube.delete(cs.K_CLUSTER, ns, name)
         step("delete", "running", f"{ns}/{name}: machines and VMs being removed")
@@ -1149,7 +1249,8 @@ def cmd_delete(args):
         # Cluster déjà parti, identité restée (suppression précédente qui a
         # échoué sur un droit) : la reprise finit le nettoyage
         sa = kube.get("serviceaccounts", ns, ci.IDENTITY)
-        if sa is None or ((sa.get("metadata") or {}).get("labels") or {}).get(ci.L_CLUSTER) != name:
+        if (sa is None or ((sa.get("metadata") or {}).get("labels") or {}).get(ci.L_CLUSTER) != name) \
+                and kube.get(cc.K_HARVESTERCLUSTER, ns, name) is None:      # 2.7.0 (m7) : reste à retirer
             step("delete", "error", f"cluster {ns}/{name} not found")
             return EXIT_FAIL
         step("delete", "running", f"{ns}/{name} already gone, its identity is left: resuming")
@@ -1227,9 +1328,17 @@ def _ensure_kube_vip(kube, ns, cluster):
 
 
 def _service_facts(kube):
-    clusters = [f"{c['metadata']['namespace']}/{c['metadata']['name']}"
-                for c in kube.list(cs.K_CLUSTER)
-                if c["metadata"].get("namespace") not in ("fleet-local", "fleet-default")]
+    objs = [c for c in kube.list(cs.K_CLUSTER)
+            if c["metadata"].get("namespace") not in ("fleet-local", "fleet-default")]
+    clusters = [f"{c['metadata']['namespace']}/{c['metadata']['name']}" for c in objs]
+    # clusters qui portent l'étiquette d'un service (sélecteur du HCP)
+    labelled = {}
+    for c in objs:
+        md = c["metadata"]
+        for k, v in (md.get("labels") or {}).items():
+            if k.startswith(sv.LABEL_PREFIX) and v == "on":
+                labelled.setdefault(f"{md['namespace']}/{k[len(sv.LABEL_PREFIX):]}", []).append(
+                    f"{md['namespace']}/{md['name']}")
     try:
         hcps = kube.list(sv.K_HCP)
         hrps = kube.list(sv.K_HRP)
@@ -1238,7 +1347,7 @@ def _service_facts(kube):
     return {"caaph": _caaph_ready(kube), "clusters": sorted(clusters),
             "no_lb": _clusters_without_kube_vip(kube),
             "services": [f"{h['metadata']['namespace']}/{h['metadata']['name']}" for h in hcps],
-            "_hcps": hcps, "_hrps": hrps}
+            "service_clusters": labelled, "_hcps": hcps, "_hrps": hrps}
 
 
 def service_spec_from(path):
@@ -1965,6 +2074,7 @@ def main(argv=None):
             ("status", cmd_status, ("components", "json")),
             ("install", cmd_install, ("components", "install")),
             ("cleanup-legacy", cmd_cleanup, ("dry",)),
+            ("uninstall", cmd_uninstall, ("dry", "json", "uninstall")),
             ("inventory", cmd_inventory, ("components", "json")),
             ("check", cmd_check, ("spec", "components", "json", "identity")),
             ("render", cmd_render, ("spec", "secrets", "identity")),
@@ -2001,6 +2111,11 @@ def main(argv=None):
                             help="import the bundle images on every node (airgap)")
             sp.add_argument("--no-wait", action="store_true")
             sp.add_argument("--timeout", type=int, default=300)
+        if "uninstall" in extra:
+            sp.add_argument("--remove-images", action="store_true",
+                            help="also remove the images of the removed providers from every node (SSH)")
+            sp.add_argument("--timeout", type=int, default=600,
+                            help="seconds to wait for the deployments of each provider to go")
         if "timeout" in extra:
             sp.add_argument("--timeout", type=int,
                             default=900 if name.startswith(("service", "manifest")) else 2400)

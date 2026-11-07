@@ -33,6 +33,8 @@ const CapiCreate = (() => {
     'stack-legacy': (v) => tr('capi.new.fd.stack-legacy', v),
     'invalid': (v) => tr('capi.new.fd.invalid', v),
     'name-taken': (v) => tr('capi.new.fd.name-taken', v),
+    'harvester-cluster-leftover': (v) => tr('capi.new.fd.harvester-cluster-leftover', v),
+    'harvester-cluster-orphan': (v) => tr('capi.new.fd.harvester-cluster-orphan', v),
     'namespace-exists': (v) => tr('capi.new.fd.namespace-exists', v),
     'namespace-has-cluster': (v) => tr('capi.new.fd.namespace-has-cluster', v),
     'image-missing': (v) => tr('capi.new.fd.image-missing', v),

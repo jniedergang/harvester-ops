@@ -116,6 +116,8 @@ const CAPI = (() => {
         <button class="btn btn-secondary btn-sm tip" id="btn-capi-bundle-build" data-tip="${esc(tr('capi.tip.bundleBuild'))}">${Icons.svg('build')} ${esc(tr('capi.v.bundle.build'))}</button>
         <button class="btn btn-secondary btn-sm tip" id="btn-capi-bundle-upload" data-tip="${esc(tr('capi.tip.bundleUpload'))}">${Icons.svg('upload')} ${esc(tr('capi.v.bundle.upload'))}</button>
         <input type="file" id="capi-bundle-upload-input" accept=".tar.gz,.tgz" style="display:none">
+        <button class="btn btn-danger btn-sm tip" id="btn-capi-uninstall" data-turtles="1"
+                data-tip="${esc(tr('capi.tip.uninstallTurtles'))}">${Icons.svg('delete')} ${esc(tr('capi.v.legacy.uninstall'))}</button>
         <span class="apply-result" id="capi-bundle-upload-result"></span>
         <span class="form-hint" style="flex-basis:100%;">${bundleLine}</span>
         <span class="apply-result" id="capi-install-result" style="flex-basis:100%;"></span>
@@ -183,7 +185,8 @@ const CAPI = (() => {
         <td><code>${esc(c.details || '—')}</code></td>
       </tr>`).join('');
 
-    // Revue 2.5.0 (D2) : l'ancien retrait casserait une pile Turtles
+    // Revue 2.5.0 (D2) : l'ancien retrait casserait une pile Turtles ;
+    // 2.7.0 : sur elle, le bouton ouvre la fenêtre du retrait Turtles
     const turtles = !!(stack && stack.turtles);
     const bundleSection = `
       <div class="apply-bar" style="margin-top: 16px; padding-top: 12px; flex-wrap: wrap; gap: 8px;">
@@ -201,7 +204,7 @@ const CAPI = (() => {
                 data-tip="${esc(d.bundle_available ? tr('capi.tip.install') : tr('capi.tip.installNoBundle'))}">
           ${Icons.svg('bundle')} ${esc(tr('capi.v.legacy.install'))}
         </button>
-        <button class="btn btn-danger btn-sm tip" id="btn-capi-uninstall" ${turtles ? 'disabled' : ''}
+        <button class="btn btn-danger btn-sm tip" id="btn-capi-uninstall" ${turtles ? 'data-turtles="1"' : ''}
                 data-tip="${esc(turtles ? tr('capi.tip.uninstallTurtles') : tr('capi.tip.uninstall'))}">
           ${Icons.svg('delete')} ${esc(tr('capi.v.legacy.uninstall'))}
         </button>
@@ -514,6 +517,123 @@ const CAPI = (() => {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // 2.7.0 (décision 215) : retrait de la pile Turtles posée par la console.
+  // Fenêtre : ce qui part, les refus, ce qui reste ; images en option
+  // décochée ; nom du cluster retapé. Le bouton reste grisé tant que le plan
+  // n'est pas revenu sans refus ou que le nom ne correspond pas. Une réponse
+  // arrivée après la fermeture n'agit plus (génération), la minuterie du
+  // message d'attente est effacée à la fermeture et au lancement.
+  // -------------------------------------------------------------------------
+  let unGen = 0;
+  let unTimer = null;
+  const UN_FINDINGS = {
+    'capi-clusters-present': (v) => tr('capi.un.fd.capi-clusters-present', v),
+    'caaph-services-present': (v) => tr('capi.un.fd.caaph-services-present', v),
+    'capi-plan-running': (v) => tr('capi.un.fd.capi-plan-running', v),
+  };
+  const UN_REASONS = {
+    'core': () => tr('capi.un.reason.core'),
+    'turtles': () => tr('capi.un.reason.turtles'),
+    'not-managed': () => tr('capi.un.reason.not-managed'),
+  };
+
+  function closeUninstall() {
+    unGen += 1;
+    if (unTimer) { clearTimeout(unTimer); unTimer = null; }
+    document.querySelector('#capi-uninstall-modal')?.remove();
+  }
+
+  function uninstallPlanHtml(p) {
+    const refusals = (p.refusals || []).map(f => `<div class="sto-finding sev-critical" data-code="${esc(f.code)}"><div class="sto-finding-title">${
+      esc(UN_FINDINGS[f.code] ? UN_FINDINGS[f.code](Object.assign({}, f.facts || {})) : f.code)}</div></div>`).join('');
+    const provs = (p.providers || []).map(x => `<li><strong>${esc(x.type)}/${esc(x.name)}</strong> <code>${esc(x.version || '')}</code>
+      <span class="form-hint">${esc(x.namespace || '')}</span></li>`).join('');
+    const kept = (p.kept || []).map(k => `<li><strong>${esc(k.provider)}</strong> <span class="form-hint">${
+      esc(UN_REASONS[k.reason] ? UN_REASONS[k.reason]() : k.reason)}</span></li>`).join('');
+    return `${refusals ? `<h4>${esc(tr('capi.un.refusals'))}</h4>${refusals}` : ''}
+      <h4>${esc(tr('capi.un.remove'))}</h4>
+      ${provs ? `<ol data-x="providers">${provs}</ol>` : `<p class="form-hint">${esc(tr('capi.un.none'))}</p>`}
+      ${(p.configmaps || []).length ? `<p class="form-hint">${esc(tr('capi.un.configmaps', { n: p.configmaps.length }))}</p>` : ''}
+      ${p.shim ? `<p class="form-hint">${esc(tr('capi.un.shim'))}</p>` : ''}
+      <h4>${esc(tr('capi.un.kept'))}</h4>
+      <ul data-x="kept">${kept}<li>${esc(tr('capi.un.keptCrds'))}</li></ul>`;
+  }
+
+  function openUninstall(cluster) {
+    closeUninstall();
+    const gen = unGen;
+    const m = document.createElement('div');
+    m.className = 'modal-overlay active';
+    m.id = 'capi-uninstall-modal';
+    m.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="capi-un-title">
+        <div class="modal-header"><div><h3 id="capi-un-title">${Icons.svg('delete')} ${esc(tr('capi.un.title', { cluster }))}</h3>
+          <div class="modal-subtitle">${esc(tr('capi.un.sub'))}</div></div>
+          <button type="button" class="btn-close tip" data-x="close" data-tip="${esc(tr('common.cancel'))}" aria-label="${esc(tr('common.cancel'))}">×</button></div>
+        <div class="modal-body">
+          <div data-x="plan"></div>
+          <label class="apply-dry tip" data-tip="${esc(tr('capi.un.t.images'))}">
+            <input type="checkbox" data-x="images"> ${esc(tr('capi.un.images'))}</label>
+          <div class="form-row"><label>${esc(tr('capi.un.confirm'))}</label>
+            <input type="text" data-x="name" autocomplete="off" spellcheck="false" class="tip"
+                   data-tip="${esc(tr('capi.un.t.confirm'))}" placeholder="${esc(cluster)}"></div>
+        </div>
+        <div class="modal-footer apply-bar" style="margin:0;">
+          <button type="button" class="btn btn-secondary btn-sm tip" data-x="close" data-tip="${esc(tr('common.cancel'))}">${esc(tr('common.cancel'))}</button>
+          <button type="button" class="btn btn-danger btn-sm tip" data-x="go" disabled data-tip="${esc(tr('capi.un.t.go'))}">${Icons.svg('delete')} ${esc(tr('capi.un.go'))}</button>
+          <span class="apply-result" data-x="feedback"></span>
+        </div>
+      </div>`;
+    document.body.appendChild(m);
+    const q = (x) => m.querySelector(`[data-x="${x}"]`);
+    let plan = null;
+    const sync = () => {
+      q('go').disabled = !(plan && !plan.blocked && (plan.providers || []).length && q('name').value === cluster);
+    };
+    m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-x="close"]')) closeUninstall(); });
+    m.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeUninstall(); });
+    q('name').addEventListener('input', sync);
+    unTimer = setTimeout(() => {
+      unTimer = null;
+      if (gen === unGen && !plan) q('plan').innerHTML = `<p class="form-hint">${esc(tr('capi.un.loading'))}</p>`;
+    }, 250);
+    fetch(`/api/capi/${encodeURIComponent(cluster)}/uninstall/plan`).then(async (r) => {
+      const d = await r.json().catch(() => ({}));
+      if (gen !== unGen) return;                         // fenêtre fermée entre-temps
+      if (unTimer) { clearTimeout(unTimer); unTimer = null; }
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      plan = d;
+      q('plan').innerHTML = uninstallPlanHtml(d);
+      sync();
+    }).catch((e) => {
+      if (gen !== unGen) return;
+      q('plan').innerHTML = `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(tr('capi.un.failed', { msg: e.message }))}</div></div>`;
+    });
+    q('go').addEventListener('click', async () => {
+      if (q('go').disabled) return;
+      q('go').disabled = true;
+      if (unTimer) { clearTimeout(unTimer); unTimer = null; }
+      try {
+        const r = await fetch(`/api/capi/${encodeURIComponent(cluster)}/uninstall`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ confirm: q('name').value, remove_images: q('images').checked }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (gen !== unGen) return;
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        closeUninstall();
+        const res = document.querySelector('#capi-install-result');
+        if (res) res.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('capi.un.started', { id: d.action_id }))}</span>`;
+      } catch (e) {
+        if (gen !== unGen) return;
+        q('feedback').innerHTML = failLine(e.message);
+        sync();
+      }
+    });
+    q('name').focus();
+  }
+
   async function install(cluster, dryRun) {
     const result = document.querySelector('#capi-install-result');
     if (result) result.textContent = tr('capi.v.starting');
@@ -600,6 +720,7 @@ const CAPI = (() => {
       if (e.target.closest('#btn-capi-uninstall')) {
         const cluster = mgmtCluster();
         if (!cluster) return;
+        if (e.target.closest('#btn-capi-uninstall').dataset.turtles) { openUninstall(cluster); return; }
         const dry = document.querySelector('#capi-install-dry')?.checked ?? true;
         const keepCM = confirm(dry ? tr('capi.v.legacy.confirmUninstallDry', { cluster })
                                    : tr('capi.v.legacy.confirmUninstall', { cluster }));
@@ -1011,7 +1132,7 @@ const CAPI = (() => {
   // Wire sub-tabs at DOMContentLoaded
   document.addEventListener('DOMContentLoaded', initSubtabs);
 
-  return { init, refresh, reactivate, setTab, tab: () => tab, refreshK8s: refreshK8sClustersPanel, openCreate };
+  return { init, refresh, reactivate, setTab, tab: () => tab, refreshK8s: refreshK8sClustersPanel, openCreate, openUninstall };
 })();
 
 document.addEventListener('DOMContentLoaded', CAPI.init);
