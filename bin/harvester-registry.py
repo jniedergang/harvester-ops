@@ -652,7 +652,8 @@ def cmd_delete(args):
         step("delete", "error", f"registry-in-use: {', '.join(sorted(set(used)))}")
         out({"registry": args.name, "deleted": False, "used_by": sorted(set(used))})
         return EXIT_REFUSED
-    if args.expect_run:
+    expect = getattr(args, "expect_run", "")
+    if expect:
         # revue finale 2.7.0 (m-b) : la marque relue juste avant d'écrire ;
         # sans Deployment, la suppression précédente s'est arrêtée en route (I2)
         try:
@@ -660,7 +661,7 @@ def cmd_delete(args):
         except KubeError as e:
             step("delete", "error", f"state unreadable: {str(e)[:200]}")
             return EXIT_FAIL
-        refused = cc.run_mismatch(dep, args.expect_run) if dep is not None else None
+        refused = cc.run_mismatch(dep, expect) if dep is not None else None
         if refused:
             step("delete", "error", refused)
             out({"registry": args.name, "deleted": False})
