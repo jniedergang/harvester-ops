@@ -1078,10 +1078,10 @@ ADMIN_ONLY_PREFIXES = (
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
-                       # 2.7.0 : défaire un déroulé et son plan de destruction
-                       "/undo", "/undo/plan",
                        # v1.43.0 : une maintenance déplace ou arrête des VMs.
                        "/maintenance")
+
+DEPLOY_UNDO_SUFFIXES = ("/undo", "/undo/plan")
 
 _roles_cache = {"mtime": None, "data": None}
 
@@ -1253,6 +1253,10 @@ def required_role_for(path, method):
         return "operator"
     if path.startswith(("/api/registries", "/api/artefacts")):
         return _artefacts_required_role(path)
+    # 2.7.0 : défaire un déroulé et son plan de destruction (pas le `/undo`
+    # d'une action de dossier, qui reste à l'opérateur)
+    if path.startswith("/api/deploy/") and path.endswith(DEPLOY_UNDO_SUFFIXES):
+        return "admin"
     if path.startswith(ADMIN_ONLY_PREFIXES) or path.endswith(ADMIN_ONLY_SUFFIXES):
         return "admin"
     return "operator"
