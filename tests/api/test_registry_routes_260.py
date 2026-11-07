@@ -250,3 +250,43 @@ def test_attach_of_a_bootstrap_registry_is_refused(env, monkeypatch):
     r = env["client"].post("/api/registries/amorcage/attach/harvlab",
                            json={"push": {"username": "u", "password": "p"}})
     assert r.status_code == 409 and r.get_json()["code"] == "registry-bootstrap"
+
+
+@pytest.mark.parametrize("refuse,status,left", [(False, 204, set()), (True, 409, {"harbor-push", "harbor-pull"})])
+def test_forget_removes_the_accounts_from_the_attached_clusters_and_is_tracked(env, monkeypatch, refuse, status,
+                                                                               left):
+    """2.6.0, vu sur harvlab2 : oublier un registre du client laissait son
+    compte d'écriture dans les Secrets du cluster Harvester."""
+    import kube as kube_mod
+    from registries import update
+    c = env["client"]
+    c.put("/api/registries/harbor", json=body())
+    update(wapp._bm_profiles_state(), "harbor", lambda d: d.update(clusters=["harvlab"]))
+    names = {"harbor-push", "harbor-pull"}
+
+    class K:
+        def __init__(self, kc, timeout=None):
+            assert kc == "/kc-of-the-person"
+
+        def list(self, kind, ns=None, selector=None):
+            return []
+
+        def delete(self, kind, ns, name):
+            if refuse:
+                raise kube_mod.KubeError("Error from server (Forbidden): secrets is forbidden")
+            if name not in names:
+                raise kube_mod.KubeError(f"Error from server (NotFound): secrets \"{name}\" not found")
+            names.discard(name)
+    monkeypatch.setattr(kube_mod, "Kube", K)
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda cl: "/kc-of-the-person")
+    before = set(wapp.ACTIONS)
+    r = c.delete("/api/registries/harbor")
+    assert r.status_code == status, r.get_data(as_text=True)
+    assert names == left
+    if refuse:
+        assert r.get_json()["code"] == "registry-detach-failed"
+        assert c.get("/api/registries/harbor").status_code == 200
+    else:
+        run = next(wapp.ACTIONS[i] for i in set(wapp.ACTIONS) - before)
+        assert run.action == "registry-forget:harbor"
+        assert c.get("/api/registries/harbor").status_code == 404

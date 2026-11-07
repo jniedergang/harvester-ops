@@ -385,7 +385,7 @@ const Registries = (() => {
     const name = selected;
     const d = (list || []).find(x => x.name === name) || {};
     if (d.kind !== 'bootstrap') {
-      if (!window.confirm(tr('reg.confirmForget', 'Forget the declaration of {registry}? The registry itself is not touched.', { registry: name }))) return;
+      if (!window.confirm(tr('reg.confirmForget', 'Forget the declaration of {registry}? Its accounts are removed from the attached Harvester clusters. The registry itself is not touched.', { registry: name }))) return;
       json('DELETE', `/api/registries/${enc(name)}`).then(r => {
         if (!r.ok) { window.alert(r.d.error || `HTTP ${r.status}`); return; }
         selected = null;

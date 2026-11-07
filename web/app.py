@@ -34933,6 +34933,15 @@ def api_registry_delete(name):
     used, why = ([], None) if d is None or d.get("kind") == "bootstrap" else _registry_users(name, d.get("clusters"))
     if why:
         return jsonify({"error": why, "code": "registry-usage-unknown"}), 409
+    if used:
+        return jsonify({"error": f"registry-in-use: {', '.join(used)}", "code": "registry-in-use"}), 409
+    steps = []
+    if d is not None and d.get("kind") != "bootstrap":
+        # 2.6.0, vu en réel : le compte d'écriture du client ne reste pas
+        # dans un Secret du cluster Harvester une fois la déclaration oubliée
+        steps, why = _registry_detach(name, d.get("clusters"))
+        if why:
+            return jsonify({"error": why, "code": "registry-detach-failed"}), 409
     try:
         _rg.forget(_bm_profiles_state(), name, used)
     except KeyError:
@@ -34940,7 +34949,26 @@ def api_registry_delete(name):
     except ValueError as e:
         code = "registry-in-use" if str(e).startswith("registry-in-use") else "registry-bootstrap"
         return jsonify({"error": str(e), "code": code}), 409
+    _art_done_action(f"registry-forget:{name}", steps + [("forget", f"{name} forgotten (by {current_user() or '?'})")])
     return "", 204
+
+
+def _registry_detach(name, clusters):
+    """Secrets d'un registre du client retirés de chaque cluster Harvester
+    rattaché, avec l'identité de la personne : (étapes, None) ou (étapes,
+    raison) au premier refus (la déclaration reste, pour réessayer)."""
+    from kube import Kube as _Kube, KubeError as _KubeError
+    steps = []
+    for c in clusters or []:
+        kc = _kubectl_for_cluster(c) if _valid_k8s_name(c) else None
+        if not kc:
+            continue
+        try:
+            gone = _rg.detach(_Kube(kc, timeout=30), name)
+        except _KubeError as e:
+            return steps, f"accounts of {name} kept on {c}: {str(e)[:160]}"
+        steps.append(("detach", f"accounts removed from {c} ({len(gone)} secret(s))"))
+    return steps, None
 
 
 def _registry_users(name, clusters):

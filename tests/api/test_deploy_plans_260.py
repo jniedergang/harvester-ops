@@ -190,3 +190,44 @@ def test_cli_forget_refuses_a_registry_named_by_a_plan(regcli, monkeypatch, stat
     assert regcli.cmd_forget(argparse.Namespace(name="client")) == regcli.EXIT_REFUSED
     assert "registry-in-use: plan:site" in capsys.readouterr().err
     assert rg.load(state, "client") is not None
+
+
+class SecretsKube(Kube):
+    """Secrets du registre sur le cluster Harvester ; `refuse` simule un
+    droit manquant sur la suppression."""
+
+    def __init__(self, names, refuse=False):
+        super().__init__()
+        self.names, self.refuse = set(names), refuse
+
+    def delete(self, kind, ns, name):
+        from kube import KubeError
+        assert kind == "secrets" and ns == rg.NAMESPACE
+        if self.refuse:
+            raise KubeError(f"Error from server (Forbidden): secrets \"{name}\" is forbidden")
+        if name not in self.names:
+            raise KubeError(f"Error from server (NotFound): secrets \"{name}\" not found")
+        self.names.discard(name)
+        self.deleted.append((kind, name))
+
+
+@pytest.mark.parametrize("names,refuse,code,left", [
+    ({"client-push", "client-pull", "client-ca"}, False, 0, set()),
+    ({"client-push", "client-pull"}, False, 0, set()),              # sans CA : rien d'autre à dire
+    ({"client-push", "client-pull", "client-ca"}, True, 2, {"client-push", "client-pull", "client-ca"}),
+])
+def test_cli_forget_removes_the_accounts_from_the_attached_clusters(regcli, monkeypatch, tmp_path, capsys,
+                                                                    names, refuse, code, left):
+    """2.6.0, vu sur harvlab2 : oublier un registre du client laissait son
+    compte d'écriture dans les Secrets du cluster Harvester, sans plus rien
+    dans la console pour le dire ni le retirer."""
+    monkeypatch.setenv("HARVESTER_OPS_STATE_DIR", str(tmp_path))
+    rg.save(tmp_path, "client", {"kind": "external", "endpoint": "h.example:443", "usage": ["images"],
+                                 "clusters": ["harvlab2"]})
+    kube = SecretsKube(names, refuse)
+    monkeypatch.setattr(regcli, "_cluster_kube", lambda c: kube)
+    assert regcli.cmd_forget(argparse.Namespace(name="client")) == code
+    assert kube.names == left
+    assert (rg.load(tmp_path, "client") is None) is (code == 0), "the declaration stays for a new try"
+    err = capsys.readouterr().err
+    assert "Forbidden" in err if refuse else "accounts removed from harvlab2" in err

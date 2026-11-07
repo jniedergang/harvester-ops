@@ -186,6 +186,22 @@ def forget(state, name, used_by=()):
     return delete(state, name)
 
 
+def detach(kube, name):
+    """Retire les Secrets d'un registre du client d'un cluster Harvester
+    (comptes d'écriture et de lecture, CA) ; un Secret déjà absent compte
+    comme retiré. Rend les noms retirés ; KubeError sur un refus (droits)."""
+    from kube import KubeError
+    gone = []
+    for sname in secret_names(name).values():
+        try:
+            kube.delete("secrets", NAMESPACE, sname)
+            gone.append(sname)
+        except KubeError as e:
+            if "(NotFound)" not in str(e):
+                raise
+    return gone
+
+
 def update(state, name, change):
     """Relit, modifie (`change(décl)`) et réécrit à la révision lue."""
     d = load(state, name)

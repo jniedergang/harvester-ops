@@ -216,6 +216,18 @@ def cmd_forget(args):
         except (KubeError, SystemExit) as e:
             step("forget", "error", f"registry-usage-unknown: {str(e)[:200]}")
             return EXIT_REFUSED
+    if used:
+        step("forget", "error", f"registry-in-use: {', '.join(sorted(set(used)))}")
+        return EXIT_REFUSED
+    # 2.6.0, vu en réel : le compte d'écriture du client ne reste pas dans
+    # un Secret du cluster Harvester une fois la déclaration oubliée
+    for c in known if d is not None and d.get("kind") != "bootstrap" else []:
+        try:
+            gone = rg.detach(_cluster_kube(c), args.name)
+        except KubeError as e:
+            step("forget", "error", f"accounts of {args.name} kept on {c}: {str(e)[:200]}")
+            return EXIT_REFUSED
+        step("detach", "done", f"accounts removed from {c} ({len(gone)} secret(s))")
     try:
         rg.forget(state(), args.name, used)
     except KeyError:
