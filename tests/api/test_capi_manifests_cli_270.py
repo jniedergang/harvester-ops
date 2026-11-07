@@ -549,3 +549,31 @@ def test_i3_remove_also_takes_what_was_pending(cli, world, capsys):
     world["run"](kube, child, ["manifest-deploy", "--spec", world["spec"](version="1.0.1"), "--timeout", "0"])
     assert world["run"](kube, child, ["manifest-remove", "--name", f"{NS}/{CL}/essai"]) == cli.EXIT_OK
     assert sorted(child.deleted) == ["essai", "essai-cm", "essai-web"]
+
+
+# ---------------------------------------------------------------------------
+# 2.7.0 (tâche 4) : manifest-verify, preuve qu'un élément est entier
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("child_objs,pending,ok,missing,relabelled", [
+    ([stamped(NSO), stamped(CMO), stamped(DEP)], False, True, [], []),
+    ([stamped(NSO), stamped(CMO)], False, False, ["Deployment essai/essai-web"], []),        # supprimé à la main
+    ([stamped(NSO), obj("ConfigMap", "essai-cm", "essai"), stamped(DEP)], False, False, [],
+     ["ConfigMap essai/essai-cm"]),
+    ([stamped(NSO), stamped(CMO), stamped(DEP)], True, False, [], []),                       # retrait en attente
+])
+def test_verify_reads_every_object(cli, world, capsys, child_objs, pending, ok, missing, relabelled):
+    kube = deployed(cli, world, capsys)
+    if pending:
+        cm = kube.objs[("configmaps", NS, "art-essai")]
+        kube.objs[("configmaps", NS, "art-essai")] = mf.with_pending(cm, [("v1", "ConfigMap", "essai", "old")])
+    assert world["run"](kube, Child(child_objs), ["manifest-verify", "--name", f"{NS}/{CL}/essai"]) == cli.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is ok and out["applied"] is True and out["missing"] == missing
+    assert out["relabelled"] == relabelled and out["pending"] == (1 if pending else 0)
+    assert out["version"] == "1.0.0"
+
+
+def test_verify_of_an_absent_item(cli, world, capsys):
+    assert world["run"](mgmt_with_cluster(), Child([]), ["manifest-verify", "--name", f"{NS}/{CL}/essai"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["present"] is False and out["ok"] is False

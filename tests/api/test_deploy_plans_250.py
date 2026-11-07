@@ -8,7 +8,7 @@ disponibilité (tâche 5).
   variable non déclarée, plus de 16 entrées) ;
 * plan écrit en 2.4.0 relu (phases désactivées à clés libres) : accepté,
   clés retirées à l'enregistrement, avertissement rendu et jamais écrit ;
-* `deploy_chain.COMING` réduit à registry et artefacts, même message que
+* `deploy_chain.COMING` vide depuis la 2.7.0 (artefacts disponible) ; même message que
   `deploy_plans.COMING` ;
 * disponibilité : chaque code Cluster API, plus « tout prêt » (lectures
   relevées sur harv1), codes absents si les phases sont désactivées ;
@@ -187,14 +187,11 @@ def test_enabled_phase_from_240_is_strict():
     assert ("phases.capi.providers", "unknown key") in e.value.errors
 
 
-def test_coming_reduced_to_artefacts():
-    """M-coming : `capi` ou (2.6.0) `registry` laissé dans COMING fait
-    échouer ce test."""
-    assert dc.COMING == ("artefacts",)
-    assert dp.AVAILABLE == ("readiness", "terraform", "registry", "capi", "clusters")
-    assert dc.COMING_MESSAGE == dp.COMING == "coming in 2.7"
-    assert not set(dc.COMING) & set(dp.AVAILABLE)
-    assert set(dc.COMING) | set(dp.AVAILABLE) == set(dp.PHASES)
+def test_nothing_is_coming_any_more():
+    """M-coming : une phase laissée dans COMING (artefacts depuis la 2.7.0)
+    fait échouer ce test."""
+    assert dc.COMING == ()
+    assert dp.AVAILABLE == dp.PHASES
 
 
 # --- disponibilité Cluster API ---------------------------------------------------

@@ -114,7 +114,10 @@ def clean_resources(resources, target_kind="harvester"):
 ORIGIN_KEYS = ("plan", "template", "template_revision", "plan_revision")
 # 2.4.0 (décision 161) : qui a écrit la révision du modèle (un admin : les
 # modèles s'écrivent sous /api/baremetal/), facultatif pour les lignes d'avant
-ORIGIN_OPTIONAL = ("template_by",)
+# 2.7.0 : exécution `deploy:` qui a créé la déclaration (Défaire : preuve de
+# création), absente des déclarations d'avant
+ORIGIN_OPTIONAL = ("template_by", "run")
+RUN_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 def clean_origin(origin):
@@ -131,6 +134,11 @@ def clean_origin(origin):
             raise StoreError("invalid-origin", "origin template_by is not a user name")
         if by:
             out["template_by"] = by
+    run = origin.get("run")
+    if run is not None:
+        if not isinstance(run, str) or not RUN_RE.match(run):
+            raise StoreError("invalid-origin", "origin run is not an action identifier")
+        out["run"] = run
     for k in ORIGIN_KEYS:
         v = origin[k]
         if k.endswith("_revision"):

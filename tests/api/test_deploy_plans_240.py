@@ -100,9 +100,9 @@ def test_plan_defaults_and_shorthands():
     (plan_doc(phases=[]), "phases", "not a mapping"),
     (with_phase("gitops", {"enabled": False}), "phases.gitops", "unknown phase"),
     (with_phase("registry", {"mirrors": {}}), "phases.registry.mirrors", "unknown key"),   # 2.6.0 : disponible
-    (with_phase("artefacts", {"enabled": True}), "phases.artefacts", "coming in 2.7: set enabled: false"),
-    (with_phase("artefacts", {"items": []}), "phases.artefacts",
-     "coming in 2.7: set enabled: false"),                                      # enabled par défaut
+    # 2.7.0 : artefacts disponible, format figé (enabled par défaut)
+    (with_phase("artefacts", {"items": "x"}), "phases.artefacts.items", "not a list"),
+    (with_phase("artefacts", {"enabled": True, "foo": 1}), "phases.artefacts.foo", "unknown key"),
     (with_phase("capi", {"providers": {}}), "phases.capi.providers", "unknown key"),   # 2.5.0 : activée, stricte
     (with_phase("clusters", [{"template": "x"}]), "phases.clusters", "not a mapping"),
     (with_phase("readiness", {"enabled": "yes"}), "phases.readiness.enabled", "not a boolean"),
@@ -251,7 +251,7 @@ def test_unreadable_plan_never_overwritten_silently(tmp_path):
 def test_unreadable_plan_listed_invalid(tmp_path):
     d = tmp_path / "plans.d"
     d.mkdir()
-    (d / "broken.yaml").write_text("phases: {artefacts: {enabled: true}}\n")
+    (d / "broken.yaml").write_text("phases: {artefacts: {enabled: true, items: x}}\n")
     (d / "garbage.yaml").write_text(": : :\n")
     assert dp.list_plans(tmp_path) == [{"name": "broken", "invalid": True},
                                        {"name": "garbage", "invalid": True}]

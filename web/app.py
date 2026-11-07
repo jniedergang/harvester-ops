@@ -32381,7 +32381,7 @@ TF_TEMPLATE_FIELD_TYPES = {
 }
 # Constats : niveau de chacun (bloquant = rien ne se lance)
 DEPLOY_FINDING_LEVELS = {
-    "plan-invalid": "blocking", "phase-not-available": "blocking", "template-missing": "blocking",
+    "plan-invalid": "blocking", "template-missing": "blocking",
     "var-missing": "blocking", "var-invalid": "blocking", "decl-name-taken": "blocking",
     "tf-missing": "blocking", "cluster-unreachable": "blocking",
     "admin-kind": "blocking", "forbidden-construct": "blocking",
@@ -32401,6 +32401,10 @@ DEPLOY_FINDING_LEVELS = {
     "package-untrusted-strict": "blocking", "registry-var-missing": "blocking",
     "registry-exists": "info", "registry-later": "info", "publish-later": "info",
     "cluster-registry-later": "info",
+    # 2.7.0 : phase Artefacts
+    "artefact-invalid": "blocking", "artefact-not-published": "blocking", "artefact-taken": "blocking",
+    "artefact-check-failed": "blocking", "artefact-var-missing": "blocking", "caaph-missing": "blocking",
+    "child-admin-required": "blocking", "artefact-later": "info",
 }
 # Constats de `harvester-capi check --many` repris dans la phase clusters :
 # niveau de l'outil -> niveau d'un lancement
@@ -32621,8 +32625,7 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
         except _dpl.ProfileError as e:
             why = e.errors
         for where, reason in why:
-            code = "phase-not-available" if str(reason).startswith(_dpl.COMING) else "plan-invalid"
-            findings.append(_deploy_finding(code, "plan", f"{where}: {reason}"))
+            findings.append(_deploy_finding("plan-invalid", "plan", f"{where}: {reason}"))
         return findings, {"declarations": [], "estimate_minutes": 0}, None
     phases = plan["phases"]
     tf_on = (phases.get("terraform") or {}).get("enabled") and _dpl.plan_templates(plan)
@@ -32699,13 +32702,16 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
                                         "readiness is checked again when the phase starts"))
     reg = _deploy_registry_prepare(kc, plan, values, install, findings, role=role)
     capi = _deploy_capi_prepare(kc, plan, values, install, findings, role=role, later=reg["created_here"])
+    later = {s["name"] for s in capi["summary"] if not s.get("exists")}
+    arts = _deploy_artefacts_prepare(kc, plan, values, install, findings, capi["entries"], cluster, later)
     estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) \
-        + (30 if install else 0) + reg["estimate"] + capi["estimate"]
+        + (30 if install else 0) + reg["estimate"] + capi["estimate"] + arts["estimate"]
     summary = {"declarations": decls, "estimate_minutes": estimate, "capi": capi["capi"],
-               "clusters": capi["summary"], "registries": reg["summary"], "publish": reg["publish"]}
+               "clusters": capi["summary"], "registries": reg["summary"], "publish": reg["publish"],
+               "artefacts": arts["summary"]}
     ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
            "update_differing": bool(update_differing), "clusters": capi["entries"],
-           "registries": reg["entries"]}
+           "registries": reg["entries"], "artefacts": arts["rows"]}
     return findings, summary, ctx
 
 
@@ -33022,7 +33028,8 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=(
                 findings.append(_deploy_finding(code, "clusters", f"{where}: {why}"))
             continue
         names[e["name"]] = name
-        out["entries"].append({"name": name, "template": t["name"], "template_revision": t["revision"],
+        out["entries"].append({"name": name, "raw_name": e["name"], "template": t["name"],
+                               "template_revision": t["revision"],
                                "spec": spec, "raw": t["spec"],
                                "depends_on": [names.get(d, d) for d in e.get("depends_on") or []]})
     absent = []
@@ -33322,15 +33329,25 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
             origin = {"plan": plan["name"], "template": tname,
                       "template_revision": t["revision"], "plan_revision": plan["revision"],
                       "template_by": t.get("updated_by") or ""}
+            if not dry:
+                # 2.7.0 : l'exécution qui crée la déclaration (preuve du Défaire)
+                origin["run"] = run.id
             decl = TF_DECLS.create(uuid.uuid4().hex[:12], cluster, dname,
                                    description=f"plan {plan['name']}, template {tname}",
                                    resources=rendered[tname], user=user, origin=origin)
             if dry:
                 created.append(decl["id"])
+            else:
+                data.update(created=True, undo={"kind": "tf-declaration", "ref": decl["id"]})
         else:
             o = decl.get("origin") or {}
             if o.get("plan") != plan["name"] or o.get("template") != tname:
                 return _dch.ItemOutcome("error", "decl-name-taken", data=data)
+            prev = next((it for it in ((state.get("previous") or {}).get("items") or [])
+                         if it.get("template") == tname), {})
+            if prev.get("created") and (prev.get("undo") or {}).get("ref") == decl["id"]:
+                # créée par un maillon précédent de la même chaîne de reprises
+                data.update({k: prev[k] for k in ("created", "undo")})
         data["declaration_id"] = decl["id"]
         if not _tf_decl_hold(decl["id"], run.id):
             return _dch.ItemOutcome("error", "declaration-busy", data=data)
@@ -33792,6 +33809,361 @@ def _deploy_registry_phase(run, cluster, kc_ref, dctx):
                       item_key="id", item_step="")
 
 
+# --- 2.7.0 : phase Artefacts (charts, manifestes, politiques) ------------------
+
+ARTEFACT_POLICIES = ("harvester-ops", "builtin")      # paquet et version du socle (harvester-capi)
+
+
+def _deploy_artefact_rows(plan, values, cluster_entries, findings):
+    """Rangées de la phase Artefacts : une par (entrée, cluster), dans
+    l'ordre d'application d'un cluster (point 211) : politiques (socle,
+    rôles, comptes), puis manifestes et politiques de paquet, puis charts,
+    chacun dans l'ordre des entrées. `cluster_entries` : clusters de la
+    phase Clusters rendus ({raw_name, name, spec}). Les constats de rendu et
+    de sorte vont dans `findings`."""
+    import child_policies as _cpm
+    pols, items = _dpl.plan_artefacts(plan)
+    rendered = {e["raw_name"]: e["name"] for e in cluster_entries or []}
+    in_plan = {e["name"] for e in cluster_entries or []}
+    clusters_on = bool((plan["phases"].get("clusters") or {}).get("enabled"))
+    kinds = _dpl.item_kind_from(_deploy_state())
+    rows, groups = [], {"policies": [], "manifest": [], "chart": []}
+
+    def refs(names, what):
+        try:
+            return _dpl.render_artefact_clusters(plan, names, values, rendered)
+        except _dpl.ProfileError as e:
+            for where, why in e.errors:
+                findings.append(_deploy_finding("artefact-var-missing" if "missing variable" in why
+                                                else "var-invalid", "artefacts", f"{what}: {where}: {why}"))
+            return []
+
+    def row_id(prefix, ref, item=None):
+        ns, c = ref.split("/")
+        base = c if ns == c else f"{ns}-{c}"
+        return f"{prefix}-{base}" + (f"-{item}" if item else "")
+
+    def deps_on_cluster(planc):
+        return [f"clusters:{planc}"] if planc and clusters_on and planc in in_plan else []
+    for p in pols:
+        spec = {k: v for k, v in p.items() if k != "clusters"}
+        for ref, planc in refs(p["clusters"], "policies"):
+            groups["policies"].append({"id": row_id("pol", ref), "type": "policies", "ref": ref,
+                                       "plan_cluster": planc, "item": _cpm.ITEM, "package": ARTEFACT_POLICIES[0],
+                                       "version": ARTEFACT_POLICIES[1], "policies": spec,
+                                       "depends_on": deps_on_cluster(planc)})
+    for i, e in enumerate(items):
+        where = f"phases.artefacts.items[{i}]"
+        kind = kinds(e["package"], e["version"], e["item"])
+        if kind is None:
+            findings.append(_deploy_finding("artefact-package-missing", "artefacts",
+                                            f"{e['package']}-{e['version']}: item {e['item']} is not imported"))
+            continue
+        bad = _dpl.artefact_entry_refusals(e, kind, where)
+        for w, why in bad:
+            findings.append(_deploy_finding("artefact-invalid", "artefacts", f"{w}: {why}"))
+        if bad:
+            continue
+        registry = None
+        if kind == "chart":
+            try:
+                registry = _dpl.render_artefact_registry(e["registry"], values)
+            except _dpl.ProfileError as ex:
+                for w, why in ex.errors:
+                    findings.append(_deploy_finding("artefact-var-missing" if "missing variable" in why
+                                                    else "var-invalid", "artefacts", f"{where}: {why}"))
+                continue
+        for ref, planc in refs(e["clusters"], e["item"]):
+            groups["chart" if kind == "chart" else "manifest"].append({
+                "id": row_id("art", ref, e["item"]), "type": "chart" if kind == "chart" else "manifest",
+                "kind": kind, "ref": ref, "plan_cluster": planc, "item": e["item"], "package": e["package"],
+                "version": e["version"], "registry": registry, "values": e.get("values"),
+                "entry_deps": list(e.get("depends_on") or []), "depends_on": deps_on_cluster(planc)})
+    for g in ("policies", "manifest", "chart"):
+        rows += groups[g]
+    by_ref_item = {(r["ref"], r["item"]): r["id"] for r in rows}
+    pol_of = {r["ref"]: r["id"] for r in groups["policies"]}
+    seen = set()
+    for r in rows:
+        if r["id"] in seen:
+            findings.append(_deploy_finding("artefact-invalid", "artefacts", f"{r['id']}: two clusters give the "
+                                            "same item identifier"))
+        seen.add(r["id"])
+        if r["type"] != "policies":
+            if r["ref"] in pol_of:
+                r["depends_on"].append(pol_of[r["ref"]])
+            r["depends_on"] += [by_ref_item[(r["ref"], d)] for d in r.pop("entry_deps") if (r["ref"], d) in by_ref_item]
+    return rows
+
+
+def _deploy_applied(kc):
+    """Ce qui est appliqué aux clusters enfants, vu du cluster de gestion :
+    {(namespace, élément): {"type": chart | manifest, "cluster", "origin",
+    "version", "ready"}} (services et manifestes de harvester-capi), ou
+    None si la lecture échoue."""
+    out = {}
+    svc, _rc, err = _deploy_capi_json(kc, "services", ["--json"], timeout=60)
+    if err or not isinstance(svc, dict):
+        return None
+    for s in svc.get("services") or []:
+        art = s.get("artefact") or {}
+        out[(s.get("namespace"), s.get("name"))] = {
+            "type": "chart", "cluster": art.get("cluster"), "package": art.get("package"),
+            "origin": art.get("origin") or {}, "version": art.get("version") or "", "item": bool(art),
+            "ready": bool(s.get("ready")) and all(r.get("ready") and r.get("current") for r in s.get("releases") or [])
+            and bool(s.get("releases")) and bool(s.get("current"))}
+    mans, _rc, err = _deploy_capi_json(kc, "manifests", ["--json"], timeout=60)
+    if err or not isinstance(mans, list):
+        return None
+    for m in mans:
+        out[(m.get("namespace"), m.get("item"))] = {
+            "type": "manifest", "cluster": m.get("cluster"), "package": m.get("package"),
+            "origin": m.get("origin") or {}, "version": m.get("version") or "", "item": True,
+            "ready": bool((m.get("state") or {}).get("applied"))}
+    return out
+
+
+def _deploy_manifest_spec(row, plan, run_id, by, origin_run=None):
+    """Demande de `manifest-deploy` d'une rangée (socle ou élément)."""
+    origin = {"plan": plan["name"]}
+    if origin_run or run_id:
+        origin["run"] = origin_run or run_id
+    spec = {"cluster": row["ref"], "origin": origin, "by": by}
+    if row["type"] == "policies":
+        spec["policies"] = row["policies"]
+    else:
+        spec.update(package=row["package"], version=row["version"], item=row["item"])
+    return spec
+
+
+def _deploy_chart_spec(row, plan, run_id, by, origin_run=None):
+    """Demande de `service-deploy` d'un chart de paquet (source « Depuis un
+    registre » de la 2.6.0), valeurs de l'entrée par-dessus celles de
+    l'élément."""
+    import yaml as _yaml
+    origin = {"plan": plan["name"]}
+    if origin_run or run_id:
+        origin["run"] = origin_run or run_id
+    return {"cluster": row["ref"], "name": row["item"],
+            "source": {"registry": row["registry"], "package": row["package"], "version": row["version"],
+                       "item": row["item"]},
+            "values": _yaml.safe_dump(row["values"], sort_keys=False) if row.get("values") else "",
+            "origin": origin, "by": by}
+
+
+def _deploy_artefacts_checks(kc, rows, plan, values, later_clusters, cluster_name, live=True):
+    """Constats des rangées (préparation et `before` de la phase) :
+    paquet présent et confiance en mode strict, CAAPH, chart publié dans son
+    registre (`artefact-not-published`), images publiées
+    (`artefact-images-not-published`), objets et nom (`manifest-check`),
+    droit de la personne sur `<c>-kubeconfig`, élément posé par une autre
+    origine (`artefact-taken`). `later_clusters` : clusters enfants créés
+    plus tard par ce plan (vérifiés au début de la phase)."""
+    state = _deploy_state()
+    findings = []
+    strict = _art_settings()["strict"]
+    pubs = {(p["package"], p["version"], p["registry"]) for p in _dpl.plan_publications(plan)}
+    for pkg, ver in sorted({(r["package"], r["version"]) for r in rows if r["type"] != "policies"}):
+        try:
+            p = _art.load_package(state, pkg, ver)
+        except _art.ArtefactError:
+            findings.append(_deploy_finding("artefact-package-missing", "artefacts", f"{pkg}-{ver} is not imported"))
+            continue
+        trust = (p.get("trust") or {}).get("state")
+        if strict and trust != "valid":
+            findings.append(_deploy_finding("package-untrusted-strict", "artefacts",
+                                            f"{pkg}-{ver}: {trust}, refused in strict mode"))
+    if not kc:
+        if rows:
+            findings.append(_deploy_finding("artefact-later", "artefacts",
+                                            "the artefacts are checked when the phase starts"))
+        return findings
+    applied = _deploy_applied(kc)
+    if applied is None:
+        findings.append(_deploy_finding("artefact-check-failed", "artefacts", "applied items unreadable"))
+        return findings
+    caaph = None
+    for r in rows:
+        ns, child = r["ref"].split("/")
+        later = r["plan_cluster"] in later_clusters
+        where = f"{r['item']} on {r['ref']}"
+        cur = applied.get((ns, r["item"]))
+        if cur is not None and (not cur["item"] or cur["cluster"] != child
+                                or (cur["origin"] or {}).get("plan") != plan["name"]
+                                or cur["package"] != r["package"] or cur["type"] != r["type"].replace("policies",
+                                                                                                    "manifest")):
+            findings.append(_deploy_finding("artefact-taken", "artefacts", f"{where}: {ns}/{r['item']} exists and "
+                                            "was not applied by this plan to this cluster"))
+            continue
+        if r["type"] == "chart":
+            if not _sv.NAME_RE.match(r["item"]):
+                findings.append(_deploy_finding("artefact-invalid", "artefacts",
+                                                f"{where}: item names applied to a cluster have 42 characters at most"))
+                continue
+            if caaph is None:
+                svc, _rc, err = _deploy_capi_json(kc, "services", ["--json"], timeout=60)
+                caaph = bool((svc or {}).get("caaph")) if not err else False
+            if not caaph:
+                findings.append(_deploy_finding("caaph-missing", "artefacts",
+                                                f"{where}: CAAPH is not installed (Cluster API > Installation)"))
+            d = _rg.load(state, r["registry"])
+            published = bool(d) and any((p.get("package"), p.get("version")) == (r["package"], r["version"])
+                                        for p in d.get("published") or [])
+            if not published and (r["package"], r["version"], r["registry"]) in pubs and not live:
+                findings.append(_deploy_finding("artefact-later", "artefacts",
+                                                f"{where}: published by the Registry phase of this plan"))
+            elif not published:
+                findings.append(_deploy_finding("artefact-not-published", "artefacts",
+                                                f"{where}: {r['package']}-{r['version']} is not published in "
+                                                f"{r['registry']}"))
+            elif cluster_name not in (d.get("clusters") or []):
+                findings.append(_deploy_finding("artefact-not-published", "artefacts",
+                                                f"{where}: {r['registry']} is not attached to {cluster_name}"))
+        if r["type"] != "policies":
+            try:
+                it = next((i for i in _art.load_package(state, r["package"], r["version"])["index"].get("items") or []
+                           if i.get("name") == r["item"]), {})
+            except _art.ArtefactError:
+                it = {}
+            if it.get("images") and not any(
+                    (p.get("package"), p.get("version")) == (r["package"], r["version"])
+                    for d in (_rg.load(state, s["name"]) for s in _rg.list_decls(state))
+                    if d and cluster_name in (d.get("clusters") or []) and "images" in (d.get("usage") or [])
+                    for p in d.get("published") or []) and not any(
+                    (pk, vr) == (r["package"], r["version"]) for pk, vr, _reg in pubs):
+                strict_pull = any(isinstance(x, dict) and x.get("no_fallback")
+                                  for x in (r.get("cluster_spec") or {}).get("registries") or [])
+                findings.append({"code": "artefact-images-not-published",
+                                 "level": "blocking" if strict_pull else "warning", "phase": "artefacts",
+                                 "detail": f"{where}: the images of the item are in no registry of {cluster_name}"
+                                           + (" and the cluster has no fallback" if strict_pull else "")})
+        if later:
+            continue
+        ok, why = _child_admin_allowed(kc, ns, child)
+        if ok is None:
+            findings.append(_deploy_finding("artefact-check-failed", "artefacts", f"{where}: {why}"))
+            continue
+        if not ok:
+            findings.append(_deploy_finding(CHILD_ADMIN_REQUIRED, "artefacts", f"{where}: reading the Secret "
+                                            f"{child}-kubeconfig in {ns} is needed (administrator of the child cluster)"))
+            continue
+        if r["type"] != "chart":
+            spec = _deploy_manifest_spec(r, plan, None, "")
+            out, _rc, err = _deploy_capi_json(kc, "manifest-check", ["--spec", "-"], spec=spec, timeout=120)
+            if err:
+                findings.append(_deploy_finding("artefact-check-failed", "artefacts", f"{where}: {err}"))
+                continue
+            findings += [f for f in _deploy_tool_findings(out, "artefacts", f"{where}: ")
+                         if not (cur and f["code"] == "manifest-object-taken")]
+    return findings
+
+
+def _deploy_artefacts_prepare(kc, plan, values, install, findings, cluster_entries, cluster_name, later):
+    """Constats et contexte de la phase Artefacts (2.7.0), lecture seule.
+    Rend {"summary", "rows", "estimate"}."""
+    out = {"summary": [], "rows": [], "estimate": 0}
+    if not (plan["phases"].get("artefacts") or {}).get("enabled"):
+        return out
+    rows = _deploy_artefact_rows(plan, values, cluster_entries, findings)
+    specs = {e["name"]: e.get("spec") or {} for e in cluster_entries or []}
+    for r in rows:
+        r["cluster_spec"] = specs.get(r["plan_cluster"]) or {}
+    out["rows"] = rows
+    out["summary"] = [{k: r.get(k) for k in ("id", "type", "ref", "item", "package", "version", "registry")}
+                      for r in rows]
+    out["estimate"] = 2 * len(rows)
+    findings += _deploy_artefacts_checks(None if install else kc, rows, plan, values, later, cluster_name,
+                                         live=False)
+    return out
+
+
+def _deploy_artefacts_phase(run, cluster, kc_ref, dctx):
+    """Phase Artefacts (2.7.0, tâche 4) : un élément par (entrée, cluster),
+    `pol-<cluster>` (socle, rôles, comptes) puis `art-<cluster>-<élément>`.
+    Chart : `harvester-capi service-deploy` (source registre) ; manifeste et
+    politique : `manifest-deploy`, en action fille. Un élément posé par une
+    exécution de ce plan est repris (son exécution d'origine gardée) ; le
+    déroulé ne marque `created` que ce qui porte SON exécution (ou celle
+    d'un maillon de sa chaîne de reprises, recopiée). Les éléments d'un
+    cluster en échec de la phase Clusters sont sautés, les autres vont à
+    leur terme (`after_failure_of`)."""
+    plan = dctx["plan"]
+    rows = {r["id"]: r for r in dctx.get("artefacts") or []}
+    timeout_s = int((plan["phases"].get("artefacts") or {}).get("timeout_minutes")
+                    or _dpl.ARTEFACTS_TIMEOUT[2]) * 60
+    dry = bool(run.dry_run)
+    by = (run.result or {}).get("by") or ""
+
+    def before(ctx, state):
+        found = _deploy_artefacts_checks(kc_ref(), list(rows.values()), plan, dctx["values"], set(), cluster)
+        blocking = _deploy_blocking(found)
+        if blocking:
+            return _dch.PhaseOutcome("error", message="blocked by the pre-check: " + ", ".join(
+                sorted({f["code"] for f in blocking})), data={"blocked_by": [
+                    {"code": f["code"], "detail": f["detail"]} for f in blocking][:20]})
+        return None
+
+    def run_item(ctx, state, item):
+        r = rows[item.id]
+        ns, child = r["ref"].split("/")
+        data = {"cluster": r["ref"], "item": r["item"], "type": r["type"], "package": r["package"],
+                "version": r["version"], "created": False, "actions": []}
+        prev = next((it for it in ((state.get("previous") or {}).get("items") or []) if it.get("id") == item.id), {})
+        kc = kc_ref()
+        applied = _deploy_applied(kc)
+        if applied is None:
+            return _dch.ItemOutcome("error", "applied items unreadable", data=data)
+        cur = applied.get((ns, r["item"]))
+        if cur is not None and ((cur["origin"] or {}).get("plan") != plan["name"] or cur["cluster"] != child):
+            return _dch.ItemOutcome("error", "artefact-taken", data=data)
+        if prev.get("created"):
+            # créé par un maillon précédent de la même chaîne de reprises
+            data.update({k: prev[k] for k in ("created", "undo") if k in prev})
+        if dry:
+            return _dch.ItemOutcome("done", "checked (dry run): would be applied" if cur is None
+                                    else "checked (dry run): present, would be updated", data=data)
+        # repris : l'exécution qui l'a créé reste écrite dessus (preuve du Défaire)
+        origin_run = (cur["origin"] or {}).get("run") if cur is not None else None
+        if r["type"] == "chart":
+            sub, spec = "service-deploy", _deploy_chart_spec(r, plan, run.id, by, origin_run)
+            label = f"capi-service-deploy:{r['ref']}:{r['item']}"
+        else:
+            sub, spec = "manifest-deploy", _deploy_manifest_spec(r, plan, run.id, by, origin_run)
+            label = (f"capi-policies:{r['ref']}" if r["type"] == "policies"
+                     else f"capi-manifest-deploy:{r['ref']}:{r['item']}")
+        child_run, err = _capi_launch(cluster, kc, sub, ["--timeout", str(timeout_s)], spec=spec, parent=run.id,
+                                      cluster_user=run.cluster_user, label=label)
+        if err:
+            return _dch.ItemOutcome("error", str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child_run.id)
+        status, _c = _deploy_wait_child(child_run.id)
+        after = (_deploy_applied(kc) or {}).get((ns, r["item"]))
+        if after is not None and (after["origin"] or {}).get("run") == run.id:
+            data["created"] = True
+            data["undo"] = {"kind": r["type"], "ref": f"{r['ref']}/{r['item']}"}
+        if status == "done":
+            return _dch.ItemOutcome("done", "applied" if cur is None else "already present, updated", data=data)
+        return _dch.ItemOutcome("error", f"apply failed (action {child_run.id})", data=data)
+
+    def verify_item(ctx, state, prev):
+        r = rows.get(prev.get("id"))
+        if r is None:
+            return False
+        kc = kc_ref()
+        ns, child = r["ref"].split("/")
+        cur = (_deploy_applied(kc) or {}).get((ns, r["item"]))
+        if cur is None or (cur["origin"] or {}).get("plan") != plan["name"] or cur["version"] != r["version"]:
+            return False
+        if r["type"] == "chart":
+            return cur["ready"]
+        # une empreinte égale ne prouve pas que les objets sont là (essai 1)
+        out, _rc, err = _deploy_capi_json(kc, "manifest-verify", ["--name", f"{r['ref']}/{r['item']}"], timeout=120)
+        return err is None and bool((out or {}).get("ok"))
+    items = [_dch.Item(r["id"], tuple(r["depends_on"])) for r in rows.values()]
+    return _dch.Phase("artefacts", items=items, run_item=run_item, verify_item=verify_item, before=before,
+                      item_key="id", item_step="", after_failure_of=("clusters",))
+
+
 def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=None, store=None):
     """Phases du déroulé, branchées sur les mécanismes existants."""
     plan = dctx["plan"]
@@ -33819,6 +34191,8 @@ def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=
             phases.append(_deploy_capi_phase(run, cluster, kc_ref, plan))
         elif pid == "clusters":
             phases.append(_deploy_clusters_phase(run, cluster, kc_ref, dctx))
+        elif pid == "artefacts":
+            phases.append(_deploy_artefacts_phase(run, cluster, kc_ref, dctx))
     return phases
 
 

@@ -83,10 +83,9 @@ def test_a_disabled_phase_of_an_older_plan_keeps_its_free_keys_as_warnings():
     assert warnings == ["phases.registry.mirrors: unknown key, ignored (phase disabled)"]
 
 
-def test_artefacts_stays_coming_in_2_7():
-    with pytest.raises(dp.ProfileError) as e:
-        dp.check_plan({"phases": {"artefacts": {"enabled": True}}})
-    assert ("phases.artefacts", "coming in 2.7: set enabled: false") in e.value.errors
+def test_artefacts_is_available_since_2_7():
+    out = dp.check_plan({"phases": {"artefacts": {"enabled": True}}})
+    assert out["phases"]["artefacts"] == {"enabled": True, "timeout_minutes": 15, "policies": [], "items": []}
 
 
 @pytest.mark.parametrize("values,ok,error", [

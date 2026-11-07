@@ -1750,6 +1750,44 @@ def cmd_manifest_remove(args):
     return EXIT_OK
 
 
+def cmd_manifest_verify(args):
+    """2.7.0 (tâche 4) : un élément appliqué est-il entier ? Le binding à
+    l'empreinte du ConfigMap ne le prouve pas (un objet supprimé à la main
+    n'est jamais recréé, essai 1) : chaque objet du contenu est relu dans
+    le cluster enfant, avec ses étiquettes, et rien n'attend d'être retiré.
+    Rend {present, applied, pending, missing, relabelled, ok, origin,
+    version} ; lecture seule."""
+    kube, _, _ = kube_from(args)
+    ns, cluster, item = _child_name(args.name, 3)
+    name = mf.name_of(item)
+    crs, cmap = kube.get(mf.K_CRS, ns, name), kube.get("configmaps", ns, name)
+    out = {"present": crs is not None or cmap is not None, "applied": False, "pending": 0,
+           "missing": [], "relabelled": [], "ok": False, "origin": cc.origin_of(crs or cmap),
+           "version": (mf.artefact_of(crs or cmap) or {}).get("version") or ""}
+    if crs is not None and cmap is not None and kube.get(cs.K_CLUSTER, ns, cluster) is not None:
+        binding = kube.get(mf.K_CRSB, ns, cluster)
+        out["applied"] = mf.state(crs, [binding] if binding else [], cmap)["applied"]
+        out["pending"] = len(mf.pending_of(cmap))
+        with ca.session(kube, ns, cluster) as path:
+            child = Kube(path)
+            for o in mf.objects_of(cmap):
+                ref = mf.ref_of(o)
+                where = f"{ref[1]} {ref[2] + '/' if ref[2] else ''}{ref[3]}"
+                try:
+                    cur = child.get(mf.resource_of(ref), ref[2] or None, ref[3])
+                except KubeError as e:
+                    if not is_missing_type(e):
+                        raise
+                    cur = None
+                if cur is None:
+                    out["missing"].append(where)
+                elif not mf.is_ours(cur, item, cluster):
+                    out["relabelled"].append(where)
+        out["ok"] = out["applied"] and not out["pending"] and not out["missing"] and not out["relabelled"]
+    print(json.dumps(out))
+    return EXIT_OK
+
+
 def cmd_manifests(args):
     """État de chaque élément appliqué (CRS de la console, binding, empreinte)."""
     kube, _, _ = kube_from(args)
@@ -1803,7 +1841,7 @@ def cmd_token(args):
     return EXIT_OK
 
 
-CHILD_COMMANDS = ("manifest-check", "manifest-deploy", "manifest-remove", "token")
+CHILD_COMMANDS = ("manifest-check", "manifest-deploy", "manifest-remove", "manifest-verify", "token")
 
 
 def _exit_cancelled(signum, frame):
@@ -1840,6 +1878,7 @@ def main(argv=None):
             ("manifest-check", cmd_manifest_check, ("mspec",)),
             ("manifest-deploy", cmd_manifest_deploy, ("mspec", "timeout")),
             ("manifest-remove", cmd_manifest_remove, ("mname",)),
+            ("manifest-verify", cmd_manifest_verify, ("mname",)),
             ("manifests", cmd_manifests, ("json",)),
             ("policy-render", cmd_policy_render, ("pspec",)),
             ("token", cmd_token, ("token",))):

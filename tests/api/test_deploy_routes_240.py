@@ -110,7 +110,7 @@ def test_plan_crud_and_revision(env):
     ([1], "plan"),
     (plan_body(variables=["vip"]), "variables[vip]"),
     (plan_body(other=1), "other"),
-    (dict(plan_body(), phases={"artefacts": {"enabled": True}}), "phases.artefacts"),
+    (dict(plan_body(), phases={"artefacts": {"enabled": True, "items": "x"}}), "phases.artefacts.items"),
     (dict(plan_body(), phases={"readiness": {"timeout_minutes": 0}}), "phases.readiness.timeout_minutes"),
     (dict(plan_body(), revision="1"), "revision"),
 ])
@@ -262,12 +262,12 @@ def test_check_declaration_states(env):
     assert body["summary"]["declarations"][0]["origin_match"] is True
 
 
-def test_check_hand_written_2_6_phase(env):
+def test_check_hand_written_invalid_artefacts_phase(env):
     d = env["state"] / "plans.d"
     d.mkdir(parents=True)
-    (d / "site.yaml").write_text("name: site\nrevision: 1\nphases: {artefacts: {items: []}}\n")
+    (d / "site.yaml").write_text("name: site\nrevision: 1\nphases: {artefacts: {items: x}}\n")
     got, body = codes(env["client"])
-    assert got["phase-not-available"]["detail"] == "phases.artefacts: coming in 2.7: set enabled: false"
+    assert got["plan-invalid"]["detail"] == "phases.artefacts.items: not a list"
     assert body["blocking"]
 
 

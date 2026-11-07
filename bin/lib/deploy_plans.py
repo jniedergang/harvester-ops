@@ -5,9 +5,8 @@ cluster Harvester déclaré, ou s'enchaîne après une installation bare-metal
 (un profil le désigne par son champ `plan`). Il active des phases :
 disponibilité et contenu Terraform en 2.4.0 ; pile Cluster API et clusters
 enfants en 2.5.0 ; registres et publication des paquets en 2.6.0 (phase
-Registre, entre Terraform et Cluster API) ; artefacts existe déjà dans le
-format, seulement désactivée (« coming in 2.7 »), pour que le format ne
-change pas.
+Registre, entre Terraform et Cluster API) ; artefacts appliqués aux
+clusters enfants (charts, manifestes, politiques) en 2.7.0.
 
 Un modèle de déclaration porte les ressources d'une déclaration Terraform
 (format de web/tf_store.py), chaînes à variables `{{nom}}`. La phase
@@ -64,7 +63,7 @@ TEMPLATE_DIR = "tf-templates.d"
 CAPI_TEMPLATE_DIR = "capi-templates.d"
 CAPI_TEMPLATE_FORBIDDEN = ("name", "namespace", "target_namespace")
 PHASES = ("readiness", "terraform", "registry", "capi", "clusters", "artefacts")
-AVAILABLE = ("readiness", "terraform", "registry", "capi", "clusters")
+AVAILABLE = PHASES
 BUILTIN_VARS = ("cluster", "vip")
 MAX_TEMPLATES = 32
 TIMEOUT_MIN, TIMEOUT_MAX, TIMEOUT_DEFAULT = 1, 180, 20
@@ -76,7 +75,6 @@ MAX_CLUSTERS = 16
 PATTERN_VAR = "n"
 MAX_DESCRIPTION = 500
 MAX_DECL_NAME = 63
-COMING = "coming in 2.7"
 # 2.6.0 : phase Registre (registres d'amorçage posés ou relus, registres du
 # client vérifiés, paquets publiés) : (min, max, défaut) en minutes
 REGISTRY_TIMEOUT = (1, 60, 10)
@@ -85,6 +83,13 @@ REGISTRY_MODES = ("bootstrap", "external")
 REGISTRY_SIZE = (5, 2048, 20)
 MAX_REGISTRIES = 8
 MAX_PUBLISH = 32
+# 2.7.0 : phase Artefacts (Contraintes communes) : entrées, éléments une fois
+# les clusters dépliés, délai par élément (minutes)
+ARTEFACTS_TIMEOUT = (1, 60, 15)
+MAX_ARTEFACT_ENTRIES = 32
+MAX_ARTEFACT_UNITS = 128
+ARTEFACT_KINDS = ("chart", "manifest", "policy")
+ARTEFACT_REFUSED_KINDS = {"images": "published by the Registry phase", "gitops": "coming in 2.8"}
 
 # Noms de clés qui désignent un objet public ou le NOM d'un Secret, pas un
 # secret : la clé publique d'une ressource ssh_key, les clés d'une VM
@@ -466,6 +471,231 @@ def _check_registry_phase(ph, errors, variables):
             "publish_timeout_minutes": pt, "registries": regs, "publish": pubs}
 
 
+def _child_ref_shape_ok(ref):
+    """`<ns>/<nom>` d'un cluster enfant existant, variables remplacées par
+    une lettre, chaque moitié RFC 1123."""
+    if not isinstance(ref, str) or ref.count("/") != 1:
+        return False
+    ns, name = _bmp.VAR_RE.sub("a", ref).split("/")
+    return bool(_cc.K8S_NAME_RE.match(ns)) and bool(_cc.K8S_NAME_RE.match(name))
+
+
+def _values_refusals(values, where):
+    """Règles de secrets du plan sur les valeurs d'un chart : une clé qui
+    désigne un secret (règle de `scrub`) ou une adresse à identifiants est
+    refusée, jamais retirée en silence (le chart changerait de sens)."""
+    _clean, removed = scrub([values])
+    out = [(w.replace("resources[0]", where, 1), SECRET_REFUSED) for w in removed]
+    out += [(w.replace("resources[0]", where, 1), why) for w, why in secret_refusals([values])]
+    return out
+
+
+def artefact_entry_refusals(entry, kind, where):
+    """[(où, raison)] d'une entrée d'artefact dont la sorte est connue
+    (paquet importé) : registre exigé pour un chart et refusé ailleurs,
+    valeurs pour un chart seulement, sortes non applicables. Rejoué au
+    lancement, quand le paquet est là (même règle, un seul endroit)."""
+    if kind in ARTEFACT_REFUSED_KINDS:
+        return [(f"{where}.item", f"a {kind} item is not applied: {ARTEFACT_REFUSED_KINDS[kind]}")]
+    if kind not in ARTEFACT_KINDS:
+        return [(f"{where}.item", f"unknown item kind {kind}")]
+    out = []
+    if kind == "chart" and not entry.get("registry"):
+        out.append((f"{where}.registry", "required for a chart (published in this registry)"))
+    if kind != "chart":
+        out += [(f"{where}.{k}", f"only for a chart, not a {kind}") for k in ("registry", "values") if k in entry]
+    return out
+
+
+def _check_artefacts_phase(ph, errors, variables, cluster_names, item_kind=None):
+    """Phase artefacts (2.7.0, tâche 4) : {enabled, timeout_minutes,
+    policies: [{clusters, base, teams, roles, accounts}], items: [{package,
+    version, item, registry, values, clusters, depends_on}]}. `clusters`
+    désigne un cluster de la phase Clusters (nom tel qu'écrit) ou un cluster
+    enfant existant `<ns>/<nom>` ; variables du plan permises dans les
+    clusters et le registre. `item_kind(paquet, version, élément)` rend la
+    sorte d'un élément d'un paquet importé, ou None : sans elle, les règles
+    de sorte sont rejouées au lancement."""
+    import artefacts as _art
+    import child_policies as _cp
+    where = "phases.artefacts"
+    unknown = sorted(set(ph) - {"enabled", "timeout_minutes", "policies", "items"})
+    errors.extend((f"{where}.{k}", "unknown key") for k in unknown)
+    timeout = _check_timeout(ph, where, ARTEFACTS_TIMEOUT, errors)
+    known = set(BUILTIN_VARS) | set(variables or [])
+    units = 0
+
+    def clusters_of(raw, w):
+        if not isinstance(raw, list) or not raw:
+            errors.append((w, "a list of clusters, one at least"))
+            return []
+        out = []
+        for j, c in enumerate(raw):
+            if c in (cluster_names or ()):
+                pass
+            elif not _child_ref_shape_ok(c):
+                errors.append((f"{w}[{j}]", f"artefact-cluster-unknown: {str(c)[:60]} is neither a cluster of "
+                                            "the Clusters phase nor <namespace>/<name>"))
+                continue
+            bad = [v for v in _bmp.VAR_RE.findall(c) if v not in known]
+            if bad:
+                errors.append((f"{w}[{j}]", f"undeclared variable {bad[0]}"))
+                continue
+            if c in out:
+                errors.append((f"{w}[{j}]", f"{c} listed twice"))
+                continue
+            out.append(c)
+        return out
+    pols_in = ph.get("policies") or []
+    if not isinstance(pols_in, list):
+        errors.append((f"{where}.policies", "not a list"))
+        pols_in = []
+    pols, pol_clusters = [], set()
+    for i, p in enumerate(pols_in):
+        w = f"{where}.policies[{i}]"
+        if not isinstance(p, dict):
+            errors.append((w, "not a mapping"))
+            continue
+        cl = clusters_of(p.get("clusters"), f"{w}.clusters")
+        raw = {k: v for k, v in p.items() if k != "clusters"}
+        try:
+            _cp.normalize(raw)
+        except ValueError as e:
+            field, _, why = str(e).partition(": ")
+            errors.append((f"{w}.{field.removeprefix('policies.')}" if why else w, why or str(e)))
+            continue
+        twice = sorted(set(cl) & pol_clusters)
+        if twice:
+            errors.append((f"{w}.clusters", f"{twice[0]} already has its policies"))
+            continue
+        pol_clusters |= set(cl)
+        units += len(cl)
+        pols.append(dict(raw, clusters=cl))
+    items_in = ph.get("items") or []
+    if not isinstance(items_in, list):
+        errors.append((f"{where}.items", "not a list"))
+        items_in = []
+    if len(items_in) + len(pols_in) > MAX_ARTEFACT_ENTRIES:
+        errors.append((f"{where}.items", f"{MAX_ARTEFACT_ENTRIES} entries at most"))
+        items_in = []
+    items, seen = [], []
+    for i, e in enumerate(items_in):
+        w = f"{where}.items[{i}]"
+        if not isinstance(e, dict):
+            errors.append((w, "not a mapping"))
+            continue
+        unknown = sorted(set(e) - {"package", "version", "item", "registry", "values", "clusters", "depends_on"})
+        errors.extend((f"{w}.{k}", "unknown key") for k in unknown)
+        pkg, ver, item = e.get("package"), str(e.get("version") or ""), e.get("item")
+        if not isinstance(pkg, str) or not _art.NAME_RE.match(pkg):
+            errors.append((f"{w}.package", "a package name"))
+            continue
+        if not _art.VERSION_RE.match(ver):
+            errors.append((f"{w}.version", "x.y.z or YYYY.MM[.DD][-n]"))
+            continue
+        if not isinstance(item, str) or not _art.ITEM_RE.match(item):
+            errors.append((f"{w}.item", "an item name (RFC 1123)"))
+            continue
+        if item == _cp.ITEM:
+            errors.append((f"{w}.item", f"{item} is the name of the policies of the console"))
+            continue
+        if item in seen:
+            errors.append((f"{w}.item", f"{item} listed twice (one object name per item in a cluster)"))
+            continue
+        cl = clusters_of(e.get("clusters"), f"{w}.clusters")
+        entry = {"package": pkg, "version": ver, "item": item, "clusters": cl}
+        reg = e.get("registry")
+        if reg is not None:
+            if not isinstance(reg, str) or not reg:
+                errors.append((f"{w}.registry", "a registry name"))
+            else:
+                bad = [v for v in _bmp.VAR_RE.findall(reg) if v not in known]
+                if bad:
+                    errors.append((f"{w}.registry", f"undeclared variable {bad[0]}"))
+                elif not _bmp.VAR_RE.search(reg) and not _cc.REGISTRY_NAME_RE.match(reg):
+                    errors.append((f"{w}.registry", "a registry name"))
+                else:
+                    entry["registry"] = reg
+        if "values" in e:
+            vals = e.get("values")
+            if not isinstance(vals, dict):
+                errors.append((f"{w}.values", "a mapping"))
+            else:
+                bad = _values_refusals(vals, f"{w}.values")
+                errors.extend(bad)
+                if not bad:
+                    entry["values"] = vals
+        kind = item_kind(pkg, ver, item) if item_kind else None
+        if kind is not None:
+            errors.extend(artefact_entry_refusals(e, kind, w))
+        deps = e.get("depends_on") or []
+        if isinstance(deps, str):
+            deps = [deps]
+        if not isinstance(deps, list):
+            errors.append((f"{w}.depends_on", "not a list"))
+            deps = []
+        clean = []
+        for d in deps:
+            if d == item:
+                errors.append((f"{w}.depends_on", "an item does not depend on itself"))
+            elif d not in seen:
+                errors.append((f"{w}.depends_on", f"{d} is not listed before this item"))
+            elif d not in clean:
+                clean.append(d)
+        if clean:
+            entry["depends_on"] = clean
+        seen.append(item)
+        units += len(cl)
+        items.append(entry)
+    if units > MAX_ARTEFACT_UNITS:
+        errors.append((f"{where}.items", f"{units} items once the clusters are unfolded, "
+                                         f"{MAX_ARTEFACT_UNITS} at most"))
+    return {"enabled": ph.get("enabled", True) is not False, "timeout_minutes": timeout,
+            "policies": pols, "items": items}
+
+
+def plan_artefacts(plan):
+    """(politiques, éléments) de la phase Artefacts d'un plan ([] si absente)."""
+    ph = (plan.get("phases") or {}).get("artefacts") or {}
+    return list(ph.get("policies") or []), list(ph.get("items") or [])
+
+
+def render_artefact_clusters(plan, names, values, rendered_plan_clusters):
+    """Clusters d'une entrée rendus : un nom de la phase Clusters devient
+    `<nom rendu>/<nom rendu>` (namespace = nom, règle 164), une référence
+    `<ns>/<nom>` est rendue avec les valeurs du lancement. Rend [(ref,
+    nom de la phase Clusters ou None)] ; ProfileError."""
+    out, errors = [], []
+    for c in names:
+        if c in rendered_plan_clusters:
+            r = rendered_plan_clusters[c]
+            out.append((f"{r}/{r}", r))
+            continue
+        missing = [v for v in _bmp.VAR_RE.findall(c) if v not in (values or {})]
+        if missing:
+            errors.append((f"artefacts.clusters[{c}]", f"missing variable {missing[0]}"))
+            continue
+        ref = _bmp.VAR_RE.sub(lambda m: str(values[m.group(1)]), c)
+        if not _child_ref_shape_ok(ref) or _bmp.VAR_RE.search(ref):
+            errors.append((f"artefacts.clusters[{c}]", f"rendered {ref[:60]} is not <namespace>/<name>"))
+            continue
+        out.append((ref, None))
+    if errors:
+        raise ProfileError(errors, "cannot render the clusters of an artefact")
+    return out
+
+
+def render_artefact_registry(reg, values):
+    """Registre d'une entrée rendu ; ProfileError."""
+    missing = [v for v in _bmp.VAR_RE.findall(reg) if v not in (values or {})]
+    if missing:
+        raise ProfileError([("artefacts.registry", f"missing variable {missing[0]}")], "missing variable")
+    out = _bmp.VAR_RE.sub(lambda m: str(values[m.group(1)]), reg)
+    if not _cc.REGISTRY_NAME_RE.match(out):
+        raise ProfileError([("artefacts.registry", f"rendered {out[:40]} is not a registry name")], "invalid")
+    return out
+
+
 def plan_registries(plan):
     """Registres de la phase Registre d'un plan, dans l'ordre ([] si absente)."""
     return list(((plan.get("phases") or {}).get("registry") or {}).get("registries") or [])
@@ -545,8 +775,13 @@ def registry_users(state, name):
         for it in _phase(doc, "clusters").get("items") or []:
             if isinstance(it, dict):
                 names |= _entry_names(it.get("registries"))
+        names |= {it.get("registry") for it in _phase(doc, "artefacts").get("items") or [] if isinstance(it, dict)}
         if name in names:
             out.append(f"plan:{stem}")
+        elif any(isinstance(n, str) and _bmp.VAR_RE.search(n) for n in names):
+            # revue 2.6.0 m-11 : un registre désigné par une variable peut
+            # être celui-ci au lancement
+            out.append(f"plan:{stem} (possibly, through a variable)")
     d = Path(state) / CAPI_TEMPLATE_DIR
     try:
         files = sorted(p for p in d.glob("*.yaml") if p.is_file())
@@ -560,11 +795,13 @@ def registry_users(state, name):
 
 
 def package_users(state, name, version):
-    """Plans enregistrés qui publient ce paquet (phase Registre)."""
+    """Plans enregistrés qui publient ce paquet (phase Registre) ou en
+    appliquent un élément (phase Artefacts, 2.7.0)."""
     out = []
     for stem, doc in _plan_docs(state):
         if any(isinstance(p, dict) and p.get("package") == name and str(p.get("version")) == str(version)
-               for p in _phase(doc, "registry").get("publish") or []):
+               for p in list(_phase(doc, "registry").get("publish") or [])
+               + list(_phase(doc, "artefacts").get("items") or [])):
             out.append(stem)
     return out
 
@@ -679,9 +916,11 @@ def _check_clusters_phase(ph, errors, variables):
     return {"enabled": ph.get("enabled", True) is not False, "timeout_minutes": timeout, "items": out}
 
 
-def check_plan_warnings(doc, known_templates=None):
+def check_plan_warnings(doc, known_templates=None, item_kind=None):
     """(plan normalisé, avertissements) ; voir check_plan. Avertissements :
-    clés d'une phase Cluster API désactivée d'un plan de 2.4.0, retirées."""
+    clés d'une phase désactivée d'un plan plus ancien (Cluster API de 2.4.0,
+    Artefacts de 2.6.0), retirées. `item_kind` : voir
+    _check_artefacts_phase."""
     if not isinstance(doc, dict):
         raise ProfileError([("plan", "not a mapping")], "invalid plan")
     errors, warnings = [], []
@@ -715,14 +954,10 @@ def check_plan_warnings(doc, known_templates=None):
         if not isinstance(enabled, bool):
             errors.append((f"phases.{pid}.enabled", "not a boolean"))
             continue
-        if pid not in AVAILABLE:
-            if enabled:
-                errors.append((f"phases.{pid}", f"{COMING}: set enabled: false"))
-                continue
-            # format de 2.7 non figé : gardé tel quel, jamais lu
-            phases[pid] = dict(ph, enabled=False)
-            continue
-        if pid in ("capi", "clusters", "registry") and not enabled:
+        cl_raw = phases_in.get("clusters") or {}
+        cluster_names = [c["name"] for c in _check_clusters_phase(cl_raw, [], variables)["items"]] \
+            if pid == "artefacts" and isinstance(cl_raw, dict) else []
+        if pid in ("capi", "clusters", "registry", "artefacts") and not enabled:
             # Plan écrit en 2.4.0 : la phase désactivée y gardait des clés
             # libres (format non figé alors). Acceptée, clés inconnues
             # ignorées et retirées au prochain enregistrement, avec un
@@ -730,6 +965,8 @@ def check_plan_warnings(doc, known_templates=None):
             sub = []
             phases[pid] = (_check_capi_phase(ph, sub) if pid == "capi"
                            else _check_registry_phase(ph, sub, variables) if pid == "registry"
+                           else _check_artefacts_phase(ph, sub, variables, cluster_names, item_kind)
+                           if pid == "artefacts"
                            else _check_clusters_phase(ph, sub, variables))
             phases[pid]["enabled"] = False
             for where, why in sub:
@@ -743,6 +980,9 @@ def check_plan_warnings(doc, known_templates=None):
             continue
         if pid == "registry":
             phases[pid] = _check_registry_phase(ph, errors, variables)
+            continue
+        if pid == "artefacts":
+            phases[pid] = _check_artefacts_phase(ph, errors, variables, cluster_names, item_kind)
             continue
         if pid == "readiness":
             unknown = sorted(set(ph) - {"enabled", "timeout_minutes"})
@@ -763,11 +1003,12 @@ def check_plan_warnings(doc, known_templates=None):
     return {"description": desc, "variables": variables, "phases": phases}, warnings
 
 
-def check_plan(doc, known_templates=None):
+def check_plan(doc, known_templates=None, item_kind=None):
     """Plan normalisé {description, variables, phases}, ou ProfileError
     [(où, raison)]. `known_templates` (noms) : refuse un modèle absent ;
-    sans lui, l'existence des modèles est contrôlée au lancement."""
-    return check_plan_warnings(doc, known_templates)[0]
+    sans lui, l'existence des modèles est contrôlée au lancement. De même
+    `item_kind` pour la sorte des éléments d'artefacts."""
+    return check_plan_warnings(doc, known_templates, item_kind)[0]
 
 
 def enabled_phases(plan):
@@ -802,11 +1043,27 @@ def _named(doc, name):
     return dict(doc, name=name) if isinstance(doc, dict) else doc
 
 
+def item_kind_from(state):
+    """`item_kind` lu dans les paquets importés de l'état (None : paquet ou
+    élément absent, contrôlé au lancement)."""
+    import artefacts as _art
+
+    def kind(pkg, ver, item):
+        try:
+            idx = _art.load_package(state, pkg, ver)["index"]
+        except (_art.ArtefactError, TypeError):
+            return None
+        return next((i.get("kind") for i in idx.get("items") or [] if i.get("name") == item), None)
+    return kind
+
+
 def save_plan(state, name, doc, revision=None):
     """Écrit le plan (0600, remplacement atomique) à la révision lue ;
     PlanConflict si elle est périmée, ProfileError s'il est invalide. Le nom
-    d'enregistrement fait foi pour le contrôle des noms de déclaration."""
-    out = _save(state, PLAN_DIR, name, doc, revision, lambda d: check_plan_warnings(_named(d, name)))
+    d'enregistrement fait foi pour le contrôle des noms de déclaration ; la
+    sorte des éléments d'artefacts est lue dans les paquets importés."""
+    kinds = item_kind_from(state)
+    out = _save(state, PLAN_DIR, name, doc, revision, lambda d: check_plan_warnings(_named(d, name), item_kind=kinds))
     out, warnings = out
     # avertissements rendus, jamais écrits (clés d'une phase désactivée retirées)
     return dict(out, warnings=warnings) if warnings else out

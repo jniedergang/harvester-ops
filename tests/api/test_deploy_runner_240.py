@@ -142,8 +142,10 @@ def test_chain_readiness_then_terraform(world):
     d = world["store"].find_by_name("harvlab", "site-cles")
     assert item["template"] == "cles" and item["status"] == "done" and item["declaration_id"] == d["id"]
     assert item["revision_applied"] == 1 and len(item["actions"]) == 2
+    # décision 161 : l'auteur du modèle ; 2.7.0 : l'exécution qui l'a créée
     assert d["origin"] == {"plan": "site", "template": "cles", "template_revision": 1, "plan_revision": 1,
-                           "template_by": "alice"}   # décision 161 : l'auteur du modèle
+                           "template_by": "alice", "run": run.id}
+    assert item["created"] is True and item["undo"] == {"kind": "tf-declaration", "ref": d["id"]}
     assert d["last_applied_status"] == "done" and d["resources"][0]["spec"]["name"] == "ops-ops"
     assert world["fake"].count("plan") == 1 and world["fake"].count("apply") == 1
     assert ("phase-readiness", "done") in steps(run) and ("tf-cles", "done") in steps(run)

@@ -19,7 +19,9 @@
 processus) : disponibilité, contenu Terraform, registres et publication
 des paquets (2.6.0), pile Cluster API et clusters enfants (2.5.0, sans
 option nouvelle : `check` en montre les constats, capacité des N clusters
-comprise), et pour `install` la série
+comprise), artefacts appliqués aux clusters enfants (2.7.0 : charts,
+manifestes, politiques ; `check` dit ceux qui ne passeraient pas), et pour
+`install` la série
 d'installations d'un profil d'abord (même garde que `harvester-baremetal
 profile apply` pour une machine qui porte déjà un système). L'action est
 enregistrée dans l'historique du répertoire d'état.
