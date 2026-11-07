@@ -42,7 +42,9 @@ def test_chain_of_three_resumes_cluster_made_by_the_first():
     chain = du.chain(C, reader(runs))
     assert [r["_run"] for r in chain] == [A, B, C]
     got = du.collect(chain)
-    assert [(u["kind"], u["ref"], u["run"]) for u in got] == [("capi-cluster", "web/web", C)]
+    # vu en réel : la fenêtre dit « créé par » ; c'est le premier maillon
+    # qui l'a créé, les reprises n'ont fait que recopier la marque
+    assert [(u["kind"], u["ref"], u["run"]) for u in got] == [("capi-cluster", "web/web", A)]
     assert got[0]["proven"] is True and got[0]["default"] is True
 
 

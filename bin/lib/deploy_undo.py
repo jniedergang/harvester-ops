@@ -97,8 +97,11 @@ def collect(results, tf_lookup=None, plan=None, cluster=None):
                 u = it.get("undo") or {}
                 if it.get("created") and u.get("kind") in KINDS_ORDER and isinstance(u.get("ref"), str):
                     key = (u["kind"], u["ref"])
+                    # dernier état gagnant, mais « créé par » reste le premier
+                    # maillon : une reprise ne fait que recopier la marque
+                    first = (found.get(key) or {}).get("run") if (found.get(key) or {}).get("proven") else None
                     found[key] = {"id": undo_id(*key), "kind": u["kind"], "ref": u["ref"],
-                                  "phase": PHASE_OF[u["kind"]], "run": res["_run"], "proven": True,
+                                  "phase": PHASE_OF[u["kind"]], "run": first or res["_run"], "proven": True,
                                   "default": u["kind"] != "registry",
                                   "note": REGISTRY_NOTE if u["kind"] == "registry" else "",
                                   "revision_applied": it.get("revision_applied")}
