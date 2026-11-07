@@ -1074,3 +1074,150 @@ par les tests seulement), plus de deux clusters enfants, Harbor.
 ## Décisions (07/11/2026)
 
 Les recommandations des points 219 à 240 sont retenues, bancs compris (VM rancher-manager démarrée puis arrêtée, import de test retiré de Rancher après, Dex et dépôt Gitea temporaires, règle nftables temporaire sur node2, harv4 à la demande).
+
+## Essais préalables (tâche 1)
+
+Faits le 07/11/2026 sur harvlab2 (node2 allumé par son iLO, éteint après,
+`PowerState: Off` relu), le Rancher externe (VM `rancher-manager` de harv1
+démarrée puis arrêtée, `runStrategy: Halted` remis), un Dex de banc sur
+node1 (podman sans privilèges, `ghcr.io/dexidp/dex:v2.45.0`, port haut tiré
+au hasard ouvert à chaud puis refermé, conteneur supprimé) et un dépôt Gitea
+temporaire (supprimé). Cluster enfant 1+1 `rke2-banc` (RKE2
+v1.34.11+rke2r1, Leap 15.6, disques de 10 Gio) créé avec le gabarit du plan
+de contrôle retouché à la main, supprimé à la fin par `harvester-capi
+delete` ; objets du banc (image, paire de clés, pool) retirés,
+`storage-minimal-available-percentage` remis à 25. Les autres clusters de
+Rancher n'ont pas bougé (liste relue avant et après). Critère de passage :
+1, 4, 5 et 6 réussis (4 avec la réserve de version ci-dessous).
+
+1. **Import générique** : Rancher v2.14.1 Prime, Fleet 0.15.1. Le schéma de
+   `provisioning.cattle.io.cluster` permet `POST` ; `POST
+   /v1/provisioning.cattle.io.clusters` avec `spec: {}` et nos étiquettes
+   est accepté, `status.clusterName` (`c-m-nwsjn9p6`) arrive en 3,6 s.
+   `/v3/clusterregistrationtokens?clusterId=` rend `default-token` quelques
+   secondes plus tard, avec `token` et `manifestUrl` déjà substitué
+   (`https://<rancher>/v3/import/<jeton>_<c-m-...>.yaml`, aucun `{token}`).
+   Manifeste de 5 251 octets, neuf objets : ClusterRole
+   `proxy-clusterrole-kubeapiserver` et `cattle-admin`, ClusterRoleBinding
+   `proxy-role-binding-kubernetes-master` et `cattle-admin-binding`,
+   Namespace `cattle-system`, ServiceAccount `cattle`, Secret
+   `cattle-credentials-*`, Deployment et Service `cattle-cluster-agent`. Une
+   seule image : `registry.rancher.com/rancher/rancher-agent:v2.14.1` (570 Mo
+   compressés). Appliqué par `kubectl apply` avec le kubeconfig du cluster
+   enfant : `Active` en 350 s (nœud encore `NotReady` à l'application : CNI,
+   tirage de l'image compris), `status.ready` vrai. Le cluster Fleet porte le
+   nom du cluster de provisionnement (`harvlab2-rke2-banc`) et en recopie les
+   étiquettes de la console. Membres : une seule liaison, `cluster-owner`
+   pour la personne qui importe (CRTB lue par `/v3`, ce que la fenêtre
+   Membres affiche). Depuis node1, `rancher.home.zypp.fr` se résout sur
+   l'adresse publique : la console relit le manifeste par l'adresse de la
+   session Rancher (chemin `/v3/import/...` seul), jamais par l'hôte écrit
+   dans `manifestUrl`.
+2. **Retrait** : `DELETE` du cluster de provisionnement, disparu de
+   `/v1` et de `/v3/clusters` en 6 s. Rancher lance alors dans le cluster
+   enfant un Job `cattle-cleanup-*` (namespace `default`, image de l'agent,
+   environ une minute) qui retire `cattle-system` et `cattle-fleet-system`.
+   Restent ensuite : le namespace `local` (vide) ; les ClusterRole
+   `cattle-*`, `cluster-owner`, `create-ns`, `project-owner`,
+   `project-owner-promoted`, `proxy-clusterrole-kubeapiserver`,
+   `p-<id>-namespaces-edit|readonly` ; les ClusterRoleBinding `cattle-*`,
+   `crb-*`, `globaladmin-*`, `proxy-role-binding-kubernetes-master` ; les CRD
+   des groupes `management.cattle.io`, `catalog.cattle.io`, `ui.cattle.io`,
+   `upgrade.cattle.io`, `auditlog.cattle.io`, `telemetry.cattle.io` et leurs
+   APIService. Aucun webhook. **Jamais** les CRD `k3s.cattle.io` et
+   `helm.cattle.io` : elles sont à RKE2. Les namespaces posés par Fleet
+   (cibles des bundles) restent aussi. Constante `rancher_import.LEFTOVERS`.
+3. **Fleet** : `HelmOp` disponible sans drapeau en Fleet 0.15.1 (chart
+   `oci://ghcr.io/stefanprodan/charts/podinfo` 6.11.0, tiré par le cluster
+   enfant, prêt en moins d'une minute). `GitRepo` par SSH depuis la VM
+   Rancher vers Gitea (172.16.1.11:2222), `clientSecretName` de type
+   `kubernetes.io/ssh-auth` avec `known_hosts` : prêt 1/1. Piège :
+   `known_hosts` doit porter toutes les clés de l'hôte (ed25519 seule :
+   `knownhosts: key mismatch`), et un `GitRepo` en échec ne se relit qu'avec
+   `spec.forceSyncGeneration` incrémenté. `targetNamespace` du `GitRepo`
+   marche. Prêt = `status.summary.ready` égal à `desiredReady`. Supprimer le
+   `GitRepo` ou le `HelmOp` retire les objets du cluster enfant et garde les
+   namespaces. `helmSecretName` non exercé (chart public).
+4. **Flux** : le chart `flux2` 2.20.0 (Flux 2.10.0) **refuse Kubernetes
+   avant 1.35** : son Job `flux-check` (crochet pre-install, aucune valeur
+   pour le retirer) échoue sur `v1.34.11+rke2r1 does not match >=1.35.0-0`.
+   `flux2` 2.19.1 (Flux 2.9.5) s'installe en 30 s sur 1.34. La console ne
+   fixe donc pas la version du chart : le paquet porte celle qui convient au
+   cluster enfant, la recette de la documentation le dit, et
+   `gitops-flux-missing` lit l'état du service `flux`. Valeurs du chart :
+   `multitenancy.enabled: true`, `multitenancy.defaultServiceAccount:
+   hops-gitops`, `multitenancy.privileged: false` (donnent
+   `--no-cross-namespace-refs=true` et `--default-service-account` aux
+   contrôleurs), `imageAutomationController.create`,
+   `imageReflectionController.create` et `sourceWatcher.create` à `false`.
+   Aucune valeur de registre : les noms d'image sont gardés et le miroir
+   `ghcr.io` du `registries.yaml` les sert. Images de 2.20.0 : flux-cli
+   v2.10.0 (48,5 Mo), helm-controller v1.7.1 (55,3), kustomize-controller
+   v1.10.1 (74,9), notification-controller v1.10.0 (54,9), source-controller
+   v1.10.1 (72,9), 306,6 Mo ; chart de 68 Kio, onze CRD. Artefact construit
+   par `flux_artifact` (bibliothèque standard) et poussé par
+   `oci_push.Registry` dans un registre de banc : accepté par
+   l'`OCIRepository` (révision `<étiquette>@sha256:<manifeste>`), deux
+   constructions donnent les mêmes octets. `Kustomization` appliquée dans
+   `equipe-a` par `targetNamespace` avec le compte `hops-gitops-<nom>` :
+   **le compte vit dans le namespace de la `Kustomization` (`hops-gitops`)**,
+   Flux usurpe `system:serviceaccount:hops-gitops:hops-gitops-<nom>`, la
+   `RoleBinding` vers `edit` est dans `equipe-a`. Passage à un contenu d'un
+   objet de moins : objet élagué. Contenu avec une ClusterRole : refus
+   `Forbidden` (verrouillage). Référence vers une source d'un autre
+   namespace : `AccessDenied ... cross-namespace references have been
+   blocked`. **CRS appliqué avant le chart** : le ConfigMap reste
+   `applied: false`, application partielle (namespaces, compte, Secret
+   créés), réessais espacés (19:19:17, 19:22:31, 19:28:00), appliqué
+   2 min 30 après Flux prêt : la console installe Flux d'abord et refuse
+   sans lui. **Secret `addons.cluster.x-k8s.io/resource-set` dans un CRS** :
+   appliqué tel quel (Secret `kubernetes.io/dockerconfigjson` dans
+   `hops-gitops`) ; l'empreinte du binding pour un Secret est le sha256 des
+   valeurs DÉCODÉES, clés triées. Supprimer le CRS a emporté le ConfigMap ET
+   le Secret (propriétaire) : `--cascade=orphan` pour les deux.
+5. **OIDC** : Dex (mots de passe statiques avec groupes, octroi par mot de
+   passe), `apiserver.config.k8s.io/v1` accepté par 1.34.11. `kubectl auth
+   whoami` : `oidc:alice@bench.lo`, groupes `oidc:hops-admins`,
+   `oidc:equipe-a`, `system:authenticated` ; autre audience :
+   `Unauthorized` ; jeton accepté 6 s avant `exp`, refusé 74 s après.
+   `ClusterRoleBinding` vers `cluster-admin` pour `oidc:hops-admins` : alice
+   oui, bob non. **RKE2 monte lui-même le fichier passé à
+   `authentication-config`** (volume `file1`, `hostPath` de type `File`,
+   lecture seule) ; `extraMounts` ajoutait un second montage du répertoire en
+   lecture-écriture : redondant, abandonné (zéro redondance). Fichier écrit
+   par CAPRKE2 avec `root:root` et `0600`. Schéma CAPRKE2 v1beta2 relu
+   (`extraArgs []string`, `extraMounts map[string]string`).
+6. **Rotation des gabarits** : la modification EN PLACE d'un gabarit est
+   acceptée par les webhooks (`--dry-run=server`) : la rotation n'est pas
+   imposée, elle reste retenue (ancien gabarit gardé pour le retour arrière,
+   rien de ce que `caphv-generate` a produit n'est réécrit). Copies `-r1`
+   (fichier ajouté) puis `ClusterClass` repointée : remplacement du plan de
+   contrôle et du worker EN MÊME TEMPS (`maxSurge: 1`), 9 min pour un 1+1 ;
+   API injoignable environ 65 s (7 sondes sur 107, toutes les 5 s) au
+   passage de l'unique plan de contrôle ; adresses .200 et .201 rendues,
+   .202 et .203 prises. Cluster API ne supprime pas les anciens gabarits.
+   OIDC toujours servi par le nouveau plan de contrôle.
+7. **Sans Internet, bases** : `curl` 8.22 et `sha256sum` présents dans
+   l'image Leap 15.6 ; `agentConfig.airGapped` existe dans CAPRKE2 v1beta2.
+   Tailles : `rke2.linux-amd64.tar.gz` 41 Mo, images `core` 814 Mo et
+   `calico` 610 Mo (tar.gz) ; agent Rancher 570 Mo ; Flux 307 Mo. Disque de
+   10 Gio du worker à 78 % juste après sa création, et l'ancien worker en
+   échec de ramasse-miettes d'images avec l'agent et Flux : 20 Gio
+   recommandés dès qu'un import ou Flux est demandé. Cluster entièrement
+   sans Internet non créé ici : tâche 8 et R11.
+8. **`containerd-registry`** de harvlab2, en lecture seule : valeur JSON
+   `{Mirrors: {<hôte>: {Endpoints, Rewrites}}, Configs: {<hôte>: {Auth:
+   null, TLS}}, Auths: null}`, déjà un miroir `172.16.1.11:5005` (essai
+   d'une version précédente) ; identifiants dans le Secret
+   `fleet-local/harvester-containerd-registry-<empreinte>` (type
+   `rke.cattle.io/auth-config`, clés `auth`, `host`, `identityToken`,
+   `password`, `username`, étiquette `harvesterhci.io/setting:
+   containerd-registry`), cité par `fleet-local/local`
+   `spec.rkeConfig.registries.configs.<hôte>.authConfigSecretName`. Rien
+   n'a été modifié.
+
+Conséquences pour les tâches 2 à 4 : restes connus de l'import écrits en
+constante (point 2) ; manifeste relu par l'adresse de la session ; OIDC
+sans `extraMounts` ; compte de Flux dans `hops-gitops` ; Flux d'abord ;
+empreinte des Secrets du CRS sur les valeurs décodées ; `--cascade=orphan`
+pour ConfigMap et Secret ; version du chart Flux laissée au paquet.

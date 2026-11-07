@@ -89,7 +89,7 @@ ARTEFACTS_TIMEOUT = (1, 60, 15)
 MAX_ARTEFACT_ENTRIES = 32
 MAX_ARTEFACT_UNITS = 128
 ARTEFACT_KINDS = ("chart", "manifest", "policy")
-ARTEFACT_REFUSED_KINDS = {"images": "published by the Registry phase", "gitops": "coming in 2.8"}
+ARTEFACT_REFUSED_KINDS = {"images": "published by the Registry phase", "gitops": "applied by a GitOps entry"}
 
 # Noms de clés qui désignent un objet public ou le NOM d'un Secret, pas un
 # secret : la clé publique d'une ressource ssh_key, les clés d'une VM

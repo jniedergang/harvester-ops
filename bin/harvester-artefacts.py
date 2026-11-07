@@ -187,7 +187,7 @@ def check_description(doc):
         if imgs:
             item["images"] = imgs
         files = it.get("files")
-        if kind in art.MANIFEST_KINDS or (kind in art.LATER_KINDS and files is not None):
+        if kind in art.MANIFEST_KINDS + ("gitops",) or (kind in art.LATER_KINDS and files is not None):
             if not isinstance(files, list) or not files or not all(isinstance(f, str) and FILE_RE.match(Path(f).name)
                                                                   for f in files):
                 errors.append(f"{where}.files: .yaml files, one at least")
@@ -695,11 +695,14 @@ def publication(pkg, items=None):
     if unknown:
         raise Refused([_finding("publish-item-unknown", items=", ".join(unknown))])
     chosen = [known[n] for n in (items or known)]
-    images, charts, skipped = [], [], []
+    images, charts, skipped, gitops = [], [], [], []
     for it in chosen:
         if it["kind"] in art.LATER_KINDS:
             skipped.append({"item": it["name"], "why": "coming"})
             continue
+        if it["kind"] == "gitops":
+            # 2.8.0 : contenu publié en artefact Flux (bin/lib/flux_artifact.py)
+            gitops.append(it)
         for n in it.get("images") or []:
             if n not in images:
                 images.append(n)
@@ -707,10 +710,35 @@ def publication(pkg, items=None):
             charts.append(it["chart"])
         elif it["kind"] in art.MANIFEST_KINDS:
             skipped.append({"item": it["name"], "why": "manifest"})
-    return images, charts, skipped
+    return images, charts, skipped, gitops
 
 
-def plan_publication(pkg, decl, dst, images, charts, work):
+def gitops_artifact(pkg, it):
+    """(dépôt, étiquette, construit) de l'artefact Flux d'un élément
+    `gitops` ; Refused si son contenu enfreint les règles des manifestes
+    (capi_manifests.check : pas de CRD, de webhook, de namespace système...)."""
+    import capi_manifests as mf
+    import flux_artifact as fa
+    root = Path(pkg["path"]).resolve()
+    files = {}
+    for rel in it.get("files") or []:
+        p = (root / rel).resolve()
+        if root not in p.parents or not p.is_file():
+            raise Refused([_finding("publish-gitops-file-missing", item=it["name"], file=rel)])
+        files[rel] = p.read_text()
+    try:
+        objs = mf.parse(files)
+    except ValueError as e:
+        raise Refused([_finding("publish-gitops-refused", item=it["name"], reason=str(e)[:200])]) from None
+    bad = [f for f in mf.check(objs, "-") if f["level"] == "block" and f["code"] != "manifest-kind-unknown"]
+    if bad:
+        raise Refused([_finding("publish-gitops-refused", item=it["name"],
+                                reason=f"{bad[0]['code']} {json.dumps(bad[0]['facts'])}"[:200])])
+    built = fa.build(files, it["name"], pkg["index"]["version"], source=f"{pkg['index']['name']}/{it['name']}")
+    return fa.repo_of(pkg["index"]["name"], it["name"]), pkg["index"]["version"], built
+
+
+def plan_publication(pkg, decl, dst, images, charts, work, gitops=()):
     """Constats avant écriture et liste de ce qui partira : un tag d'une
     autre empreinte (`publish-tag-differs`, lu par HEAD), un registre qui ne
     sert pas cet usage (`registry-no-usage`)."""
@@ -718,7 +746,8 @@ def plan_publication(pkg, decl, dst, images, charts, work):
     usage = decl.get("usage") or []
     if images and "images" not in usage:
         findings.append(_finding("registry-no-usage", registry=decl["name"], usage="images"))
-    if charts and "charts" not in usage:
+    if (charts or gitops) and "charts" not in usage:
+        # un artefact Flux est un artefact OCI comme un chart
         findings.append(_finding("registry-no-usage", registry=decl["name"], usage="charts"))
     lay = ol.Layout(Path(pkg["path"]) / "images")
     for n in images:
@@ -734,6 +763,11 @@ def plan_publication(pkg, decl, dst, images, charts, work):
         repo, tag = ol.chart_repo(meta["name"], meta["version"])
         todo.append({"kind": "chart", "name": f"{meta['name']}:{meta['version']}", "layout": clay,
                      "entry": clay.find(f"{meta['name']}:{meta['version']}"), "repo": repo, "tag": tag})
+    import flux_artifact as fa
+    for it in gitops:
+        repo, tag, built = gitops_artifact(pkg, it)
+        todo.append({"kind": "gitops", "name": f"{it['name']}:{tag}", "repo": repo, "tag": tag, "built": built,
+                     "entry": {"digest": fa.digest_of(built[2])}})
     for t in todo:
         try:
             have = dst.manifest_digest(t["repo"], t["tag"])
@@ -752,14 +786,15 @@ def plan_publication(pkg, decl, dst, images, charts, work):
 
 def publish(pkg, decl, dst, items=None, dry_run=False, work=None):
     """Publie (ou liste, `dry_run`) ; rend le résultat sans identifiant."""
-    images, charts, skipped = publication(pkg, items)
+    images, charts, skipped, gitops = publication(pkg, items)
     for s in skipped:
-        step("publish", "running", f"{s['item']}: skipped ({'coming in 2.8' if s['why'] == 'coming' else 'manifests are not published'})")
-    findings, todo = plan_publication(pkg, decl, dst, images, charts, work)
+        step("publish", "running", f"{s['item']}: skipped ({'coming later' if s['why'] == 'coming' else 'manifests are not published'})")
+    findings, todo = plan_publication(pkg, decl, dst, images, charts, work, gitops)
     if dry_run or [f for f in findings if f["level"] == "block"]:
         return {"findings": findings, "blocked": bool(findings),
                 "todo": [{k: t[k] for k in ("kind", "name", "repo", "tag", "state")} for t in todo]}
-    res = {"images": 0, "charts": 0, "pushed_blobs": 0, "skipped_blobs": 0, "mounted_blobs": 0, "bytes": 0}
+    res = {"images": 0, "charts": 0, "gitops": 0, "pushed_blobs": 0, "skipped_blobs": 0, "mounted_blobs": 0,
+           "bytes": 0}
     mounts = {}
     sent = {"n": 0, "last": 0}
 
@@ -779,6 +814,14 @@ def publish(pkg, decl, dst, items=None, dry_run=False, work=None):
             res["mounted_blobs"] += r["mounted"]
         if part:
             step(f"{kind}s", "done", f"{len(part)} {kind}(s) in {decl['name']}")
+    import flux_artifact as fa
+    part = [t for t in todo if t["kind"] == "gitops"]
+    for i, t in enumerate(part, 1):
+        step("gitops", "running", f"gitops {i}/{len(part)}: {t['name']}")
+        fa.push(dst, t["repo"], t["tag"], t["built"])
+        res["gitops"] += 1
+    if part:
+        step("gitops", "done", f"{len(part)} Flux artefact(s) in {decl['name']}")
     res["bytes"] = sent["n"]
     return res
 
@@ -847,7 +890,7 @@ def cmd_publish(args):
             except dp.PlanConflict:
                 if attempt:
                     raise
-        step("publish", "done", f"{res['images']} image(s), {res['charts']} chart(s); "
+        step("publish", "done", f"{res['images']} image(s), {res['charts']} chart(s), {res['gitops']} gitops; "
                                 f"{res['pushed_blobs']} blob(s) sent, {res['skipped_blobs'] + res['mounted_blobs']} "
                                 "already there")
     except Refused as e:

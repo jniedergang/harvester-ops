@@ -21972,7 +21972,10 @@ def _capi_artefact_request(cluster, check=False):
     if kind == "images":
         return None, _artefact_error("images are published by the Registry phase", 400, "artefact-kind-images")
     if kind in _artm.LATER_KINDS:
-        return None, _artefact_error(f"{kind}: coming in 2.8", 400, "artefact-kind-later")
+        return None, _artefact_error(f"{kind}: coming later", 400, "artefact-kind-later")
+    if kind == "gitops":
+        # 2.8.0 : posé par une entrée GitOps (POST /api/capi/<c>/gitops)
+        return None, _artefact_error("a gitops item is applied by a GitOps entry", 400, "artefact-kind-gitops")
     if not _mf.item_name_ok(item):
         return None, _artefact_error(f"{item}: 42 characters at most to be applied", 400, "artefact-name-too-long")
     ns, child = ref
@@ -22176,6 +22179,179 @@ def api_capi_token(cluster):
     resp.headers["Cache-Control"] = "no-store"
     resp.headers["Pragma"] = "no-cache"
     return resp
+
+
+# ---------------------------------------------------------------------------
+# 2.8.0 : accès humain aux clusters enfants (import dans le Rancher de la
+# session, OIDC de l'API) et GitOps. Tout passe par harvester-capi (parité) ;
+# Rancher n'est écrit qu'avec le jeton de la session de la personne (points
+# 221 et 222) : un compte local reçoit `rancher-session-needed` (409), comme
+# Projets et Membres.
+# ---------------------------------------------------------------------------
+def _rancher_session_refusal(cluster, what):
+    kc, r = _session_rancher(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if r is None:
+        return jsonify({"error": f"{what} lives in Rancher", "code": "rancher-session-needed",
+                        "hint": "sign in to the console through Rancher"}), 409
+    return None
+
+
+@app.route("/api/capi/<cluster>/rancher-import", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_capi_rancher_import(cluster):
+    """Importe un cluster enfant dans le Rancher de la session : action
+    suivie `capi-rancher-import:` (création dans Rancher, manifeste appliqué
+    par la console, attente de `Active`)."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - {"cluster"}):
+        return _artefact_error(f"{k}: unknown key", 400)
+    ref, err = _child_ref(body.get("cluster"))
+    if err:
+        return err
+    refusal = _rancher_session_refusal(cluster, "the import")
+    if refusal:
+        return refusal
+    ns, child = ref
+    cmd, err = _capi_child_base(cluster, "rancher-import", ns, child)
+    if err:
+        return err
+    run, err = _capi_action(cluster, f"capi-rancher-import:{ns}/{child}",
+                            cmd + ["--name", f"{ns}/{child}", "--by", current_user() or ""])
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{ns}/{child}"}), 202
+
+
+@app.route("/api/capi/<cluster>/rancher-import/<namespace>/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_capi_rancher_unimport(cluster, namespace, name):
+    """Retire l'import : cluster supprimé dans Rancher, restes connus
+    supprimés dans le cluster enfant après jugement du serveur."""
+    if not all(_K8S_NAME_RE.match(x) for x in (namespace, name)):
+        return _artefact_error("invalid name", 400)
+    refusal = _rancher_session_refusal(cluster, "the import")
+    if refusal:
+        return refusal
+    cmd, err = _capi_child_base(cluster, "rancher-unimport", namespace, name)
+    if err:
+        return err
+    run, err = _capi_action(cluster, f"capi-rancher-unimport:{namespace}/{name}",
+                            cmd + ["--name", f"{namespace}/{name}"])
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}"}), 202
+
+
+@app.route("/api/capi/<cluster>/rancher-status")
+@requires_auth
+def api_capi_rancher_status(cluster):
+    """Clusters enfants importés et leur état chez le Rancher de la session."""
+    cmd, err = _capi_base(cluster, "rancher-status")
+    if err:
+        return err
+    res, err = _capi_run_json(cmd + ["--json"], timeout=60)
+    if err:
+        return err
+    return jsonify(res[0])
+
+
+@app.route("/api/capi/<cluster>/oidc-kubeconfig/<namespace>/<name>")
+@requires_auth
+def api_capi_oidc_kubeconfig(cluster, namespace, name):
+    """Kubeconfig OIDC des personnes (greffon kubelogin, aucun identifiant),
+    pour qui a le droit d'administrer le cluster enfant (point 230)."""
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["operator"]:
+        return jsonify({"error": "forbidden", "required": "operator"}), 403
+    if not all(_K8S_NAME_RE.match(x) for x in (namespace, name)):
+        return _artefact_error("invalid name", 400)
+    cmd, err = _capi_child_base(cluster, "oidc-kubeconfig", namespace, name)
+    if err:
+        return err
+    res, err = _capi_run_json(cmd + ["--name", f"{namespace}/{name}", "--json"], timeout=60)
+    if err:
+        return err
+    out, rc = res
+    if rc != 0:
+        return jsonify(out), 409
+    resp = jsonify(out)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+GITOPS_KEYS = {"cluster", "entry", "secrets"}
+
+
+@app.route("/api/capi/<cluster>/gitops", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_gitops(cluster):
+    """Pose une entrée GitOps sur un cluster enfant (Fleet s'il est importé,
+    Flux sinon) : action suivie `capi-gitops:`. Les secrets saisis partent
+    dans la demande privée de l'outil, jamais rangés."""
+    import child_gitops as _cg
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - GITOPS_KEYS):
+        return _artefact_error(f"{k}: unknown key", 400)
+    ref, err = _child_ref(body.get("cluster"))
+    if err:
+        return err
+    try:
+        entry = _cg.normalize(body.get("entry"))
+    except ValueError as e:
+        return _artefact_error(str(e), 400)
+    secrets = body.get("secrets") or {}
+    if not isinstance(secrets, dict) or not all(isinstance(v, dict) for v in secrets.values()):
+        return _artefact_error("secrets: {name: {identity, known_hosts} | {username, password}}", 400)
+    if entry["privileges"] == "cluster" and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return _artefact_error("privileges cluster: administrators only", 403, "gitops-privileges-admin-only")
+    ns, child = ref
+    cmd, err = _capi_child_base(cluster, "gitops-deploy", ns, child)
+    if err:
+        return err
+    spec = {"cluster": f"{ns}/{child}", "entry": entry, "secrets": secrets,
+            "role": current_role() or "viewer", "by": current_user() or ""}
+    run, err = _capi_action(cluster, f"capi-gitops:{ns}/{child}:{entry['name']}", cmd, spec=spec)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{ns}/{child}", "entry": entry["name"]}), 202
+
+
+@app.route("/api/capi/<cluster>/gitops/<namespace>/<name>/<entry>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_gitops_remove(cluster, namespace, name, entry):
+    import child_gitops as _cg
+    if not all(_K8S_NAME_RE.match(x) for x in (namespace, name)) or not _cg.REF_RE.match(entry or ""):
+        return _artefact_error("invalid name", 400)
+    cmd, err = _capi_child_base(cluster, "gitops-remove", namespace, name)
+    if err:
+        return err
+    run, err = _capi_action(cluster, f"capi-gitops-remove:{namespace}/{name}:{entry}",
+                            cmd + ["--name", f"{namespace}/{name}/{entry}"])
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "entry": entry}), 202
+
+
+@app.route("/api/capi/<cluster>/gitops")
+@requires_auth
+def api_capi_gitops_list(cluster):
+    """Entrées GitOps posées (Flux, et Fleet avec une session Rancher)."""
+    cmd, err = _capi_base(cluster, "gitops-status")
+    if err:
+        return err
+    res, err = _capi_run_json(cmd + ["--json"], timeout=60)
+    if err:
+        return err
+    return jsonify(res[0])
 
 
 @app.route("/api/capi/<cluster>/artefacts/applied")

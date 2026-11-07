@@ -188,7 +188,7 @@ def test_a_chart_starts_service_deploy_with_its_source_values_and_person(env):
     ({"item": "absent"}, 404, "artefact-item-unknown"),
     ({"version": "9.9.9"}, 404, "artefact-package-missing"),
     ({"item": "outils"}, 400, "artefact-kind-images"),
-    ({"item": "flux"}, 400, "artefact-kind-later"),
+    ({"item": "flux"}, 400, "artefact-kind-gitops"),
     ({"item": "x" * 43}, 400, "artefact-name-too-long"),
     ({"item": "podinfo"}, 400, None),                                      # registre exigé
     ({"item": "podinfo", "registry": "autre"}, 409, "artefact-not-published"),

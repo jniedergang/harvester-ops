@@ -52,6 +52,7 @@ DEFAULTS = {
     "pod_cidr": "10.42.0.0/16", "service_cidr": "10.43.0.0/16",
     "cni_mtu": 1500, "cni_encapsulation": "VXLANCrossSubnet", "cni_bgp": "Disabled",
     "fleet_branch": "main", "target_namespace": "default", "rancher_import": False,
+    "rancher_external": False,
 }
 
 # Option du formulaire -> option du générateur. Tout le reste est refusé :
@@ -70,8 +71,12 @@ FLAGS = {
 }
 LIST_FLAGS = {"dns": "--dns", "ip_pool_refs": "--ip-pool-refs"}
 # Options traitées par la console elle-même, après le générateur.
+# 2.8.0 : `rancher_external` (import dans le Rancher de la session,
+# bin/lib/rancher_import.py) et `oidc` (API du cluster enfant,
+# bin/lib/child_oidc.py).
 CONSOLE_OPTIONS = {"extra_disk_size", "extra_disk_class", "target_namespace",
-                   "rancher_import", "extra_networks", "service_cidr", "registries"}
+                   "rancher_import", "extra_networks", "service_cidr", "registries",
+                   "rancher_external", "oidc"}
 KNOWN = set(FLAGS) | set(LIST_FLAGS) | CONSOLE_OPTIONS
 # Options entières : `normalize` les convertit, le rendu d'un modèle de
 # cluster (deploy_plans) donne ce type à une chaîne qui n'est qu'une variable.
@@ -152,6 +157,9 @@ def normalize(raw):
     spec["ip_pool_refs"] = _as_list(spec.get("ip_pool_refs"))
     spec["extra_networks"] = _as_list(spec.get("extra_networks"))
     spec["rancher_import"] = spec.get("rancher_import") in (True, "true", "1", 1, "on")
+    spec["rancher_external"] = spec.get("rancher_external") in (True, "true", "1", 1, "on")
+    if "oidc" in spec and not isinstance(spec["oidc"], dict):
+        raise ValueError("oidc: an object (issuer_url, audience, ...)")
     regs = normalize_registry_entries(spec.pop("registries", None))
     if regs:
         spec["registries"] = regs
@@ -354,6 +362,26 @@ def _apply_registries(docs, registries):
     return docs + [copy.deepcopy(s) for s in registries.get("secrets") or []]
 
 
+def _apply_oidc(docs, spec):
+    """2.8.0 (point 228) : configuration d'authentification structurée posée
+    dans le SEUL gabarit du plan de contrôle (l'API ne tourne pas sur les
+    workers). ValueError si les réglages sont refusés ou si le gabarit porte
+    déjà un argument ou un fichier du même nom (`oidc-arg-conflict`)."""
+    import child_oidc
+    cfg, found = child_oidc.check(spec["oidc"], spec.get("k8s_version"))
+    bad = child_oidc.blocking(found)
+    if bad:
+        raise ValueError(f"{bad[0]['code']}: the oidc option is refused")
+    patch = child_oidc.template_patch(cfg, spec.get("k8s_version"))
+    for d in docs:
+        if d.get("kind") == "Cluster":
+            d.setdefault("metadata", {}).setdefault("annotations", {})[child_oidc.ANNOTATION] = child_oidc.public(cfg)
+        if d.get("kind") == "RKE2ControlPlaneTemplate":
+            tpl = d.setdefault("spec", {}).setdefault("template", {})
+            tpl["spec"] = child_oidc.apply_patch(tpl.get("spec") or {}, patch)
+    return docs
+
+
 def postprocess(docs, spec, origin=None, registries=None):
     """Corrige les documents produits par le générateur ; rend une copie.
 
@@ -379,6 +407,9 @@ def postprocess(docs, spec, origin=None, registries=None):
     - **Registres** (2.6.0) : `registries` = {files, secrets} rendu
       par registries.rke2_config, passé par l'appelant (jamais lu dans la
       demande brute) ; voir `_apply_registries`.
+    - **OIDC** (2.8.0) : `_apply_oidc`, gabarit du plan de contrôle seul.
+    - `rancher_external` (2.8.0) ne change aucun document : l'import se fait
+      après la création (harvester-capi rancher-import).
     """
     out = []
     for d in docs:
@@ -415,6 +446,8 @@ def postprocess(docs, spec, origin=None, registries=None):
                 d["spec"].setdefault("clusterNetwork", {}).setdefault("services", {})[
                     "cidrBlocks"] = [svc]
         out.append(d)
+    if spec.get("oidc") is not None:
+        _apply_oidc(out, spec)
     cluster = next((d for d in out if d.get("kind") == "Cluster"), None)
     have = {(d.get("kind"), (d.get("metadata") or {}).get("name")) for d in out}
     if cluster and ("ClusterResourceSet", KUBE_VIP_CRS) not in have:
@@ -601,6 +634,22 @@ def harvester_cluster_findings(ref, facts):
     return []
 
 
+def access_findings(spec):
+    """2.8.0 : accès humain au cluster enfant. `rancher_import` (Turtles du
+    Rancher intégré) et `rancher_external` (Rancher de la session) sont
+    exclusifs (point 239) : deux agents se disputeraient `cattle-system`.
+    L'option `oidc` est contrôlée par child_oidc.check (point 228), qui
+    avertit quand l'import externe est demandé aussi (point 231)."""
+    out = []
+    if spec.get("rancher_import") and spec.get("rancher_external"):
+        out.append(finding("rancher-import-conflict", "block"))
+    if spec.get("oidc") is not None:
+        import child_oidc
+        _, found = child_oidc.check(spec["oidc"], spec.get("k8s_version"), rancher=spec.get("rancher_external"))
+        out += found
+    return out
+
+
 def check(spec, facts):
     """Constats sur une demande, à partir de ce qu'on a lu du cluster.
 
@@ -617,6 +666,7 @@ def check(spec, facts):
     Niveaux : block, warn, ok (comme le transfert de VM).
     """
     out = []
+    out += access_findings(spec)
     stack = facts.get("stack") or {}
     if not stack.get("ready"):
         out.append(finding("stack-not-ready", "block", missing=", ".join(stack.get("missing") or [])))

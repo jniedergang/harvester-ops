@@ -35,8 +35,11 @@ NAME_RE = re.compile(r"^[a-z](?:[a-z0-9-]{0,38}[a-z0-9])?$")
 VERSION_RE = re.compile(r"^(?:\d+\.\d+\.\d+(?:[-.][0-9A-Za-z.]+)?|\d{4}\.(?:0[1-9]|1[0-2])(?:\.(?:0[1-9]|[12]\d|3[01]))?(?:-\d+)?)$")
 ARCHIVE_RE = re.compile(r"^(?P<name>[a-z](?:[a-z0-9-]{0,38}[a-z0-9])?)-(?P<version>\d[0-9A-Za-z.+-]*)\.tar\.gz$")
 ITEM_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-KINDS = ("chart", "manifest", "policy", "images")
-LATER_KINDS = ("gitops",)
+# 2.8.0 : `gitops` rejoint les sortes applicables (contenu d'un artefact
+# Flux publié dans un registre, bin/lib/flux_artifact.py) ; LATER_KINDS
+# reste pour les sortes à venir.
+KINDS = ("chart", "manifest", "policy", "images", "gitops")
+LATER_KINDS = ()
 # Sortes livrées par ClusterResourceSet (2.7.0, bin/lib/capi_manifests.py)
 MANIFEST_KINDS = ("manifest", "policy")
 STATES = ("valid", "unknown-key", "unsigned", "invalid", "sums-mismatch")
@@ -67,9 +70,9 @@ _ITEM_KEYS = {"name", "kind", "version", "description", "chart", "values", "file
 def check_index(doc, image_names=None):
     """(index, erreurs) de `artefacts.yaml`. `image_names` : les noms
     (`io.containerd.image.name`) de images/index.json ; une image citée par
-    un élément doit y être. La sorte `gitops` est gardée et marquée `later`
-    (montrée « à venir », jamais appliquée) ; `policy` est un manifeste
-    depuis la 2.7.0."""
+    un élément doit y être. `policy` est un manifeste depuis la 2.7.0 ;
+    `gitops` (2.8.0) porte des fichiers `manifests/<élément>/` comme un
+    manifeste, publiés en artefact Flux."""
     errors = []
     if not isinstance(doc, dict):
         return None, ["the index is not an object"]
@@ -111,7 +114,7 @@ def check_index(doc, image_names=None):
                 errors.append(f"{where}.values: an object")
         elif "chart" in it or "values" in it:
             errors.append(f"{where}: chart and values are for a chart")
-        if kind in MANIFEST_KINDS or (kind in LATER_KINDS and "files" in it):
+        if kind in MANIFEST_KINDS + ("gitops",) or (kind in LATER_KINDS and "files" in it):
             files = it.get("files")
             if not isinstance(files, list) or not files or not all(
                     isinstance(f, str) and re.match(rf"^manifests/{re.escape(iname)}/[A-Za-z0-9._-]+\.ya?ml$", f)
