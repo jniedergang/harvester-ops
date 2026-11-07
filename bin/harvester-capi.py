@@ -1108,11 +1108,42 @@ def _remove_registry_secrets(kube, ns, name):
                                   "(other clusters keep the namespace)")
 
 
+def destroy_plan(kube, ns, name):
+    """2.7.0 (Défaire) : ce que `delete` emporterait, sans rien écrire :
+    machines, VMs et volumes du namespace des VMs, répartiteurs de charge,
+    namespace créé par la console."""
+    cl = kube.get(cs.K_CLUSTER, ns, name)
+    out = {"cluster": f"{ns}/{name}", "present": cl is not None, "machines": 0, "target_namespace": None,
+           "vms": [], "volumes": [], "loadbalancers": [], "namespace_removed": False}
+    if cl is None:
+        return out
+    var = next((v for v in ((cl.get("spec") or {}).get("topology") or {}).get("variables") or []
+                if v.get("name") == "targetNamespace"), {})
+    target = var.get("value") or ns
+    out["target_namespace"] = target
+    machines = [m for m in kube.list("machines.cluster.x-k8s.io", ns)
+                if ((m.get("metadata") or {}).get("labels") or {}).get("cluster.x-k8s.io/cluster-name") == name]
+    out["machines"] = len(machines)
+    vms = sorted({((m.get("spec") or {}).get("infrastructureRef") or {}).get("name") for m in machines} - {None})
+    out["vms"] = vms
+    out["volumes"] = sorted(p["metadata"]["name"] for p in kube.list("persistentvolumeclaims", target)
+                            if any(p["metadata"]["name"].startswith(v + "-") for v in vms))
+    out["loadbalancers"] = sorted(lb["metadata"]["name"] for lb in kube.list(
+        "loadbalancers.loadbalancer.harvesterhci.io", target) if name in lb["metadata"]["name"])
+    nsobj = kube.get("namespaces", None, ns) or {}
+    out["namespace_removed"] = ((nsobj.get("metadata") or {}).get("labels") or {}).get(cs.MANAGED) == "true" \
+        and len(kube.list(cs.K_CLUSTER, ns)) == 1
+    return out
+
+
 def cmd_delete(args):
     kube, _, _ = kube_from(args)
     ns, _, name = args.name.partition("/")
     if not ns or not name:
         raise SystemExit("--name expects namespace/name")
+    if getattr(args, "dry_run", False):
+        print(json.dumps(destroy_plan(kube, ns, name)))
+        return EXIT_OK
     cl = kube.get(cs.K_CLUSTER, ns, name)
     if cl is None:
         # Cluster déjà parti, identité restée (suppression précédente qui a
@@ -1404,8 +1435,41 @@ def cmd_service_remove(args):
         if ((c["metadata"].get("labels") or {}).get(label)):
             kube.patch(cs.K_CLUSTER, ns, c["metadata"]["name"],
                        {"metadata": {"labels": {label: None}}})
+    _release_namespace_down(kube, ns, hcp)
     step("remove", "done", f"service {ns}/{name} removed")
     return EXIT_OK
+
+
+def _release_namespace_down(kube, ns, hcp):
+    """2.7.0 (essai 2) : CAAPH laisse le namespace de la release que
+    `createNamespace` a créé. Pour un chart de paquet, il est retiré s'il
+    est né après le service (créé pour lui) et ne porte plus rien ;
+    sinon il est gardé et nommé. Jamais d'erreur : le service est parti."""
+    art = mf.artefact_of(hcp)
+    rns = ((hcp.get("spec") or {}).get("namespace") or "")
+    if not art or not rns or mf.is_system_namespace(rns) or rns in mf.IMMORTAL_NAMESPACES:
+        return
+    child_name = art["cluster"]
+    if kube.get(cs.K_CLUSTER, ns, child_name) is None:
+        return                                  # parti avec le cluster
+    born = (hcp.get("metadata") or {}).get("creationTimestamp") or ""
+    try:
+        with ca.session(kube, ns, child_name) as path:
+            child = Kube(path)
+            obj = child.get("namespaces", None, rns)
+            if obj is None:
+                return
+            if ((obj.get("metadata") or {}).get("creationTimestamp") or "") < born:
+                step("remove", "running", f"namespace {rns} kept on {child_name}: it existed before the chart")
+                return
+            others = _namespace_others(child, rns, art["item"], child_name)
+            if others:
+                step("remove", "running", f"namespace {rns} kept on {child_name}: it holds {len(others)} object(s)")
+                return
+            child.delete("namespaces", None, rns)
+            step("remove", "running", f"namespace {rns} removed from {child_name} (created for the chart)")
+    except (ca.ChildAccessError, KubeError) as e:
+        step("remove", "running", f"namespace {rns} kept on {child_name}: {str(e)[:120]}")
 
 
 # ---------------------------------------------------------------------------
@@ -1578,11 +1642,21 @@ def cmd_manifest_check(args):
     return EXIT_BLOCKED if blocked else EXIT_OK
 
 
+def _namespace_others(child, ns, item, cluster):
+    """Objets d'un namespace du cluster enfant qui ne viennent pas de cet
+    élément, toutes sortes listables comprises (revue 1-3, C1) ; KubeError
+    si une sorte ne se liste pas (l'appelant garde le namespace)."""
+    kinds = mf.scan_resources(child.api_resources(namespaced=True, verbs="list").split())
+    inside = child.list(",".join(kinds), ns, missing_ok=False) if kinds else []
+    return mf.foreign(inside, item, cluster)
+
+
 def _judge(child, refs, item, cluster, sid):
     """Passe 1 du retrait, sans écriture : chaque objet lu, puis sa
-    suppression jugée par le serveur. Rend (à supprimer, refus) ; un objet
-    introuvable compte comme retiré, un objet sans étiquette est gardé."""
-    todo, refused = [], []
+    suppression jugée par le serveur. Rend (à supprimer, refus, gardés) ;
+    un objet introuvable compte comme retiré, un objet sans étiquette est
+    gardé."""
+    todo, refused, kept = [], [], []
     for ref in mf.delete_order(refs):
         res, where = mf.resource_of(ref), f"{ref[1]} {ref[2] + '/' if ref[2] else ''}{ref[3]}"
         try:
@@ -1598,19 +1672,20 @@ def _judge(child, refs, item, cluster, sid):
             continue
         if not mf.is_ours(obj, item, cluster):
             step(sid, "running", f"kept-relabelled: {where} kept, modified by hand (labels of the console removed)")
+            kept.append({"object": where, "code": "kept-relabelled"})
             continue
         if ref[1] == "Namespace":
             # revue 1-3, C1 : toutes les sortes listables, échec fermé
             try:
-                kinds = mf.scan_resources(child.api_resources(namespaced=True, verbs="list").split())
-                inside = child.list(",".join(kinds), ref[3], missing_ok=False) if kinds else []
+                others = _namespace_others(child, ref[3], item, cluster)
             except KubeError as e:
                 step(sid, "running", f"kept-in-use: {where} kept, its content could not be listed: {str(e)[:120]}")
+                kept.append({"object": where, "code": "kept-in-use"})
                 continue
-            others = mf.foreign(inside, item, cluster)
             if others:
                 step(sid, "running", f"kept-in-use: {where} kept, it holds {len(others)} object(s) "
                                      "not delivered by this item")
+                kept.append({"object": where, "code": "kept-in-use"})
                 continue
         try:
             child.delete(res, ref[2] or None, ref[3], dry_run=True)
@@ -1618,7 +1693,7 @@ def _judge(child, refs, item, cluster, sid):
             refused.append(f"{where}: {str(e)[:160]}")
             continue
         todo.append((res, ref, where))
-    return todo, refused
+    return todo, refused, kept
 
 
 def _prune(child, todo, sid):
@@ -1687,7 +1762,7 @@ def cmd_manifest_deploy(args):
         return EXIT_OK
     with ca.session(kube, ns, cluster) as path:
         child = Kube(path)
-        todo, refused = _judge(child, pending, item, cluster, "prune")
+        todo, refused, _kept = _judge(child, pending, item, cluster, "prune")
         if refused:
             step("prune", "error", "the server refuses: " + "; ".join(refused[:4]))
             return EXIT_FAIL
@@ -1707,6 +1782,10 @@ def cmd_manifest_remove(args):
     name = mf.name_of(item)
     crs, cmap = kube.get(mf.K_CRS, ns, name), kube.get("configmaps", ns, name)
     if crs is None and cmap is None:
+        if getattr(args, "dry_run", False):
+            print(json.dumps({"item": item, "cluster": f"{ns}/{cluster}", "absent": True,
+                              "delete": [], "kept": [], "refused": []}))
+            return EXIT_OK
         step("remove", "done", f"{item} is not applied to {ns}/{cluster}")
         return EXIT_OK
     for o in (crs, cmap):
@@ -1719,12 +1798,23 @@ def cmd_manifest_remove(args):
     refs = [mf.ref_of(o) for o in objs]
     refs += [r for r in mf.pending_of(cmap) if r not in refs]
     present = kube.get(cs.K_CLUSTER, ns, cluster) is not None
+    if getattr(args, "dry_run", False) and not (present and refs):
+        print(json.dumps({"item": item, "cluster": f"{ns}/{cluster}", "cluster_present": present,
+                          "delete": [], "kept": [], "refused": []}))
+        return EXIT_OK
     todo = []
     with contextlib.ExitStack() as stack:
         child = None
+        kept = []
         if present and refs:
             child = Kube(stack.enter_context(ca.session(kube, ns, cluster)))
-            todo, refused = _judge(child, refs, item, cluster, "remove")
+            todo, refused, kept = _judge(child, refs, item, cluster, "remove")
+            if getattr(args, "dry_run", False):
+                # 2.7.0 (plan de destruction du Défaire) : jugé par le
+                # serveur, rien n'est écrit
+                print(json.dumps({"item": item, "cluster": f"{ns}/{cluster}", "cluster_present": True,
+                                  "delete": [w for _r, _ref, w in todo], "kept": kept, "refused": refused}))
+                return EXIT_OK
             if refused:
                 step("remove", "error", "the server refuses: " + "; ".join(refused[:4]) + "; nothing deleted")
                 return EXIT_FAIL
@@ -1869,7 +1959,7 @@ def main(argv=None):
             ("check", cmd_check, ("spec", "components", "json", "identity")),
             ("render", cmd_render, ("spec", "secrets", "identity")),
             ("create", cmd_create, ("spec", "components", "json", "dry", "timeout", "identity")),
-            ("delete", cmd_delete, ("name", "timeout")),
+            ("delete", cmd_delete, ("name", "timeout", "dry")),
             ("state", cmd_state, ("name", "json")),
             ("services", cmd_services, ("json",)),
             ("service-check", cmd_service_check, ("sspec",)),
@@ -1877,7 +1967,7 @@ def main(argv=None):
             ("service-remove", cmd_service_remove, ("sname", "timeout")),
             ("manifest-check", cmd_manifest_check, ("mspec",)),
             ("manifest-deploy", cmd_manifest_deploy, ("mspec", "timeout")),
-            ("manifest-remove", cmd_manifest_remove, ("mname",)),
+            ("manifest-remove", cmd_manifest_remove, ("mname", "dry")),
             ("manifest-verify", cmd_manifest_verify, ("mname",)),
             ("manifests", cmd_manifests, ("json",)),
             ("policy-render", cmd_policy_render, ("pspec",)),

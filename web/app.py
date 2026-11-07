@@ -1078,6 +1078,8 @@ ADMIN_ONLY_PREFIXES = (
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
+                       # 2.7.0 : défaire un déroulé et son plan de destruction
+                       "/undo", "/undo/plan",
                        # v1.43.0 : une maintenance déplace ou arrête des VMs.
                        "/maintenance")
 
@@ -28620,24 +28622,41 @@ def api_tf_declaration_delete(decl_id):
     d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
     if d is None:
         return jsonify({"error": "declaration not found"}), 404
+    removed, why = _tf_decl_remove(decl_id)
+    if removed:
+        return jsonify({"deleted": decl_id})
+    if why == "running":
+        return jsonify({"error": "this declaration is running", "code": "running",
+                        "hint": "wait for the current plan, apply or destroy to end"}), 409
+    if isinstance(why, list):
+        return jsonify({"error": "declaration still has deployed resources",
+                        "code": "deployed", "deployed": why}), 409
+    return jsonify({"error": "declaration not found"}), 404
+
+
+def _tf_decl_remove(decl_id):
+    """Supprime une déclaration et son espace, refusé tant que son état
+    porte des ressources (route et Défaire, 2.7.0). (True, None) ou (False,
+    "running" | "not-found" | [adresses déployées])."""
+    d = TF_DECLS.get(decl_id)
+    if d is None:
+        return False, "not-found"
     with TF_DECL_RUNNING_LOCK:
         fd = None if _tf_decl_busy(decl_id) or decl_id in TF_DECL_FDS else _tf_decl_flock(decl_id, "delete")
         if fd is None:
-            return jsonify({"error": "this declaration is running", "code": "running",
-                            "hint": "wait for the current plan, apply or destroy to end"}), 409
+            return False, "running"
     try:
         ws = _tf_decl_ws(d, create=False)
         deployed = _tfst.addresses(ws) if ws.exists() else []
         if deployed:
-            return jsonify({"error": "declaration still has deployed resources",
-                            "code": "deployed", "deployed": deployed}), 409
+            return False, deployed
         TF_DECLS.delete(decl_id)
         if ws.exists():
             import shutil as _shutil
             _shutil.rmtree(ws, ignore_errors=True)
     finally:
         _flock_release(fd)
-    return jsonify({"deleted": decl_id})
+    return True, None
 
 
 @app.route("/api/terraform/<cluster>/apply_declaration", methods=["POST"])
@@ -32537,8 +32556,8 @@ def _deploy_mark_orphans():
     try:
         conn = sqlite3.connect(str(ACTIONS_DB), timeout=10)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT id, action, result FROM actions WHERE action LIKE 'deploy:%' "
-                            "AND status IN ('starting', 'running')").fetchall()
+        rows = conn.execute("SELECT id, action, result FROM actions WHERE (action LIKE 'deploy:%' "
+                            "OR action LIKE 'deploy-undo:%') AND status IN ('starting', 'running')").fetchall()
         conn.close()
     except sqlite3.Error as e:
         log_actions.warning("deploy orphans: %s", e)
@@ -32546,7 +32565,7 @@ def _deploy_mark_orphans():
     marked = []
     now = time.time()
     for row in rows:
-        cluster = row["action"][len(DEPLOY_PREFIX):]
+        cluster = row["action"].partition(":")[2]
         if (_deploy_lock_holder(cluster) or {}).get("run") == row["id"]:
             continue
         try:
@@ -34782,6 +34801,405 @@ def api_deploy_resume(cluster):
         update_differing=result.get("update_differing") is True, role=current_role())
     if status != 202 and store is not None:
         store.delete_tree(_dch.SECRET_CLASS, run_id)
+    return jsonify(body), status
+
+
+# --- 2.7.0 : « Défaire le déploiement » (décision 128) ---------------------------
+
+import deploy_undo as _du  # noqa: E402
+
+DEPLOY_UNDO_PREFIX = "deploy-undo:"
+UNDO_CHART_TIMEOUT, UNDO_MANIFEST_TIMEOUT, UNDO_CLUSTER_TIMEOUT = 900, 300, 2400
+# Ce que le défaire ne sait pas retirer seul, dit avant (plan de destruction)
+UNDO_LIMITS = (
+    {"code": "volumes-claimed", "detail": "a volume still claimed by a VM or a pod is kept until it is released"},
+    {"code": "lb-dhcp", "detail": "load balancers whose address came from DHCP may stay "
+                                  "(harvester/harvester#11767): check the Load balancers view"},
+    {"code": "ccm-kubernetes", "detail": "objects named after the cloud provider name 'kubernetes' of a child "
+                                         "cluster (CAPHV #277) may stay on Harvester"},
+    {"code": "release-namespace", "detail": "the namespace of a chart release is removed only if it is empty "
+                                            "and was created for the chart"},
+)
+
+
+def _action_read(action_id):
+    """{action, status, result} d'une action (mémoire, sinon actions.db), ou
+    None."""
+    if not isinstance(action_id, str) or not _dch.RUN_ID_RE.match(action_id):
+        return None
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(action_id)
+    if run is not None:
+        return {"action": run.action, "status": run.status, "result": dict(run.result or {})}
+    d, _ev = _actions_db_get(action_id)
+    if not d:
+        return None
+    return {"action": d.get("action"), "status": d.get("status"),
+            "result": d.get("result") if isinstance(d.get("result"), dict) else {}}
+
+
+def _undo_chain(cluster, action_id):
+    """(exécution d'origine, résultats de sa chaîne, None) ou (None, None,
+    (corps, statut)). Gardes : un déroulé `deploy:` de ce cluster, fini,
+    pas un essai."""
+    prev, err = _deploy_previous(action_id)
+    if err:
+        return None, None, err
+    if prev["action"] != f"{DEPLOY_PREFIX}{cluster}":
+        return None, None, ({"error": "this run belongs to another cluster", "fields": ["action_id"]}, 400)
+    if prev["status"] in ("starting", "running"):
+        return None, None, ({"error": "this run is still in progress", "code": "deploy-running"}, 409)
+    if prev["dry_run"]:
+        return None, None, ({"error": "a dry run created nothing to undo", "code": "undo-dry-run-target"}, 400)
+
+    def read(i):
+        p, e = _deploy_previous(i)
+        return (p or {}).get("result") if e is None and not (p or {}).get("dry_run") else None
+    try:
+        results = _du.chain(action_id, read)
+    except _du.UndoError as e:
+        return None, None, ({"error": str(e), "code": e.code}, 400)
+    return prev, results, None
+
+
+def _undo_collect(cluster, action_id):
+    """(origine, [Undo], None) ou (None, None, (corps, statut))."""
+    prev, results, err = _undo_chain(cluster, action_id)
+    if err:
+        return None, None, err
+
+    def tf_lookup(decl_id):
+        d = TF_DECLS.get(decl_id)
+        return d if d and d.get("cluster") == cluster else None
+    undos = _du.collect(results, tf_lookup, plan=(prev["result"] or {}).get("plan"), cluster=cluster)
+    return prev, undos, None
+
+
+def _undo_present(kc, cluster, u, services=None):
+    """Vrai si ce que désigne l'élément est encore là ; None si la lecture
+    échoue (jamais pris pour « parti »)."""
+    kind, ref = u["kind"], u["ref"]
+    if kind == "chart":
+        ns, _c, item = ref.split("/")
+        if services is None:
+            services, _rc, err = _deploy_capi_json(kc, "services", ["--json"], timeout=60)
+            if err:
+                return None
+        return any((s.get("namespace"), s.get("name")) == (ns, item) for s in (services or {}).get("services") or [])
+    if kind in ("manifest", "policies"):
+        out, _rc, err = _deploy_capi_json(kc, "manifest-verify", ["--name", ref], timeout=120)
+        return None if err else bool((out or {}).get("present"))
+    if kind == "capi-cluster":
+        out, _rc, err = _deploy_capi_json(kc, "state", ["--name", ref, "--json"], timeout=60)
+        return None if err else bool((out or {}).get("present"))
+    if kind == "registry":
+        return _rg.load(_bm_profiles_state(), ref.split("/", 1)[1]) is not None
+    return TF_DECLS.get(ref) is not None
+
+
+def _undo_details(kc, cluster, u, services):
+    """Ce qui partira pour un élément (lectures seules, suppressions jugées
+    par le serveur pour les objets d'un cluster enfant)."""
+    kind, ref = u["kind"], u["ref"]
+    if kind == "chart":
+        ns, c, item = ref.split("/")
+        s = next((x for x in (services or {}).get("services") or [] if (x.get("namespace"), x.get("name")) == (ns, item)),
+                 None)
+        if s is None:
+            return {"present": False}
+        return {"present": True, "release": item, "release_namespace": s.get("release_namespace"),
+                "chart": s.get("chart"), "version": s.get("version")}
+    if kind in ("manifest", "policies"):
+        out, _rc, err = _deploy_capi_json(kc, "manifest-remove", ["--name", ref, "--dry-run"], timeout=180)
+        if err:
+            return {"error": err}
+        return {"present": not out.get("absent"), "delete": out.get("delete") or [], "kept": out.get("kept") or [],
+                "refused": out.get("refused") or [], "cluster_present": out.get("cluster_present", True)}
+    if kind == "capi-cluster":
+        out, _rc, err = _deploy_capi_json(kc, "delete", ["--name", ref, "--dry-run"], timeout=120)
+        return {"error": err} if err else out
+    if kind == "registry":
+        name = ref.split("/", 1)[1]
+        d = _rg.load(_bm_profiles_state(), name)
+        return {"present": d is not None, "address": (d or {}).get("address"), "volume": f"{name}-data"}
+    d = TF_DECLS.get(ref)
+    if d is None:
+        return {"present": False}
+    ws = _tf_decl_ws(d, create=False)
+    return {"present": True, "name": d["name"], "revision": d.get("revision"),
+            "resources": _tfst.addresses(ws) if ws.exists() else []}
+
+
+def _undo_include(undos, include):
+    """Identifiants choisis (liste) ou None (cochés par défaut) ; un
+    identifiant inconnu est refusé."""
+    if include is None:
+        return None, None
+    if not isinstance(include, list) or not all(isinstance(i, str) for i in include):
+        return None, ({"error": "include: a list of item identifiers", "fields": ["include"]}, 400)
+    known = {u["id"] for u in undos}
+    bad = [i for i in include if i not in known]
+    if bad:
+        return None, ({"error": f"unknown item {bad[0][:80]}", "fields": ["include"]}, 400)
+    return set(include), None
+
+
+def _undo_plan_body(cluster, kc, action_id, include=None):
+    """Plan de destruction : (corps, statut)."""
+    prev, undos, err = _undo_collect(cluster, action_id)
+    if err:
+        return err
+    chosen, err = _undo_include(undos, include)
+    if err:
+        return err
+    steps = {s["id"] for s in _du.plan(undos, chosen)}
+    services, _rc, serr = _deploy_capi_json(kc, "services", ["--json"], timeout=60) if any(
+        u["kind"] == "chart" for u in undos) else ({}, 0, None)
+    items = []
+    for u in sorted(undos, key=lambda x: _du.KINDS_ORDER.index(x["kind"])):
+        det = {"error": serr} if serr and u["kind"] == "chart" else _undo_details(kc, cluster, u, services)
+        items.append(dict(u, selected=u["id"] in steps, details=det))
+    res = prev["result"] or {}
+    return {"undoes": action_id, "plan": res.get("plan"), "cluster": cluster, "items": items,
+            "limits": list(UNDO_LIMITS), "undone_by": res.get("undone_by")}, 200
+
+
+def _deploy_result_patch(action_id, patch):
+    """Ajoute des clés au résultat d'une action (en mémoire et dans
+    actions.db), sans toucher au reste."""
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(action_id)
+    if run is not None:
+        run.result = dict(run.result or {}, **patch)
+        if run.status not in ("starting", "running"):
+            _actions_persist(run)
+        return
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB), timeout=10)
+        row = conn.execute("SELECT result FROM actions WHERE id = ?", (action_id,)).fetchone()
+        if row is not None:
+            conn.execute("UPDATE actions SET result = ? WHERE id = ?",
+                         (json.dumps(dict(_row_result(row[0]), **patch)), action_id))
+            conn.commit()
+        conn.close()
+    except sqlite3.Error as e:
+        log_actions.warning("undo mark %s: %s", action_id, e)
+
+
+def _undo_phases(run, cluster, kc, steps, delete_data):
+    """Phases du défaire (une par phase de deploy_undo.ORDER), branchées sur
+    les gestes existants en actions filles."""
+    by_id = {s["id"]: s for s in steps}
+    state = _bm_profiles_state()
+
+    def wait(child, timeout=None):
+        if timeout:
+            st, _c = _deploy_wait_until(child.id, timeout, run)
+            return "error" if st == "timeout" else st
+        return _deploy_wait_child(child.id)[0]
+
+    def capi(sub, args, label):
+        child, err = _capi_launch(cluster, kc, sub, args, parent=run.id, cluster_user=run.cluster_user, label=label)
+        if err:
+            return None, str(err.get("error") or "refused")[:120]
+        return child, None
+
+    def run_item(ctx, st, item):
+        u = by_id[item.id]
+        kind, ref = u["kind"], u["ref"]
+        data = {"kind": kind, "ref": ref, "actions": []}
+        present = _undo_present(kc, cluster, u)
+        if present is None:
+            return _dch.ItemOutcome("error", "state unreadable", data=data)
+        if not present:
+            return _dch.ItemOutcome("done", "already gone", data=data)
+        if kind == "chart":
+            ns, _c, it = ref.split("/")
+            child, err = capi("service-remove", ["--name", f"{ns}/{it}", "--timeout", str(UNDO_CHART_TIMEOUT)],
+                              f"capi-service-remove:{ns}/{it}")
+            timeout = None
+        elif kind in ("manifest", "policies"):
+            child, err = capi("manifest-remove", ["--name", ref], f"capi-manifest-remove:{ref}")
+            timeout = UNDO_MANIFEST_TIMEOUT
+        elif kind == "capi-cluster":
+            child, err = capi("delete", ["--name", ref, "--timeout", str(UNDO_CLUSTER_TIMEOUT)],
+                              f"capi-cluster-delete:{ref}")
+            timeout = None
+        elif kind == "registry":
+            name = ref.split("/", 1)[1]
+            cmd = _registry_cmd("delete")
+            if cmd is None:
+                return _dch.ItemOutcome("error", f"{REGISTRY_SCRIPT} not deployed", data=data)
+            cmd += [name, "--cluster", cluster, "--kubeconfig", kc] + (["--delete-data"] if name in delete_data else [])
+            with app.app_context():
+                child, e2 = _cli_action(cluster, f"registry-delete:{cluster}/{name}", cmd, "harvester-registry",
+                                        parent=run.id, cluster_user=run.cluster_user,
+                                        setup=lambda c: setattr(c, "required_role", "admin"))
+            err = None if child else "refused"
+            timeout = None
+            data["data_kept"] = name not in delete_data
+        else:
+            return _undo_tf(ctx, ref, data)
+        if err:
+            return _dch.ItemOutcome("error", err, data=data)
+        data["actions"].append(child.id)
+        status = wait(child, timeout)
+        if status == "done" and _undo_present(kc, cluster, u) is False:
+            return _dch.ItemOutcome("done", "removed", data=data)
+        return _dch.ItemOutcome("error", f"removal failed (action {child.id})", data=data)
+
+    def _undo_tf(ctx, decl_id, data):
+        if not _tf_decl_hold(decl_id, run.id):
+            return _dch.ItemOutcome("error", "declaration-busy", data=data)
+        try:
+            aid, _h = _tf_decl_launch(cluster, kc, decl_id, "destroy", user=(run.result or {}).get("by") or "",
+                                      cluster_user=run.cluster_user, holder=run.id, role=run.launch_role,
+                                      parent=run.id)
+            data["actions"].append(aid)
+            status, _c = _deploy_wait_child(aid)
+            if not _tf_decl_wait_idle(decl_id):
+                return _dch.ItemOutcome("error", "declaration-busy", data=data)
+            if status != "done":
+                return _dch.ItemOutcome("error", f"destroy failed (action {aid})", data=data)
+        except TfLaunchError as e:
+            return _dch.ItemOutcome("error", str(e.payload.get("code") or e.payload.get("error") or "refused")[:120],
+                                    data=data)
+        finally:
+            _tf_decl_release(decl_id, run.id)
+        removed, why = _tf_decl_remove(decl_id)
+        return _dch.ItemOutcome("done" if removed else "error",
+                                "destroyed and removed" if removed else f"destroyed, not removed ({why})", data=data)
+
+    def verify_item(ctx, st, prev):
+        u = by_id.get(prev.get("id"))
+        return bool(u) and _undo_present(kc, cluster, u) is False
+    return _du.phases(steps, run_item, verify_item)
+
+
+def _undo_runner(run, cluster, kc, steps, delete_data, previous, orig_id, lock_fd):
+    try:
+        run.status = "running"
+        run.emit({"type": "status", "status": "running", "ts": time.time()})
+        base = dict(run.result or {})
+        ctx = _DeployCtx(run, base)
+        res = None
+        try:
+            res = _dch.run(ctx, _undo_phases(run, cluster, kc, steps, delete_data), previous=previous,
+                           order=_du.ORDER, secrets=_sst.store())
+        except BaseException as e:
+            log.exception("undo %s", run.id)
+            res = dict(run.result or {}, status="error", error_summary=type(e).__name__)
+            if not isinstance(e, Exception):
+                raise
+        finally:
+            final = (res or {}).get("status") or "error"
+            if final == "error" and any(i.get("status") == "done" for p in (res or {}).get("phases") or []
+                                        for i in p.get("items") or []):
+                # une partie est défaite : le reste se reprend (point 214)
+                final = "partial"
+            run.result = dict(base, **{k: v for k, v in (res or {}).items() if k != "status"}, status=final)
+            run.error_summary = (res or {}).get("error_summary") or None
+            run.exit_code = _dch.EXIT_CODES.get(final, 1)
+            run.status = {"done": "done", "cancelled": "cancelled"}.get(final, "error")
+            run.ended_at = time.time()
+            # historique : l'exécution d'origine dit qui l'a défaite (point 214 :
+            # pas de « défaire le défaire », on relance le plan)
+            _deploy_result_patch(orig_id, {"undone_by": run.id, "undone_at": run.ended_at, "undone_status": final})
+            run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
+            run.close()
+    finally:
+        _flock_release(lock_fd)
+
+
+def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_registry, user, cluster_user,
+                role):
+    """Contrôles puis lancement de `deploy-undo:<cluster>`, sous le verrou
+    de cluster des déroulés : (corps, statut)."""
+    if confirm != cluster:
+        return {"error": "type the name of the Harvester cluster to undo", "code": "confirm-name",
+                "fields": ["confirm"]}, 400
+    prev, undos, err = _undo_collect(cluster, action_id)
+    if err:
+        return err
+    chosen, err = _undo_include(undos, include)
+    if err:
+        return err
+    steps = _du.plan(undos, chosen)
+    if not steps:
+        return {"error": "nothing selected to undo", "code": "undo-empty"}, 400
+    regs = {s["ref"].split("/", 1)[1] for s in steps if s["kind"] == "registry"}
+    if not isinstance(delete_data, list) or not all(isinstance(n, str) for n in delete_data):
+        return {"error": "delete_data: a list of registry names", "fields": ["delete_data"]}, 400
+    confirm_registry = confirm_registry if isinstance(confirm_registry, dict) else {}
+    for name in delete_data:
+        if name not in regs:
+            return {"error": f"{name[:40]} is not a selected registry", "fields": ["delete_data"]}, 400
+        if confirm_registry.get(name) != name:
+            # point 210 : les données d'un registre partent sur un second nom tapé
+            return {"error": f"type the registry name {name} to delete its data", "code": "confirm-name",
+                    "fields": ["confirm_registry"]}, 400
+    res = prev["result"] or {}
+    previous = None
+    last = _action_read(res.get("undone_by"))
+    if last and last["action"] == f"{DEPLOY_UNDO_PREFIX}{cluster}" and last["result"].get("undoes") == action_id:
+        # reprise d'un défaire : ce qui est parti est revérifié et sauté
+        previous = last["result"]
+    with _DEPLOY_LAUNCH_LOCK:
+        busy = _deploy_busy(cluster)
+        if busy:
+            return {"error": "a deployment is running on this cluster", "code": "deploy-running",
+                    "running": busy.id}, 409
+        run_id = uuid.uuid4().hex[:12]
+        lock_fd, holder = _deploy_cluster_lock(cluster, run_id, f"undo:{res.get('plan') or ''}")
+        if lock_fd is None:
+            return {"error": "a deployment or an undo is running on this cluster", "code": "deploy-running",
+                    "running": holder.get("run") or ""}, 409
+        try:
+            run = ActionRun(run_id, f"{DEPLOY_UNDO_PREFIX}{cluster}", cluster, [])
+            run.cluster_user = cluster_user
+            run.required_role = "admin"
+            run.launch_role = role
+            run.result = {"undoes": action_id, "plan": res.get("plan"), "cluster": cluster, "by": user or "",
+                          "selected": [s["id"] for s in steps], "delete_data": sorted(delete_data), "phases": []}
+            with ACTIONS_LOCK:
+                ACTIONS[run_id] = run
+            READ_SHARE.invalidate("_activity")
+            threading.Thread(target=_undo_runner, args=(run, cluster, kc, steps, set(delete_data), previous,
+                                                        action_id, lock_fd),
+                             daemon=True, name=f"undo-{run_id}").start()
+        except BaseException:
+            _flock_release(lock_fd)
+            raise
+    return {"action_id": run_id, "undoes": action_id, "selected": [s["id"] for s in steps]}, 202
+
+
+@app.route("/api/deploy/<cluster>/undo/plan", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_deploy_undo_plan(cluster):
+    """Plan de destruction d'un déroulé et de sa chaîne de reprises :
+    lectures seules (suppressions jugées par le serveur)."""
+    kc, err = _deploy_route_cluster(cluster)
+    if err:
+        return err
+    data = _deploy_body()
+    body, status = _undo_plan_body(cluster, kc, data.get("action_id"), data.get("include"))
+    return jsonify(body), status
+
+
+@app.route("/api/deploy/<cluster>/undo", methods=["POST"])
+@requires_auth
+@_rate_limit("6/minute")
+def api_deploy_undo(cluster):
+    """Défait un déroulé (administrateur) : action `deploy-undo:<cluster>`,
+    nom du cluster Harvester tapé ; reprenable en le relançant."""
+    kc, err = _deploy_route_cluster(cluster)
+    if err:
+        return err
+    data = _deploy_body()
+    body, status = _undo_start(cluster, kc, data.get("action_id"), data.get("include"), data.get("confirm"),
+                               data.get("delete_data") or [], data.get("confirm_registry"), current_user() or "",
+                               (current_cluster_identity() or {}).get("user"), current_role())
     return jsonify(body), status
 
 

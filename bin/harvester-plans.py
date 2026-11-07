@@ -10,6 +10,8 @@
                   [--update-declarations]
   harvester-plans [--state-dir D] [--json] resume ACTION_ID [--secrets-file s.yaml | --secrets-stdin]
                   [--confirm-system HOST=NAME]...
+  harvester-plans [--state-dir D] [--json] undo ACTION_ID [--dry-run] [--include registry,unproven]
+                  [--confirm CLUSTER] [--delete-registry-data NAME]...
   harvester-plans [--state-dir D] [--json] install PLAN --profile P --nodes nodes.csv --cluster-name C --vip V
                   [--iso I] [--vars vars.yaml] [--concurrency N] [--confirm-system HOST=NAME]...
                   (--secrets-file s.yaml | --secrets-stdin)
@@ -25,6 +27,16 @@ manifestes, politiques ; `check` dit ceux qui ne passeraient pas), et pour
 d'installations d'un profil d'abord (même garde que `harvester-baremetal
 profile apply` pour une machine qui porte déjà un système). L'action est
 enregistrée dans l'historique du répertoire d'état.
+
+`undo` (2.7.0, décision 128) défait ce qu'une exécution `deploy:` et sa
+chaîne de reprises ont créé, dans l'ordre inverse : artefacts, clusters
+enfants, registre d'amorçage, contenu Terraform ; jamais l'installation de
+Harvester ni la pile Cluster API. `--dry-run` rend le plan de destruction
+sans rien écrire. Par défaut, le registre d'amorçage et les déclarations
+dont la création n'est pas prouvée (ou modifiées depuis) restent ;
+`--include registry,unproven` les ajoute. Les données d'un registre ne
+partent que par `--delete-registry-data NOM`. `--confirm` porte le nom du
+cluster Harvester ; relancer `undo` sur la même exécution reprend.
 
 Les secrets (`resume` et `install` seulement : un plan appliqué à un cluster
 existant n'en demande aucun) viennent d'un fichier privé (0600) ou de
@@ -346,6 +358,44 @@ def cmd_install(args, state):
     return _launched(app, body, status)
 
 
+UNDO_CATEGORIES = ("registry", "unproven")
+
+
+def cmd_undo(args, state):
+    app = _console(state)
+    prev, err = app._deploy_previous(args.action_id)
+    if err:
+        raise Refused(err[0]["error"], err[0].get("code") or "refused")
+    cluster = str(prev["action"])[len(app.DEPLOY_PREFIX):]
+    kc = _cluster_kc(app, cluster)
+    cats = [c for c in (args.include or "").split(",") if c]
+    bad = [c for c in cats if c not in UNDO_CATEGORIES]
+    if bad:
+        raise Refused(f"--include: {bad[0]} is not one of {', '.join(UNDO_CATEGORIES)}", "usage")
+    include = None
+    if cats:
+        _p, undos, uerr = app._undo_collect(cluster, args.action_id)
+        if uerr:
+            raise Refused(uerr[0]["error"], uerr[0].get("code") or "refused")
+        include = [u["id"] for u in undos if u["default"]
+                   or ("registry" in cats and u["kind"] == "registry")
+                   or ("unproven" in cats and u["kind"] == "tf-declaration")]
+    if args.dry_run:
+        body, status = app._undo_plan_body(cluster, kc, args.action_id, include)
+        if status != 200:
+            raise Refused(body.get("error") or "refused", body.get("code") or "refused")
+        for it in body["items"]:
+            mark = "x" if it["selected"] else " "
+            print(f"[{mark}] {it['kind']} {it['ref']}" + (f" ({it['note']})" if it.get("note") else ""),
+                  file=sys.stderr)
+        _out(body)
+        return EXIT_DONE
+    data = args.delete_registry_data or []
+    body, status = app._undo_start(cluster, kc, args.action_id, include, args.confirm, data, {n: n for n in data},
+                                   getpass.getuser(), None, None)
+    return _launched(app, body, status)
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="harvester-plans", allow_abbrev=False,
                                 description="Deployment plans of harvester-ops.")
@@ -381,6 +431,14 @@ def build_parser():
     sp = sub.add_parser("resume", allow_abbrev=False)
     sp.add_argument("action_id")
     secrets_args(sp)
+    sp = sub.add_parser("undo", allow_abbrev=False)
+    sp.add_argument("action_id")
+    sp.add_argument("--dry-run", action="store_true", help="show the destruction plan, write nothing")
+    sp.add_argument("--include", help="also undo: registry (bootstrap registry posed by the plan), "
+                                      "unproven (declarations whose creation is not proven or that changed)")
+    sp.add_argument("--confirm", help="name of the Harvester cluster (required to undo)")
+    sp.add_argument("--delete-registry-data", action="append", metavar="NAME",
+                    help="also delete the data volume of this bootstrap registry")
     sp = sub.add_parser("install", allow_abbrev=False)
     sp.add_argument("plan")
     sp.add_argument("--profile", required=True)
@@ -396,7 +454,7 @@ def build_parser():
 
 COMMANDS = {"plan": cmd_store, "template": cmd_store, "capi-template": cmd_store,
             "check": cmd_check, "apply": cmd_apply,
-            "resume": cmd_resume, "install": cmd_install}
+            "resume": cmd_resume, "install": cmd_install, "undo": cmd_undo}
 
 
 def main(argv=None):

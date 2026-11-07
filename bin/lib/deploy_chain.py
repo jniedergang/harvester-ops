@@ -235,8 +235,9 @@ def _run_items(ctx, ph, state, previous, progress=None):
     return PhaseOutcome(status, items=entries, message=msg)
 
 
-def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=None):
-    """Déroule les phases ; rend le résultat (voir l'en-tête du module)."""
+def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=None, order=ORDER):
+    """Déroule les phases ; rend le résultat (voir l'en-tête du module).
+    `order` (2.7.0) : ordre des phases d'une autre chaîne (le Défaire)."""
     if not isinstance(getattr(ctx, "run_id", None), str) or not RUN_ID_RE.match(ctx.run_id):
         # avant tout secret : l'effacement final ne pourrait pas le désigner
         raise ValueError("run_id must be 12 hexadecimal characters")
@@ -246,7 +247,7 @@ def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=Non
     results = {}
     stop = None                                   # statut qui arrête la chaîne
     try:
-        for pid in ORDER:
+        for pid in order:
             ph = by_id.get(pid)
             if ph is None:
                 continue
