@@ -418,6 +418,13 @@ templates and plan entries take the same list, with `{{variables}}`.
   two labelled with the registry name (they tell which clusters use a
   registry). All are labelled to be removed with the cluster. **Only the
   read account reaches the nodes**; the write account never does.
+- **The read password ends up in the cloud-init of the VMs.** CAPRKE2
+  inlines `registries.yaml`, read password included, into the bootstrap
+  Secret of each Machine, and CAPHV copies it into the cloud-init Secret
+  of the VM in its namespace on Harvester (which may be `default`).
+  Anyone who can read Secrets there, or see the user data of a VM in
+  Harvester, can read the read account. `privateRegistriesConfig` does the
+  same; only the read account travels this way.
 
 **Fallback to the Internet.** containerd tries the mirrors, then the origin
 registry. 2.6.0 **never cuts this fallback by default**, bootstrap registry

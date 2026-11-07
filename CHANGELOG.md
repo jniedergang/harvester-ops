@@ -279,7 +279,16 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - Back to 2.5.0: these directories are ignored; child clusters created
   with registries keep their files on the nodes; a bootstrap registry
   keeps running on the Harvester cluster and is no longer shown (delete it
-  from 2.6.0 before going back if it is not wanted).
+  from 2.6.0 before going back if it is not wanted). 2.5.0 lists as
+  **invalid** a plan saved with an enabled Registry phase or with
+  `registries` on a cluster entry ("coming in 2.6+: set enabled: false", "unknown
+  key"), and a cluster template with `spec.registries`: no crash, but they
+  cannot be launched. Before going back, disable the Registry phase and
+  remove the `registries` keys.
+- The read password of a registry ends up in the cloud-init Secret of
+  each child VM on Harvester (CAPRKE2 inlines `registries.yaml` into the
+  bootstrap Secret, CAPHV copies it), as with `privateRegistriesConfig`:
+  whoever can see the user data of these VMs can read the read account.
 
 ### Verified for real
 - **harvlab2** (nested on node2, Harvester v1.9.0, 32 GiB, Longhorn disk

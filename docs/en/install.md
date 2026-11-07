@@ -386,6 +386,17 @@ staged signed archive is the only way back. Two limits: below 2.0.0, read the
 console cannot run under Docker, so on a Docker host the agent puts the
 current version back.
 
+**Back from 2.6.0 to 2.5.0.** 2.5.0 does not know the registries. It lists
+as **invalid** a plan saved with an enabled Registry phase or with
+`registries` on a cluster entry ("coming in 2.6+: set enabled: false", "unknown
+key"), and a cluster template with `spec.registries`. Nothing crashes, but
+such plans and templates cannot be launched until fixed. Before going
+back, disable the Registry phase and remove the `registries` keys (or keep
+a copy of these plans to put back after a new upgrade). The directories
+`artefacts.d`, `artefacts` and `registries.d` are ignored by 2.5.0; a
+bootstrap registry keeps running on its cluster, no longer shown (delete
+it from 2.6.0 first if it is not wanted).
+
 **Trust.** The agent installs only an archive signed by a key of
 `/opt/harvester-ops/update-signers` (shipped with the installed version), or
 of `/etc/harvester-ops/update-signers` when you write one (it then wins: put

@@ -398,6 +398,19 @@ avant 2.0.0, lire d'abord la note 2.0.0 « Rolling back to 1.101.x » du
 CHANGELOG ; avant 2.0.2, la console ne tourne pas sous Docker, donc sur un
 hôte Docker l'agent remet la version en cours.
 
+**Revenir de la 2.6.0 à la 2.5.0.** La 2.5.0 ne connaît pas les registres.
+Elle liste comme **invalides** un plan enregistré avec une phase Registre
+active ou des `registries` sur une entrée de cluster (« coming in 2.6+: set
+enabled: false », « unknown key »), et un modèle de cluster avec
+`spec.registries`. Rien ne plante, mais ces plans et modèles ne se lancent
+plus tant qu'ils ne sont pas corrigés. Avant de revenir, désactivez la
+phase Registre et retirez les clés `registries` (ou gardez une copie de
+ces plans pour les remettre après une nouvelle mise à jour). Les
+répertoires `artefacts.d`, `artefacts` et `registries.d` sont ignorés par
+la 2.5.0 ; un registre d'amorçage continue de tourner sur son cluster,
+sans plus être montré (le supprimer d'abord depuis la 2.6.0 s'il n'est pas
+voulu).
+
 **Confiance.** L'agent n'installe qu'une archive signée par une clé de
 `/opt/harvester-ops/update-signers` (livré avec la version installée), ou de
 `/etc/harvester-ops/update-signers` si vous en écrivez un (il prévaut alors :

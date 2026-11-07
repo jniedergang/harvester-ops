@@ -431,6 +431,14 @@ même liste, avec des `{{variables}}`.
   derniers étiquetés au nom du registre (ils disent quels clusters
   l'emploient). Tous sont étiquetés pour partir avec le cluster. **Seul le
   compte de lecture va sur les nœuds** ; le compte d'écriture jamais.
+- **Le mot de passe de lecture finit dans le cloud-init des VMs.** CAPRKE2
+  recopie `registries.yaml`, mot de passe de lecture compris, dans le
+  Secret d'amorçage de chaque Machine, et CAPHV le recopie dans le Secret
+  cloud-init de la VM, dans son namespace sur Harvester (qui peut être
+  `default`). Quiconque lit les Secrets de ce namespace, ou voit les
+  données utilisateur d'une VM dans Harvester, peut lire le compte de
+  lecture. `privateRegistriesConfig` fait de même ; seul le compte de
+  lecture voyage ainsi.
 
 **Repli vers Internet.** containerd essaie les miroirs, puis le registre
 d'origine. La 2.6.0 **ne coupe jamais ce repli par défaut**, registre
