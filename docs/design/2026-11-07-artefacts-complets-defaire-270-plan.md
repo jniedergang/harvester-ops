@@ -932,3 +932,7 @@ Rancher restreinte qui émet un jeton (essai par usurpation seulement).
      branchement de `containerd-registry` sur les registres déclarés
      passent en 2.8.0 ou plus tard ; la 2.7.0 reste sur la conception
      (artefacts, Défaire, reliquats).
+
+## Décisions (07/11/2026)
+
+Les recommandations des points 201 à 217 sont retenues. Pour R10, harv4 est utilisé à la demande (règle du propriétaire du produit du 07/11/2026 : les ressources de l'infra s'allument quand on en a besoin et s'éteignent après).
