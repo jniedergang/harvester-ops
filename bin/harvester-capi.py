@@ -11,6 +11,12 @@
                              [--identity restricted|console] [--origin plan=P,template=M,run=ID]
     harvester-capi delete    --cluster C --name ns/nom [--timeout S]
     harvester-capi state     --cluster C --name ns/nom [--json]
+    harvester-capi manifest-check  --cluster C --spec FICHIER
+    harvester-capi manifest-deploy --cluster C --spec FICHIER [--timeout S]
+    harvester-capi manifest-remove --cluster C --name ns/cluster/élément
+    harvester-capi manifests       --cluster C [--json]
+    harvester-capi policy-render   --spec FICHIER
+    harvester-capi token     --cluster C --name ns/cluster --account ns/compte [--seconds N] [--by P]
 
 Le cluster Harvester sert lui-même de cluster de gestion : Harvester 1.9
 embarque Rancher Turtles et son cœur Cluster API. `install` y déclare les
@@ -33,6 +39,14 @@ le kubeconfig de la console, pour un diagnostic.
 par `create --origin`, état (capi_cluster.cluster_state, compteurs du
 statut v1beta2). Code 1 s'il est absent, avec `{"present": false}`.
 
+2.7.0 : les éléments `manifest` et `policy` d'un paquet, et le socle de
+politiques et d'accès de la console (bin/lib/child_policies.py), sont
+livrés aux clusters enfants par ClusterResourceSet (bin/lib/capi_manifests.py),
+retrait suivi par la console ; `token` émet un jeton court (TokenRequest)
+d'un compte d'automatisation, écrit sur la sortie standard seulement. Le
+cluster enfant est atteint par son Secret `<cluster>-kubeconfig`, lu avec
+l'identité passée par `--kubeconfig` (bin/lib/child_access.py).
+
 Progression sur stderr au format STEP_EVENT|<étape>|<statut>|<message>, lue
 par la console. Codes de sortie : 0 succès, 1 échec, 2 refus du contrôle
 préalable, 3 annulation.
@@ -45,25 +59,29 @@ Voir docs/design/2026-09-25-creation-cluster-capi.md.
 
 import argparse
 import base64
+import contextlib
 import json
 import os
 import signal
 import subprocess
 import sys
 import tarfile
-import tempfile
 import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 import capi_cluster as cc  # noqa: E402
+import capi_manifests as mf  # noqa: E402
+import child_access as ca  # noqa: E402
+import child_policies as cp  # noqa: E402
 import capi_identity as ci  # noqa: E402
 import capi_stack as cs  # noqa: E402
 import capi_services as sv  # noqa: E402
 import longhorn_room as lr  # noqa: E402
 import node_images  # noqa: E402
 import registries as rg  # noqa: E402
+import work_dir  # noqa: E402
 from kube import Kube, KubeError, cluster_config  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_BLOCKED, EXIT_CANCELLED = 0, 1, 2, 3
@@ -107,13 +125,12 @@ def components_from(path):
     """Un paquet extrait, ou son .tar.gz : seuls `turtles.json`, les
     composants et les images de ces fournisseurs en sont extraits (le paquet
     porte aussi les images de l'installation d'avant Turtles), dans
-    `HARVESTER_OPS_WORK_DIR` plutôt que /tmp (en mémoire dans le service)."""
+    l'espace de travail (bin/lib/work_dir.py, jamais /tmp)."""
     if not path:
         return None
     p = Path(path)
     if p.is_file():
-        work = Path(tempfile.mkdtemp(prefix="hops-capi-", dir=os.environ.get("HARVESTER_OPS_WORK_DIR")))
-        p = _extract_turtles(p, work)
+        p = _extract_turtles(p, work_dir.mkdtemp("hops-capi-"))
     if not (p / "turtles.json").is_file():
         raise SystemExit("this bundle has no turtles.json (built before harvester-ops 1.48)")
     return cs.load_components(p)
@@ -780,14 +797,9 @@ TOKEN_WAIT = 30
 
 
 def _work_file(content):
-    """Fichier 0600 de l'espace de travail (HARVESTER_OPS_WORK_DIR) ; le
+    """Fichier 0600 de l'espace de travail (bin/lib/work_dir.py) ; le
     chemin n'est jamais écrit sur stdout, stderr ni dans une étape."""
-    fd, path = tempfile.mkstemp(prefix="hops-caphv-", suffix=".kubeconfig",
-                                dir=os.environ.get("HARVESTER_OPS_WORK_DIR"))
-    with os.fdopen(fd, "w") as f:
-        os.fchmod(f.fileno(), 0o600)
-        f.write(content)
-    return path
+    return work_dir.private_file(content, prefix="hops-caphv-", suffix=".kubeconfig")
 
 
 def _ensure_namespace(kube, ns):
@@ -1378,6 +1390,324 @@ def cmd_service_remove(args):
     return EXIT_OK
 
 
+# ---------------------------------------------------------------------------
+# 2.7.0 : manifestes, politiques et jetons des clusters enfants
+# ---------------------------------------------------------------------------
+MANIFEST_KEYS = {"cluster", "package", "version", "item", "origin", "policies", "by"}
+POLICIES_PACKAGE, POLICIES_VERSION = "harvester-ops", "builtin"
+BY_MAX = 128
+
+
+def _child_name(text, parts=2):
+    """`ns/cluster` (ou `ns/cluster/élément`) contrôlé ; ValueError sinon."""
+    bits = str(text or "").split("/")
+    if len(bits) != parts or not all(cc.K8S_NAME_RE.match(b) for b in bits):
+        raise ValueError("--name expects " + "/".join(("namespace", "cluster", "item")[:parts]))
+    return bits
+
+
+def manifest_spec_from(path):
+    """Demande de `manifest-*` : `cluster` <ns>/<c>, puis soit `package`,
+    `version`, `item`, soit `policies` (socle et accès) ; `origin` et `by`
+    facultatifs. ValueError qui nomme le champ."""
+    raw = json.load(sys.stdin) if path == "-" else json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        raise ValueError("the request is not an object")
+    for k in sorted(set(raw) - MANIFEST_KEYS):
+        raise ValueError(f"unknown key: {k}")
+    ns, cluster = _child_name(raw.get("cluster"))
+    out = {"namespace": ns, "cluster": cluster}
+    if "policies" in raw:
+        if any(k in raw for k in ("package", "version", "item")):
+            raise ValueError("policies: give either policies or package, version and item")
+        out.update(policies=cp.normalize(raw["policies"]), item=cp.ITEM,
+                   package=POLICIES_PACKAGE, version=POLICIES_VERSION)
+    else:
+        for k in ("package", "version", "item"):
+            if not isinstance(raw.get(k), str) or not raw[k]:
+                raise ValueError(f"{k}: required")
+        out.update(package=raw["package"], version=raw["version"], item=raw["item"])
+    origin = raw.get("origin") or {}
+    if not isinstance(origin, dict):
+        raise ValueError("origin: an object")
+    out["origin"] = cc.parse_origin(",".join(f"{k}={v}" for k, v in origin.items()))
+    by = raw.get("by", "")
+    if not isinstance(by, str) or len(by) > BY_MAX or "\n" in by:
+        raise ValueError(f"by: one line, {BY_MAX} characters at most")
+    out["by"] = by
+    return out
+
+
+def manifest_objects(spec):
+    """(objets, constats) de l'élément demandé : rendus pour le socle, lus
+    dans le paquet du répertoire d'état sinon."""
+    import artefacts as art
+    item = spec["item"]
+    if not mf.item_name_ok(item):
+        return [], [mf.finding("artefact-name-too-long", item=item, max=42)]
+    if "policies" in spec:
+        objs = cp.objects(spec["policies"])
+        return objs, mf.check(objs, spec["cluster"], item)
+    ref = f"{spec['package']}-{spec['version']}"
+    try:
+        pkg = art.load_package(_state(), spec["package"], spec["version"])
+    except art.ArtefactError:
+        return [], [mf.finding("artefact-package-missing", package=ref)]
+    it = next((i for i in pkg["index"].get("items") or [] if i.get("name") == item), None)
+    if it is None or it.get("kind") not in ("manifest", "policy") or not it.get("files"):
+        return [], [mf.finding("artefact-item-not-manifest", package=ref, item=item)]
+    root = Path(pkg["path"]).resolve()
+    files = {}
+    for rel in it["files"]:
+        p = (root / rel).resolve()
+        if root not in p.parents or not p.is_file():
+            return [], [mf.finding("artefact-file-missing", package=ref, file=rel)]
+        files[rel] = p.read_text()
+    try:
+        objs = mf.parse(files)
+    except ValueError as e:
+        return [], [mf.finding("manifest-unreadable", package=ref, message=str(e)[:200])]
+    return objs, mf.check(objs, spec["cluster"], item)
+
+
+def _manifest_owner(kube, spec):
+    """Constats sur le cluster de gestion : Cluster présent, élément du
+    même nom posé pour un autre cluster ou un autre paquet."""
+    ns, cluster, item = spec["namespace"], spec["cluster"], spec["item"]
+    found = []
+    if kube.get(cs.K_CLUSTER, ns, cluster) is None:
+        found.append(mf.finding("manifest-cluster-missing", cluster=f"{ns}/{cluster}"))
+    crs = kube.get(mf.K_CRS, ns, mf.name_of(item))
+    if crs is not None:
+        lab = (crs.get("metadata") or {}).get("labels") or {}
+        if lab.get(mf.L_CLUSTER) != cluster or lab.get(mf.L_PACKAGE) != spec["package"]:
+            found.append(mf.finding("artefact-taken", item=item, cluster=lab.get(mf.L_CLUSTER) or "",
+                                    package=lab.get(mf.L_PACKAGE) or ""))
+    return found
+
+
+def _team_namespaces_taken(child, spec):
+    """Point 207 : un namespace d'équipe déjà présent dans le cluster enfant
+    sans les étiquettes de la console bloque."""
+    out = []
+    for ns in cp.team_namespaces(spec["policies"]):
+        obj = child.get("Namespace", None, ns)
+        if obj is not None and not mf.is_ours(obj, spec["item"], spec["cluster"]):
+            out.append(mf.finding("team-namespace-taken", namespace=ns))
+    return out
+
+
+def cmd_manifest_check(args):
+    kube, _, _ = kube_from(args)
+    spec = manifest_spec_from(args.spec)
+    objs, found = manifest_objects(spec)
+    found += _manifest_owner(kube, spec)
+    blocked = bool(mf.blocking(found))
+    print(json.dumps({"blocked": blocked, "findings": found, "item": spec["item"], "objects": len(objs)}))
+    return EXIT_BLOCKED if blocked else EXIT_OK
+
+
+def _judge(child, refs, item, cluster, sid):
+    """Passe 1 du retrait, sans écriture : chaque objet lu, puis sa
+    suppression jugée par le serveur. Rend (à supprimer, refus) ; un objet
+    introuvable compte comme retiré, un objet sans étiquette est gardé."""
+    todo, refused = [], []
+    for ref in mf.delete_order(refs):
+        res, where = mf.resource_of(ref), f"{ref[1]} {ref[2] + '/' if ref[2] else ''}{ref[3]}"
+        obj = child.get(res, ref[2] or None, ref[3])
+        if obj is None:
+            continue
+        if not mf.is_ours(obj, item, cluster):
+            step(sid, "running", f"kept-relabelled: {where} kept, modified by hand (labels of the console removed)")
+            continue
+        if ref[1] == "Namespace":
+            foreign = [o for o in child.list(mf.FOREIGN_KINDS, ref[3])
+                       if not (o.get("metadata") or {}).get("ownerReferences") and not mf.is_ours(o, item, cluster)]
+            if foreign:
+                step(sid, "running", f"kept-in-use: {where} kept, it holds {len(foreign)} workload(s) or volume(s) "
+                                     "not delivered by this item")
+                continue
+        try:
+            child.delete(res, ref[2] or None, ref[3], dry_run=True)
+        except KubeError as e:
+            refused.append(f"{where}: {str(e)[:160]}")
+            continue
+        todo.append((res, ref, where))
+    return todo, refused
+
+
+def _prune(child, todo, sid):
+    for res, ref, where in todo:
+        try:
+            child.delete(res, ref[2] or None, ref[3])
+        except KubeError as e:
+            if not _not_found(e):
+                raise
+        step(sid, "running", f"{where} deleted")
+    return len(todo)
+
+
+def _wait_binding(kube, ns, cluster, cm_doc, timeout, now=time.time, sleep=time.sleep):
+    """Attend que le binding du cluster porte l'empreinte du ConfigMap."""
+    deadline, last = now() + timeout, None
+    name = cm_doc["metadata"]["name"]
+    while True:
+        crs = kube.get(mf.K_CRS, ns, name)
+        binding = kube.get(mf.K_CRSB, ns, cluster)
+        st = mf.state(crs, [binding] if binding else [], cm_doc)
+        if st["applied"]:
+            return st
+        if st["message"] != last:
+            step("reconcile", "running", st["message"])
+            last = st["message"]
+        if now() > deadline:
+            raise TimeoutError(st["message"])
+        sleep(5)
+
+
+def cmd_manifest_deploy(args):
+    """Déclare ConfigMap et CRS, sélectionne le cluster, attend le binding à
+    l'empreinte du nouveau contenu, puis retire du cluster enfant les objets
+    sortis du contenu qui portent encore les étiquettes de la console."""
+    kube, _, _ = kube_from(args)
+    spec = manifest_spec_from(args.spec)
+    ns, cluster, item = spec["namespace"], spec["cluster"], spec["item"]
+    objs, found = manifest_objects(spec)
+    found += _manifest_owner(kube, spec)
+    if not mf.blocking(found) and "policies" in spec and cp.team_namespaces(spec["policies"]):
+        with ca.session(kube, ns, cluster) as path:
+            found += _team_namespaces_taken(Kube(path), spec)
+    if mf.blocking(found):
+        for f in mf.blocking(found):
+            step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
+        return EXIT_BLOCKED
+    step("check", "done", f"{item} ({spec['package']} {spec['version']}): {len(objs)} object(s) for {ns}/{cluster}")
+    old = mf.objects_of(kube.get("configmaps", ns, mf.name_of(item)))
+    docs = mf.docs(ns, cluster, item, spec["package"], spec["version"], objs, spec["origin"], spec["by"])
+    kube.apply(docs)
+    kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"labels": {mf.label_of(item): "on"}}})
+    step("apply", "done", f"{mf.name_of(item)} declared, cluster {cluster} selected")
+    try:
+        _wait_binding(kube, ns, cluster, docs[0], args.timeout)
+    except TimeoutError as e:
+        step("reconcile", "error", f"not applied after {args.timeout} s: {e}")
+        return EXIT_FAIL
+    step("reconcile", "done", f"{mf.name_of(item)} applied to {cluster}")
+    refs = mf.removed(old, objs)
+    if not refs:
+        step("prune", "done", "no object left the content")
+        return EXIT_OK
+    with ca.session(kube, ns, cluster) as path:
+        child = Kube(path)
+        todo, refused = _judge(child, refs, item, cluster, "prune")
+        if refused:
+            step("prune", "error", "the server refuses: " + "; ".join(refused[:4]))
+            return EXIT_FAIL
+        n = _prune(child, todo, "prune")
+    step("prune", "done", f"{n} object(s) that left the content deleted from {cluster}")
+    return EXIT_OK
+
+
+def cmd_manifest_remove(args):
+    """CRS d'abord (plus de réapplication), étiquette du Cluster ôtée, objets
+    du ConfigMap supprimés dans le cluster enfant (seulement s'ils portent
+    les étiquettes), puis ConfigMap. Les suppressions sont jugées par le
+    serveur avant toute écriture."""
+    kube, _, _ = kube_from(args)
+    ns, cluster, item = _child_name(args.name, 3)
+    name = mf.name_of(item)
+    crs, cmap = kube.get(mf.K_CRS, ns, name), kube.get("configmaps", ns, name)
+    if crs is None and cmap is None:
+        step("remove", "done", f"{item} is not applied to {ns}/{cluster}")
+        return EXIT_OK
+    for o in (crs, cmap):
+        lab = ((o or {}).get("metadata") or {}).get("labels") or {}
+        if o is not None and (lab.get(mf.L_CLUSTER) != cluster or lab.get(mf.L_ITEM) != item):
+            step("remove", "error", f"artefact-taken: {ns}/{name} belongs to {lab.get(mf.L_CLUSTER) or 'something else'}")
+            return EXIT_BLOCKED
+    objs = mf.objects_of(cmap)
+    present = kube.get(cs.K_CLUSTER, ns, cluster) is not None
+    todo = []
+    with contextlib.ExitStack() as stack:
+        child = None
+        if present and objs:
+            child = Kube(stack.enter_context(ca.session(kube, ns, cluster)))
+            todo, refused = _judge(child, [mf.ref_of(o) for o in objs], item, cluster, "remove")
+            if refused:
+                step("remove", "error", "the server refuses: " + "; ".join(refused[:4]) + "; nothing deleted")
+                return EXIT_FAIL
+        if crs is not None:
+            # orphan : Cluster API pose sur le ConfigMap une référence de
+            # propriétaire vers le CRS ; sans cela, le ConfigMap (la liste
+            # des objets à retirer) partirait avec lui (vu sur harvlab2)
+            kube.delete(mf.K_CRS, ns, name, cascade="orphan")
+            step("remove", "running", f"ClusterResourceSet {ns}/{name} deleted")
+        if present:
+            kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"labels": {mf.label_of(item): None}}})
+            n = _prune(child, todo, "remove") if child else 0
+            step("remove", "running", f"{n} object(s) deleted from {cluster}")
+        else:
+            step("remove", "running", f"cluster {ns}/{cluster} is gone: its objects left with it")
+    if cmap is not None:
+        try:
+            kube.delete("configmaps", ns, name)
+        except KubeError as e:
+            if not _not_found(e):
+                raise
+    step("remove", "done", f"{item} removed from {ns}/{cluster}")
+    return EXIT_OK
+
+
+def cmd_manifests(args):
+    """État de chaque élément appliqué (CRS de la console, binding, empreinte)."""
+    kube, _, _ = kube_from(args)
+    out = []
+    crss = kube.list(mf.K_CRS, selector=mf.L_ITEM)
+    bindings = {}
+    for b in kube.list(mf.K_CRSB):
+        bindings.setdefault(b["metadata"].get("namespace"), []).append(b)
+    for crs in crss:
+        md = crs["metadata"]
+        ns, lab, ann = md.get("namespace"), md.get("labels") or {}, md.get("annotations") or {}
+        cmap = kube.get("configmaps", ns, md["name"])
+        out.append({"namespace": ns, "cluster": lab.get(mf.L_CLUSTER), "item": lab.get(mf.L_ITEM),
+                    "package": lab.get(mf.L_PACKAGE), "version": ann.get(mf.A_VERSION),
+                    "applied_by": ann.get(mf.A_BY) or "", "origin": cc.origin_of(crs),
+                    "objects": len(mf.objects_of(cmap)),
+                    "state": mf.state(crs, bindings.get(ns, []), cmap)})
+    print(json.dumps(out) if args.json else json.dumps(out, indent=1))
+    return EXIT_OK
+
+
+def cmd_policy_render(args):
+    raw = json.load(sys.stdin) if args.spec == "-" else json.loads(Path(args.spec).read_text())
+    print(json.dumps(cp.render(cp.normalize(raw))))
+    return EXIT_OK
+
+
+def cmd_token(args):
+    """Jeton `TokenRequest` d'un compte d'automatisation : sur la sortie
+    standard seulement ({token, expires_at}), jamais en étape."""
+    seconds = ca.check_seconds(args.seconds)
+    ns, cluster = _child_name(args.name)
+    tns, account = _child_name(args.account)
+    kube, _, _ = kube_from(args)
+    with ca.session(kube, ns, cluster) as path:
+        child = Kube(path)
+        sa = child.get("serviceaccounts", tns, account)
+        if sa is None:
+            step("token", "error", f"account-not-found: {tns}/{account} on {cluster}")
+            return EXIT_BLOCKED
+        if not mf.is_ours(sa, cp.ITEM, cluster):
+            step("token", "error", f"account-not-managed: {tns}/{account} was not declared by the console")
+            return EXIT_BLOCKED
+        token, expires = ca.token(child, tns, account, seconds)
+    sys.stdout.write(json.dumps({"token": token, "expires_at": expires}) + "\n")
+    sys.stdout.flush()
+    step("token", "done", f"token issued for {tns}/{account} on {cluster}, {seconds} s, by {args.by or '?'}")
+    return EXIT_OK
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="harvester-capi", allow_abbrev=False,
                                  description=__doc__.split("\n\n")[0])
@@ -1404,7 +1734,13 @@ def main(argv=None):
             ("services", cmd_services, ("json",)),
             ("service-check", cmd_service_check, ("sspec",)),
             ("service-deploy", cmd_service_deploy, ("sspec", "timeout")),
-            ("service-remove", cmd_service_remove, ("sname", "timeout"))):
+            ("service-remove", cmd_service_remove, ("sname", "timeout")),
+            ("manifest-check", cmd_manifest_check, ("mspec",)),
+            ("manifest-deploy", cmd_manifest_deploy, ("mspec", "timeout")),
+            ("manifest-remove", cmd_manifest_remove, ("mname",)),
+            ("manifests", cmd_manifests, ("json",)),
+            ("policy-render", cmd_policy_render, ("pspec",)),
+            ("token", cmd_token, ("token",))):
         sp = sub.add_parser(name, allow_abbrev=False)
         common(sp)
         sp.set_defaults(fn=fn)
@@ -1426,13 +1762,26 @@ def main(argv=None):
             sp.add_argument("--timeout", type=int, default=300)
         if "timeout" in extra:
             sp.add_argument("--timeout", type=int,
-                            default=900 if name.startswith("service") else 2400)
+                            default=900 if name.startswith(("service", "manifest")) else 2400)
             if name == "create":
                 sp.add_argument("--no-wait", action="store_true")
         if "name" in extra:
             sp.add_argument("--name", required=True, help="namespace/name of the cluster")
         if "sname" in extra:
             sp.add_argument("--name", required=True, help="namespace/name of the service")
+        if "mspec" in extra:
+            sp.add_argument("--spec", required=True, help="JSON request (cluster, package, version, item "
+                                                          "or policies), '-' for stdin")
+        if "mname" in extra:
+            sp.add_argument("--name", required=True, help="namespace/cluster/item")
+        if "pspec" in extra:
+            sp.add_argument("--spec", required=True, help="JSON policies request, '-' for stdin")
+        if "token" in extra:
+            sp.add_argument("--name", required=True, help="namespace/cluster of the child cluster")
+            sp.add_argument("--account", required=True, help="namespace/name of the automation account")
+            sp.add_argument("--seconds", type=int, default=ca.TOKEN_DEFAULT,
+                            help=f"{ca.TOKEN_MIN} to {ca.TOKEN_MAX}, default {ca.TOKEN_DEFAULT}")
+            sp.add_argument("--by", default="", help="person who asks (written in the step)")
         if "sspec" in extra:
             sp.add_argument("--spec", required=True, help="JSON service request, '-' for stdin")
         if name == "check":
@@ -1452,6 +1801,9 @@ def main(argv=None):
         return args.fn(args)
     except ValueError as e:
         step(args.cmd, "error", str(e)[:300])
+        return EXIT_BLOCKED
+    except ca.ChildAccessError as e:
+        step(args.cmd, "error", f"{e.code}: {str(e)[:300]}")
         return EXIT_BLOCKED
     except KubeError as e:
         step(args.cmd, "error", str(e)[:300])

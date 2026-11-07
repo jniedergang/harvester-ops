@@ -936,3 +936,129 @@ Rancher restreinte qui émet un jeton (essai par usurpation seulement).
 ## Décisions (07/11/2026)
 
 Les recommandations des points 201 à 217 sont retenues. Pour R10, harv4 est utilisé à la demande (règle du propriétaire du produit du 07/11/2026 : les ressources de l'infra s'allument quand on en a besoin et s'éteignent après).
+
+## Essais préalables (tâche 1)
+
+Faits le 07/11/2026 sur harvlab2 (Harvester v1.9.0, Turtles et Cluster API
+v1.13.3, CAAPH v0.6.4, CAPHV v0.10.1, RKE2 v0.25.2), node2 allumé pour
+l'occasion. Cluster enfant `rke2-banc/rke2-banc` 1+1 (openSUSE Leap 15.6,
+disque de 10 Gio, réseau `default/lab-net`) créé par `harvester-capi
+create` du worktree (pool `plan-test-pool` 172.16.2.200-205, plage déjà
+réservée dans NetBox ; `storage-minimal-available-percentage` abaissé de
+25 à 15 pendant les essais puis remis) : disponible en 610 s, supprimé en
+238 s. Les outils de la tâche 2 et 3 ont été exercés sur ce cluster en plus
+des essais bruts. Critère de passage : 1, 3 et 5 réussis.
+
+1. **ClusterResourceSet en Reconcile** (réussi).
+   - Application en 1 à 3 s après l'étiquette posée sur le `Cluster` (ou
+     après un ConfigMap modifié).
+   - Le `ClusterResourceSetBinding` (servi en `v1beta2`, nom du cluster)
+     liste par CRS la ressource et son empreinte : `{clusterResourceSetName,
+     resources: [{kind: ConfigMap, name, applied, hash, lastAppliedTime}]}`.
+     L'empreinte est `sha256:` + sha256 des valeurs du ConfigMap, clés
+     triées : recalculée à l'identique par `capi_manifests.content_hash`
+     (vérifié sur `art-essai` et `kube-vip-addon`).
+   - Les objets sont créés puis mis à jour par le client de Cluster API
+     (gestionnaire de champs `manager`, opération `Update`), pas par une
+     application côté serveur. Les objets en JSON, un document par objet
+     séparé par `---`, sont acceptés.
+   - ConfigMap modifié : les objets restants sont réécrits (une valeur
+     changée à la main est écrasée), **un objet retiré du ConfigMap reste
+     dans le cluster enfant** : le retrait suivi de la console est
+     nécessaire, y compris à la mise à jour.
+   - Objet modifié ou supprimé à la main sans changement du ConfigMap :
+     rien n'est réécrit ni recréé (relevé à 90 s ; un `manifest-deploy` du
+     même contenu ne recrée pas non plus un objet supprimé, l'empreinte
+     étant la même). Une empreinte égale ne prouve donc pas que tous les
+     objets sont présents : `verify_item` (tâche 4) doit le savoir.
+   - Étiquette retirée du `Cluster` : l'entrée du binding reste, les objets
+     restent. CRS supprimé : l'entrée du binding part, les objets restent.
+   - **Cluster API pose sur le ConfigMap une référence de propriétaire vers
+     le CRS** dès qu'il l'applique : supprimer le CRS supprimait aussi le
+     ConfigMap (la liste des objets à retirer). `manifest-remove` supprime
+     donc le CRS en `--cascade=orphan` (vérifié : le ConfigMap reste, sans
+     propriétaire) et lit le ConfigMap avant toute écriture.
+   - `apiVersion: addons.cluster.x-k8s.io/v1beta1` est acceptée avec un
+     avertissement de dépréciation (`use v1beta2`) ; gardée comme
+     `kube_vip_docs` (point à reprendre quand la v1beta1 sera retirée).
+2. **CAAPH au retrait** (réussi). `service-remove` d'un `podinfo` : release
+   désinstallée en 7 s (plus aucun objet ni Secret de release), **le
+   namespace `podinfo` créé par `createNamespace` reste**, vide. Le Défaire
+   (tâche 5) le nomme dans le plan de destruction.
+3. **Réseau du cluster enfant** (réussi). CNI = Calico posé par le chart
+   `rke2-calico` de RKE2 (opérateur Tigera, namespaces `tigera-operator` et
+   `calico-system`), configuré par le CRS `crs-calico-chart-config` de
+   `caphv-generate`. Avec le socle (`manifest-deploy` du socle, équipe
+   `equipe-a` refus par défaut, `equipe-b` sans refus) : `wget` dans le
+   même namespace passe, vers `equipe-b` et depuis `equipe-b` vers
+   `equipe-a` échoue (délai), le DNS répond grâce à `hops-allow-dns`. Un
+   conteneur sans ressources reçoit les défauts du LimitRange (100m/128Mi
+   demandés, 500m/512Mi limites). Contrôleur d'ingress : DaemonSet
+   `rke2-ingress-nginx-controller` du namespace `kube-system`, pods
+   étiquetés `app.kubernetes.io/name: rke2-ingress-nginx` et
+   `app.kubernetes.io/component: controller` (ports d'hôte, pas de réseau
+   d'hôte) : constantes de `child_policies`. Une Ingress de `equipe-a` est
+   jointe depuis node1 sur les deux nœuds ; sans `hops-allow-ingress`, plus
+   de réponse.
+4. **TokenRequest** (réussi). L'API refuse moins de 600 s (« may not
+   specify a duration less than 10 minutes ») et n'a **aucun maximum** sur
+   ce RKE2 (172 800 s et un an accordés tels quels) : la borne de 86 400 s
+   n'existe que dans la console. Jeton de 600 s : liste les comptes du
+   namespace d'équipe, refusé dans `kube-system` (Forbidden) ; expiration
+   annoncée 13:21:13, encore accepté à 13:21:55, refusé (Unauthorized) dès
+   13:22:19 : l'API tolère environ une minute de décalage d'horloge, à dire
+   dans la documentation des jetons (« valable N s, plus une minute au
+   plus »). Le jeton n'est apparu dans aucune étape ni sur stderr.
+5. **Accès au cluster enfant** (réussi). Le Secret `rke2-banc-kubeconfig`
+   (type Opaque, clé `value`) est refusé à un opérateur usurpé sans droit
+   (`--as spike-op --as-group spike-ops`, Forbidden), lu dès qu'une Role
+   lui donne `get` sur ce seul Secret ; la `SelfSubjectAccessReview`
+   répond pareil. **Piège** : `kubectl create -f` d'une
+   SelfSubjectAccessReview avec une identité qui ne peut pas lister les
+   CRD échoue côté client (validation) : passer `--validate=false`. Le
+   kubeconfig vise l'adresse du répartiteur du cluster enfant, prise en
+   DHCP sur le réseau des VMs (172.16.11.123, puis 172.16.11.87), joignable
+   depuis node1 ; `kubectl delete --dry-run=server` y fonctionne, et les
+   ressources se nomment `Sorte.version.groupe` (`ConfigMap` seul pour le
+   groupe principal : `ConfigMap.v1` est refusé).
+6. **CAPIProvider supprimé** (réussi, puis pile réinstallée). Aucun webhook
+   de Turtles ne refuse la suppression d'un `CAPIProvider` (essai à blanc
+   côté serveur accepté pour CAAPH, CAPHV, RKE2 et même `core/cluster-api`)
+   alors qu'un cluster enfant existe : **la console doit refuser
+   elle-même** (tâche 7). Retrait réel de CAAPH (`caaph-system/helm`),
+   cluster enfant présent, aucun HelmChartProxy : objet parti
+   immédiatement ; en 45 s, déploiement, webhooks, Secrets et ConfigMap de
+   configuration retirés ; **gardés** : le namespace `caaph-system`, les CRD
+   `helmchartproxies` et `helmreleaseproxies`, le ConfigMap du paquet
+   `v0.6.4` (étiquette `harvester-ops.io/managed`). Le cluster enfant n'a
+   rien vu. Réinstallation par `harvester-capi install --components`
+   (ce que lance le bouton Installer, sans `--push-images` : images déjà
+   sur le nœud) : pile prête en 30 s, aux versions du paquet.
+7. **HarvesterCluster orphelin** (m7). Créé à la main sans `Cluster` :
+   CAPHV ne pose **aucun finaliseur** (« ClusterOwner not yet set, waiting
+   for CAPI ») et il se supprime à l'instant. Créé sous le nom d'un cluster
+   à venir puis `harvester-capi create` du même nom : **la topologie
+   l'adopte** (référence de propriétaire vers le nouveau `Cluster`, spec
+   réécrite) et le cluster devient disponible normalement ; `check` ne le
+   voit pas. L'échec décrit en 2.5.0 vient donc d'un reste qui porte encore
+   une référence vers l'ancien `Cluster` (suppression bloquée, finaliseur)
+   : le constat `harvester-cluster-leftover` de la tâche 7 vise ce cas
+   (HarvesterCluster sans `Cluster` vivant, ou propriétaire d'un autre
+   uid), un orphelin sans propriétaire n'étant qu'un avertissement.
+
+Écarts au plan retenus pendant la tâche 2 (à valider par le propriétaire
+du produit) :
+
+- `capi_manifests.check(objs, cluster, item=None)` au lieu de
+  `policy=False` : la liste des sortes est la même pour `manifest` et
+  `policy` (Contraintes), le paramètre n'aurait rien changé (zéro
+  redondance) ; `item` donné, la taille est mesurée sur le contenu rangé,
+  étiquettes comprises.
+- Un `Namespace` livré n'est supprimé que s'il ne porte aucune charge ni
+  aucun volume d'ailleurs (objet sans propriétaire et sans les étiquettes
+  de l'élément) : étape `kept-in-use`. Sans cela, retirer le socle
+  supprimait le travail des équipes dans leurs namespaces (vu sur le banc :
+  pods de test gardés).
+- `child_access.session` rend le chemin du kubeconfig, comme le plan ; le
+  jeton est obtenu par `kubectl create --raw .../token` (réponse JSON avec
+  l'expiration), jamais par un argument de commande.

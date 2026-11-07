@@ -106,10 +106,14 @@ class Kube:
         """Journal d'une pod (les `tail` dernières lignes)."""
         return self.run("logs", name, *self._ns(ns), f"--tail={int(tail)}")
 
-    def delete(self, kind, ns, name, cascade=None):
+    def delete(self, kind, ns, name, cascade=None, dry_run=False):
+        """`dry_run` : suppression jugée par le serveur (webhooks compris),
+        rien n'est supprimé (`--dry-run=server`)."""
         args = ["delete", kind, name, *self._ns(ns), "--wait=false"]
         if cascade:
             args.append(f"--cascade={cascade}")
+        if dry_run:
+            args.append("--dry-run=server")
         self.run(*args)
 
     def raw_stream(self, path):
