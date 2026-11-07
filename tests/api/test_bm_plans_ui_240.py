@@ -44,7 +44,8 @@ FINDING_CODES = ["plan-invalid", "phase-not-available", "template-missing", "var
                  "package-untrusted-strict", "registry-var-missing", "registry-exists", "registry-later",
                  "publish-later", "cluster-registry-later", "registry-address-answers", "registry-address-in-pool",
                  "registry-address-vip", "registry-room-short", "registry-not-attached", "registry-unreachable",
-                 "publish-tag-differs", "cluster-registry-not-attached", "cluster-registry-no-fallback-system"]
+                 "publish-tag-differs", "cluster-registry-not-attached", "cluster-registry-no-fallback-system",
+                 "registry-vm-network-unchecked", "cluster-registry-vm-network-unchecked"]  # revue finale I-4
 
 
 # --- onglet, historique, page d'hôte (source) ----------------------------------

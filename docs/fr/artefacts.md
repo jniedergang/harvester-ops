@@ -236,9 +236,22 @@ registre depuis la console, avec chaque compte, sans rien écrire.
 Constats : `registry-unknown`, `registry-not-attached`,
 `registry-unreachable`, `registry-ca-invalid`, `registry-auth-refused`,
 `registry-no-usage` (bloquants) ; `registry-pull-is-push`,
-`registry-insecure` (avertissements). `registry-insecure` vient de
-`insecure_skip_verify: true` dans un fichier de déclaration : les nœuds ne
-vérifient alors pas le certificat.
+`registry-insecure`, `registry-vm-network-unchecked` (avertissements).
+`registry-insecure` vient de `insecure_skip_verify: true` dans un fichier
+de déclaration : les nœuds ne vérifient alors pas le certificat.
+
+**La joignabilité du registre n'est vérifiée que depuis le cluster
+Harvester, pas depuis le réseau des VMs.** La console et le cluster
+Harvester sondent l'adresse ; aucun contrôle ne part du réseau des VMs des
+clusters enfants. Chaque vérification le dit par un avertissement :
+`registry-vm-network-unchecked` (Vérifier, fenêtre du registre
+d'amorçage et constats des plans) et `cluster-registry-vm-network-unchecked`
+(contrôle de création d'un cluster enfant, un par registre qui sert des
+images). Un réseau de VMs qui ne route pas vers le registre (VLAN sans
+route, pare-feu) n'est pas détecté : les nœuds se replient alors sur
+Internet, ou échouent à tirer quand `no_fallback` est posé. Assurez-vous
+que les VMs enfants atteignent l'adresse avant de compter dessus. Une
+sonde par un pod attaché au réseau des VMs arrive en 2.6.1.
 
 **Oublier** retire les Secrets du registre (les deux comptes et la CA) de
 chaque cluster Harvester rattaché, avec votre identité, puis la
@@ -512,8 +525,12 @@ employé...).
 - Brancher le réglage `containerd-registry` des nœuds Harvester sur les
   registres déclarés : le réglage reste un geste manuel (Réglages).
 - Le ramasse-miettes et l'agrandissement d'un registre d'amorçage.
-- Sonder le registre depuis le réseau des VMs : la console le vérifie
-  depuis elle-même seulement.
+- Sonder le registre depuis le réseau des VMs : les vérifications
+  avertissent que la joignabilité n'est vue que depuis le cluster
+  Harvester (voir Vérifier plus haut). La sonde par un pod arrive en
+  2.6.1 ; son image (`bci-busybox`) est déjà dans le paquet du registre de
+  la 2.6.0, importée sur les nœuds avec l'image du registre, et ne sert
+  encore à rien d'autre.
 - Restreindre le port d'écriture 5443 à l'adresse de la console. Essayé
   sur le banc : un second service LoadBalancer à la même adresse, avec le
   seul port d'écriture et `loadBalancerSourceRanges` à l'adresse de la

@@ -125,6 +125,8 @@ const BMPlans = (() => {
     'publish-tag-differs': () => tr('dpw.f.publishTagDiffers'),
     'cluster-registry-not-attached': () => tr('dpw.f.clusterRegistryNotAttached'),
     'cluster-registry-no-fallback-system': () => tr('dpw.f.clusterRegistryNoFallbackSystem'),
+    'registry-vm-network-unchecked': () => tr('dpw.f.registryVmNetworkUnchecked'),
+    'cluster-registry-vm-network-unchecked': () => tr('dpw.f.clusterRegistryVmNetworkUnchecked'),
   };
   const LEVELS = {
     blocking: () => tr('dpw.lvl.blocking'), warning: () => tr('dpw.lvl.warning'), info: () => tr('dpw.lvl.info'),

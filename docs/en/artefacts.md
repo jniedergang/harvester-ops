@@ -228,9 +228,22 @@ they arrive on standard input, never in an argument.
 registry from the console, with each account, without writing. Findings:
 `registry-unknown`, `registry-not-attached`, `registry-unreachable`,
 `registry-ca-invalid`, `registry-auth-refused`, `registry-no-usage`
-(blocking); `registry-pull-is-push`, `registry-insecure` (warnings).
-`registry-insecure` comes from `insecure_skip_verify: true` in a
-declaration file: the nodes then do not check the certificate.
+(blocking); `registry-pull-is-push`, `registry-insecure`,
+`registry-vm-network-unchecked` (warnings). `registry-insecure` comes from
+`insecure_skip_verify: true` in a declaration file: the nodes then do not
+check the certificate.
+
+**Registry reachability is checked from the Harvester cluster only, not
+from the VM network.** The console and the Harvester cluster probe the
+address; no check runs from the network of the child VMs. Every check says
+so with a warning: `registry-vm-network-unchecked` (Check, bootstrap
+registry window and plan checks) and `cluster-registry-vm-network-unchecked`
+(creation check of a child cluster, one per registry that serves images).
+A VM network that cannot route to the registry (VLAN without a route,
+firewall) is not detected: the nodes then fall back to the Internet, or
+fail to pull when `no_fallback` is set. Make sure the child VMs reach the
+address before you rely on it. A probe pod attached to the VM network
+comes in 2.6.1.
 
 **Forget** removes the Secrets of the registry (both accounts and the CA)
 from every attached Harvester cluster, with your identity, then the
@@ -496,8 +509,11 @@ success, 1 failure, 2 refused (a blocking finding, a registry in use...).
 - Pointing the `containerd-registry` setting of the Harvester nodes at the
   declared registries: the setting stays a manual gesture (Settings).
 - Garbage collection and resizing of a bootstrap registry.
-- Probing the registry from the VM network: the console checks it from
-  itself only.
+- Probing the registry from the VM network: the checks warn that
+  reachability is checked from the Harvester cluster only (see Check
+  above). The probe pod comes in 2.6.1; its image (`bci-busybox`) is
+  already in the registry bundle of 2.6.0, imported on the nodes with the
+  registry image, and used by nothing else yet.
 - Restricting the write port 5443 to the address of the console. Tried
   on the bench: a second LoadBalancer Service on the same address, with
   the write port only and `loadBalancerSourceRanges` set to the console

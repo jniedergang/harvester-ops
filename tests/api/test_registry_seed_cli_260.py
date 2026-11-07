@@ -134,7 +134,8 @@ def test_a_failed_deploy_still_removes_its_work_files(world, capsys):
 
 def test_a_blocking_finding_writes_nothing(world, capsys):
     code, out, err = deploy(capsys, "--size-gib", "2000")
-    assert code == 2 and [f["code"] for f in json.loads(out)["findings"]] == ["registry-room-short"]
+    assert code == 2 and [f["code"] for f in json.loads(out)["findings"] if f["level"] == "block"] == \
+        ["registry-room-short"]
     assert world["kube"].applied == [] and world["calls"] == [] and world["imports"] == []
 
 

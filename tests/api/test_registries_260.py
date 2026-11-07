@@ -277,8 +277,11 @@ def test_each_registry_finding(d, facts, codes):
     dd = {"ok": decl("a"), "no-usage": decl("a", usage=[]), "insecure": decl("a", insecure_skip_verify=True),
           None: None}[d]
     got = rg.check(dd, facts, "a")
-    assert [f["code"] for f in got] == codes
-    levels = {"registry-pull-is-push": "warn", "registry-insecure": "warn"}
+    assert [f["code"] for f in got if f["code"] != rg.VM_NETWORK_WARNING] == codes
+    # revue finale I-4 : toute sonde faite le dit, vue de la console seulement
+    probed = dd is not None and facts.get("attached") is not False
+    assert [f["code"] for f in got if f["code"] == rg.VM_NETWORK_WARNING] == ([rg.VM_NETWORK_WARNING] if probed else [])
+    levels = {"registry-pull-is-push": "warn", "registry-insecure": "warn", rg.VM_NETWORK_WARNING: "warn"}
     assert all(f["level"] == levels.get(f["code"], "block") for f in got)
 
 

@@ -67,6 +67,7 @@ const CapiCreate = (() => {
     'cluster-registry-no-images': (v) => tr('capi.new.fd.cluster-registry-no-images', v),
     'cluster-registry-mirror-unknown': (v) => tr('capi.new.fd.cluster-registry-mirror-unknown', v),
     'cluster-registry-no-fallback-system': (v) => tr('capi.new.fd.cluster-registry-no-fallback-system', v),
+    'cluster-registry-vm-network-unchecked': (v) => tr('capi.new.fd.cluster-registry-vm-network-unchecked', v),
   };
   const LEVEL_CLASS = { block: 'sev-critical', warn: 'sev-watch', ok: 'sev-info' };
   const LEVEL_RANK = { block: 0, warn: 1, ok: 2 };
@@ -113,7 +114,7 @@ const CapiCreate = (() => {
     'storage-class-missing': 'storage', 'cidr-overlap': 'kubernetes', 'cni-tuning-ignored': 'integrations',
     'cluster-registry-unknown': 'registries', 'cluster-registry-not-attached': 'registries',
     'cluster-registry-no-images': 'registries', 'cluster-registry-mirror-unknown': 'registries',
-    'cluster-registry-no-fallback-system': 'registries',
+    'cluster-registry-no-fallback-system': 'registries', 'cluster-registry-vm-network-unchecked': 'registries',
   };
   // Point 198 : registres d'origine des images système de RKE2. Couper le
   // repli vers Internet pour eux n'est proposé que si un registre qui les

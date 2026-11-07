@@ -275,3 +275,19 @@ def test_the_leftovers_of_a_failed_deploy_are_listed_and_deleted(context, flask_
     page.locator(".reg-modal [data-reg-go]").click()
     expect(page.locator(".reg-modal")).to_have_count(0)
     assert calls["left"] == [("DELETE", {})]
+
+
+def test_check_says_reachability_is_seen_from_the_harvester_cluster_only(context, flask_server):
+    """Revue finale I-4 (repli du point 192) : le verdict, puis
+    l'avertissement du réseau des VMs."""
+    calls = {}
+    page, _ = open_registries(context, flask_server, calls)
+    page.route(re.compile(r".*/api/registries/amorcage/check/harv-fake$"), lambda r, q: fulfill(r, {
+        "findings": [{"code": "registry-vm-network-unchecked", "level": "warn",
+                      "facts": {"registry": "amorcage", "endpoint": "172.16.2.76"}}], "blocked": False}))
+    page.locator('.reg-row[data-reg="amorcage"]').click()
+    page.locator("#registries-detail [data-reg-check]").click()
+    box = page.locator('#registries-detail [data-x="check"]')
+    expect(box).to_contain_text("Reachable, CA valid, accounts accepted.")
+    expect(box.locator('[data-code="registry-vm-network-unchecked"]')).to_contain_text(
+        "Reachability of 172.16.2.76 is checked from the Harvester cluster only, not from the VM network")

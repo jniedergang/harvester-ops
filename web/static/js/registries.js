@@ -50,6 +50,7 @@ const Registries = (() => {
     'publish-tag-differs': (v) => tr('reg.fd.publish-tag-differs', '{reference} already exists with another content: nothing is overwritten.', v),
     'package-untrusted-strict': (v) => tr('reg.fd.package-untrusted-strict', 'Strict mode refuses {package} ({state}).', v),
     'publish-item-unknown': (v) => tr('reg.fd.publish-item-unknown', 'Unknown item(s): {items}.', v),
+    'registry-vm-network-unchecked': (v) => tr('reg.fd.registry-vm-network-unchecked', 'Reachability of {endpoint} is checked from the Harvester cluster only, not from the VM network: make sure the child VMs can reach it.', v),
   };
   const LEVEL_CLASS = { block: 'sev-critical', warn: 'sev-watch', ok: 'sev-info' };
   const findingText = (f) => {
@@ -229,7 +230,11 @@ const Registries = (() => {
     if (!box || !selected) return;
     box.innerHTML = `<p class="form-hint">${esc(tr('reg.checking', 'Checking…'))}</p>`;
     const r = await json('POST', `/api/registries/${enc(selected)}/check/${enc(cluster())}`);
-    box.innerHTML = r.ok ? (findingsHtml(r.d.findings) || `<div class="sto-finding sev-info"><div class="sto-finding-title">${esc(tr('reg.allGood', 'Reachable, CA valid, accounts accepted.'))}</div></div>`)
+    // revue finale I-4 : l'avertissement du réseau des VMs suit le verdict
+    const VM = 'registry-vm-network-unchecked';
+    const fs = r.ok ? (r.d.findings || []) : [];
+    box.innerHTML = r.ok ? ((findingsHtml(fs.filter(f => f.code !== VM)) || `<div class="sto-finding sev-info"><div class="sto-finding-title">${esc(tr('reg.allGood', 'Reachable, CA valid, accounts accepted.'))}</div></div>`)
+      + findingsHtml(fs.filter(f => f.code === VM)))
       : `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(r.d.error || `HTTP ${r.status}`)}</div></div>`;
   }
 

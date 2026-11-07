@@ -250,9 +250,20 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   (defaults unchanged for the update); the member rules of the archive are
   shared with the artefacts.
 - `scripts/registry-bundle.json` pins the registry and bci-busybox images
-  by digest; `package.sh` builds `bundles/registry` with `pack`, which
+  by digest (bci-busybox for the probe of 2.6.1); `package.sh` builds `bundles/registry` with `pack`, which
   checks every manifest and layer against these digests (no cosign check
   at build time).
+
+### Known limits
+- **Registry reachability is checked from the Harvester cluster only, not
+  from the VM network.** Every check says so with a warning
+  (`registry-vm-network-unchecked` on Check, the bootstrap registry window
+  and the plan checks; `cluster-registry-vm-network-unchecked` on the
+  creation check of a child cluster, one per registry that serves images).
+  A VM network that cannot route to the registry is not detected: the
+  nodes fall back to the Internet, or fail when `no_fallback` is set. The
+  probe pod attached to the VM network comes in 2.6.1; its image,
+  `bci-busybox`, is already in the registry bundle and unused in 2.6.0.
 
 ### Upgrade and rollback
 - New state, all additive: `<state>/artefacts.d`, `<state>/artefacts`

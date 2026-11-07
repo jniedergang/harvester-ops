@@ -219,6 +219,9 @@ def check(spec, facts):
             out.append(cc.finding("registry-address-vip", "block", address=addr))
         if facts.get("address_answers"):
             out.append(cc.finding("registry-address-answers", "block", address=addr))
+        # revue finale I-4 : l'adresse est vue de la console et du cluster
+        # Harvester, jamais du réseau des VMs (sonde par un pod en 2.6.1)
+        out.append(cc.finding(rg.VM_NETWORK_WARNING, "warn", registry=spec.get("name"), endpoint=addr))
     if facts.get("name_taken"):
         out.append(cc.finding("registry-name-taken", "block", registry=spec.get("name")))
     if not facts.get("bundle"):

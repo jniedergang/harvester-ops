@@ -1197,6 +1197,12 @@ est publié.
      prouve ; sinon, avertissement « vérifié depuis le cluster Harvester
      seulement » et contrôle rejoué depuis le premier nœud du cluster
      enfant, avant les workers.
+     *Écart livré (décision du 07/11/2026, revue finale I-4)* : la 2.6.0
+     livre l'avertissement seul (`registry-vm-network-unchecked`,
+     `cluster-registry-vm-network-unchecked`) dans chaque vérification et
+     dans la doc ; la sonde par un pod du réseau des VMs, prouvée par la
+     tâche 1, arrive en 2.6.1. `bci-busybox` reste dans le paquet du
+     registre : la recette de la sonde s'en sert (`udhcpc`, `wget`).
 193. **Taille et suppression du registre d'amorçage.** Recommandation : 20
      Gio par défaut, place vérifiée sous les deux contraintes de Longhorn ;
      pas de nettoyage automatique en 2.6.0 ; suppression refusée tant qu'un

@@ -119,7 +119,14 @@ def test_registries_never_reach_the_generator():
 ])
 def test_child_registry_findings(entries, decls, attached, ready, codes):
     got = rg.check_child(entries, decls, "harvlab2", attached, ready)
-    assert [(f["code"], f["level"]) for f in got] == codes
+    assert [(f["code"], f["level"]) for f in got if f["code"] != rg.CHILD_VM_NETWORK_WARNING] == codes
+    # revue finale I-4 : un avertissement par registre connu qui sert des
+    # images, la joignabilité n'étant vue que du cluster Harvester
+    vm = [f for f in got if f["code"] == rg.CHILD_VM_NETWORK_WARNING]
+    want = [e if isinstance(e, str) else e["registry"] for e in entries]
+    want = [n for n in want if n in decls and "images" in decls[n]["usage"]]
+    assert [(f["facts"]["registry"], f["level"]) for f in vm] == [(n, "warn") for n in want]
+    assert all(f["facts"]["endpoint"] == decls[f["facts"]["registry"]]["endpoint"] for f in vm)
 
 
 def test_system_images_are_found_in_a_published_package(tmp_path):
@@ -283,7 +290,8 @@ def test_create_stops_before_any_write_when_a_registry_is_missing(cli, state, ob
 def test_check_adds_the_registry_findings(cli, state):
     kube = Kube()                                 # compte de lecture absent sur ce cluster
     got = cli.registry_findings(kube, demand(registries=["amorcage", "absent"]), "harvlab2")
-    assert [f["code"] for f in got] == ["cluster-registry-not-attached", "cluster-registry-unknown"]
+    assert [f["code"] for f in got] == ["cluster-registry-not-attached", "cluster-registry-unknown",
+                                        rg.CHILD_VM_NETWORK_WARNING]
     assert cli.registry_findings(kube, demand(), "harvlab2") == []
 
 

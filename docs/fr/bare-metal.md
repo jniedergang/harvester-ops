@@ -899,12 +899,20 @@ registre existe déjà. Leurs constats apparaissent avec leurs propres codes
   publication est vérifiée une fois qu'il est là), `cluster-registry-later`
   (un cluster enfant emploie un registre de la phase Registre : revérifié
   au début de la phase Clusters).
+- Avertissement : `registry-vm-network-unchecked` et
+  `cluster-registry-vm-network-unchecked` (la joignabilité n'est vérifiée
+  que depuis le cluster Harvester, pas depuis le réseau des VMs ; voir
+  [artefacts.md](artefacts.md)).
 
 **Reprise d'un registre.** Un registre d'amorçage posé par un plan porte
 son origine (l'étiquette `harvester-ops.io/plan`, l'annotation
 `harvester-ops.io/plan-run` sur ses objets). Une nouvelle exécution du même
 plan le reprend, s'il répond à la même adresse. Un registre de même nom
-sans cette origine bloque.
+sans cette origine bloque. Un déploiement de ce plan qui a échoué avant
+que le registre soit prêt laisse des objets sans déclaration : ils portent
+aussi l'origine, si bien que les constats (rejoués avec l'origine du plan)
+ne les comptent ni comme un nom pris ni comme une adresse qui répond, et
+la reprise redéploie par-dessus.
 
 **Suivre une exécution.** Étape `phase-registry`, puis une sous-étape par
 élément : `reg-<registre>` et `pub-<paquet>-<version>-<registre>`. Les

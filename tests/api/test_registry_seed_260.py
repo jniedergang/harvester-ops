@@ -119,8 +119,12 @@ GOOD = {"pools": [{"name": "capi", "ranges": [{"start": "172.16.2.200", "end": "
 ])
 def test_each_bootstrap_finding(spec_over, facts_over, codes):
     got = rs.check(dict(SPEC, **spec_over), dict(GOOD, **facts_over))
-    assert [f["code"] for f in got] == codes
-    assert all(f["level"] == "block" for f in got)
+    assert [f["code"] for f in got if f["level"] == "block"] == codes
+    # revue finale I-4 : seul avertissement, la joignabilité vue de la
+    # console et du cluster Harvester seulement (adresse valide)
+    warns = [(f["code"], f["facts"]["endpoint"]) for f in got if f["level"] != "block"]
+    valid = codes != ["registry-address-invalid"]
+    assert warns == ([("registry-vm-network-unchecked", dict(SPEC, **spec_over)["address"])] if valid else [])
 
 
 class Recorder:

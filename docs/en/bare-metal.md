@@ -854,11 +854,19 @@ Their findings appear with their own codes (`registry-address-answers`,
   checked once it is there), `cluster-registry-later` (a child cluster
   uses a registry of the Registry phase: checked again at the start of the
   Clusters phase).
+- Warning: `registry-vm-network-unchecked` and
+  `cluster-registry-vm-network-unchecked` (reachability is checked from
+  the Harvester cluster only, not from the VM network; see
+  [artefacts.md](artefacts.md)).
 
 **Adoption.** A bootstrap registry posed by a plan carries its origin (the
 label `harvester-ops.io/plan`, the annotation `harvester-ops.io/plan-run`
 on its objects). A new run of the same plan adopts it, if it answers at the
 same address. A registry of the same name without this origin blocks.
+A deployment of this plan that failed before the registry was ready
+leaves objects without a declaration: they carry the origin too, so the
+checks (replayed with the origin of the plan) do not count them as a taken
+name or an answering address, and the resume deploys over them.
 
 **Following a run.** Step `phase-registry`, then one sub-step per item:
 `reg-<registry>` and `pub-<package>-<version>-<registry>`. The child

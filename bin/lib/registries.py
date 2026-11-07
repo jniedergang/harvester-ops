@@ -294,6 +294,10 @@ def read_creds(kube, name, role):
 # ---------------------------------------------------------------------------
 # Constats
 # ---------------------------------------------------------------------------
+VM_NETWORK_WARNING = "registry-vm-network-unchecked"
+CHILD_VM_NETWORK_WARNING = "cluster-registry-vm-network-unchecked"
+
+
 def check(decl, facts, name=None):
     """Constats d'un registre sur un cluster Harvester. `facts` :
     {"attached": bool, "reachable": bool, "ca_ok": bool,
@@ -319,6 +323,10 @@ def check(decl, facts, name=None):
             out.append(cc.finding("registry-auth-refused", "block", registry=n, accounts=refused))
     if facts.get("pull_is_push"):
         out.append(cc.finding("registry-pull-is-push", "warn", registry=n))
+    # Revue finale 2.6.0 (I-4, point 192 en repli) : la sonde part de la
+    # console et du cluster Harvester, jamais du réseau des VMs (sonde par
+    # un pod de ce réseau en 2.6.1)
+    out.append(cc.finding(VM_NETWORK_WARNING, "warn", registry=n, endpoint=decl.get("endpoint")))
     return out
 
 
@@ -443,6 +451,10 @@ def check_child(entries, decls, cluster, attached, system_ready=()):
             out.append(cc.finding("cluster-registry-mirror-unknown", "block", registry=n, mirrors=", ".join(bad)))
     known = [e for e in normalize_entries(entries) if e["registry"] in decls]
     out += fallback_findings(fallback_asked(known), known, decls, system_ready)
+    # revue finale I-4 : joignabilité vue du cluster Harvester seulement
+    out += [cc.finding(CHILD_VM_NETWORK_WARNING, "warn", registry=e["registry"],
+                       endpoint=decls[e["registry"]].get("endpoint"))
+            for e in known if "images" in (decls[e["registry"]].get("usage") or [])]
     return out
 
 

@@ -129,8 +129,9 @@ sa version et son signataire.
 
 Depuis la 2.6.0, la livraison porte les images du **registre d'amorçage**
 dans `bundles/registry` : CNCF Distribution 3.1 dans l'image de SUSE
-(`registry.suse.com/suse/registry:3.1`) et `registry.suse.com/bci/bci-busybox:16.0`,
-toutes deux épinglées par empreinte dans `scripts/registry-bundle.json`.
+(`registry.suse.com/suse/registry:3.1`) et `registry.suse.com/bci/bci-busybox:16.0`
+(l'image de la sonde depuis le réseau des VMs de la 2.6.1, inemployée par
+la 2.6.0), toutes deux épinglées par empreinte dans `scripts/registry-bundle.json`.
 `package.sh` les construit par `harvester-artefacts pack`, qui contrôle
 chaque manifeste et chaque couche contre ces empreintes, puis écrit
 `registry-images.tar` (l'archive que lit `ctr images import`),
