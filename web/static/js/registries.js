@@ -10,6 +10,8 @@
  * jamais réaffichés), vérification, suppression (nom retapé pour supprimer
  * les données). Le serveur lance `harvester-registry` (parité CLI) ; les
  * rôles sont contrôlés côté serveur (point 195).
+ * 2.6.1 : Vérifier sonde aussi depuis un réseau de VMs choisi (pod brève),
+ * et Paramètres > Registres réserve le port d'écriture à la console.
  * Voir docs/design/2026-11-05-artefacts-registre-260-plan.md.
  */
 const Registries = (() => {
@@ -50,8 +52,37 @@ const Registries = (() => {
     'publish-tag-differs': (v) => tr('reg.fd.publish-tag-differs', '{reference} already exists with another content: nothing is overwritten.', v),
     'package-untrusted-strict': (v) => tr('reg.fd.package-untrusted-strict', 'Strict mode refuses {package} ({state}).', v),
     'publish-item-unknown': (v) => tr('reg.fd.publish-item-unknown', 'Unknown item(s): {items}.', v),
-    'registry-vm-network-unchecked': (v) => tr('reg.fd.registry-vm-network-unchecked', 'Reachability of {endpoint} is checked from the Harvester cluster only, not from the VM network: make sure the child VMs can reach it.', v),
+    'registry-vm-network-unchecked': (v) => tr('reg.fd.registry-vm-network-unchecked', 'Reachability of {endpoint} from the VM network is not checked: {reason}.', vmFacts(v)),
+    'registry-vm-network-ok': (v) => tr('reg.fd.registry-vm-network-ok', '{endpoint} answers from the VM network {network} (probe address {address}, TLS handshake done).', vmFacts(v)),
+    'registry-unreachable-from-vm-network': (v) => tr('reg.fd.registry-unreachable-from-vm-network', '{endpoint} cannot be reached from the VM network {network}: {failed}.', vmFacts(v)),
+    'registry-write-port-open': (v) => tr('reg.fd.registry-write-port-open', 'The write port {endpoint} accepts every address: reserve it to the console in Settings > Registries.', v),
   };
+  // 2.6.1 : raison d'une sonde impossible, étape qui a échoué (un appel
+  // littéral par texte, contrôle de parité des traductions)
+  const REASONS = {
+    'no-network': (v) => tr('vmp.reason.no-network', 'no VM network chosen', v),
+    'at-use': (v) => tr('vmp.reason.at-use', 'it is probed from the VM network when a child cluster or a plan that uses it is checked', v),
+    'network-missing': (v) => tr('vmp.reason.network-missing', 'the network {network} was not found', v),
+    'forbidden': (v) => tr('vmp.reason.forbidden', 'your rights do not allow the probe pod (namespace harvester-ops-probe)', v),
+    'image-missing': (v) => tr('vmp.reason.image-missing', 'the probe image is not on the nodes (it comes with a bootstrap registry)', v),
+    'no-address': (v) => tr('vmp.reason.no-address', 'the probe got no address on {network} (no DHCP lease, no IPAM)', v),
+    'not-started': (v) => tr('vmp.reason.not-started', 'the probe pod did not start ({detail})', v),
+    'timeout': (v) => tr('vmp.reason.timeout', 'the probe gave no result in time', v),
+    'ipam-incomplete': (v) => tr('vmp.reason.ipam-incomplete', 'the address given by the IPAM of {network} comes without a gateway or DNS: the probe cannot judge', v),
+  };
+  const FAILED = {
+    dns: () => tr('vmp.failed.dns', 'the name does not resolve with the DNS of the network'),
+    route: () => tr('vmp.failed.route', 'no route (the network gives no gateway)'),
+    tcp: () => tr('vmp.failed.tcp', 'no TCP connection'),
+    tls: () => tr('vmp.failed.tls', 'TCP connects but the TLS handshake fails'),
+  };
+  function vmFacts(v) {
+    const out = Object.assign({}, v || {});
+    if (out.reason) out.reason = REASONS[out.reason] ? REASONS[out.reason](out) : out.reason;
+    if (out.failed) out.failed = FAILED[out.failed] ? FAILED[out.failed]() : out.failed;
+    return out;
+  }
+  const VM_CODES = ['registry-vm-network-unchecked', 'registry-vm-network-ok', 'registry-unreachable-from-vm-network'];
   const LEVEL_CLASS = { block: 'sev-critical', warn: 'sev-watch', ok: 'sev-info' };
   const findingText = (f) => {
     const fn = FINDINGS[f.code];
@@ -205,6 +236,9 @@ const Registries = (() => {
           ${boot ? `<dt>${esc(tr('reg.volume', 'Volume'))}</dt><dd>${esc(d.size_gib)} GiB, ${esc(d.storage_class)}</dd>` : ''}
         </dl>
         <div data-x="state"></div>
+        ${attached && can('operator') ? `<div class="reg-vmnet">${field(tr('reg.vmNet', 'VM network'),
+          `<select data-x="vm-net"><option value="">${esc(tr('reg.vmNetNone', 'None: from the console and the Harvester cluster only'))}</option></select>`,
+          tr('reg.t.vmNet', 'Also probe the registry from this VM network, as a VM would: a short-lived pod gets an address there (DHCP or the IPAM of the network), tests TCP and TLS, and is removed right after'))}</div>` : ''}
         <div data-x="check"></div>
         <h4>${esc(tr('reg.usedBy', 'Used by'))}</h4>
         ${used ? `<ul class="reg-used">${used}</ul>` : `<p class="form-hint">${esc(tr('reg.unused', 'Nothing uses it yet.'))}</p>`}
@@ -212,6 +246,19 @@ const Registries = (() => {
         <h4>${esc(tr('reg.published', 'Published packages'))}</h4>
         ${pubs ? `<ul>${pubs}</ul>` : `<p class="form-hint">${esc(tr('reg.nothingPublished', 'No package published yet (Artefacts tab).'))}</p>`}
       </div>`;
+    const sel = box.querySelector('[data-x="vm-net"]');
+    if (sel) {
+      json('GET', `/api/networks/${enc(c)}`).then(nr => {
+        const nets = nr && nr.ok && Array.isArray(nr.d) ? nr.d : [];
+        nets.forEach(n => {
+          const ref = `${n.namespace}/${n.name}`;
+          const o = document.createElement('option');
+          o.value = ref;
+          o.textContent = n.vlan ? `${ref} (VLAN ${n.vlan})` : ref;
+          sel.appendChild(o);
+        });
+      }).catch(() => {});
+    }
     if (boot && d.cluster === c) {
       const st = await json('GET', `/api/registries/bootstrap/${enc(c)}/${enc(name)}`).catch(() => null);
       const el = box.querySelector('[data-x="state"]');
@@ -229,12 +276,13 @@ const Registries = (() => {
     const box = document.querySelector('#registries-detail [data-x="check"]');
     if (!box || !selected) return;
     box.innerHTML = `<p class="form-hint">${esc(tr('reg.checking', 'Checking…'))}</p>`;
-    const r = await json('POST', `/api/registries/${enc(selected)}/check/${enc(cluster())}`);
-    // revue finale I-4 : l'avertissement du réseau des VMs suit le verdict
-    const VM = 'registry-vm-network-unchecked';
+    const net = (document.querySelector('#registries-detail [data-x="vm-net"]') || {}).value || '';
+    const r = await json('POST', `/api/registries/${enc(selected)}/check/${enc(cluster())}`, net ? { vm_network: net } : undefined);
+    // le constat du réseau des VMs (2.6.1 : sonde ou raison) suit le verdict
     const fs = r.ok ? (r.d.findings || []) : [];
-    box.innerHTML = r.ok ? ((findingsHtml(fs.filter(f => f.code !== VM)) || `<div class="sto-finding sev-info"><div class="sto-finding-title">${esc(tr('reg.allGood', 'Reachable, CA valid, accounts accepted.'))}</div></div>`)
-      + findingsHtml(fs.filter(f => f.code === VM)))
+    const isVm = (f) => VM_CODES.includes(f.code);
+    box.innerHTML = r.ok ? ((findingsHtml(fs.filter(f => !isVm(f))) || `<div class="sto-finding sev-info"><div class="sto-finding-title">${esc(tr('reg.allGood', 'Reachable, CA valid, accounts accepted.'))}</div></div>`)
+      + findingsHtml(fs.filter(isVm)))
       : `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(r.d.error || `HTTP ${r.status}`)}</div></div>`;
   }
 
@@ -516,6 +564,62 @@ const Registries = (() => {
   }
 
   document.addEventListener('DOMContentLoaded', init);
-  return { start: refresh, refresh, openBootstrap, openDeclare, _findingText: findingText };
+  // -------------------------------------------------------------------------
+  // Paramètres > Registres (2.6.1) : port d'écriture réservé à la console
+  // -------------------------------------------------------------------------
+  async function loadSettings() {
+    const box = document.getElementById('registries-settings-body');
+    if (!box) return;
+    const c = cluster();
+    const r = await json('GET', `/api/registries/settings${c ? `?cluster=${enc(c)}` : ''}`).catch(() => null);
+    if (!r || !r.ok) { box.innerHTML = `<p class="form-hint">${esc(tr('regset.loadError', 'The registry settings could not be read.'))}</p>`; return; }
+    const s = r.d;
+    const sugg = Object.entries(s.suggested || {}).map(([cl, a]) => btn(`data-regset-use="${esc(a)}"`, 'btn-secondary',
+      'add', tr('regset.suggest', 'Use {address} (toward {cluster})', { address: a, cluster: cl }),
+      tr('regset.t.suggest', 'The address the console leaves from toward this cluster; behind a NAT, give the translated address instead'))).join(' ');
+    const where = Object.entries(s.bootstrap || {}).map(([cl, ns]) => `${cl} (${ns.join(', ')})`).join(', ');
+    box.innerHTML = `
+      <div class="form-row"><label for="regset-sources">${esc(tr('regset.sources', 'Networks of the console'))}</label>
+        <input type="text" id="regset-sources" class="form-input tip" spellcheck="false" placeholder="172.16.1.11/32"
+               value="${esc((s.write_sources || []).join(', '))}"
+               data-tip="${esc(tr('regset.t.sources', 'IPv4 addresses or networks, separated by commas (a.b.c.d or a.b.c.d/n); empty: every address'))}"
+               title="${esc(tr('regset.t.sources', 'IPv4 addresses or networks, separated by commas (a.b.c.d or a.b.c.d/n); empty: every address'))}">
+        <div class="form-hint">${esc(tr('regset.open', 'Empty: the write port accepts every address.'))}</div>
+        <div class="reg-actions">${sugg}
+          ${btn('data-regset-save', 'btn-primary', 'save', tr('regset.save', 'Save'),
+            tr('regset.t.save', 'Save, then bring every bootstrap registry to this setting (one tracked action per cluster)'))}</div></div>
+      <p class="form-hint">${esc(where ? tr('regset.current', 'Applied on: {clusters}', { clusters: where }) : tr('regset.none', 'No bootstrap registry yet.'))}</p>
+      <p class="form-hint">${esc(tr('regset.limits', 'This keeps other hosts of the network away from the write port. It does not replace the password of the write account, and it does not see through a NAT: the cluster must see the real address of the console.'))}</p>
+      <div class="res-feedback" id="regset-feedback">${s.error ? esc(s.error) : ''}</div>`;
+  }
+
+  async function saveSettings() {
+    const v = (document.getElementById('regset-sources') || {}).value || '';
+    const r = await json('PUT', '/api/registries/settings', { write_sources: v.split(/[\s,]+/).filter(Boolean) });
+    if (r.ok) await loadSettings();
+    const fb = document.getElementById('regset-feedback');
+    if (fb) fb.textContent = r.ok ? tr('regset.saved', 'Saved; {n} cluster(s) being updated (Activity).', { n: (r.d.actions || []).length })
+      : (r.d.error || `HTTP ${r.status}`);
+  }
+
+  function initSettings() {
+    document.addEventListener('click', (e) => {
+      const use = e.target.closest('[data-regset-use]');
+      if (use) {
+        const inp = document.getElementById('regset-sources');
+        if (inp) {
+          const cur = inp.value.split(/[\s,]+/).filter(Boolean);
+          if (!cur.includes(use.dataset.regsetUse)) cur.push(use.dataset.regsetUse);
+          inp.value = cur.join(', ');
+        }
+        return;
+      }
+      if (e.target.closest('[data-regset-save]')) saveSettings();
+    });
+    document.querySelector('.settings-tab[data-stab="registries"]')?.addEventListener('click', loadSettings);
+  }
+  document.addEventListener('DOMContentLoaded', initSettings);
+
+  return { start: refresh, refresh, openBootstrap, openDeclare, loadSettings, vmFacts, _findingText: findingText };
 })();
 window.Registries = Registries;

@@ -2474,7 +2474,12 @@ Internet. Full reference: **[artefacts.md](artefacts.md)**.
   Harvester cluster, Longhorn volume, address served by kube-vip, TLS
   always, read-only instance on 443 and write instance on 5443 in the same
   pod. Its details show the address, volume use, packages published and
-  what uses it.
+  what uses it. Since 2.6.1, Check can also probe the registry from a VM
+  network (a short-lived pod that takes an address there, then tests TCP
+  and TLS), the child cluster and plan checks do it from the network of
+  the cluster, and Settings > Registries reserves the write port 5443 to
+  the networks of the console (a second LoadBalancer Service with source
+  ranges at the same address).
 - **Publish** on a package copies its images and charts layer by layer into
   a registry (`<registry>/<origin host>/<path>:<tag>`,
   `<registry>/charts/<chart>:<version>`): checks before any write, a tag of

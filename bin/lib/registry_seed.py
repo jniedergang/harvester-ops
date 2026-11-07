@@ -36,6 +36,7 @@ READ_PORT, WRITE_PORT = 443, 5443
 READ_TARGET, WRITE_TARGET = 5000, 5001
 DATA = "/var/lib/docker-registry"
 VIP_ANNOTATION = "kube-vip.io/loadbalancerIPs"
+WRITE_SUFFIX = rg.WRITE_NAME_SUFFIX   # Service du port d'écriture (2.6.1)
 PROBE_PERIOD = 60                     # règle des sondes : 60 s au moins
 CA_DAYS, CERT_DAYS = 3650, 730
 TOOLS = ("openssl", "htpasswd")
@@ -97,14 +98,14 @@ def origin_of(deployment):
     return cc.origin_of(deployment)
 
 
-def manifests(spec, tls, htpasswd, origin=None):
+def manifests(spec, tls, htpasswd, origin=None, write_sources=None):
     """Objets du registre d'amorçage. `spec` : {"name", "address",
     "size_gib", "storage_class", "image"} ; `tls` : {"crt", "key", "ca"}
     (PEM) ; `htpasswd` : {"read": lignes des comptes push et pull, "write":
     ligne du compte push} (empreintes bcrypt seulement). `origin` (2.6.0,
     tâche 11) : {plan, run} d'une chaîne, posés comme sur un cluster enfant
     (étiquette `harvester-ops.io/plan`, annotation `harvester-ops.io/plan-run`)."""
-    docs = _manifests(spec, tls, htpasswd)
+    docs = _manifests(spec, tls, htpasswd, write_sources)
     import capi_cluster as cc
     for d in docs[1:] if origin else []:
         if origin.get("plan"):
@@ -114,7 +115,7 @@ def manifests(spec, tls, htpasswd, origin=None):
     return docs
 
 
-def _manifests(spec, tls, htpasswd):
+def _manifests(spec, tls, htpasswd, write_sources=None):
     n = spec["name"]
     sel = {LABEL: n}
     mounts = [{"name": "data", "mountPath": DATA},
@@ -166,14 +167,80 @@ def _manifests(spec, tls, htpasswd):
                                                            "items": [{"key": "read", "path": "htpasswd"}]}},
                           {"name": "auth-write", "secret": {"secretName": f"{n}-htpasswd",
                                                             "items": [{"key": "write", "path": "htpasswd"}]}}]}}}},
-        {"apiVersion": "v1", "kind": "Service",
-         "metadata": _meta(n, spec, annotations={VIP_ANNOTATION: spec["address"]}),
-         # revue m-6 : kube-vip sert l'adresse sans NodePort ; sans ce champ,
-         # 443 et 5443 s'ouvraient aussi sur chaque nœud Harvester
-         "spec": {"type": "LoadBalancer", "allocateLoadBalancerNodePorts": False, "selector": sel,
-                  "ports": [{"name": "read", "port": READ_PORT, "targetPort": READ_TARGET},
-                            {"name": "write", "port": WRITE_PORT, "targetPort": WRITE_TARGET}]}},
+        *services(spec, write_sources),
     ]
+
+
+def write_service_name(name):
+    return f"{name}{WRITE_SUFFIX}"
+
+
+def services(spec, write_sources=None, labels=None):
+    """Les deux Services LoadBalancer du registre, à la même adresse servie
+    par le kube-vip de Harvester (2.6.1, essai de la tâche 13 de la 2.6.0) :
+    lecture 443 ouverte à tous (les nœuds des clusters enfants), écriture
+    5443 dans un Service à elle, limitée par `loadBalancerSourceRanges` aux
+    réseaux de la console (`write_sources`, vide : ouverte à tous). Un seul
+    Service à plages limitées couperait aussi 443 aux VMs. `labels` :
+    étiquettes à garder (reprise d'un registre posé, origine d'un plan)."""
+    n = spec["name"]
+    sel = {LABEL: n}
+
+    def svc(name, port_name, port, target):
+        meta = _meta(name, spec, annotations={VIP_ANNOTATION: spec["address"]})
+        if labels:
+            meta["labels"] = dict(labels)
+        # revue m-6 : kube-vip sert l'adresse sans NodePort ; sans ce champ,
+        # les ports s'ouvraient aussi sur chaque nœud Harvester
+        return {"apiVersion": "v1", "kind": "Service", "metadata": meta,
+                "spec": {"type": "LoadBalancer", "allocateLoadBalancerNodePorts": False, "selector": sel,
+                         "ports": [{"name": port_name, "port": port, "targetPort": target}]}}
+    read = svc(n, "read", READ_PORT, READ_TARGET)
+    write = svc(write_service_name(n), "write", WRITE_PORT, WRITE_TARGET)
+    if write_sources:
+        write["spec"]["loadBalancerSourceRanges"] = list(write_sources)
+    return [read, write]
+
+
+def write_access(main, write):
+    """État du port d'écriture lu sur le cluster : {"migrated": bool (Service
+    d'écriture à part, 5443 retiré du Service principal), "sources": [...]}."""
+    ports = [p.get("port") for p in (((main or {}).get("spec") or {}).get("ports") or [])]
+    migrated = write is not None and WRITE_PORT not in ports
+    sources = sorted((((write or {}).get("spec") or {}).get("loadBalancerSourceRanges") or []))
+    return {"migrated": migrated, "sources": sources if migrated else []}
+
+
+def reconcile_write_access(kube, name, sources, step=None):
+    """Porte le registre d'amorçage `name` au réglage courant : 5443 retiré
+    du Service principal, Service d'écriture à plages limitées. D'abord le
+    Service principal (le port quitte l'ancien Service), puis celui
+    d'écriture : quelques secondes sans écriture, jamais deux Services sur
+    le même port. Rend {"changed", "missing", "sources"}."""
+    main = kube.get("services", NAMESPACE, name)
+    if main is None:
+        return {"changed": False, "missing": True, "sources": []}
+    meta = main.get("metadata") or {}
+    address = (meta.get("annotations") or {}).get(VIP_ANNOTATION)
+    write = kube.get("services", NAMESPACE, write_service_name(name))
+    want = sorted(sources or [])
+    now = write_access(main, write)
+    if now["migrated"] and now["sources"] == want:
+        return {"changed": False, "missing": False, "sources": want}
+    _, write_svc = services({"name": name, "address": address}, want, labels=meta.get("labels") or None)
+    ports = (main.get("spec") or {}).get("ports") or []
+    if WRITE_PORT in [p.get("port") for p in ports]:
+        # patch de fusion (liste remplacée) plutôt qu'application côté
+        # serveur : le port est retiré quel que soit le gestionnaire qui le
+        # possède (vu en réel : un port ajouté par kubectl patch restait)
+        kube.patch("services", NAMESPACE, name, {"spec": {"ports": [p for p in ports if p.get("port") != WRITE_PORT]}})
+        if step:
+            step("write-access", "running", f"{name}: port {WRITE_PORT} removed from service {name}")
+    kube.apply([write_svc])
+    if step:
+        step("write-access", "running", f"{name}: service {write_service_name(name)} "
+                                        f"({', '.join(want) if want else 'open to every address'})")
+    return {"changed": True, "missing": False, "sources": want}
 
 
 def declaration(spec, ca_pem, cluster, mirrors=()):
@@ -219,9 +286,10 @@ def check(spec, facts):
             out.append(cc.finding("registry-address-vip", "block", address=addr))
         if facts.get("address_answers"):
             out.append(cc.finding("registry-address-answers", "block", address=addr))
-        # revue finale I-4 : l'adresse est vue de la console et du cluster
-        # Harvester, jamais du réseau des VMs (sonde par un pod en 2.6.1)
-        out.append(cc.finding(rg.VM_NETWORK_WARNING, "warn", registry=spec.get("name"), endpoint=addr))
+        # l'adresse n'est pas encore servie : la sonde du réseau des VMs
+        # (2.6.1) se fait au contrôle d'un cluster enfant ou d'un plan
+        out.append(cc.finding(rg.VM_NETWORK_WARNING, "warn", registry=spec.get("name"), endpoint=addr,
+                              network="", reason="at-use", detail=""))
     if facts.get("name_taken"):
         out.append(cc.finding("registry-name-taken", "block", registry=spec.get("name")))
     if not facts.get("bundle"):

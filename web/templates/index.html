@@ -1053,6 +1053,7 @@
       <button class="settings-tab needs-admin" data-stab="rancher" data-i18n="settings.tab.rancher">Rancher sign-in</button>
       <button class="settings-tab needs-admin" data-stab="accounts" data-i18n="settings.tab.accounts">Console accounts</button>
       <button class="settings-tab needs-admin" data-stab="artefacts" data-i18n="settings.tab.artefacts">Artefacts</button>
+      <button class="settings-tab needs-admin" data-stab="registries" data-i18n="settings.tab.registries">Registries</button>
       <button class="settings-tab"        data-stab="support"    data-i18n="settings.tab.support">Support</button>
       <button class="settings-tab"        data-stab="about"      data-i18n="settings.tab.about">About</button>
     </div>
@@ -1073,6 +1074,13 @@
         <h4 data-i18n="art.settingsTitle">Artefact packages</h4>
         <p class="form-hint" data-i18n="art.settingsIntro">Which packages the console accepts: strict mode and the keys of your organisation.</p>
         <div id="artefacts-settings-body"><p class="form-hint">…</p></div>
+      </div>
+
+      <!-- 2.6.1 : port d'écriture des registres d'amorçage réservé à la console -->
+      <div class="settings-tab-content" id="stab-registries">
+        <h4 data-i18n="regset.title">Bootstrap registries</h4>
+        <p class="form-hint" data-i18n="regset.intro">The write port (5443) of the bootstrap registries accepts only the networks below: the console publishes there. The read port (443) stays open to the nodes of the child clusters.</p>
+        <div id="registries-settings-body"><p class="form-hint">…</p></div>
       </div>
 
       <div class="settings-tab-content" id="stab-accounts">

@@ -2710,7 +2710,13 @@ Internet. Référence complète : **[artefacts.md](artefacts.md)**.
   cluster Harvester, volume Longhorn, adresse servie par kube-vip, TLS
   toujours, instance en lecture seule sur 443 et instance en écriture sur
   5443 dans le même pod. Son détail montre l'adresse, l'occupation du
-  volume, les paquets publiés et ce qui l'emploie.
+  volume, les paquets publiés et ce qui l'emploie. Depuis la 2.6.1,
+  Vérifier peut aussi sonder le registre depuis un réseau de VMs (une pod
+  brève qui y prend une adresse, puis essaie TCP et TLS), les contrôles
+  des clusters enfants et des plans le font depuis le réseau du cluster, et
+  Paramètres > Registres réserve le port d'écriture 5443 aux réseaux de la
+  console (un second Service LoadBalancer à plages de sources, à la même
+  adresse).
 - **Publier** sur un paquet recopie ses images et ses charts couche par
   couche dans un registre (`<registre>/<hôte d'origine>/<chemin>:<tag>`,
   `<registre>/charts/<chart>:<version>`) : vérifications avant toute

@@ -1203,6 +1203,15 @@ est publié.
      dans la doc ; la sonde par un pod du réseau des VMs, prouvée par la
      tâche 1, arrive en 2.6.1. `bci-busybox` reste dans le paquet du
      registre : la recette de la sonde s'en sert (`udhcpc`, `wget`).
+     *Livré en 2.6.1 (07/11/2026)* : pod sonde (`bin/lib/vm_probe.py`,
+     Job dans `harvester-ops-probe`, `NET_ADMIN` et `NET_RAW`) au
+     contrôle d'un cluster enfant et des plans (réseau `network` du
+     cluster) et dans Vérifier (réseau choisi) ; constats
+     `*-vm-network-ok`, `*-unreachable-from-vm-network` (bloquant si le
+     repli vers Internet est coupé), `*-vm-network-unchecked` avec la
+     raison. Le rejeu depuis le premier nœud du cluster enfant n'est pas
+     fait : la sonde le remplace. Le port d'écriture 5443 est réservé à la
+     console par un second Service (Paramètres > Registres).
 193. **Taille et suppression du registre d'amorçage.** Recommandation : 20
      Gio par défaut, place vérifiée sous les deux contraintes de Longhorn ;
      pas de nettoyage automatique en 2.6.0 ; suppression refusée tant qu'un

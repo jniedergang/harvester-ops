@@ -284,10 +284,11 @@ def test_check_says_reachability_is_seen_from_the_harvester_cluster_only(context
     page, _ = open_registries(context, flask_server, calls)
     page.route(re.compile(r".*/api/registries/amorcage/check/harv-fake$"), lambda r, q: fulfill(r, {
         "findings": [{"code": "registry-vm-network-unchecked", "level": "warn",
-                      "facts": {"registry": "amorcage", "endpoint": "172.16.2.76"}}], "blocked": False}))
+                      "facts": {"registry": "amorcage", "endpoint": "172.16.2.76", "network": "",
+                                "reason": "no-network"}}], "blocked": False}))
     page.locator('.reg-row[data-reg="amorcage"]').click()
     page.locator("#registries-detail [data-reg-check]").click()
     box = page.locator('#registries-detail [data-x="check"]')
     expect(box).to_contain_text("Reachable, CA valid, accounts accepted.")
     expect(box.locator('[data-code="registry-vm-network-unchecked"]')).to_contain_text(
-        "Reachability of 172.16.2.76 is checked from the Harvester cluster only, not from the VM network")
+        "Reachability of 172.16.2.76 from the VM network is not checked: no VM network chosen.")
