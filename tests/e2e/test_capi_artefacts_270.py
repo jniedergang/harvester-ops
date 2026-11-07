@@ -173,3 +173,21 @@ def test_a_manifest_has_no_registry_and_hostile_names_are_escaped(ui):
     m.locator("[data-art-close]").first.click()
     expect(page.locator(".art-apply")).to_have_count(0)
     assert calls["apply"] == []
+
+
+def test_apply_stays_disabled_after_launch_even_after_an_edit(ui):
+    """Revue 4-8 I3 : une saisie après le lancement ne réactive pas Appliquer."""
+    page, calls = ui("#automation/capi/artefacts")
+    open_detail(page)
+    page.locator('#artefacts-detail [data-art-apply="podinfo"]').click()
+    m = page.locator(".art-apply")
+    go = m.locator("[data-art-apply-go]")
+    expect(go).to_be_enabled(timeout=5000)
+    go.click()
+    expect(m.locator('[data-x="progress"]')).to_contain_text("art000000001")
+    n_checks = len(calls["check"])
+    m.locator('[data-x="values"]').fill("replicaCount: 3\n")
+    page.wait_for_timeout(900)                     # au-delà du délai de vérification (500 ms)
+    expect(go).to_be_disabled()
+    assert len(calls["check"]) == n_checks and len(calls["apply"]) == 1
+    assert "follow the action in the dock" in (go.get_attribute("title") or "")

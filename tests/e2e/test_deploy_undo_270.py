@@ -72,7 +72,7 @@ def plan_body(include):
             "items": [dict(i, selected=i["id"] in chosen) for i in ITEMS]}
 
 
-def open_page(context, flask_server, role="admin", hold=False, runs=None):
+def open_page(context, flask_server, role="admin", hold=False, runs=None, undo_mode=None):
     context.add_init_script("localStorage.setItem('harvester_ops_language','en');")
     page = context.new_page()
     st = {"plan": [], "undo": [], "held": [], "errors": []}
@@ -89,6 +89,11 @@ def open_page(context, flask_server, role="admin", hold=False, runs=None):
             return fulfill(route, plan_body(body.get("include")))
         if url.endswith("/undo"):
             st["undo"].append(body)
+            if undo_mode == "abort":
+                return route.abort()
+            if undo_mode == "slow":
+                st["held"].append((route, body))
+                return None
             return fulfill(route, {"action_id": "c0000000d274", "undoes": body["action_id"],
                                    "selected": body["include"]}, 202)
         return fulfill(route, {"error": "unexpected"}, 500)
@@ -257,3 +262,54 @@ def test_no_late_request_after_close(context, flask_server):
     page.wait_for_timeout(1200)
     assert len(st["plan"]) == 1 and st["undo"] == []
     assert st["errors"] == []
+
+
+def _ready_to_launch(page):
+    row(page, RUN["id"]).locator(".bm-deploy-undo").click()
+    win = page.locator(f"#fp-deploy-undo-{RUN['id']}")
+    expect(win.locator('.udw-item[value="chart-a/a/podinfo"]')).to_be_checked()
+    win.locator('[data-udw-tab="confirm"]').click()
+    win.locator(".udw-typed").fill(C)
+    launch = win.locator(".udw-launch")
+    expect(launch).to_be_enabled()
+    return win, launch
+
+
+def test_undo_launch_is_sent_once_on_a_double_click(context, flask_server):
+    """Revue 4-8 I4 : un double clic n'envoie qu'une demande."""
+    page, st = open_page(context, flask_server, undo_mode="slow")
+    win, launch = _ready_to_launch(page)
+    launch.dispatch_event("click")
+    page.locator(".udw-form").evaluate("f => f.requestSubmit()")
+    expect(launch).to_be_disabled()
+    page.wait_for_timeout(300)
+    assert len(st["undo"]) == 1
+    route, body = st["held"].pop()
+    fulfill(route, {"action_id": "c0000000d274", "undoes": body["action_id"], "selected": body["include"]}, 202)
+    expect(win.locator(".dpw-follow")).to_be_visible()
+    assert len(st["undo"]) == 1 and st["errors"] == []
+
+
+def test_undo_launch_network_error_is_said(context, flask_server):
+    """Revue 4-8 I4 : une erreur réseau est dite, le bouton revient."""
+    page, st = open_page(context, flask_server, undo_mode="abort")
+    win, launch = _ready_to_launch(page)
+    launch.click()
+    expect(win.locator(".udw-msg .bm-refusal")).to_be_visible()
+    expect(launch).to_be_enabled()
+    assert st["errors"] == []
+
+
+def test_a_target_recreated_since_is_named_in_the_plan(context, flask_server):
+    """Revue 4-8 C1 : le plan dit qu'un objet recréé depuis restera."""
+    orig = [dict(i) for i in ITEMS]
+    try:
+        ITEMS[0]["details"] = dict(ITEMS[0]["details"], not_ours=True, recreated_by="beef00000002")
+        page, st = open_page(context, flask_server)
+        row(page, RUN["id"]).locator(".bm-deploy-undo").click()
+        win = page.locator(f"#fp-deploy-undo-{RUN['id']}")
+        win.locator('[data-udw-tab="plan"]').click()
+        expect(win.locator(".udw-not-ours")).to_contain_text("beef00000002")
+        expect(win.locator('.udw-plan-item[data-kind="capi-cluster"] .udw-child-data')).to_be_visible()
+    finally:
+        ITEMS[:] = orig

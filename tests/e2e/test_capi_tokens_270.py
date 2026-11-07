@@ -79,6 +79,10 @@ def test_the_token_is_shown_once_then_gone_after_close(ui):
     assert m.locator("[data-tok-copy]").get_attribute("title")
     expect(m.locator("[data-tok-go]")).to_have_count(0)                 # jamais réaffiché dans cette fenêtre
     assert asked == [{"cluster": "web/web", "account": "equipe-a/ci", "seconds": 600}]
+    # revue 4-8 m7 : le focus va sur Copier, un clic à côté ne détruit pas le jeton
+    assert page.evaluate("() => document.activeElement && document.activeElement.hasAttribute('data-tok-copy')")
+    page.mouse.click(5, 5)
+    expect(val).to_have_value(TOKEN)
     m.locator("[data-tok-close]").first.click()
     expect(page.locator(".tok-modal")).to_have_count(0)
     assert TOKEN not in page_text(page)

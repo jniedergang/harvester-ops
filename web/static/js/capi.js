@@ -581,15 +581,20 @@ const CAPI = (() => {
         </div>
         <div class="modal-footer apply-bar" style="margin:0;">
           <button type="button" class="btn btn-secondary btn-sm tip" data-x="close" data-tip="${esc(tr('common.cancel'))}">${esc(tr('common.cancel'))}</button>
-          <button type="button" class="btn btn-danger btn-sm tip" data-x="go" disabled data-tip="${esc(tr('capi.un.t.go'))}">${Icons.svg('delete')} ${esc(tr('capi.un.go'))}</button>
+          <button type="button" class="btn btn-danger btn-sm tip" data-x="go" disabled data-tip="${esc(tr('capi.un.t.go'))}" title="${esc(tr('capi.un.t.go'))}">${Icons.svg('delete')} ${esc(tr('capi.un.go'))}</button>
           <span class="apply-result" data-x="feedback"></span>
         </div>
       </div>`;
     document.body.appendChild(m);
     const q = (x) => m.querySelector(`[data-x="${x}"]`);
     let plan = null;
+    // revue 4-8 m8 : administrateur seulement (le serveur refuse aussi)
+    const isAdmin = () => !!(window.App && App.role && App.role() === 'admin');
     const sync = () => {
-      q('go').disabled = !(plan && !plan.blocked && (plan.providers || []).length && q('name').value === cluster);
+      q('go').disabled = !(isAdmin() && plan && !plan.blocked && (plan.providers || []).length && q('name').value === cluster);
+      const tp = isAdmin() ? tr('capi.un.t.go') : tr('capi.un.t.adminOnly');
+      q('go').dataset.tip = tp;
+      q('go').title = tp;
     };
     m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-x="close"]')) closeUninstall(); });
     m.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeUninstall(); });
@@ -623,6 +628,7 @@ const CAPI = (() => {
         if (gen !== unGen) return;
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
         closeUninstall();
+        if (typeof Dock !== 'undefined' && Dock.poll) Dock.poll();
         const res = document.querySelector('#capi-install-result');
         if (res) res.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('capi.un.started', { id: d.action_id }))}</span>`;
       } catch (e) {

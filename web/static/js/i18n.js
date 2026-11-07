@@ -17,6 +17,15 @@ const I18N_STORAGE_KEY = 'harvester_ops_language';
 
 const translations = {
   en: {
+    "udw.notOurs": "Not this run's: no mark of the undone run (recreated by hand?). Left untouched.",
+    "udw.notOursRun": "Recreated since by run {id}: left untouched.",
+    "udw.childData": "The workloads and volumes inside the child cluster go with it.",
+    "udw.approx": "VMs and volumes found by name: the list is approximate.",
+    "udw.retry": "Retry",
+    "udw.t.retry": "Read the destruction plan again",
+    "art.ap.t.launched": "Applied once from this window: follow the action in the dock",
+    "art.t.closeWindow": "Close this window",
+    "capi.un.t.adminOnly": "Needs the administrator role",
     "activity.expandTip": "Show the {n} child actions launched by this action",
     "activity.collapseTip": "Hide the {n} child actions",
     "activity.partOf": "part of {id}",
@@ -8300,6 +8309,15 @@ const translations = {
   },
 
   fr: {
+    "udw.notOurs": "Pas à ce déroulé : aucune marque de l'exécution défaite (recréé à la main ?). Laissé tel quel.",
+    "udw.notOursRun": "Recréé depuis par l'exécution {id} : laissé tel quel.",
+    "udw.childData": "Les charges et les volumes du cluster enfant partent avec lui.",
+    "udw.approx": "VMs et volumes trouvés par leur nom : la liste est approximative.",
+    "udw.retry": "Réessayer",
+    "udw.t.retry": "Relire le plan de destruction",
+    "art.ap.t.launched": "Appliqué une fois depuis cette fenêtre : suivez l'action dans le dock",
+    "art.t.closeWindow": "Fermer cette fenêtre",
+    "capi.un.t.adminOnly": "Réservé au rôle administrateur",
     "activity.expandTip": "Afficher les {n} actions filles lancées par cette action",
     "activity.collapseTip": "Masquer les {n} actions filles",
     "activity.partOf": "fait partie de {id}",
@@ -16584,6 +16602,15 @@ const translations = {
   },
 
   it: {
+    "udw.notOurs": "Non di questo rilascio: nessun segno dell'esecuzione annullata (ricreato a mano?). Lasciato intatto.",
+    "udw.notOursRun": "Ricreato in seguito dall'esecuzione {id}: lasciato intatto.",
+    "udw.childData": "I carichi e i volumi del cluster figlio se ne vanno con lui.",
+    "udw.approx": "VM e volumi trovati per nome: l'elenco è approssimativo.",
+    "udw.retry": "Riprova",
+    "udw.t.retry": "Rileggi il piano di distruzione",
+    "art.ap.t.launched": "Applicato una volta da questa finestra: segui l'azione nel dock",
+    "art.t.closeWindow": "Chiudi questa finestra",
+    "capi.un.t.adminOnly": "Richiede il ruolo di amministratore",
     "activity.expandTip": "Mostrare le {n} azioni figlie avviate da questa azione",
     "activity.collapseTip": "Nascondere le {n} azioni figlie",
     "activity.partOf": "parte di {id}",
@@ -24866,6 +24893,15 @@ const translations = {
   },
 
   es: {
+    "udw.notOurs": "No es de este despliegue: ninguna marca de la ejecución deshecha (¿recreado a mano?). Se deja intacto.",
+    "udw.notOursRun": "Recreado después por la ejecución {id}: se deja intacto.",
+    "udw.childData": "Las cargas y los volúmenes del clúster hijo se van con él.",
+    "udw.approx": "VMs y volúmenes encontrados por nombre: la lista es aproximada.",
+    "udw.retry": "Reintentar",
+    "udw.t.retry": "Volver a leer el plan de destrucción",
+    "art.ap.t.launched": "Aplicado una vez desde esta ventana: siga la acción en el dock",
+    "art.t.closeWindow": "Cerrar esta ventana",
+    "capi.un.t.adminOnly": "Requiere el rol de administrador",
     "activity.expandTip": "Mostrar las {n} acciones hijas lanzadas por esta acción",
     "activity.collapseTip": "Ocultar las {n} acciones hijas",
     "activity.partOf": "parte de {id}",
@@ -33148,6 +33184,15 @@ const translations = {
   },
 
   de: {
+    "udw.notOurs": "Nicht von diesem Lauf: keine Markierung des rückgängig gemachten Laufs (von Hand neu erstellt?). Unverändert gelassen.",
+    "udw.notOursRun": "Seitdem von Lauf {id} neu erstellt: unverändert gelassen.",
+    "udw.childData": "Die Workloads und Volumes im Child-Cluster verschwinden mit ihm.",
+    "udw.approx": "VMs und Volumes nach Namen gefunden: die Liste ist ungefähr.",
+    "udw.retry": "Erneut versuchen",
+    "udw.t.retry": "Den Abbauplan erneut lesen",
+    "art.ap.t.launched": "Einmal aus diesem Fenster angewendet: Aktion im Dock verfolgen",
+    "art.t.closeWindow": "Dieses Fenster schließen",
+    "capi.un.t.adminOnly": "Erfordert die Administratorrolle",
     "activity.expandTip": "Die {n} von dieser Aktion gestarteten Unteraktionen anzeigen",
     "activity.collapseTip": "Die {n} Unteraktionen ausblenden",
     "activity.partOf": "Teil von {id}",

@@ -106,7 +106,10 @@ const CapiTokens = (() => {
     document.body.appendChild(modal);
     const m = modal;
     const q = (x) => m.querySelector(`[data-x="${x}"]`);
-    m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-tok-close]')) closeModal(); });
+    // revue 4-8 m7 : un clic à côté ne détruit pas un jeton montré (seul Fermer le fait)
+    m.addEventListener('click', (e) => {
+      if (e.target.closest('[data-tok-close]') || (e.target === m && !q('token'))) closeModal();
+    });
     m.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
     const go = m.querySelector('[data-tok-go]');
     go.addEventListener('click', async () => {
@@ -146,6 +149,8 @@ const CapiTokens = (() => {
       // posé par value (jamais par innerHTML) : aucun balisage interprété
       q('token').value = d.token;
       d.token = null;
+      const copyBtn = m.querySelector('[data-tok-copy]');
+      if (copyBtn) copyBtn.focus();
       m.querySelector('[data-tok-copy]').addEventListener('click', async () => {
         const t = q('token');
         if (!t) return;

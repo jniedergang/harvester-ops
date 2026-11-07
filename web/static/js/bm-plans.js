@@ -1811,6 +1811,11 @@ const BMPlans = (() => {
     const li = (arr) => (arr || []).map(x => `<li><code>${esc(objText(x))}</code></li>`).join('');
     if (d.error) return `<div class="bm-refusal">${icon('fail', { size: 13 })} ${esc(tr('udw.detailError'))} ${esc(d.error)}</div>`;
     if (d.present === false) return `<p class="form-hint udw-gone">${esc(tr('udw.gone'))}</p>`;
+    // revue 4-8 C1 : recréé depuis par un autre déroulé ou à la main, jamais touché
+    if (d.not_ours) {
+      return `<div class="bm-refusal bm-warning udw-not-ours">${icon('warn', { size: 13 })} ${esc(d.recreated_by
+        ? tr('udw.notOursRun', { id: d.recreated_by }) : tr('udw.notOurs'))}</div>`;
+    }
     if (u.kind === 'chart') {
       return `<p>${esc(tr('udw.release', { name: d.release || '', ns: d.release_namespace || '' }))}
         ${d.chart ? `<code>${esc(`${d.chart} ${d.version || ''}`)}</code>` : ''}</p>`;
@@ -1823,6 +1828,8 @@ const BMPlans = (() => {
     }
     if (u.kind === 'capi-cluster') {
       return `<p>${esc(tr('udw.clusterGoes', { machines: d.machines || 0, ns: d.target_namespace || '' }))}</p>
+        <p class="form-hint udw-child-data">${esc(tr('udw.childData'))}</p>
+        ${(d.vms || []).length || (d.volumes || []).length ? `<p class="form-hint udw-approx">${esc(tr('udw.approx'))}</p>` : ''}
         ${(d.vms || []).length ? `<p class="form-hint">${esc(tr('udw.vms'))}</p><ul class="bm-paths">${li(d.vms)}</ul>` : ''}
         ${(d.volumes || []).length ? `<p class="form-hint">${esc(tr('udw.volumes'))}</p><ul class="bm-paths">${li(d.volumes)}</ul>` : ''}
         ${(d.loadbalancers || []).length ? `<p class="form-hint">${esc(tr('udw.loadbalancers'))}</p><ul class="bm-paths">${li(d.loadbalancers)}</ul>` : ''}
@@ -1844,7 +1851,7 @@ const BMPlans = (() => {
     const cluster = String(a.action).split(':').slice(1).join(':');
     const s = {
       items: null, chosen: new Set(), plan: null, fetching: false, error: '', timer: null, closed: false,
-      typed: '', deleteData: new Set(), regTyped: {}, launched: null, sse: null,
+      typed: '', deleteData: new Set(), regTyped: {}, launched: null, launching: false, sse: null,
     };
     const stop = () => { clearTimeout(s.timer); s.timer = null; };
     const tabBtn = (t, label, tp, ic) => `<button type="button" class="sub-tab tip${t === 'content' ? ' active' : ''}" role="tab"
@@ -1907,7 +1914,7 @@ const BMPlans = (() => {
 
     function launchState() {
       if (!can('admin')) return [false, tr('udw.t.adminOnly')];
-      if (s.launched) return [false, tr('dpw.t.launched')];
+      if (s.launched || s.launching) return [false, tr('dpw.t.launched')];
       if (s.error) return [false, tr('udw.t.planFailed')];
       if (s.fetching || !s.plan || s.plan.sig !== sig()) return [false, tr('udw.t.waitPlan')];
       if (!s.chosen.size) return [false, tr('udw.t.empty')];
@@ -1928,7 +1935,8 @@ const BMPlans = (() => {
     function paintContent() {
       const box = $('.udw-content');
       if (!s.items) {
-        box.innerHTML = s.error ? `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(s.error)}</div>`
+        box.innerHTML = s.error ? `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(s.error)}</div>
+          <button type="button" class="btn btn-secondary btn-sm tip udw-retry" data-tip="${esc(tr('udw.t.retry'))}" title="${esc(tr('udw.t.retry'))}">${icon('refresh', { size: 12 })} ${esc(tr('udw.retry'))}</button>`
           : `<p class="form-hint">${esc(tr('udw.loading'))}</p>`;
         return;
       }
@@ -1951,7 +1959,11 @@ const BMPlans = (() => {
     }
     function paintPlan() {
       const box = $('.udw-plan');
-      if (s.error) { box.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(s.error)}</div>`; return; }
+      if (s.error) {
+        box.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(s.error)}</div>
+          <button type="button" class="btn btn-secondary btn-sm tip udw-retry" data-tip="${esc(tr('udw.t.retry'))}" title="${esc(tr('udw.t.retry'))}">${icon('refresh', { size: 12 })} ${esc(tr('udw.retry'))}</button>`;
+        return;
+      }
       if (s.fetching || !s.plan || s.plan.sig !== sig()) { box.innerHTML = `<p class="form-hint udw-wait">${esc(tr('udw.planWait'))}</p>`; return; }
       const sel = (s.plan.items || []).filter(u => u.selected);
       box.innerHTML = (sel.length ? `<ol class="udw-steps">${sel.map(u => `<li class="udw-plan-item" data-kind="${esc(u.kind)}">
@@ -2016,8 +2028,15 @@ const BMPlans = (() => {
       const regs = selectedRegs().filter(n => s.deleteData.has(n));
       const body = { action_id: a.id, confirm: s.typed.trim(), include: [...s.chosen], delete_data: regs };
       if (regs.length) body.confirm_registry = Object.fromEntries(regs.map(n => [n, (s.regTyped[n] || '').trim()]));
-      const r = await api('POST', `/api/deploy/${enc(cluster)}/undo`, body);
+      // revue 4-8 I4 : un seul envoi à la fois ; une erreur réseau est dite
+      s.launching = true;
+      paintLaunch();
+      let r;
+      try { r = await api('POST', `/api/deploy/${enc(cluster)}/undo`, body); }
+      catch (e) { r = { ok: false, status: 0, d: { error: e.message || String(e) } }; }
+      s.launching = false;
       if (s.closed || !form.isConnected) return;
+      paintLaunch();
       if (r.ok && r.d.action_id) {
         s.launched = r.d.action_id;
         msg.innerHTML = okLine(tr('udw.started'));
@@ -2037,6 +2056,7 @@ const BMPlans = (() => {
     form.addEventListener('click', (e) => {
       const t = e.target.closest('[data-udw-tab]');
       if (t) setTab(t.dataset.udwTab);
+      if (e.target.closest('.udw-retry')) fetchPlan(!s.items);
     });
     form.addEventListener('change', (e) => {
       const c = e.target.closest('.udw-item');

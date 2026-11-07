@@ -116,3 +116,18 @@ def test_closing_before_the_plan_comes_back_leaves_nothing(context, flask_server
     expect(page.locator("#capi-uninstall-modal")).to_have_count(0)
     assert page.evaluate("() => document.body.innerHTML.includes('caphv-system')") is False
     assert calls == []
+
+
+def test_an_operator_sees_uninstall_greyed_with_the_reason(context, flask_server):
+    """Revue 4-8 m8 : administrateur seulement, dit par l'info-bulle."""
+    context.route(re.compile(r".*/api/whoami$"), lambda r, q: fulfill(r, {
+        "role": "operator", "roles_active": True, "user": "u", "auth": "local"}))
+    calls = []
+    page = open_window(context, flask_server, PLAN, calls)
+    m = page.locator("#capi-uninstall-modal")
+    expect(m.locator('[data-x="providers"] li')).to_have_count(2)
+    m.locator('[data-x="name"]').fill("harv-fake")
+    go = m.locator('[data-x="go"]')
+    expect(go).to_be_disabled()
+    assert "administrator" in (go.get_attribute("title") or "")
+    assert calls == []

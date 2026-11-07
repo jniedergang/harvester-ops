@@ -166,7 +166,7 @@ const Artefacts = (() => {
           <div class="xfer-live-line" data-x="progress" hidden></div>
         </div>
         <div class="modal-footer apply-bar" style="margin:0;">
-          <button type="button" class="btn btn-secondary btn-sm" data-art-close>${esc(tr('common.cancel', 'Cancel'))}</button>
+          <button type="button" class="btn btn-secondary btn-sm tip" data-art-close data-tip="${esc(tr('art.t.closeWindow', 'Close this window'))}" title="${esc(tr('art.t.closeWindow', 'Close this window'))}">${esc(tr('common.cancel', 'Cancel'))}</button>
           <span class="tip" data-x="go-wrap"><button type="button" class="btn btn-primary btn-sm" data-art-go disabled>${icon('upload', 13)} ${esc(tr('art.publish', 'Publish'))}</button></span>
           <span class="apply-result" data-x="feedback"></span>
         </div>
@@ -219,6 +219,7 @@ const Artefacts = (() => {
       line.hidden = false;
       line.textContent = tr('art.publishStarted', 'Publishing (action {id}), see the dock.', { id: d.action_id });
       if (!window.SSEReconnect) return;
+      if (modal !== m) return;
       const es = SSEReconnect.connect(`/api/stream/${enc(d.action_id)}`, {
         on: {
           step: (ev) => { try { const st = JSON.parse(ev.data); if (st.message) line.textContent = st.message; } catch { /* ligne illisible */ } },
@@ -304,7 +305,7 @@ const Artefacts = (() => {
           <div class="xfer-live-line" data-x="progress" hidden></div>
         </div>
         <div class="modal-footer apply-bar" style="margin:0;">
-          <button type="button" class="btn btn-secondary btn-sm" data-art-close>${esc(tr('common.cancel', 'Cancel'))}</button>
+          <button type="button" class="btn btn-secondary btn-sm tip" data-art-close data-tip="${esc(tr('art.t.closeWindow', 'Close this window'))}" title="${esc(tr('art.t.closeWindow', 'Close this window'))}">${esc(tr('common.cancel', 'Cancel'))}</button>
           <span class="tip" data-x="go-wrap"><button type="button" class="btn btn-primary btn-sm" data-art-apply-go disabled>${icon('play', 13)} ${esc(tr('art.ap.apply', 'Apply'))}</button></span>
           <span class="apply-result" data-x="feedback"></span>
         </div>
@@ -331,8 +332,10 @@ const Artefacts = (() => {
       q('go-wrap').dataset.tip = why;
       go.title = why;
     };
-    const seq = { n: 0, t: null };
+    // revue 4-8 I3 : une fois lancé, Appliquer reste grisé (pas de second envoi)
+    const seq = { n: 0, t: null, launched: false, es: null };
     async function check() {
+      if (seq.launched) return;
       const n = ++seq.n;
       const b = body();
       if (!b.cluster) { setGo(false, tr('art.ap.noCluster', 'No cluster created by Cluster API on this Harvester cluster.')); return; }
@@ -365,22 +368,34 @@ const Artefacts = (() => {
       go.disabled = true;
       seq.t = setTimeout(check, ms);
     };
-    m._cleanup = () => { clearTimeout(seq.t); seq.n++; };
+    m._cleanup = () => {
+      clearTimeout(seq.t); seq.n++;
+      if (seq.es) { seq.es.close(); seq.es = null; }
+    };
     m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-art-close]')) closeModal(); });
     m.addEventListener('input', () => later(500));
     m.addEventListener('change', () => later(200));
     go.addEventListener('click', async () => {
-      if (go.disabled) return;
+      if (go.disabled || seq.launched) return;
       go.disabled = true;
-      m._cleanup();
+      seq.launched = true;
+      clearTimeout(seq.t); seq.n++;
       const r = await fetch(`/api/capi/${enc(cluster)}/artefact`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body()) }).catch(() => null);
       const d = r ? await r.json().catch(() => ({})) : {};
-      if (!r || !r.ok) { q('feedback').textContent = d.error || (r ? `HTTP ${r.status}` : '?'); go.disabled = false; return; }
+      if (!r || !r.ok) {
+        q('feedback').textContent = d.error || (r ? `HTTP ${r.status}` : '?');
+        seq.launched = false;
+        go.disabled = false;
+        return;
+      }
+      setGo(false, tr('art.ap.t.launched', 'Applied once from this window: follow the action in the dock'));
+      if (typeof Dock !== 'undefined' && Dock.poll) Dock.poll();
       const line = q('progress');
       line.hidden = false;
       line.textContent = tr('art.ap.started', 'Applying (action {id}), see the dock.', { id: d.action_id });
       if (!window.SSEReconnect) return;
+      if (modal !== m) return;
       const es = SSEReconnect.connect(`/api/stream/${enc(d.action_id)}`, {
         on: {
           step: (ev) => { try { const st = JSON.parse(ev.data); if (st.message) line.textContent = st.message; } catch { /* ligne illisible */ } },
@@ -388,10 +403,12 @@ const Artefacts = (() => {
             let x = {};
             try { x = JSON.parse(ev.data); } catch { /* fin sans détail */ }
             es.close();
+            seq.es = null;
             line.textContent = x.status === 'done' ? tr('art.ap.done', 'Applied.') : tr('art.ap.failed', 'The item was not applied: see the dock.');
           },
         },
       });
+      seq.es = es;
     });
     check();
   }
@@ -482,7 +499,7 @@ const Artefacts = (() => {
           <div data-x="verdict"></div>
         </div>
         <div class="modal-footer apply-bar" style="margin:0;">
-          <button type="button" class="btn btn-secondary btn-sm" data-art-close>${esc(tr('common.cancel', 'Cancel'))}</button>
+          <button type="button" class="btn btn-secondary btn-sm tip" data-art-close data-tip="${esc(tr('art.t.closeWindow', 'Close this window'))}" title="${esc(tr('art.t.closeWindow', 'Close this window'))}">${esc(tr('common.cancel', 'Cancel'))}</button>
           <button type="button" class="btn btn-secondary btn-sm tip" data-art-upload disabled
                   data-tip="${esc(tr('art.t.upload', 'Send the files and check the package (nothing is imported yet)'))}" title="${esc(tr('art.t.upload', 'Send the files and check the package (nothing is imported yet)'))}">${icon('upload')} ${esc(tr('art.upload', 'Send and check'))}</button>
           <button type="button" class="btn btn-primary btn-sm tip" data-art-accept disabled
