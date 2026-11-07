@@ -259,3 +259,16 @@ def test_an_archive_named_after_another_package_is_refused_at_upload(env, pkg, t
     r = upload(env["client"], other)
     staged = r.get_json().get("staged") or {}
     assert staged.get("ok") is False and staged.get("code") == "root-mismatch", r.get_json()
+
+
+def test_upload_and_settings_actions_have_an_end(env, pkg, keys):
+    """2.6.0, vu sur la console du banc : les actions de téléversement et
+    les gestes courts (réglages, oubli d'un registre) finissaient sans
+    heure de fin, ce que lit l'Activité (durée, tri)."""
+    c = env["client"]
+    up = wait(upload(c, pkg).get_json()["action_id"])
+    pub = (keys / "client.pub").read_text().split()
+    st = wait(c.put("/api/artefacts/settings", json={"add_signer": f"ops@client {pub[0]} {pub[1]}"})
+              .get_json()["action_id"])
+    for run in (up, st):
+        assert run.ended_at is not None and run.ended_at >= run.started_at

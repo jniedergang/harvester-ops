@@ -34619,6 +34619,7 @@ def api_artefacts_upload():
         run.error_summary = "cancelled" if isinstance(e, _UploadCancelled) else _error_text(e)
         run.emit({"type": "step", "step_id": "upload", "status": "error",
                   "message": run.error_summary, "ts": time.time()})
+        run.ended_at = time.time()
         run.close()
         return jsonify({"error": run.error_summary, "action_id": run.id}), 409
     run.emit({"type": "step", "step_id": "upload", "status": "done",
@@ -34633,6 +34634,7 @@ def api_artefacts_upload():
     run.status, run.exit_code = ("done", 0) if chk.get("ok") else ("error", 2)
     if not chk.get("ok"):
         run.error_summary = msg
+    run.ended_at = time.time()
     run.close()
     return jsonify({"ok": True, "action_id": run.id, "staged": chk})
 
@@ -34646,6 +34648,7 @@ def _art_done_action(label, steps):
     for sid, msg in steps:
         run.emit({"type": "step", "step_id": sid, "status": "done", "message": msg, "ts": time.time()})
     run.status, run.exit_code = "done", 0
+    run.ended_at = time.time()
     run.close()
     return run.id
 
