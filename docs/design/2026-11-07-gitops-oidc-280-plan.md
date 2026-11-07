@@ -378,7 +378,11 @@ Ce qui est réutilisé, sans copie :
   récupère côté connecté.
 - **Publication** : chaque fichier en blob du dépôt
   `<registre>/harvester-ops/rke2`, manifeste d'artefact étiqueté `<version>`
-  (type `application/vnd.harvester-ops.rke2.v1+json`).
+  (type `application/vnd.harvester-ops.rke2.v1+json`). Tâche 8 : la grammaire
+  des étiquettes OCI interdit le `+` ; l'étiquette est la version au `+`
+  remplacé par `_` (`v1.34.11_rke2r1`). `/opt/install.sh` n'est posé qu'après
+  la vérification des trois empreintes (récupéré sous un autre nom) et
+  CAPRKE2 le lance lui-même (`airGapped`).
 - **Option du cluster enfant** `offline: true` : exige des registres dont le
   miroir de `docker.io` est sans repli (`no_fallback`) et l'élément `rke2`
   de la version du modèle publié dans l'un d'eux (`offline-rke2-missing`,

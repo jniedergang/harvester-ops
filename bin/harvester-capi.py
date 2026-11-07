@@ -415,9 +415,10 @@ def amount(spec, overcommit=None):
 # Manifestes
 # ---------------------------------------------------------------------------
 
-def render(spec, identity_kubeconfig, origin=None, registries=None):
+def render(spec, identity_kubeconfig, origin=None, registries=None, offline=None):
     """Les documents du cluster, corrigés (liste de dict) ; `registries` :
-    configuration de registres de RKE2 (`registry_config`)."""
+    configuration de registres de RKE2 (`registry_config`) ; `offline` :
+    amorçage sans Internet (`offline_config`, 2.8.0)."""
     argv = ["bash", str(GENERATOR)] + cc.to_argv(spec, identity_kubeconfig)
     p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     if p.returncode != 0:
@@ -428,7 +429,7 @@ def render(spec, identity_kubeconfig, origin=None, registries=None):
     if y.returncode != 0:
         raise RuntimeError("cannot parse the generated manifests: " + y.stderr.strip()[:200])
     docs = [json.loads(line) for line in y.stdout.splitlines() if line.strip() not in ("", "null")]
-    out = cc.postprocess(docs, spec, origin, registries)
+    out = cc.postprocess(docs, spec, origin, registries, offline)
     for d in out:
         if d.get("kind") == "Namespace":
             d.setdefault("metadata", {}).setdefault("labels", {})[cs.MANAGED] = "true"
@@ -785,6 +786,69 @@ def registry_config(kube, spec, harvester, hidden=False, nodes_secret=None):
             "no_fallback": any(f["path"] == rg.NO_FALLBACK_FILE for f in files)}
 
 
+def _offline_published(spec):
+    """{registre: [éléments rke2 publiés]} des registres de la demande, lus
+    dans les paquets publiés de chaque déclaration."""
+    import artefacts as art
+    import rke2_offline as ro
+    out = {}
+    for e in spec.get("registries") or []:
+        d = rg.load(_state(), e["registry"])
+        pkgs = []
+        for p in (d or {}).get("published") or []:
+            try:
+                pkgs.append(art.load_package(_state(), p.get("package"), p.get("version")))
+            except (art.ArtefactError, TypeError):
+                continue
+        out[e["registry"]] = ro.published_rke2(pkgs)
+    return out
+
+
+def offline_findings(spec):
+    """2.8.0 (point 237) : constats de l'option `offline` (rke2_offline)."""
+    import rke2_offline as ro
+    if not spec.get("offline"):
+        return []
+    # une seule décision de repli par cluster (registries.fallback_asked)
+    cut = rg.fallback_asked(spec.get("registries") or [])
+    entries = [dict(e, decl=rg.load(_state(), e["registry"]), no_fallback=cut) for e in spec.get("registries") or []]
+    return ro.findings(spec, _offline_published(spec), entries)
+
+
+def offline_config(kube, spec, hidden=False):
+    """{files, preRKE2Commands, secrets} de l'option `offline`, None sans
+    elle ; mode `image` : {} (airGapped seul). Empreintes = sha256 des
+    fichiers du paquet (celles des blobs publiés) ; compte de lecture dans
+    le Secret `<c>-rke2-fetch` (netrc), jamais dans une commande."""
+    import artefacts as art
+    import rke2_offline as ro
+    if not spec.get("offline"):
+        return None
+    if spec.get("offline_artifacts") == "image":
+        return {}
+    got = ro.chosen(spec, _offline_published(spec))
+    if got is None:
+        raise ValueError("offline-rke2-missing: no RKE2 item of this version in the registries of the cluster")
+    reg, it = got
+    d = rg.load(_state(), reg)
+    pkg = art.load_package(_state(), it["package"], it["pkg_version"])
+    import oci_layout as ol
+    digests = {Path(rel).name: "sha256:" + ol.sha256_file(Path(pkg["path"]) / rel) for rel in ro.files_of(it["version"])}
+    creds = dict(HIDDEN_CREDS) if hidden else rg.read_creds(kube, reg, "pull")
+    if not creds:
+        raise ValueError(f"cluster-registry-not-attached: no read account of {reg}")
+    name = f"{spec['name']}-rke2-fetch"
+    data = {"netrc": ro.netrc(d["endpoint"], creds["username"], creds["password"])}
+    if d.get("ca_pem"):
+        data["ca.crt"] = rg.ca_bundle(d)
+    patch = ro.template_patch(d["endpoint"], digests, name, ca=bool(d.get("ca_pem")))
+    secret = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+              "metadata": {"name": name, "namespace": spec["namespace"],
+                           "labels": {cc.GENERATED: "true", rg.LABEL: reg}},
+              "stringData": data}
+    return dict(patch, secrets=[secret])
+
+
 def registries_step(spec, regs):
     """Ligne de l'étape `registries` d'une création."""
     return (f"{len(spec['registries'])} registry(ies): mirrors {', '.join(regs['mirrors']) or '-'}"
@@ -797,7 +861,7 @@ def _check(kube, spec, desc, identity="console", harvester=None):
         findings = [cc.finding("cluster-unreachable", "block")]
         return {"findings": findings, "blocked": True, "amount": amount(spec), "spec": spec}
     findings = cc.check(spec, facts_from(inv)) + registry_findings(kube, spec, harvester) + \
-        _session_findings(kube, spec)
+        _session_findings(kube, spec) + offline_findings(spec)
     version = ci.caphv_version(inv.get("stack"), desc)
     if identity == "restricted":
         findings += ci.findings(spec, version, identity, _cloud_provider_bindings(kube, spec["name"]),
@@ -862,7 +926,7 @@ def _check_many(kube, specs, desc, identity="restricted", harvester=None):
     for s in specs:
         reviews += cc.manifest_reviews(s)
         extra += [dict(f, cluster=f"{s['namespace']}/{s['name']}")
-                  for f in registry_findings(kube, s, harvester) + _session_findings(kube, s)]
+                  for f in registry_findings(kube, s, harvester) + _session_findings(kube, s) + offline_findings(s)]
         if identity == "restricted":
             extra += [dict(f, cluster=f"{s['namespace']}/{s['name']}")
                       for f in ci.findings(s, version, identity, _cloud_provider_bindings(kube, s["name"]),
@@ -939,7 +1003,8 @@ def cmd_render(args):
     rkc = _work_file(DRY_RUN_KUBECONFIG) if restricted else kc
     try:
         # aperçu : les comptes des registres ne sont jamais lus (masqués)
-        docs = render(spec, rkc, registries=registry_config(kube, spec, _harvester(args), hidden=True))
+        docs = render(spec, rkc, registries=registry_config(kube, spec, _harvester(args), hidden=True),
+                      offline=offline_config(kube, spec, hidden=True))
     finally:
         if restricted:
             Path(rkc).unlink(missing_ok=True)
@@ -1079,7 +1144,8 @@ def cmd_create(args):
     if args.dry_run:
         dry_kc = _work_file(DRY_RUN_KUBECONFIG) if restricted else kc
         try:
-            docs = render(spec, dry_kc, origin, registries=registry_config(kube, spec, _harvester(args), hidden=True))
+            docs = render(spec, dry_kc, origin, registries=registry_config(kube, spec, _harvester(args), hidden=True),
+                          offline=offline_config(kube, spec, hidden=True))
         finally:
             if restricted:
                 Path(dry_kc).unlink(missing_ok=True)
@@ -1106,7 +1172,7 @@ def cmd_create(args):
             if restricted:
                 ns_created = _ensure_namespace(kube, ns)
                 ident = identity_up(kube, spec, out["caphv_version"])
-            docs = render(spec, ident or kc, origin, registries=regs)
+            docs = render(spec, ident or kc, origin, registries=regs, offline=offline_config(kube, spec))
         finally:
             if ident:
                 Path(ident).unlink(missing_ok=True)
@@ -1313,6 +1379,7 @@ def _registry_secrets_of(generated, ns, name):
     for reg in regs:
         wanted |= set(rg.child_secret_names(name, reg).values())
         wanted.add(sv.registry_secret_names({"cluster": f"{ns}/{name}"}, reg)["auth"])
+    wanted.add(f"{name}-rke2-fetch")                     # 2.8.0 : sans Internet
     return [s for s in generated if (s.get("metadata") or {}).get("name") in wanted]
 
 

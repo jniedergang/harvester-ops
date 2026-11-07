@@ -38,7 +38,8 @@ ITEM_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 # 2.8.0 : `gitops` rejoint les sortes applicables (contenu d'un artefact
 # Flux publié dans un registre, bin/lib/flux_artifact.py) ; LATER_KINDS
 # reste pour les sortes à venir.
-KINDS = ("chart", "manifest", "policy", "images", "gitops")
+# 2.8.0 : `rke2` (RKE2 lui-même et ses images système, bin/lib/rke2_offline.py)
+KINDS = ("chart", "manifest", "policy", "images", "gitops", "rke2")
 LATER_KINDS = ()
 # Sortes livrées par ClusterResourceSet (2.7.0, bin/lib/capi_manifests.py)
 MANIFEST_KINDS = ("manifest", "policy")
@@ -114,7 +115,10 @@ def check_index(doc, image_names=None):
                 errors.append(f"{where}.values: an object")
         elif "chart" in it or "values" in it:
             errors.append(f"{where}: chart and values are for a chart")
-        if kind in MANIFEST_KINDS + ("gitops",) or (kind in LATER_KINDS and "files" in it):
+        if kind == "rke2":
+            import rke2_offline as _ro
+            errors.extend(f"{where}.{e}" for e in _ro.check_item(it))
+        elif kind in MANIFEST_KINDS + ("gitops",) or (kind in LATER_KINDS and "files" in it):
             files = it.get("files")
             if not isinstance(files, list) or not files or not all(
                     isinstance(f, str) and re.match(rf"^manifests/{re.escape(iname)}/[A-Za-z0-9._-]+\.ya?ml$", f)

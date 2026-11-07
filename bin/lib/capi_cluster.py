@@ -427,7 +427,31 @@ def renew_templates(docs, spec, whats, registries=None):
     return out
 
 
-def postprocess(docs, spec, origin=None, registries=None):
+def _apply_offline(docs, offline):
+    """2.8.0 (point 237) : cluster amorcé sans Internet, dans les DEUX
+    gabarits RKE2 : fichiers (netrc et CA, depuis un Secret), commandes de
+    récupération ajoutées à la fin de `preRKE2Commands`, et
+    `agentConfig.airGapped: true` (CAPRKE2 lance alors /opt/install.sh sur
+    /opt/rke2-artifacts). `offline` = {files, preRKE2Commands, secrets}
+    rendu par l'appelant (rke2_offline.template_patch), vide en mode
+    `image` (l'image de VM porte déjà les fichiers)."""
+    if offline is None:
+        return docs
+    for d in docs:
+        if d.get("kind") not in RKE2_TEMPLATE_KINDS:
+            continue
+        inner = d.setdefault("spec", {}).setdefault("template", {}).setdefault("spec", {})
+        paths = {f["path"] for f in offline.get("files") or []}
+        if paths:
+            inner["files"] = [f for f in inner.get("files") or [] if f.get("path") not in paths] \
+                + copy.deepcopy(offline["files"])
+        if offline.get("preRKE2Commands"):
+            inner["preRKE2Commands"] = list(inner.get("preRKE2Commands") or []) + list(offline["preRKE2Commands"])
+        inner.setdefault("agentConfig", {})["airGapped"] = True
+    return docs + [copy.deepcopy(s) for s in offline.get("secrets") or []]
+
+
+def postprocess(docs, spec, origin=None, registries=None, offline=None):
     """Corrige les documents produits par le générateur ; rend une copie.
 
     - **v1alpha1 -> v1beta1 pour les objets Harvester.** Le générateur écrit
@@ -455,6 +479,8 @@ def postprocess(docs, spec, origin=None, registries=None):
     - **OIDC** (2.8.0) : `_apply_oidc`, gabarit du plan de contrôle seul.
     - `rancher_external` (2.8.0) ne change aucun document : l'import se fait
       après la création (harvester-capi rancher-import).
+    - **Sans Internet** (2.8.0) : `offline` rendu par l'appelant, voir
+      `_apply_offline`.
     """
     out = []
     for d in docs:
@@ -497,6 +523,8 @@ def postprocess(docs, spec, origin=None, registries=None):
     have = {(d.get("kind"), (d.get("metadata") or {}).get("name")) for d in out}
     if cluster and ("ClusterResourceSet", KUBE_VIP_CRS) not in have:
         out.extend(kube_vip_docs(cluster["metadata"].get("namespace") or "default"))
+    if spec.get("offline"):
+        out = _apply_offline(out, offline if offline is not None else {})
     return _apply_registries(out, registries)
 
 
