@@ -20,6 +20,12 @@ class KubeError(Exception):
     pass
 
 
+def is_missing_type(err):
+    """Vrai si kubectl dit que le serveur ne sert pas cette sorte (CRD
+    retirée, groupe absent)."""
+    return "the server doesn't have a resource type" in str(err)
+
+
 
 # ---------------------------------------------------------------------------
 # kubectl
@@ -60,7 +66,9 @@ class Kube:
                 return None
             raise
 
-    def list(self, kind, ns=None, selector=None):
+    def list(self, kind, ns=None, selector=None, missing_ok=True):
+        """`missing_ok=False` (2.7.0) : une sorte que le serveur ne sert pas
+        lève KubeError au lieu de rendre [] (contrôle qui doit échouer fermé)."""
         args = ["get", kind, "-o", "json"]
         args += self._ns(ns) if ns else ["-A"]
         if selector:
@@ -68,9 +76,19 @@ class Kube:
         try:
             return json.loads(self.run(*args)).get("items", [])
         except KubeError as e:
-            if "the server doesn't have a resource type" in str(e):
+            if missing_ok and is_missing_type(e):
                 return []
             raise
+
+    def api_resources(self, namespaced=None, verbs=None):
+        """`kubectl api-resources --no-headers` (texte) ; `namespaced`
+        (bool) et `verbs` filtrent, la sortie est alors `-o name`."""
+        args = ["api-resources", "--no-headers"]
+        if namespaced is not None:
+            args.append(f"--namespaced={'true' if namespaced else 'false'}")
+        if verbs:
+            args += [f"--verbs={verbs}", "-o", "name"]
+        return self.run(*args)
 
     def create(self, obj, dry_run=False):
         """`dry_run` : validation par le serveur (webhooks compris), rien

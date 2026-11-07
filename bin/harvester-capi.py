@@ -82,7 +82,7 @@ import longhorn_room as lr  # noqa: E402
 import node_images  # noqa: E402
 import registries as rg  # noqa: E402
 import work_dir  # noqa: E402
-from kube import Kube, KubeError, cluster_config  # noqa: E402
+from kube import Kube, KubeError, cluster_config, is_missing_type  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_BLOCKED, EXIT_CANCELLED = 0, 1, 2, 3
 GENERATOR = Path(os.environ.get("HARVESTER_OPS_CAPHV_GEN", str(HERE / "caphv-generate")))
@@ -1515,11 +1515,60 @@ def _team_namespaces_taken(child, spec):
     return out
 
 
+def _taken(child, objs, item, cluster):
+    """Revue 1-3, I2 : un objet du contenu déjà présent dans le cluster
+    enfant sans les étiquettes de cet élément bloque (le CRS le
+    réécrirait, puis le retrait le supprimerait)."""
+    out = []
+    for o in objs:
+        ref = mf.ref_of(o)
+        try:
+            cur = child.get(mf.resource_of(ref), ref[2] or None, ref[3])
+        except KubeError as e:
+            if is_missing_type(e):
+                continue                      # sorte absente : rien n'existe encore
+            raise
+        if cur is not None and not mf.is_ours(cur, item, cluster):
+            out.append(mf.finding("manifest-object-taken", object=f"{ref[1]} {ref[2] + '/' if ref[2] else ''}{ref[3]}"))
+    return out
+
+
+def _child_findings(kube, spec, objs):
+    """Contrôles faits dans le cluster enfant, avec l'identité de la
+    personne (son droit d'administrateur, m1) : sortes servies et portée
+    (I1), objets déjà présents (I2), namespaces d'équipe (207). Lève
+    ChildAccessError sans le droit."""
+    ns, cluster, item = spec["namespace"], spec["cluster"], spec["item"]
+    with ca.session(kube, ns, cluster) as path:
+        child = Kube(path)
+        scopes = mf.parse_api_resources(child.api_resources())
+        found = mf.check(objs, cluster, item, scopes=scopes)
+        if not mf.blocking(found):
+            found += _taken(child, objs, item, cluster)
+        if "policies" in spec and cp.team_namespaces(spec["policies"]):
+            found += _team_namespaces_taken(child, spec)
+    return found
+
+
+def _static_findings(kube, spec):
+    """(objets, constats) sans le cluster enfant ; `manifest-kind-unknown`
+    y est rejugé contre le cluster enfant, pas tranché ici."""
+    objs, found = manifest_objects(spec)
+    found = [f for f in found if f["code"] != "manifest-kind-unknown"]
+    return objs, found + _manifest_owner(kube, spec)
+
+
 def cmd_manifest_check(args):
     kube, _, _ = kube_from(args)
     spec = manifest_spec_from(args.spec)
-    objs, found = manifest_objects(spec)
-    found += _manifest_owner(kube, spec)
+    objs, found = _static_findings(kube, spec)
+    if objs and not mf.blocking(found):
+        try:
+            found = [f for f in found if not f["code"].startswith("manifest-")] + _child_findings(kube, spec, objs)
+        except ca.ChildAccessError as e:
+            found.append(mf.finding(e.code, cluster=f"{spec['namespace']}/{spec['cluster']}"))
+    elif objs:
+        found += [f for f in manifest_objects(spec)[1] if f["code"] == "manifest-kind-unknown"]
     blocked = bool(mf.blocking(found))
     print(json.dumps({"blocked": blocked, "findings": found, "item": spec["item"], "objects": len(objs)}))
     return EXIT_BLOCKED if blocked else EXIT_OK
@@ -1532,17 +1581,31 @@ def _judge(child, refs, item, cluster, sid):
     todo, refused = [], []
     for ref in mf.delete_order(refs):
         res, where = mf.resource_of(ref), f"{ref[1]} {ref[2] + '/' if ref[2] else ''}{ref[3]}"
-        obj = child.get(res, ref[2] or None, ref[3])
+        try:
+            obj = child.get(res, ref[2] or None, ref[3])
+        except KubeError as e:
+            if not is_missing_type(e):
+                raise
+            # revue 1-3, I5 : la sorte n'est plus servie (CRD retirée avec
+            # son chart, ordre de retrait 211) : l'objet est parti avec elle
+            step(sid, "running", f"{where}: kind no longer served by {cluster}, gone with it")
+            continue
         if obj is None:
             continue
         if not mf.is_ours(obj, item, cluster):
             step(sid, "running", f"kept-relabelled: {where} kept, modified by hand (labels of the console removed)")
             continue
         if ref[1] == "Namespace":
-            foreign = [o for o in child.list(mf.FOREIGN_KINDS, ref[3])
-                       if not (o.get("metadata") or {}).get("ownerReferences") and not mf.is_ours(o, item, cluster)]
-            if foreign:
-                step(sid, "running", f"kept-in-use: {where} kept, it holds {len(foreign)} workload(s) or volume(s) "
+            # revue 1-3, C1 : toutes les sortes listables, échec fermé
+            try:
+                kinds = mf.scan_resources(child.api_resources(namespaced=True, verbs="list").split())
+                inside = child.list(",".join(kinds), ref[3], missing_ok=False) if kinds else []
+            except KubeError as e:
+                step(sid, "running", f"kept-in-use: {where} kept, its content could not be listed: {str(e)[:120]}")
+                continue
+            others = mf.foreign(inside, item, cluster)
+            if others:
+                step(sid, "running", f"kept-in-use: {where} kept, it holds {len(others)} object(s) "
                                      "not delivered by this item")
                 continue
         try:
@@ -1590,18 +1653,22 @@ def cmd_manifest_deploy(args):
     kube, _, _ = kube_from(args)
     spec = manifest_spec_from(args.spec)
     ns, cluster, item = spec["namespace"], spec["cluster"], spec["item"]
-    objs, found = manifest_objects(spec)
-    found += _manifest_owner(kube, spec)
-    if not mf.blocking(found) and "policies" in spec and cp.team_namespaces(spec["policies"]):
-        with ca.session(kube, ns, cluster) as path:
-            found += _team_namespaces_taken(Kube(path), spec)
+    objs, found = _static_findings(kube, spec)
+    if not mf.blocking(found):
+        # toujours dans le cluster enfant : droit de la personne (m1), sortes
+        # servies (I1), objets déjà présents (I2), namespaces d'équipe (207)
+        found = [f for f in found if not f["code"].startswith("manifest-")] + _child_findings(kube, spec, objs)
     if mf.blocking(found):
         for f in mf.blocking(found):
             step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
         return EXIT_BLOCKED
     step("check", "done", f"{item} ({spec['package']} {spec['version']}): {len(objs)} object(s) for {ns}/{cluster}")
-    old = mf.objects_of(kube.get("configmaps", ns, mf.name_of(item)))
+    old_cm = kube.get("configmaps", ns, mf.name_of(item))
+    # I3 : ce qui sort du contenu est écrit AVANT l'application ; un
+    # déploiement arrêté le retire à la reprise
+    pending = mf.pending_after(old_cm, objs)
     docs = mf.docs(ns, cluster, item, spec["package"], spec["version"], objs, spec["origin"], spec["by"])
+    docs[0] = mf.with_pending(docs[0], pending)
     kube.apply(docs)
     kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"labels": {mf.label_of(item): "on"}}})
     step("apply", "done", f"{mf.name_of(item)} declared, cluster {cluster} selected")
@@ -1611,17 +1678,17 @@ def cmd_manifest_deploy(args):
         step("reconcile", "error", f"not applied after {args.timeout} s: {e}")
         return EXIT_FAIL
     step("reconcile", "done", f"{mf.name_of(item)} applied to {cluster}")
-    refs = mf.removed(old, objs)
-    if not refs:
+    if not pending:
         step("prune", "done", "no object left the content")
         return EXIT_OK
     with ca.session(kube, ns, cluster) as path:
         child = Kube(path)
-        todo, refused = _judge(child, refs, item, cluster, "prune")
+        todo, refused = _judge(child, pending, item, cluster, "prune")
         if refused:
             step("prune", "error", "the server refuses: " + "; ".join(refused[:4]))
             return EXIT_FAIL
         n = _prune(child, todo, "prune")
+    kube.patch("configmaps", ns, mf.name_of(item), {"metadata": {"annotations": {mf.A_PENDING: None}}})
     step("prune", "done", f"{n} object(s) that left the content deleted from {cluster}")
     return EXIT_OK
 
@@ -1643,14 +1710,17 @@ def cmd_manifest_remove(args):
         if o is not None and (lab.get(mf.L_CLUSTER) != cluster or lab.get(mf.L_ITEM) != item):
             step("remove", "error", f"artefact-taken: {ns}/{name} belongs to {lab.get(mf.L_CLUSTER) or 'something else'}")
             return EXIT_BLOCKED
+    # I3 : ce qu'un déploiement interrompu n'a pas encore retiré compte aussi
     objs = mf.objects_of(cmap)
+    refs = [mf.ref_of(o) for o in objs]
+    refs += [r for r in mf.pending_of(cmap) if r not in refs]
     present = kube.get(cs.K_CLUSTER, ns, cluster) is not None
     todo = []
     with contextlib.ExitStack() as stack:
         child = None
-        if present and objs:
+        if present and refs:
             child = Kube(stack.enter_context(ca.session(kube, ns, cluster)))
-            todo, refused = _judge(child, [mf.ref_of(o) for o in objs], item, cluster, "remove")
+            todo, refused = _judge(child, refs, item, cluster, "remove")
             if refused:
                 step("remove", "error", "the server refuses: " + "; ".join(refused[:4]) + "; nothing deleted")
                 return EXIT_FAIL

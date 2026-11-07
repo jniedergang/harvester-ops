@@ -74,30 +74,60 @@ class Mgmt:
             {"kind": "ConfigMap", "name": name, "applied": True, "hash": mf.content_hash(cmap)}]})
 
     def patch(self, kind, ns, name, body, dry_run=False):
-        self.calls.append(("patch", kind, body["metadata"]["labels"]))
-        labels = self.objs[(kind, ns, name)]["metadata"].setdefault("labels", {})
-        for k, v in body["metadata"]["labels"].items():
-            if v is None:
-                labels.pop(k, None)
-            else:
-                labels[k] = v
+        self.calls.append(("patch", kind, body["metadata"].get("labels", body["metadata"].get("annotations"))))
+        for field in ("labels", "annotations"):
+            if field not in body["metadata"]:
+                continue
+            cur = self.objs[(kind, ns, name)]["metadata"].setdefault(field, {})
+            for k, v in body["metadata"][field].items():
+                if v is None:
+                    cur.pop(k, None)
+                else:
+                    cur[k] = v
 
     def delete(self, kind, ns, name, cascade=None, dry_run=False):
         self.calls.append(("delete", kind, name, cascade))
         self.objs.pop((kind, ns, name), None)
 
 
+# découverte du cluster enfant (`kubectl api-resources --no-headers`)
+API_RESOURCES = """\
+configmaps        cm      v1        true    ConfigMap
+secrets                   v1        true    Secret
+serviceaccounts   sa      v1        true    ServiceAccount
+namespaces        ns      v1        false   Namespace
+deployments       deploy  apps/v1   true    Deployment
+networkpolicies   netpol  networking.k8s.io/v1   true   NetworkPolicy
+resourcequotas    quota   v1        true    ResourceQuota
+limitranges       limits  v1        true    LimitRange
+rolebindings              rbac.authorization.k8s.io/v1   true   RoleBinding
+widgets                   example.io/v1   true   Widget
+"""
+
+
 class Child:
-    def __init__(self, objs, refuse=(), foreign=None):
+    def __init__(self, objs, refuse=(), foreign=None, missing=(), unlistable=False):
         self.objs = {(mf.resource_of(mf.ref_of(o)), mf.ref_of(o)[2] or None, o["metadata"]["name"]): o for o in objs}
         self.refuse, self.foreign = set(refuse), foreign or {}
-        self.deleted, self.dry = [], []
+        self.missing, self.unlistable = set(missing), unlistable
+        self.deleted, self.dry, self.listed = [], [], []
 
     def get(self, res, ns, name):
+        if res.split(".")[0] in self.missing:
+            raise KubeError(f'error: the server doesn\'t have a resource type "{res}"')
         return self.objs.get((res, ns, name))
 
-    def list(self, kinds, ns=None, selector=None):
-        return self.foreign.get(ns, [])
+    def api_resources(self, namespaced=None, verbs=None):
+        if verbs:
+            return "pods\nconfigmaps\nsecrets\nevents\npersistentvolumeclaims\nwidgets.example.io\n"
+        return API_RESOURCES
+
+    def list(self, kinds, ns=None, selector=None, missing_ok=True):
+        self.listed.append((kinds, ns, missing_ok))
+        if self.unlistable:
+            raise KubeError('error: the server doesn\'t have a resource type "widgets"')
+        inside = [o for (_, s, _), o in self.objs.items() if s == ns]
+        return inside + self.foreign.get(ns, [])
 
     def delete(self, res, ns, name, cascade=None, dry_run=False):
         if dry_run:
@@ -241,7 +271,7 @@ def test_first_deploy_declares_selects_and_waits(cli, world, capsys):
     assert kube.get(cs.K_CLUSTER, NS, CL)["metadata"]["labels"] == {"harvester-ops.io/art-essai": "on"}
     ev = events(capsys)
     assert [e[0] for e in ev] == ["check", "apply", "reconcile", "prune"]
-    assert world["state"]["session"] == 0                       # rien à retirer : cluster enfant non lu
+    assert world["state"]["session"] == 1                       # contrôles seulement : rien à retirer
     assert cmap["metadata"]["annotations"][mf.A_BY] == "alice"
 
 
@@ -353,14 +383,16 @@ def test_remove_keeps_a_namespace_that_holds_foreign_work(cli, world, capsys):
                                      {"metadata": {"name": "owned-pod", "ownerReferences": [{"kind": "ReplicaSet"}]}}]})
     assert world["run"](kube, child, ["manifest-remove", "--name", f"{NS}/{CL}/essai"]) == cli.EXIT_OK
     assert child.deleted == ["essai-cm", "essai-web"]
-    assert any("kept-in-use" in e[2] and "1 workload" in e[2] for e in events(capsys))
+    # le pod d'un ReplicaSet qui n'est pas de l'élément compte aussi (revue 1-3, C1)
+    assert any("kept-in-use" in e[2] and "2 object(s)" in e[2] for e in events(capsys))
 
 
 def test_remove_of_a_deleted_cluster_never_reads_its_kubeconfig(cli, world, capsys):
     kube = deployed(cli, world, capsys)
     kube.objs.pop((cs.K_CLUSTER, NS, CL))
+    before = world["state"]["session"]
     assert world["run"](kube, Child([]), ["manifest-remove", "--name", f"{NS}/{CL}/essai"]) == cli.EXIT_OK
-    assert world["state"]["session"] == 0
+    assert world["state"]["session"] == before
     assert kube.get(mf.K_CRS, NS, "art-essai") is None and kube.get("configmaps", NS, "art-essai") is None
     assert any("left with it" in e[2] for e in events(capsys))
 
@@ -403,3 +435,117 @@ def test_manifests_lists_the_state(cli, world, capsys):
     out = json.loads(capsys.readouterr().out)
     assert len(out) == 1 and out[0]["item"] == "essai" and out[0]["cluster"] == CL and out[0]["objects"] == 3
     assert out[0]["state"]["applied"] is True and out[0]["applied_by"] == "alice"
+
+
+# ---------------------------------------------------------------------------
+# Corrections de la revue des tâches 1 à 3
+# ---------------------------------------------------------------------------
+def test_c1_a_namespace_whose_content_cannot_be_listed_is_kept(cli, world, capsys):
+    kube = deployed(cli, world, capsys)
+    child = Child([stamped(NSO), stamped(CMO), stamped(DEP)], unlistable=True)
+    assert world["run"](kube, child, ["manifest-remove", "--name", f"{NS}/{CL}/essai"]) == cli.EXIT_OK
+    assert child.deleted == ["essai-cm", "essai-web"]
+    assert child.listed and child.listed[0][2] is False                      # échec fermé, jamais []
+    assert any("kept-in-use" in e[2] and "could not be listed" in e[2] for e in events(capsys))
+
+
+@pytest.mark.parametrize("other", [
+    {"apiVersion": "v1", "kind": "PersistentVolumeClaim",
+     "metadata": {"name": "pg-1", "namespace": "essai", "uid": "p", "ownerReferences": [{"uid": "cnpg"}]}},
+    {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": "creds", "namespace": "essai", "uid": "s"}},
+    {"apiVersion": "example.io/v1", "kind": "Widget", "metadata": {"name": "w", "namespace": "essai", "uid": "w"}},
+])
+def test_c1_team_data_keeps_the_namespace(cli, world, capsys, other):
+    kube = deployed(cli, world, capsys)
+    child = Child([stamped(NSO), stamped(CMO), stamped(DEP)], foreign={"essai": [other]})
+    assert world["run"](kube, child, ["manifest-remove", "--name", f"{NS}/{CL}/essai"]) == cli.EXIT_OK
+    assert "essai" not in child.deleted
+    scanned = child.listed[0][0].split(",")
+    assert "secrets" in scanned and "widgets.example.io" in scanned and "events" not in scanned
+
+
+def test_i5_a_kind_no_longer_served_counts_as_gone(cli, world, capsys):
+    kube = deployed(cli, world, capsys)
+    child = Child([stamped(NSO), stamped(CMO)], missing={"Deployment"})
+    assert world["run"](kube, child, ["manifest-remove", "--name", f"{NS}/{CL}/essai"]) == cli.EXIT_OK
+    assert sorted(child.deleted) == ["essai", "essai-cm"]
+    assert any("no longer served" in e[2] for e in events(capsys))
+    assert kube.get("configmaps", NS, "art-essai") is None
+
+
+@pytest.mark.parametrize("present", [
+    obj("ConfigMap", "essai-cm", "essai"),                                    # objet d'équipe homonyme
+    obj("Namespace", "essai"),                                                # namespace existant
+    obj("ConfigMap", "essai-cm", "essai", labels=mf.marks("autre", CL)),      # d'un autre élément
+])
+def test_i2_an_object_already_there_blocks(cli, world, capsys, present):
+    kube = mgmt_with_cluster()
+    child = Child([present])
+    assert world["run"](kube, child, ["manifest-deploy", "--spec", world["spec"]()]) == cli.EXIT_BLOCKED
+    assert kube.calls == []
+    assert any("manifest-object-taken" in e[2] for e in events(capsys))
+    assert world["run"](kube, child, ["manifest-check", "--spec", world["spec"]()]) == cli.EXIT_BLOCKED
+    assert "manifest-object-taken" in [f["code"] for f in json.loads(capsys.readouterr().out)["findings"]]
+
+
+def test_i2_our_own_objects_do_not_block_an_update(cli, world, capsys):
+    kube = deployed(cli, world, capsys)
+    child = Child([stamped(NSO), stamped(CMO), stamped(DEP)])
+    assert world["run"](kube, child, ["manifest-deploy", "--spec", world["spec"](version="1.0.1")]) == cli.EXIT_OK
+
+
+def test_i1_the_child_discovery_judges_custom_kinds(cli, world, capsys, tmp_path):
+    d = tmp_path / "artefacts.d" / "banc-1.0.0"
+    flow = {"apiVersion": "flowcontrol.apiserver.k8s.io/v1", "kind": "FlowSchema",
+            "metadata": {"name": "f", "namespace": "essai"}}
+    widget = obj("Widget", "w", "essai", api="example.io/v1")
+    for objs, rc in (([widget], cli.EXIT_OK), ([flow], cli.EXIT_BLOCKED),
+                     ([obj("Gadget", "g", "essai", api="example.io/v1")], cli.EXIT_BLOCKED)):
+        (d / "manifests" / "essai" / "a.yaml").write_text(json.dumps(objs[0]))
+        kube = mgmt_with_cluster()
+        assert world["run"](kube, Child([]), ["manifest-deploy", "--spec", world["spec"]()]) == rc
+    # sans le cluster enfant, le contrôle dit « inconnue » au lieu de trancher
+    kube = mgmt_with_cluster()
+    kube.objs.pop((cs.K_CLUSTER, NS, CL))
+    world["run"](kube, Child([]), ["manifest-check", "--spec", world["spec"]()])
+    out = json.loads(capsys.readouterr().out)
+    assert {"manifest-cluster-missing", "manifest-kind-unknown"} <= {f["code"] for f in out["findings"]}
+
+
+def test_m1_the_child_admin_right_is_needed_for_a_package_item(cli, world, capsys, monkeypatch):
+    kube = mgmt_with_cluster()
+
+    @contextlib.contextmanager
+    def refused(k, ns, c):
+        raise cli.ca.ChildAccessError("child-admin-required", "forbidden")
+        yield
+    monkeypatch.setattr(cli, "kube_from", lambda a: (kube, None, None))
+    monkeypatch.setattr(cli.ca, "session", refused)
+    assert cli.main(["manifest-deploy", "--spec", world["spec"]()]) == cli.EXIT_BLOCKED
+    assert kube.calls == []
+    assert cli.main(["manifest-check", "--spec", world["spec"]()]) == cli.EXIT_BLOCKED
+    out = json.loads(capsys.readouterr().out)
+    assert [f["code"] for f in out["findings"]] == ["child-admin-required"]
+
+
+def test_i3_a_stopped_update_prunes_on_resume(cli, world, capsys):
+    kube = deployed(cli, world, capsys)
+    kube.stale = True
+    child = Child([stamped(NSO), stamped(CMO), stamped(DEP)])
+    rc = world["run"](kube, child, ["manifest-deploy", "--spec", world["spec"](version="1.0.1"), "--timeout", "0"])
+    assert rc == cli.EXIT_FAIL and child.deleted == []
+    cmap = kube.get("configmaps", NS, "art-essai")
+    assert mf.pending_of(cmap) == [mf.ref_of(DEP)]                           # écrit AVANT l'application
+    kube.stale = False
+    assert world["run"](kube, child, ["manifest-deploy", "--spec", world["spec"](version="1.0.1")]) == cli.EXIT_OK
+    assert child.deleted == ["essai-web"]
+    assert mf.A_PENDING not in kube.get("configmaps", NS, "art-essai")["metadata"]["annotations"]
+
+
+def test_i3_remove_also_takes_what_was_pending(cli, world, capsys):
+    kube = deployed(cli, world, capsys)
+    kube.stale = True
+    child = Child([stamped(NSO), stamped(CMO), stamped(DEP)])
+    world["run"](kube, child, ["manifest-deploy", "--spec", world["spec"](version="1.0.1"), "--timeout", "0"])
+    assert world["run"](kube, child, ["manifest-remove", "--name", f"{NS}/{CL}/essai"]) == cli.EXIT_OK
+    assert sorted(child.deleted) == ["essai", "essai-cm", "essai-web"]

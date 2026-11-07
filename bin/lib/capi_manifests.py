@@ -58,11 +58,55 @@ REFUSED_KINDS = ("CustomResourceDefinition", "APIService", "MutatingWebhookConfi
 # plus celui de l'opérateur Calico que RKE2 pose.
 EXTRA_SYSTEM_NAMESPACES = ("tigera-operator",)
 SA_TOKEN_TYPE = "kubernetes.io/service-account-token"
-# Un Namespace livré n'est supprimé que s'il ne porte aucune charge ni aucun
-# volume d'ailleurs (objets sans propriétaire et sans les étiquettes de
-# l'élément) : sa suppression emporterait le travail d'une équipe.
-FOREIGN_KINDS = ("deployments.apps,statefulsets.apps,daemonsets.apps,jobs.batch,cronjobs.batch,"
-                 "persistentvolumeclaims,pods")
+# Namespaces qu'un élément ne livre jamais comme objet Namespace : ils ne se
+# suppriment pas (NamespaceLifecycle refuserait le retrait pour toujours) ;
+# kube-public et kube-node-lease sont déjà des namespaces système (`kube-*`).
+IMMORTAL_NAMESPACES = ("default",)
+# Portée des sortes intégrées de Kubernetes (groupe, sorte) : sans la
+# découverte du cluster enfant, une sorte absente de ces tables est
+# inconnue et bloque (revue 1-3, I1 : une sorte de portée cluster qui porte
+# un `metadata.namespace`, FlowSchema par exemple, passait pour namespacée).
+NAMESPACED_KINDS = frozenset((g, k) for g, ks in {
+    "": ("ConfigMap", "Secret", "Service", "ServiceAccount", "Pod", "PersistentVolumeClaim", "Endpoints",
+         "LimitRange", "ResourceQuota", "ReplicationController", "Event", "PodTemplate"),
+    "apps": ("Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "ControllerRevision"),
+    "batch": ("Job", "CronJob"),
+    "networking.k8s.io": ("NetworkPolicy", "Ingress"),
+    "rbac.authorization.k8s.io": ("Role", "RoleBinding"),
+    "policy": ("PodDisruptionBudget",),
+    "autoscaling": ("HorizontalPodAutoscaler",),
+    "coordination.k8s.io": ("Lease",),
+    "discovery.k8s.io": ("EndpointSlice",),
+    "events.k8s.io": ("Event",),
+    "storage.k8s.io": ("CSIStorageCapacity",),
+}.items() for k in ks)
+CLUSTER_SCOPED_KINDS = frozenset((g, k) for g, ks in {
+    "": ("Namespace", "Node", "PersistentVolume", "ComponentStatus"),
+    "rbac.authorization.k8s.io": ("ClusterRole", "ClusterRoleBinding"),
+    "storage.k8s.io": ("StorageClass", "CSIDriver", "CSINode", "VolumeAttachment", "VolumeAttributesClass"),
+    "scheduling.k8s.io": ("PriorityClass",),
+    "networking.k8s.io": ("IngressClass", "IPAddress", "ServiceCIDR"),
+    "node.k8s.io": ("RuntimeClass",),
+    "apiextensions.k8s.io": ("CustomResourceDefinition",),
+    "apiregistration.k8s.io": ("APIService",),
+    "admissionregistration.k8s.io": ("MutatingWebhookConfiguration", "ValidatingWebhookConfiguration",
+                                     "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",
+                                     "MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"),
+    "flowcontrol.apiserver.k8s.io": ("FlowSchema", "PriorityLevelConfiguration"),
+    "certificates.k8s.io": ("CertificateSigningRequest", "ClusterTrustBundle"),
+}.items() for k in ks)
+# Retrait d'un Namespace livré (revue 1-3, C1) : il n'est supprimé que si
+# aucun objet d'ailleurs n'y vit, toutes sortes listables comprises (Secrets,
+# ConfigMaps, ressources personnalisées) ; seules sont ignorées celles que
+# Kubernetes crée de lui-même, et les objets qu'il pose dans tout namespace.
+AUTO_RESOURCES = ("events", "events.events.k8s.io", "endpoints", "endpointslices.discovery.k8s.io",
+                  "leases.coordination.k8s.io", "controllerrevisions.apps")
+AUTO_GROUPS = ("metrics.k8s.io",)
+AUTO_OBJECTS = (("ServiceAccount", "default"), ("ConfigMap", "kube-root-ca.crt"))
+# 2.7.0 (revue 1-3, I3) : objets sortis du contenu et pas encore retirés du
+# cluster enfant, écrits sur le ConfigMap AVANT l'application : un
+# déploiement arrêté (délai, arrêt, refus) les retire à la reprise.
+A_PENDING = "harvester-ops.io/artefact-pending-prune"
 
 
 def finding(code, level="block", **facts):
@@ -172,10 +216,40 @@ def objects_of(cm):
     return [json.loads(chunk) for chunk in text.split("---\n") if chunk.strip()]
 
 
-def check(objs, cluster, item=None):
+def parse_api_resources(text):
+    """Sortie de `kubectl api-resources --no-headers` -> {(groupe, sorte):
+    namespacée ?}. Colonnes lues depuis la droite (KIND, NAMESPACED,
+    APIVERSION) : la colonne des noms courts est souvent vide."""
+    out = {}
+    for line in (text or "").splitlines():
+        cols = line.split()
+        if len(cols) < 4 or cols[-2] not in ("true", "false"):
+            continue
+        out[(_group(cols[-3]), cols[-1])] = cols[-2] == "true"
+    return out
+
+
+def scope_of(obj, scopes=None):
+    """True (namespacée), False (portée cluster) ou None (inconnue) : la
+    découverte du cluster enfant si elle est donnée, sinon les tables des
+    sortes intégrées."""
+    key = (_group(obj.get("apiVersion")), obj.get("kind") or "")
+    if scopes is not None and key in scopes:
+        return scopes[key]
+    if key in NAMESPACED_KINDS:
+        return True
+    if key in CLUSTER_SCOPED_KINDS:
+        return False
+    return None
+
+
+def check(objs, cluster, item=None, scopes=None):
     """Constats bloquants sur les objets d'un élément. `item` donné : la
     taille est mesurée sur le contenu réellement rangé (étiquettes
-    comprises)."""
+    comprises). `scopes` : découverte du cluster enfant
+    (`parse_api_resources`) ; sans elle, une sorte hors des tables
+    intégrées est inconnue (`manifest-kind-unknown`, jugée au déploiement
+    contre le cluster enfant)."""
     found = []
     if len(objs) > MAX_OBJECTS:
         found.append(finding("manifest-too-many", count=len(objs), max=MAX_OBJECTS))
@@ -191,13 +265,22 @@ def check(objs, cluster, item=None):
             found.append(finding("manifest-kind-refused", object=where, kind=kind))
             continue
         ref = ref_of(o)
-        if kind not in CLUSTER_KINDS and not ref[2]:
+        scope = scope_of(o, scopes)
+        if scope is None:
+            found.append(finding("manifest-kind-unknown", object=where, kind=kind,
+                                 reason="not served by the child cluster" if scopes is not None
+                                 else "checked against the child cluster when it is applied"))
+            continue
+        if scope is False and kind not in CLUSTER_KINDS:
             found.append(finding("manifest-kind-refused", object=where, kind=kind,
-                                 reason=f"cluster-scoped kinds allowed: {', '.join(CLUSTER_KINDS)}; "
-                                        "a namespaced object needs metadata.namespace"))
+                                 reason=f"cluster-scoped kinds allowed: {', '.join(CLUSTER_KINDS)}"))
+            continue
+        if scope is True and not ref[2]:
+            found.append(finding("manifest-kind-refused", object=where, kind=kind,
+                                 reason="a namespaced object needs metadata.namespace"))
             continue
         target_ns = name if kind == "Namespace" else ref[2]
-        if target_ns and is_system_namespace(target_ns):
+        if target_ns and is_system_namespace(target_ns) or kind == "Namespace" and name in IMMORTAL_NAMESPACES:
             found.append(finding("manifest-system-namespace", object=where, namespace=target_ns))
         if kind == "Secret" and o.get("type") == SA_TOKEN_TYPE:
             found.append(finding("manifest-sa-token-refused", object=where))
@@ -299,6 +382,76 @@ def removed(old_objs, new_objs):
         ref = ref_of(o)
         if _key(ref) not in keep and ref not in out:
             out.append(ref)
+    return out
+
+
+def pending_of(cm):
+    """Références en attente de retrait rangées sur un ConfigMap (I3)."""
+    raw = (((cm or {}).get("metadata") or {}).get("annotations") or {}).get(A_PENDING)
+    try:
+        refs = json.loads(raw) if raw else []
+    except ValueError:
+        return []
+    return [tuple(r) for r in refs if isinstance(r, list) and len(r) == 4 and all(isinstance(x, str) for x in r)]
+
+
+def pending_after(old_cm, new_objs):
+    """Ce qu'il reste à retirer après l'application de `new_objs` : ce qui
+    était déjà en attente plus ce qui sort du contenu, moins ce qui y
+    revient."""
+    keep = {_key(ref_of(o)) for o in new_objs}
+    out = []
+    for ref in pending_of(old_cm) + removed(objects_of(old_cm), new_objs):
+        if _key(ref) not in keep and ref not in out:
+            out.append(ref)
+    return out
+
+
+def with_pending(cm_doc, refs):
+    """Copie du ConfigMap qui porte la liste en attente (absente si vide)."""
+    out = copy.deepcopy(cm_doc)
+    ann = out.setdefault("metadata", {}).setdefault("annotations", {})
+    if refs:
+        ann[A_PENDING] = json.dumps([list(r) for r in refs], separators=(",", ":"))
+    else:
+        ann.pop(A_PENDING, None)
+    return out
+
+
+def scan_resources(names):
+    """Ressources namespacées listables à relire avant de supprimer un
+    Namespace livré : toutes, moins celles que Kubernetes crée de lui-même."""
+    return [n for n in names if n and n not in AUTO_RESOURCES
+            and not any(n.endswith("." + g) for g in AUTO_GROUPS)]
+
+
+def foreign(objs, item, cluster):
+    """Objets d'un namespace qui ne viennent pas de cet élément : ni ses
+    étiquettes, ni un propriétaire (de proche en proche) qui les porte.
+    Un volume réclamé par un opérateur, un Secret d'équipe, une ressource
+    personnalisée sont d'ailleurs ; ce que Kubernetes pose dans tout
+    namespace est ignoré."""
+    ours = {(o.get("metadata") or {}).get("uid") for o in objs if is_ours(o, item, cluster)}
+    ours.discard(None)
+    changed = True
+    while changed:
+        changed = False
+        for o in objs:
+            md = o.get("metadata") or {}
+            uid = md.get("uid")
+            if uid in ours or not md.get("ownerReferences"):
+                continue
+            if any(r.get("uid") in ours for r in md["ownerReferences"]):
+                ours.add(uid)
+                changed = True
+    out = []
+    for o in objs:
+        md = o.get("metadata") or {}
+        if is_ours(o, item, cluster) or (md.get("uid") and md.get("uid") in ours):
+            continue
+        if (o.get("kind"), md.get("name")) in AUTO_OBJECTS:
+            continue
+        out.append(o)
     return out
 
 

@@ -87,7 +87,7 @@ def test_each_refused_kind_is_refused(kind, ns):
     (obj("Namespace", "kube-public"), "manifest-system-namespace"),
     (obj("Secret", "t", "equipe", type="kubernetes.io/service-account-token"), "manifest-sa-token-refused"),
     (obj("ConfigMap", "", "equipe"), "manifest-no-name"),
-    (obj("ClusterIssuer", "x", api="cert-manager.io/v1"), "manifest-kind-refused"),   # portée cluster hors liste
+    (obj("ClusterIssuer", "x", api="cert-manager.io/v1"), "manifest-kind-unknown"),   # sans découverte : inconnue
     (obj("ConfigMap", "nons"), "manifest-kind-refused"),                              # namespacé sans namespace
 ])
 def test_check_refusals(o, code):
@@ -103,7 +103,7 @@ def test_check_refusals(o, code):
     obj("Secret", "s", "equipe", type="Opaque"), obj("Widget", "w", "equipe", api="example.io/v1"),
 ])
 def test_accepted_objects(o):
-    assert mf.check([o], "c") == []
+    assert mf.check([o], "c", scopes={("example.io", "Widget"): True}) == []
 
 
 def test_duplicates_and_too_many():
