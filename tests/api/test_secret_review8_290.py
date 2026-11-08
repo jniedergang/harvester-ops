@@ -625,3 +625,45 @@ def test_kvm_host_add_copy_on_tmpfs_when_migrated(appenv, monkeypatch):
 def types_ns(**kw):
     import types
     return types.SimpleNamespace(**kw)
+
+
+# ---------------------------------------------------------------------------
+# M3 (seconde moitié) : jamais de `.migrated` inconnu du registre des originaux
+# ---------------------------------------------------------------------------
+def _registry(env):
+    p = env["state"] / ss.ORIGINALS_FILE
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
+@pytest.mark.parametrize("cls", ["rancher-oidc", "ssh-kvm"])
+def test_kept_original_is_registered_before_it_exists(env, capsys, monkeypatch, cls):
+    """A crash right after the `.migrated` copy is written must not leave a
+    plaintext copy the registry (hence the keep delay and the confirmation)
+    does not know: the entry is saved first."""
+    real = kvm_decl.write_private
+    seen = []
+
+    def probe(path, data):
+        if str(path).endswith(ss.MIGRATED_SUFFIX):
+            rel = os.path.relpath(path, env["state"])
+            seen.append(any(isinstance(e, dict) and Path(e.get("file", "")).name == Path(rel).name
+                            for e in _registry(env).values()))
+        return real(path, data)
+    monkeypatch.setattr(kvm_decl, "write_private", probe)
+    assert migrate(cls, capsys)[0] == 0
+    assert seen and all(seen), seen
+
+
+@pytest.mark.parametrize("cls", ["rancher-oidc", "ssh-kvm"])
+def test_failed_copy_leaves_neither_entry_nor_file(env, capsys, monkeypatch, cls):
+    real = kvm_decl.write_private
+
+    def failing(path, data):
+        if str(path).endswith(ss.MIGRATED_SUFFIX):
+            real(path, data)
+            raise OSError(28, "No space left on device")
+        return real(path, data)
+    monkeypatch.setattr(kvm_decl, "write_private", failing)
+    migrate(cls, capsys)
+    assert not [e for e in _registry(env).values() if isinstance(e, dict) and e.get("cls") == cls]
+    assert not list(env["state"].rglob("*" + ss.MIGRATED_SUFFIX))

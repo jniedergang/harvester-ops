@@ -756,14 +756,26 @@ class FileStore:
                 raise ValueError("local value changed during the migration")
             base = self._base(cls)
             mig = f.with_name(f.name + MIGRATED_SUFFIX)
+            key = f"{cls}/{path}#{field}"
             with self._originals_lock():
-                kvm_decl.write_private(mig, data)
+                # l'entrée d'abord, la copie ensuite (revue M3 de la tâche 8) :
+                # un arrêt brutal entre les deux laisse au pire une entrée sans
+                # fichier (sans effet), jamais une copie en clair inconnue du
+                # registre, donc du délai de garde et de la confirmation
                 doc = self._originals_doc()
-                doc[f"{cls}/{path}#{field}"] = {
+                doc[key] = {
                     "cls": cls, "path": path, "field": field, "at": time.time(), "action": action or "",
                     "file": Path(os.path.relpath(mig, base)).as_posix(),
                     "dest": Path(os.path.relpath(f, base)).as_posix()}
                 self._originals_save(doc)
+                try:
+                    kvm_decl.write_private(mig, data)
+                except BaseException:
+                    _unlink(mig)
+                    doc = self._originals_doc()
+                    doc.pop(key, None)
+                    self._originals_save(doc)
+                    raise
             if kind == "file":
                 # classes sans verrou partagé avec leurs écrivains (la classe
                 # est déjà marquée migrée : ils écrivent dans OpenBao) :
@@ -771,7 +783,7 @@ class FileStore:
                 if self._norm(cls, f.read_bytes()) != self._norm(cls, data):
                     with self._originals_lock():
                         doc = self._originals_doc()
-                        doc.pop(f"{cls}/{path}#{field}", None)
+                        doc.pop(key, None)
                         self._originals_save(doc)
                     _unlink(mig)
                     raise ValueError("local value changed during the migration")
