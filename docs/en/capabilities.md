@@ -4848,6 +4848,34 @@ masking, stored secret kept only for the same request, `--accept-degraded-standb
 and the resume flags) are covered by unit and end-to-end tests, not run on a
 cluster.
 
+## 12. Secret store (OpenBao, CLI + console)
+
+### Secrets in OpenBao, class by class (2.9.0)
+
+The console can keep its secrets in OpenBao instead of local files: mode A
+(your OpenBao or a compatible Vault, AppRole login, wrapped `secret_id`) or
+mode B1 (OpenBao of the SUSE Application Collection in a container next to
+the console, static unseal key, declarative initialization, snapshots).
+Classes `kubeconfig`, `ssh-cluster`, `ssh-kvm`, `rancher-oidc`,
+`replication-notify`, `replication-hook`, `tf-kvm` move one by one and come
+back the same way; the secrets of a running deployment plan stay in OpenBao
+until the run ends.
+
+| Function | Console | CLI |
+|---|---|---|
+| Activation assistant (commands and policy of mode A, B1 bundle), checks | Settings > Secret store > Enable | `harvester-secrets assistant`, `check`, `enable` |
+| Move a class, come back, confirm the originals | Classes tab | `migrate`, `confirm` |
+| Status, cache, outage test, banner | Status tab, banner | `status`, `outage-test` |
+| Versions of a secret (author, action), rollback | Versions tab | `versions`, `rollback` |
+| Rotation: `secret_id`, B1 unseal key, KVM SSH keys, transit keys | Rotation tab | `rotate` |
+| B1 snapshots: schedule, take, restore with preflight and allowlist review | Snapshots tab, Disaster Recovery overview | `snapshot`, `snapshots`, `restore` |
+| Offline copy of the B1 unseal key | Status tab | `offline-copy export / done / ack` |
+| OpenTofu states encrypted by transit | Terraform declarations (badge, Put back in clear) | `tf-encryption`, `tf-keys`, `tf-entity-remove` |
+| B1 bundle and image upgrade | - | `bundle`, `upgrade-b1` |
+
+Everything is described in [secrets.md](secrets.md), with the limits and
+what was not verified.
+
 ## What needs what
 
 | You want… | You need |
@@ -4860,6 +4888,7 @@ cluster.
 | Fully offline operation | The tarball: bundled wheels + OCI image |
 | KVM hosts and their VMs | Web console or `bin/harvester-kvm.py`, and SSH access by key to an account in the `libvirt` group of each host |
 | Standby copies of VMs on a second cluster | `bin/harvester-replication.py` (or the console routes), two Harvester clusters sharing one backup target |
+| Secrets out of the state directory | Mode A: an OpenBao or Vault server; mode B1: the OpenBao bundle built with an Application Collection service account (Rancher Prime) |
 
 See [architecture.md](architecture.md) for how the surfaces sit on top of
 the shared engine, and [install.md](install.md) to get started.

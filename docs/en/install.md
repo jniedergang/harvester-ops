@@ -386,6 +386,14 @@ staged signed archive is the only way back. Two limits: below 2.0.0, read the
 console cannot run under Docker, so on a Docker host the agent puts the
 current version back.
 
+**Back below 2.9.0 with OpenBao.** A rollback (or an install with "allow
+older") to a release older than 2.9.0 is refused with `secrets-in-openbao`
+while the secret store is not local, a class is in OpenBao or an OpenTofu
+state is encrypted. Bring every class back to local files, put encrypted
+states back in clear and disable the store first
+([secrets.md](secrets.md#disabling-switching-mode-going-back-to-an-older-console)).
+`install.sh` run by hand with an older release is not guarded.
+
 **Back from 2.6.0 to 2.5.0.** 2.5.0 does not know the registries. It lists
 as **invalid** a plan saved with an enabled Registry phase or with
 `registries` on a cluster entry ("coming in 2.6+: set enabled: false", "unknown
@@ -435,6 +443,30 @@ installer needs is removed and the directory created again. The update to
 2.8.3 itself is still run by the agent already installed: to apply the fix
 at once, install 2.8.3 with `sudo ./install.sh --upgrade`. Rolling back to
 an older release reinstalls its agent and installer, without this fix.
+
+## Secret store agent and OpenBao (2.9.0)
+
+`install.sh` (install and `--upgrade`) installs the secret store agent:
+`harvester-secrets-agent.path` and `.service` (root, closed list of
+operations, `ProtectHome=read-only`, `PrivateTmp=yes`) and
+`harvester-secrets-rotate.timer` (hourly: health file, `secret_id` rotation
+every 30 days, retention of old keys and volumes). Without OpenBao they only
+refresh `secrets-agent/health.json`. It also creates
+`/var/lib/harvester-ops-snapshots`, mounted in the console container for the
+B1 snapshots.
+
+For mode B1, build the OpenBao bundle with your Application Collection
+service account (`harvester-secrets bundle`, see
+[secrets.md](secrets.md#building-the-b1-bundle)) and put it with its
+`.sha256` under `bundles/openbao/` of the release before running
+`install.sh`; it is checked and placed in
+`/var/lib/harvester-ops/secrets-agent/staged/`. A later upgrade of the
+OpenBao image: `sudo /usr/local/bin/harvester-secrets upgrade-b1 --bundle
+<file>`. When B1 is posed, `install.sh --upgrade` queues a refresh of the
+agent and OpenTofu token policies (Settings > Secret store shows it done).
+
+On openSUSE, `sudo harvester-secrets` is not found (`secure_path` has no
+`/usr/local/bin`): use `sudo /usr/local/bin/harvester-secrets`.
 
 ## Moving harvops to another host
 

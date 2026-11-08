@@ -3,7 +3,7 @@
 # Statuts : ok (fait), part (partiel), todo (manquant), plus (console seulement), na (hors périmètre).
 # v : version où c'est arrivé (ok/part) ou prévue (todo).
 
-AS_OF = "2.8.0"
+AS_OF = "2.9.0"
 DATE = "2026-11-08"
 
 S = []  # sections
@@ -275,6 +275,9 @@ r("plus", "2.7", "Artefacts appliqués aux clusters enfants, défaire un déploi
 r("plus", "2.8", "Accès aux clusters enfants, GitOps, renouvellement des machines", "Child cluster access, GitOps, machine renewal",
   "import dans le Rancher externe de la session (Membres compris), OIDC de l'API vers le fournisseur d'identité du client avec groupe administrateur, Flux (paquet OCI ou Git) ou Fleet (administrateur), renouvellement des machines pour changer registres, OIDC ou CA, certificat du registre renouvelé, nœuds Harvester branchés sur un registre, cluster enfant sans Internet ; Harvester n'a rien de tel",
   "import into the external Rancher of the session (Members included), API OIDC to the client identity provider with an administrator group, Flux (OCI package or Git) or Fleet (administrator), machine renewal to change registries, OIDC or CA, registry certificate renewal, Harvester nodes wired to a registry, child cluster without Internet; Harvester has nothing of the kind")
+r("plus", "2.9", "Magasin de secrets OpenBao", "OpenBao secret store",
+  "secrets de la console dans OpenBao classe par classe (kubeconfigs, clés SSH, OIDC, réplication, variables Terraform KVM, secrets des plans), mode A (serveur du client) ou B1 (OpenBao de la SUSE Application Collection à côté de la console), cache en mémoire, rotation, versions, instantanés et restauration contrôlée, états OpenTofu chiffrés ; Harvester garde ces secrets dans des fichiers ou des Secrets Kubernetes",
+  "console secrets in OpenBao class by class (kubeconfigs, SSH keys, OIDC, replication, KVM Terraform variables, plan secrets), mode A (client server) or B1 (OpenBao of the SUSE Application Collection next to the console), in-memory cache, rotation, versions, snapshots and checked restore, encrypted OpenTofu states; Harvester keeps such secrets in files or Kubernetes Secrets")
 r("plus", "1.19", "Installation bare-metal de Harvester par Redfish", "Bare-metal Harvester install over Redfish",
   "configuration complète de l'installeur, import d'un fichier existant et aperçu (1.77) ; découverte des disques, rôles, pools, cluster déclaré tout seul (1.78) ; écran en onglets Machines, Profils, Images, Historique, dernière découverte gardée (2.1) ; machine qui porte déjà un système gardée, séries de profils comprises (2.2) ; plans de déploiement : disponibilité puis contenu Terraform, suivis et reprenables (2.4), Cluster API et clusters enfants (2.5), registres et publication de paquets (2.6), artefacts et Défaire (2.7), phase GitOps et options d'accès des modèles (2.8)", "complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78); screen in tabs Machines, Profiles, Images, History, last discovery remembered (2.1); a machine that already carries a system is guarded, profile batches included (2.2); deployment plans: readiness then Terraform content, tracked and resumable (2.4), Cluster API and child clusters (2.5), registries and package publishing (2.6), artefacts and undo (2.7), GitOps phase and access options of the templates (2.8)")
 r("plus", "1.6", "Activité : chaque geste suivi, dock des actions", "Activity: every action tracked, action dock")

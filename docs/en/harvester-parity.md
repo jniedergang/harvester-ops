@@ -1,6 +1,6 @@
 # Parity with the Harvester UI
 
-Status on 2026-11-08, console **v2.8.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
+Status on 2026-11-08, console **v2.9.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
 
 Of 136 functions of the Harvester UI: **133 done**, **3 partial**, **0 missing**; 1 out of scope. A missing function shows the version it is planned for.
 
@@ -280,6 +280,7 @@ Harvester menu: *VM Imports / VM Migration*
 | Signed artefact packages and child-cluster registries | Console only | 2.6 | package built on a connected machine (standard library only) and imported offline, permissive or strict trust, bootstrap registry on the Harvester cluster or client registry, resumable publishing, RKE2 mirrors set at creation, charts through CAAPH from the registry; Harvester only has the containerd-registry setting of its own nodes |
 | Artefacts applied to child clusters, undoing a deployment | Console only | 2.7 | manifests and policies through a ClusterResourceSet with removal followed by the console, base of policies, automation accounts and short tokens, Artefacts phase of the plans, reverse removal of what a run created; Harvester has nothing of the kind |
 | Child cluster access, GitOps, machine renewal | Console only | 2.8 | import into the external Rancher of the session (Members included), API OIDC to the client identity provider with an administrator group, Flux (OCI package or Git) or Fleet (administrator), machine renewal to change registries, OIDC or CA, registry certificate renewal, Harvester nodes wired to a registry, child cluster without Internet; Harvester has nothing of the kind |
+| OpenBao secret store | Console only | 2.9 | console secrets in OpenBao class by class (kubeconfigs, SSH keys, OIDC, replication, KVM Terraform variables, plan secrets), mode A (client server) or B1 (OpenBao of the SUSE Application Collection next to the console), in-memory cache, rotation, versions, snapshots and checked restore, encrypted OpenTofu states; Harvester keeps such secrets in files or Kubernetes Secrets |
 | Bare-metal Harvester install over Redfish | Console only | 1.19 | complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78); screen in tabs Machines, Profiles, Images, History, last discovery remembered (2.1); a machine that already carries a system is guarded, profile batches included (2.2); deployment plans: readiness then Terraform content, tracked and resumable (2.4), Cluster API and child clusters (2.5), registries and package publishing (2.6), artefacts and undo (2.7), GitOps phase and access options of the templates (2.8) |
 | Activity: every action tracked, action dock | Console only | 1.6 |  |
 | Collaborative notes on VMs and nodes | Console only | 1.4 |  |

@@ -403,6 +403,21 @@ updates step indicators in real time without polling. Direct-API actions
 (VM ops, Terraform apply, CAPHV install) use the same `ActionRun` + SSE
 mechanism, streaming step/log events as they progress.
 
+## Secret store (2.9.0)
+
+`bin/lib/secret_store.py` is the single reader of every console secret.
+A field holds either a value or a path (local, as before) or a reference
+`openbao:<class>/<path>#<field>`. `bin/lib/openbao_client.py` (standard
+library only) talks to OpenBao by AppRole, keeps the token in memory and
+retries network errors; `VAULT_*` and `BAO_*` from the environment are
+ignored. Values read are cached in memory (15 min); copies handed to
+`kubectl`, `ssh` and `tofu` are tmpfs files erased after the action. A tool
+launched by the console never logs in: it receives the working copies. The
+host agent `bin/harvester-secrets-agent.py` (root, one at a time, closed
+list of operations) deposits the `secret_id`, poses and upgrades B1, rotates
+keys and restores snapshots; the console asks it by
+`<state>/secrets-agent/request.json`. Details: [secrets.md](secrets.md).
+
 ## Trust model
 
 - The container holds full `cluster-admin` access via mounted kubeconfigs

@@ -781,6 +781,70 @@ nœuds Harvester sur un registre qu'ils joignent : un registre du client, ou
 le registre d'amorçage d'un autre cluster Harvester. Contrôle depuis un
 nœud : `curl -k https://<registre>/v2/` (401 attendu).
 
+## Magasin de secrets (OpenBao, 2.9.0)
+
+### « openbao-sealed »
+B1 : l'unité démarre OpenBao avec la clé statique, qui se descelle tout
+seul. Un B1 scellé signifie le plus souvent que le fichier de la clé de
+descellement ou son secret podman manque (`journalctl -u
+harvester-ops-openbao`). Mode A : descellez votre serveur. La console sert
+les valeurs en cache jusqu'à l'expiration du cache (bandeau).
+
+### « openbao-login-failed » ou « invalid role or secret ID »
+Le `secret_id` a été tourné ou détruit sur le serveur, ou l'adresse de la
+console est hors de `secret_id_bound_cidrs`. Mode A : créez un nouveau
+`secret_id` emballé et relancez l'activation (la vérification avant
+activation n'emploie jamais les anciens identifiants). B1 : **Faire
+tourner** dans Paramètres > Magasin de secrets > Rotation.
+
+### « openbao-denied ... (capabilities: deny) »
+La politique de la console n'autorise pas ce chemin, ou le jeton est
+employé hors de `token_bound_cidrs` (OpenBao répond le même 403). Comparez
+la politique au texte de l'assistant.
+
+### « openbao-internal » avec OpenBao descellé
+Le plus souvent, le journal d'audit est plein : OpenBao refuse toute
+requête qu'il ne peut pas journaliser, alors que `sys/health` dit encore
+descellé. Libérez de la place sur le volume d'audit (B1 :
+`/var/lib/harvester-ops-openbao/audit`) ; OpenBao reprend aussitôt.
+
+### « openbao-unreachable » une fois le cache expiré
+OpenBao est arrêté et le cache (15 min par défaut) ne tient plus la
+valeur : il n'y a pas de copie locale, c'est voulu. Démarrez OpenBao, ou
+restaurez B1 depuis un instantané ([secrets.md](secrets.md#restaurer)).
+
+### « offline-copy-ack-required »
+B1 refuse de migrer une classe tant que la copie hors ligne de la clé de
+descellement en service n'est pas téléchargée et acquittée (onglet État).
+
+### Une restauration répond « restore-risks » ou « actions-running »
+La vérification préalable a trouvé ce que la restauration casserait (listé
+dans la fenêtre). Attendez la fin des actions en cours, ou acquittez la
+liste.
+
+### Une restauration finit par « snapshot-untrusted »
+La configuration restaurée ne correspond pas à ce qu'attend cette console
+(le message nomme l'élément : une politique, une méthode
+d'authentification, un rôle, un `secret_id`, un rôle de jeton, un groupe,
+un montage, un périphérique d'audit, une politique de jeton). Le volume
+précédent est remis et rien n'a changé. Un instantané d'une autre console,
+ou modifié hors de harvops, est refusé exprès.
+
+### Retour arrière refusé avec « secrets-in-openbao »
+Voir [secrets.md](secrets.md#désactiver-changer-de-mode-revenir-à-une-console-plus-ancienne) :
+ramenez les classes, remettez les états en clair, désactivez, puis revenez
+en arrière.
+
+### « sudo: harvester-secrets: command not found »
+Le `secure_path` de `sudo` (openSUSE) ne contient pas `/usr/local/bin` :
+lancez `sudo /usr/local/bin/harvester-secrets`.
+
+### « snapshot-dir-not-writable » ou aucun instantané planifié
+Le répertoire des instantanés doit être visible dans le conteneur de la
+console : employez `/var/lib/harvester-ops-snapshots` (ou un partage monté
+là). Un instantané en échec est affiché dans État et retenté après une
+heure.
+
 ## Reprendre une extinction interrompue
 
 Si le script a été tué (Ctrl-C, perte SSH, ...) avec certains nodes éteints et d'autres encore up :

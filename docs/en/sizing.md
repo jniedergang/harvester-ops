@@ -107,3 +107,12 @@ Each read worker adds about 175 MB. Beyond 60 clusters, or with many people
 each on a different cluster, measure with the bench before committing to a
 figure; raising `HARVESTER_OPS_WATCH_INTERVAL` lowers the constant load of the
 watchers.
+
+## OpenBao B1 (2.9.0)
+
+The B1 container runs with `--memory 512m --memory-swap 512m`; measured on
+the client VM: 39 to 42 MB in use with three classes moved. The image takes
+202 MB on disk once loaded, the bundle 59 MB. A snapshot of that store was
+58 to 86 KB. Keep at least 1 GiB free for the audit log under
+`/var/lib/harvester-ops-openbao` (the console warns below 1 GiB or 10 %).
+

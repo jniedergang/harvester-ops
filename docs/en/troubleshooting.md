@@ -750,6 +750,64 @@ Harvester nodes to a registry they can reach: a client registry, or the
 bootstrap registry of another Harvester cluster. Check from a node with
 `curl -k https://<registry>/v2/` (401 expected).
 
+## Secret store (OpenBao, 2.9.0)
+
+### "openbao-sealed"
+B1: the unit starts OpenBao with the static key and unseals by itself; a
+sealed B1 usually means the unseal key file or its podman secret is missing
+(`journalctl -u harvester-ops-openbao`). Mode A: unseal your server. The
+console serves the cached values until the cache expires (banner).
+
+### "openbao-login-failed" or "invalid role or secret ID"
+The `secret_id` was rotated or destroyed on the server, or the console
+address is outside `secret_id_bound_cidrs`. Mode A: create a new wrapped
+`secret_id` and run Enable again (the check before activation never uses
+the old credentials). B1: **Rotate now** in Settings > Secret store >
+Rotation.
+
+### "openbao-denied ... (capabilities: deny)"
+The console policy does not allow that path, or the token is used outside
+`token_bound_cidrs` (OpenBao answers the same 403). Compare the policy with
+the text of the assistant.
+
+### "openbao-internal" with OpenBao unsealed
+Usually the audit log is full: OpenBao refuses every request it cannot log,
+while `sys/health` still says unsealed. Free space on the audit volume
+(B1: `/var/lib/harvester-ops-openbao/audit`); OpenBao resumes at once.
+
+### "openbao-unreachable" once the cache expired
+OpenBao is down and the cache (15 min by default) no longer holds the value:
+there is no local copy by design. Start OpenBao, or restore B1 from a
+snapshot ([secrets.md](secrets.md#restoring)).
+
+### "offline-copy-ack-required"
+B1 refuses to move a class until the offline copy of the unseal key in
+service is downloaded and acknowledged (Status tab).
+
+### A restore says "restore-risks" or "actions-running"
+The preflight found what the restore would break (listed in the window).
+Wait for running actions, or acknowledge the list.
+
+### A restore ends with "snapshot-untrusted"
+The restored configuration does not match what this console expects (the
+message names the item: a policy, an auth method, a role, a `secret_id`, a
+token role, a group, a mount, an audit device, a token policy). The previous
+volume is back and nothing changed. A snapshot of another console, or one
+modified outside harvops, is refused on purpose.
+
+### Rollback refused with "secrets-in-openbao"
+See [secrets.md](secrets.md#disabling-switching-mode-going-back-to-an-older-console):
+bring classes back, put states back in clear, disable, then roll back.
+
+### "sudo: harvester-secrets: command not found"
+`sudo`'s `secure_path` (openSUSE) has no `/usr/local/bin`: run
+`sudo /usr/local/bin/harvester-secrets`.
+
+### "snapshot-dir-not-writable" or no scheduled snapshot
+The snapshot directory must be visible in the console container: use
+`/var/lib/harvester-ops-snapshots` (or a share mounted there). A failed
+snapshot is shown in Status and retried after an hour.
+
 ## Recovering from a half-done shutdown
 
 If the script was killed (Ctrl-C, lost SSH, ...) and some nodes are off while others are still up:

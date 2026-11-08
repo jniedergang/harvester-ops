@@ -43,7 +43,7 @@ systemctl disable --now harvester-secrets-agent.path harvester-secrets-rotate.ti
 rm -f /etc/systemd/system/harvester-secrets-agent.path /etc/systemd/system/harvester-secrets-agent.service \
       /etc/systemd/system/harvester-secrets-rotate.timer /etc/systemd/system/harvester-ops-openbao.service \
       /etc/logrotate.d/harvester-ops-openbao
-rm -rf /var/lib/harvester-secrets-agent /run/hops-openbao-boot
+rm -rf /var/lib/harvester-secrets-agent /var/lib/harvester-secrets-agent.lock /run/hops-openbao-boot
 systemctl daemon-reload 2>/dev/null || true
 
 info "Removing container image..."

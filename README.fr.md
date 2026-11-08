@@ -309,6 +309,7 @@ d'eux.
 [Installation](docs/fr/installation.md) ·
 [Bare-metal](docs/fr/bare-metal.md) ·
 [Artefacts et registres](docs/fr/artefacts.md) ·
+[Magasin de secrets](docs/fr/secrets.md) ·
 [Dimensionnement](docs/fr/dimensionnement.md) ·
 [Dépannage](docs/fr/depannage.md) ·
 [Journal des versions](CHANGELOG.md) (en anglais)

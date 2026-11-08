@@ -223,6 +223,14 @@ everything on the target (listed in `left`). After a completed failover,
 backups are purged by hand: see "Purging the backups after a completed
 failover" in the capabilities page.
 
+**Secret store first (2.9.0).** When the console keeps its secrets in
+OpenBao, the recovery sheet starts with OpenBao: in B1, restore the latest
+snapshot from `/var/lib/harvester-ops-snapshots` with its unseal key (the
+offline copy) before anything else (Settings > Secret store > Snapshots, or
+`sudo /usr/local/bin/harvester-secrets restore <file>`); in mode A, your
+server and its backups come first. Without OpenBao the console cannot read
+the kubeconfigs and keys it moved there. See [secrets.md](secrets.md).
+
 ## 13. Navigation by hosts (2.0)
 
 A **host** is a whole Harvester cluster or a KVM hypervisor, never a
@@ -856,3 +864,26 @@ Not verified for real: a client identity provider other than Dex
 (stopped in 2.8.0 by the package update CAPHV asks of cloud-init; 2.8.1
 skips it, the bench run is still to do), a plan chained to a real Harvester install with a Git
 secret, more than two child clusters, harv4 (two clusters in one run).
+
+## 19. Secret store (2.9.0)
+
+1. Choose the mode: A (your OpenBao or Vault) or B1 (OpenBao next to the
+   console). B1 needs the OpenBao bundle built with your Application
+   Collection account.
+2. Settings > Secret store > Enable: run the checks, activate.
+3. B1: export, download and acknowledge the offline copy of the unseal key;
+   set the snapshot directory and time (UTC).
+4. Move the classes one by one (Classes tab), kubeconfig last after
+   **Test an outage**; confirm the originals once the console works.
+5. Before rolling the console back below 2.9.0, or before disabling: bring
+   every class back, put encrypted states back in clear, then disable.
+
+Seen for real (2.9.0): mode A on OpenBao 2.7.2 and Vault 1.14.2 (each check
+failed once then activation, classes moved, console restarted, values
+identical, back to local), a harv1 kubeconfig moved and used to start and
+stop a VM, outages (cache warm and cold, sealed, revoked token, narrowed
+policy, full audit), audit correlation by `X-Hops-Action`, B1 from the
+Application Collection on a client VM (reboot unsealed by itself, rotations,
+snapshot and restore, upgrade), encrypted OpenTofu states on harvlab2, KVM
+key rotation on node2.
+
