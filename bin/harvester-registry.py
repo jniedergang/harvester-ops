@@ -1050,8 +1050,11 @@ def cmd_harvester_nodes(args):
         try:
             services = [] if d.get("kind") == "bootstrap" and d.get("cluster") == args.cluster \
                 else kube.list("services")
-        except KubeError:
+        except KubeError as e:
+            # relecture M-5 : l'absence de constat ne veut pas dire « pas
+            # hébergé ici », le dire dans le journal de l'action
             services = []
+            step("harvester-nodes", "running", f"self-hosted check skipped: Services unreadable ({str(e)[:200]})")
         own = rg.self_hosted(d, args.cluster, services)
         if own:
             found = found + [own]

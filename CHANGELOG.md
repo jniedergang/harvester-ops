@@ -29,6 +29,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - `additionalUserData` of the RKE2 templates is merged, not replaced: an
   existing `strict` or `data` is kept, and another `config` already there
   is refused instead of being overwritten.
+- `harvester-nodes` logs a step when the Services of the cluster cannot be
+  read for the self-hosted check, so a missing warning is not read as
+  "not self-hosted".
 
 ### Added
 - **Option `offline_packages`** (`skip`, the default, or `keep`) for a
@@ -103,9 +106,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   in the request, the template and the `--spec` file, `keep` without
   `bootcmd` nor restore in both templates and both modes, merge of
   `additionalUserData`, the stderr lines of the restore played by a real
-  shell, the pinned provider versions;
+  shell, the step for unreadable Services, the pinned provider versions;
   e2e of the new selector in the creation window and the template editor.
-  Twelve more named mutations are killed.
+  Thirteen more named mutations are killed.
 
 ### Not verified for real
 - Unit-tested only, no bench pass for this release: the offline

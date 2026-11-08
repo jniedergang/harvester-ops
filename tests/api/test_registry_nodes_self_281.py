@@ -158,3 +158,18 @@ def test_self_hosted_pure(decl, services, want):
 def test_ui_and_five_languages():
     assert f"'{CODE}': (v) => tr('reg.fd.{CODE}'" in JS
     assert I18N.count(f'"reg.fd.{CODE}"') + I18N.count(f"'reg.fd.{CODE}'") == 5
+
+
+@pytest.mark.parametrize("decl,fail,skipped", [
+    ("external", True, True),                                  # Services illisibles : dit dans le journal
+    ("external", False, False),
+    ("bootstrap-here", True, False),                           # Services non lus : rien à dire
+])
+def test_unreadable_services_are_named_in_the_action_log(setup, capsys, decl, fail, skipped):
+    """Relecture M-5. Mutation « step retiré »."""
+    setup(decl, [], fail)
+    code, out, err = run(capsys)
+    assert code == 0 and out["blocked"] is False
+    assert ("self-hosted check skipped: Services unreadable" in err) is skipped
+    if skipped:
+        assert "STEP_EVENT|harvester-nodes|running|self-hosted check skipped" in err
