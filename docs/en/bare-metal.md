@@ -746,9 +746,11 @@ the stack version, and the per-cluster rules of the creation window.
 template names is missing, but a declaration of the Terraform phase of
 this plan creates it. The console reads it in the rendered resources of
 the plan templates (`image`, `ssh_key`, `ippool`, or free code whose
-`resource` block has a literal name, without `count` or `for_each`).
+`resource` block has a literal name, without `count` or `for_each`; a
+namespace written as an expression keeps the block out). A resource that
+does not render (missing field) counts for nothing.
 An image matches by `namespace/name` or `namespace/display name`; a
-missing namespace means `default`. A declaration kept with other values
+namespace not written means `default`. A declaration kept with other values
 counts with its own resources. The Clusters phase checks again before
 any creation and blocks if the reference is still missing.
 

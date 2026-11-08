@@ -787,8 +787,10 @@ d'adresses qu'un modèle de cluster désigne manque, mais une déclaration de
 la phase Terraform de ce plan le crée. La console le lit dans les
 ressources rendues des modèles du plan (`image`, `ssh_key`, `ippool`, ou
 code libre dont le bloc `resource` a un nom littéral, sans `count` ni
-`for_each`). Une image se reconnaît à `namespace/nom` ou
-`namespace/nom affiché` ; sans espace de noms, c'est `default`. Une
+`for_each` ; un espace de noms écrit comme une expression écarte le
+bloc). Une ressource qui ne se rend pas (champ manquant) ne compte pas.
+Une image se reconnaît à `namespace/nom` ou `namespace/nom affiché` ;
+sans espace de noms écrit, c'est `default`. Une
 déclaration gardée avec d'autres valeurs compte avec ses propres
 ressources. La phase Clusters revérifie avant toute création et bloque si
 la référence manque encore.

@@ -594,10 +594,12 @@ def resource_types(text):
 
 def resource_literals(text, types):
     """[(type, {attribut: valeur})] des blocs `resource` de ces types (2.8.2,
-    décision 246) : seuls les attributs de premier niveau dont la valeur est
-    une chaîne littérale (sans gabarit `${...}`) ; un bloc à `count` ou
-    `for_each` est écarté (ses noms ne se lisent pas sans OpenTofu). Vide si
-    le code est illisible (check_resources le refuse alors)."""
+    décision 246) : attributs de premier niveau, valeur de chaîne littérale
+    (sans gabarit `${...}`), None pour toute autre expression (relecture
+    I-2 : un attribut écrit mais calculé n'est jamais pris pour absent) ; un
+    bloc à `count` ou `for_each` est écarté (ses noms ne se lisent pas sans
+    OpenTofu). Vide si le code est illisible (check_resources le refuse
+    alors)."""
     try:
         root, _streams = _parse(text or "")
     except _Syntax:
@@ -610,8 +612,8 @@ def resource_literals(text, types):
             continue
         attrs = {}
         for name, _line, vtoks in b.attrs:
-            if len(vtoks) == 1 and vtoks[0].kind == "str" and not vtoks[0].tmpl:
-                attrs[name] = vtoks[0].val
+            literal = len(vtoks) == 1 and vtoks[0].kind == "str" and not vtoks[0].tmpl
+            attrs[name] = vtoks[0].val if literal else None
         out.append((b.labels[0], attrs))
     return out
 

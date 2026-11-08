@@ -33350,9 +33350,11 @@ def _deploy_tf_declared(resources_by_template):
     devinées) : `ns/nom` et `ns/nom affiché` d'une image (les deux formes
     qu'accepte `harvester-capi`, _image_facts), `ns/nom` d'une paire de clés,
     nom d'un pool d'adresses (de portée cluster). Code libre : blocs
-    `resource` de ces types à nom littéral (tf_guard.resource_literals).
-    Espace de noms absent : `default`, comme le rendu des formulaires et le
-    défaut du provider Harvester."""
+    `resource` de ces types à nom littéral (tf_guard.resource_literals) ;
+    un espace de noms écrit mais calculé écarte le bloc, un nom affiché
+    calculé n'ajoute que `ns/nom` (relecture I-2). Espace de noms absent :
+    `default`, comme le rendu des formulaires et le défaut du provider
+    Harvester."""
     out = {"image": set(), "keypair": set(), "pool": set()}
     for resources in (resources_by_template or {}).values():
         for res in resources or []:
@@ -33363,6 +33365,12 @@ def _deploy_tf_declared(resources_by_template):
                 found = _tfg.resource_literals(spec.get("tf") if isinstance(spec.get("tf"), str) else "",
                                                _DEPLOY_TF_REF_TYPES)
             elif _KIND_TO_TF_TYPE.get(kind) in _DEPLOY_TF_REF_TYPES:
+                try:
+                    hcl = _render_tf_for_kind(kind, spec)
+                except _tfk.SpecError:
+                    hcl = ""
+                if not hcl:
+                    continue                    # ne se rend pas : la déclaration échouera (relecture m-1)
                 found = [(_KIND_TO_TF_TYPE[kind], {k: v for k, v in spec.items() if isinstance(v, str)})]
             else:
                 continue
@@ -33374,10 +33382,12 @@ def _deploy_tf_declared(resources_by_template):
                 if key == "pool":
                     out[key].add(name)
                     continue
+                if "namespace" in attrs and attrs["namespace"] is None:
+                    continue                    # calculé : jamais deviné
                 ns = attrs.get("namespace") or "default"
                 out[key].add(f"{ns}/{name}")
-                if key == "image":
-                    out[key].add(f"{ns}/{attrs.get('display_name') or name}")
+                if key == "image" and attrs.get("display_name"):
+                    out[key].add(f"{ns}/{attrs['display_name']}")
     return out
 
 

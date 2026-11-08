@@ -70,6 +70,11 @@ RAW_IMAGE = f'''resource "harvester_image" "leap" {{
 '''
 RAW_COUNT = RAW_IMAGE.replace('  name         = "leap"\n', '  count        = 1\n  name         = "leap"\n')
 RAW_LOCAL = RAW_IMAGE.replace('name         = "leap"', 'name         = "${local.n}"')
+# relecture 2.8.2 I-2 : espace de noms non littéral, jamais pris pour `default`
+RAW_NS_LOCAL = RAW_IMAGE.replace('namespace    = "default"', 'namespace    = local.ns')
+RAW_NS_TMPL = RAW_IMAGE.replace('namespace    = "default"', 'namespace    = "def${local.x}"')
+RAW_NO_NS = RAW_IMAGE.replace('  namespace    = "default"\n', '')
+RAW_DISPLAY_LOCAL = RAW_IMAGE.replace('display_name = "leap"', 'display_name = local.d')
 
 
 def seed(c, resources, terraform=True, ref=None):
@@ -105,6 +110,10 @@ def run_check(w, code, fact, value, extra=None):
     ("raw-literal", [raw(RAW_IMAGE)], "image-missing", "image", "default/leap", True),
     ("raw-count", [raw(RAW_COUNT)], "image-missing", "image", "default/leap", False),                # M3
     ("raw-not-literal", [raw(RAW_LOCAL)], "image-missing", "image", "default/leap", False),
+    ("raw-namespace-not-literal", [raw(RAW_NS_LOCAL)], "image-missing", "image", "default/leap", False),   # I-2
+    ("raw-namespace-template", [raw(RAW_NS_TMPL)], "image-missing", "image", "default/leap", False),       # I-2
+    ("raw-namespace-unwritten", [raw(RAW_NO_NS)], "image-missing", "image", "default/leap", True),
+    ("raw-display-not-literal", [raw(RAW_DISPLAY_LOCAL)], "image-missing", "image", "default/leap", True),
     ("three-resources-one-template", [ssh_key(), image(), ippool()], "pool-missing", "pool", "capi-vm-pool", True),
 ])
 def test_refs_declared_by_the_terraform_phase_are_later(capi, case, resources, code, fact, value, later):
@@ -156,6 +165,15 @@ def test_the_kept_declaration_satisfies_its_own_reference(capi):
     assert ("terraform-ref-later", "info") in got and not out["blocking"], out["findings"]
 
 
+def test_a_resource_that_does_not_render_declares_nothing():
+    """Relecture 2.8.2 m-1 : une paire de clés sans clé publique ne se rend
+    pas (la déclaration échoue) ; elle ne satisfait aucune référence."""
+    bad = ssh_key("k")
+    del bad["spec"]["public_key"]
+    assert wapp._deploy_tf_declared({"a": [bad, ippool("p")]})["keypair"] == set()
+    assert wapp._deploy_tf_declared({"a": [{"kind": "ippool", "spec": {"name": "p"}}]})["pool"] == set()
+
+
 def test_declared_helper_reads_the_rendered_resources():
     got = wapp._deploy_tf_declared({"a": [image("img-1", display="Leap"), ssh_key("k", ns="equipe"), ippool("p"),
                                           raw(RAW_IMAGE), raw(RAW_COUNT), {"kind": "network", "spec": {"name": "n"}},
@@ -199,7 +217,10 @@ def test_created_by_terraform_then_the_cluster_is_made(capi, monkeypatch):
 @pytest.mark.parametrize("case,text,want", [
     ("literal", 'resource "harvester_ippool" "p" {\n  name = "p"\n}\n', [("harvester_ippool", {"name": "p"})]),
     ("for-each", 'resource "harvester_ippool" "p" {\n  for_each = toset(["a"])\n  name = "p"\n}\n', []),
-    ("template", 'resource "harvester_ippool" "p" {\n  name = "p-${var.x}"\n}\n', [("harvester_ippool", {})]),
+    ("template", 'resource "harvester_ippool" "p" {\n  name = "p-${var.x}"\n}\n',
+     [("harvester_ippool", {"name": None})]),
+    ("reference", 'resource "harvester_ippool" "p" {\n  name = "p"\n  description = local.d\n}\n',
+     [("harvester_ippool", {"name": "p", "description": None})]),
     ("data-block", 'data "harvester_ippool" "p" {\n  name = "p"\n}\n', []),
     ("other-type", 'resource "harvester_network" "n" {\n  name = "n"\n}\n', []),
     ("unreadable", 'resource "harvester_ippool" "p" {\n  name = "p"\n', []),
@@ -207,3 +228,20 @@ def test_created_by_terraform_then_the_cluster_is_made(capi, monkeypatch):
 def test_resource_literals(case, text, want):
     import tf_guard
     assert tf_guard.resource_literals(text, {"harvester_ippool"}) == want
+
+
+@pytest.mark.parametrize("case,tf,want", [
+    ("namespace-reference", RAW_NS_LOCAL, set()),
+    ("display-reference", RAW_DISPLAY_LOCAL, {"default/leap"}),
+    ("namespace-empty-form", None, {"default/leap"}),
+    ("form-that-does-not-render", "no-url-no-name", set()),
+    ("display-literal", RAW_IMAGE.replace('display_name = "leap"', 'display_name = "Leap"'),
+     {"default/leap", "default/Leap"}),
+])
+def test_declared_free_code_never_guesses(case, tf, want):
+    """Relecture 2.8.2 I-2 : un attribut écrit mais non littéral n'est pas
+    remplacé par sa valeur par défaut."""
+    res = image() if tf is None else {"kind": "image", "spec": {"url": URL}} if tf == "no-url-no-name" else raw(tf)
+    if tf is None:
+        res["spec"]["namespace"] = ""             # formulaire : vide = `default` au rendu
+    assert wapp._deploy_tf_declared({"a": [res]})["image"] == want

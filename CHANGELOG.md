@@ -17,7 +17,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   Terraform phase creates them. The console reads its rendered resources
   (`image`, `ssh_key`, `ippool`, or free code whose `resource` block of
   type `harvester_image`, `harvester_ssh_key` or `harvester_ippool` has a
-  literal name, without `count` or `for_each`). An image matches by
+  literal name, without `count` or `for_each`). A namespace written as an
+  expression keeps the block out, it is never taken as `default`; a
+  resource that does not render counts for nothing. An image matches by
   `namespace/name` or `namespace/display name`, `default` when the
   namespace is not written. A declaration kept with other values counts
   with its own resources, an updated one with the rendered resources. The
@@ -43,7 +45,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 ### Tests
 - `test_deploy_tf_refs_later_282.py`: one case per resource kind and per
   mismatch (namespace, name, display name, other kind), free code with a
-  literal name, `count` or a template, phase disabled, declaration kept or
+  literal name, `count`, a template or a computed namespace, a resource
+  that does not render, phase disabled, declaration kept or
   updated, replay at the phase start (blocks, or creates once Terraform
   made the image), and `tf_guard.resource_literals`.
 - `test_rancher_unimport_bundle_282.py`: the Bundle goes after the cluster
