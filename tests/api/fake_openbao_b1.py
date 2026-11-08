@@ -154,8 +154,13 @@ class FakeB1(FakeOpenBao):
             if rid is None:
                 return h._err(400, "role not found")
             if rest == "" and m == "GET":
-                return h._send(200, {"data": dict(self.role_params.get(role) or {"token_policies": [role]},
-                                                  bind_secret_id=True)})
+                d = dict(self.role_params.get(role) or {"token_policies": [role]}, bind_secret_id=True)
+                # comme OpenBao 2.7.2 (relevé sur la VM client en tâche 13) :
+                # token_bound_cidrs rend l'adresse seule pour un /32, alors
+                # que secret_id_bound_cidrs garde « 127.0.0.1/32 »
+                d["token_bound_cidrs"] = [c[:-3] if str(c).endswith("/32") else c
+                                          for c in d.get("token_bound_cidrs") or []]
+                return h._send(200, {"data": d})
             if rest == "secret-id" and m == "LIST":
                 return h._send(200, {"data": {"keys": [a for a, (r, _s) in self.accessors.items() if r == rid]}})
             if rest == "role-id" and m == "GET":

@@ -43,6 +43,7 @@ import calendar
 import contextlib
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -1503,7 +1504,10 @@ class Agent:
                         or d.get("bind_secret_id") is False:
                     self._untrusted(f"AppRole role {role} policies")
                 for k in ("token_bound_cidrs", "secret_id_bound_cidrs"):
-                    if sorted(str(x) for x in (d.get(k) or [])) != sorted(params[k]):
+                    # OpenBao 2.7.2 rend « 127.0.0.1 » pour token_bound_cidrs et
+                    # « 127.0.0.1/32 » pour secret_id_bound_cidrs (relevé sur la
+                    # VM client) : réseaux comparés, pas les textes
+                    if _networks(d.get(k)) != _networks(params[k]):
                         self._untrusted(f"AppRole role {role} {k}")
             sid_acc = {pol.console_role(cid): _read(self.p.etc / "secret-id-accessor")}
             _, look = a._call("POST", f"auth/approle/role/{pol.agent_role(cid)}/secret-id/lookup",
@@ -1785,6 +1789,18 @@ class Agent:
             if keep != st.get("keys"):
                 self.save_agent_state(dict(st, keys=keep))
         return out
+
+
+def _networks(values):
+    """Ensemble de réseaux d'une liste d'adresses ou de plages ; une entrée
+    illisible reste telle quelle (donc différente de toute plage attendue)."""
+    out = set()
+    for v in values or []:
+        try:
+            out.add(ipaddress.ip_network(str(v), strict=False))
+        except ValueError:
+            out.add(str(v))
+    return out
 
 
 def _agent_snapshot_prune(snaps, now, days=AGENT_SNAP_KEEP_DAYS):
