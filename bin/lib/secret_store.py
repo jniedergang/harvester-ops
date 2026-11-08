@@ -718,7 +718,9 @@ class OpenBaoStore:
             except oc.OpenBaoError as e:
                 if e.code != "openbao-missing":
                     raise
-                data, cas = {}, 0
+                # Dernière version supprimée (douce) ou détruite : 404 à la
+                # lecture, mais la clé garde sa version courante (revue I5).
+                data, cas = {}, self._current_version(c, cls, path)
             new = dict(data or {}, **{field: value})
             written = c.kv_put(self.mount, self._kv(cls, path), new, cas=cas,
                                custom_metadata={"hops_action": action or "", "hops_actor": actor or "service",
@@ -730,6 +732,16 @@ class OpenBaoStore:
             self._cache[ref] = (value, self._clock())
         self.last_metadata_error = getattr(written, "metadata_error", None)
         return ref
+
+    def _current_version(self, c, cls, path):
+        """`current_version` des métadonnées, 0 si la clé n'existe pas."""
+        import openbao_client as oc
+        try:
+            return int(c.kv_metadata(self.mount, self._kv(cls, path)).get("current_version") or 0)
+        except oc.OpenBaoError as e:
+            if e.code != "openbao-missing":
+                raise
+            return 0
 
     def delete(self, ref, actor=None, action=None):
         import openbao_client as oc

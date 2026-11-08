@@ -60,6 +60,8 @@ class FakeOpenBao:
         self.restored = []
         self.token_ttl = 3600
         self.renew_fails = False
+        self.lose_reply = 0                  # écritures KV dont la réponse arrive après le délai du client
+        self.lose_sleep = 0.0
         self.httpd = None
 
     # -- vie du serveur ----------------------------------------------------
@@ -290,6 +292,11 @@ class FakeOpenBao:
                 v = int(rec["query"].get("version", [e["current"]])[0])
                 if v not in e["versions"]:
                     return h._err(404)
+                if v in e.get("deleted", ()):
+                    # suppression douce ou destruction : 404 avec les métadonnées
+                    return h._send(404, {"data": {"data": None, "metadata": {
+                        "version": v, "created_time": "2026-11-08T10:00:00Z",
+                        "deletion_time": "2026-11-08T11:00:00Z", "destroyed": False}}})
                 return h._send(200, {"data": {"data": e["versions"][v], "metadata": {
                     "version": v, "created_time": "2026-11-08T10:00:00Z", "custom_metadata": e["custom"],
                     "deletion_time": "", "destroyed": False}}})
@@ -303,8 +310,21 @@ class FakeOpenBao:
                 e["versions"][e["current"]] = body.get("data") or {}
                 for old in sorted(e["versions"])[: max(0, len(e["versions"]) - e["max"])]:
                     del e["versions"][old]
+                if srv_lose := self.lose_reply:
+                    self.lose_reply = srv_lose - 1
+                    time.sleep(self.lose_sleep)       # écriture appliquée, réponse perdue (délai)
                 return h._send(200, {"data": {"version": e["current"], "created_time": "2026-11-08T10:00:00Z"},
                                      "warnings": None})
+            if m == "DELETE":
+                if e and e["current"]:
+                    e.setdefault("deleted", set()).add(e["current"])
+                return h._send(204)
+        if kind == "destroy" and m in ("POST", "PUT"):
+            e = self.kv.get((mount, path))
+            for v in body.get("versions") or []:
+                if e and int(v) in e["versions"]:
+                    e.setdefault("deleted", set()).add(int(v))
+            return h._send(204)
         if kind == "metadata":
             if m == "LIST" or rec["query"].get("list") == ["true"]:
                 prefix = path.rstrip("/") + "/" if path.strip("/") else ""

@@ -538,3 +538,31 @@ def test_db_read_only(state):
     ss.MultiStore(state).get("local:replication-notify/global#sl__url")
     assert db.stat().st_mtime_ns == before
     sqlite3.connect(db).close()
+
+
+# ---------------------------------------------------------------------------
+# Revue des tâches 2 à 4
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("how", ["soft-delete", "destroy"])
+def test_put_after_latest_version_deleted(active, bao, how):
+    """I5 : la dernière version supprimée (douce) ou détruite rend 404 à la
+    lecture ; l'écriture suivante prend `cas` = version courante des
+    métadonnées, sinon cas-conflict permanent."""
+    import urllib.request
+    b = active.openbao
+    ref = b.put("kubeconfig", "h1", "kubeconfig", "v1")
+    key = f"{PREFIX}/kubeconfig/h1"
+    if how == "soft-delete":
+        req = urllib.request.Request(f"{bao.addr}/v1/harvester-ops/data/{key}", method="DELETE")
+    else:
+        req = urllib.request.Request(f"{bao.addr}/v1/harvester-ops/destroy/{key}", method="POST",
+                                     data=b'{"versions": [1]}', headers={"Content-Type": "application/json"})
+    tok = next(iter(bao.tokens))
+    req.add_header("X-Vault-Token", tok)
+    urllib.request.urlopen(req).read()
+    b.clear_cache()
+    assert b.put("kubeconfig", "h1", "kubeconfig", "v2") == ref
+    w = [r for r in bao.requests(f"/data/{key}") if r["method"] == "POST"][-1]
+    assert json.loads(w["raw"])["options"] == {"cas": 1}
+    b.clear_cache()
+    assert active.get(ref) == "v2"
