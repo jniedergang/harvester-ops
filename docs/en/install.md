@@ -451,8 +451,9 @@ an older release reinstalls its agent and installer, without this fix.
 operations, `ProtectHome=read-only`, `PrivateTmp=yes`) and
 `harvester-secrets-rotate.timer` (hourly: health file, `secret_id` rotation
 every 30 days, retention of old keys and volumes). Without OpenBao they only
-refresh `secrets-agent/health.json`. It also creates
-`/var/lib/harvester-ops-snapshots`, mounted in the console container for the
+refresh `secrets-agent/health.json`. The console unit creates
+`/var/lib/harvester-ops-snapshots` at each start when it is missing (owned by
+the console account, before the container starts) and mounts it in the console container for the
 B1 snapshots.
 
 For mode B1, build the OpenBao bundle with your Application Collection

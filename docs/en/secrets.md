@@ -75,7 +75,8 @@ already unwrapped or expired token gives `openbao-unwrap-used`: someone else
 may have read the secret.
 
 Vault: the API is the same (KV v2, AppRole, wrapping, transit). Vault 1.14.2
-was checked like OpenBao. OpenTofu documents its `openbao` key provider with
+was checked in mode A: a subset of the checks, activation, migration and
+return. OpenTofu documents its `openbao` key provider with
 Vault 1.14 only: with a newer Vault the Status tab asks you to acknowledge it
 before states get encrypted (Vault 1.17.6 encrypted states without error in
 our tests).

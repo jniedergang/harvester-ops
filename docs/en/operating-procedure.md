@@ -878,10 +878,11 @@ secret, more than two child clusters, harv4 (two clusters in one run).
 5. Before rolling the console back below 2.9.0, or before disabling: bring
    every class back, put encrypted states back in clear, then disable.
 
-Seen for real (2.9.0): mode A on OpenBao 2.7.2 and Vault 1.14.2 (each check
-failed once then activation, classes moved, console restarted, values
-identical, back to local), a harv1 kubeconfig moved and used to start and
-stop a VM, outages (cache warm and cold, sealed, revoked token, narrowed
+Seen for real (2.9.0): mode A on OpenBao 2.7.2 (each check failed once
+then activation, classes moved, console restarted, values identical, back
+to local) and on Vault 1.14.2 (a subset of the checks, activation,
+migration and return), a harv1 kubeconfig moved and used to start and stop
+a VM, outages (cache warm and cold, sealed, revoked token, narrowed
 policy, full audit), audit correlation by `X-Hops-Action`, B1 from the
 Application Collection on a client VM (reboot unsealed by itself, rotations,
 snapshot and restore, upgrade), encrypted OpenTofu states on harvlab2, KVM

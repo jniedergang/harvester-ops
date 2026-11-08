@@ -936,9 +936,10 @@ exécution).
    ramener toutes les classes, remettre en clair les états chiffrés, puis
    désactiver.
 
-Vu en réel (2.9.0) : le mode A sur OpenBao 2.7.2 et Vault 1.14.2 (chaque
-vérification mise en échec une fois, puis activation, classes migrées,
-console redémarrée, valeurs identiques, retour en local), un kubeconfig de
+Vu en réel (2.9.0) : le mode A sur OpenBao 2.7.2 (chaque vérification
+mise en échec une fois, puis activation, classes migrées, console
+redémarrée, valeurs identiques, retour en local) et sur Vault 1.14.2 (une
+partie des vérifications, activation, migration et retour), un kubeconfig de
 harv1 migré et employé pour démarrer et arrêter une VM, des pannes (cache
 chaud et froid, scellé, jeton révoqué, politique restreinte, audit plein),
 la corrélation d'audit par `X-Hops-Action`, B1 depuis l'Application

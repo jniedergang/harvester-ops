@@ -77,7 +77,8 @@ déjà déballé ou expiré donne `openbao-unwrap-used` : quelqu'un d'autre a
 peut-être lu le secret.
 
 Vault : l'API est la même (KV v2, AppRole, enveloppe, transit). Vault 1.14.2
-a été vérifié comme OpenBao. OpenTofu ne documente son fournisseur de clés
+a été vérifié en mode A : une partie des vérifications, l'activation, la
+migration et le retour. OpenTofu ne documente son fournisseur de clés
 `openbao` qu'avec Vault 1.14 : avec un Vault plus récent, l'onglet État vous
 demande de l'acquitter avant que les états soient chiffrés (Vault 1.17.6 a
 chiffré des états sans erreur dans nos essais).

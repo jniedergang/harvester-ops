@@ -472,9 +472,10 @@ d'opérations, `ProtectHome=read-only`, `PrivateTmp=yes`) et
 `harvester-secrets-rotate.timer` (toutes les heures : fichier de santé,
 rotation du `secret_id` tous les 30 jours, rétention des anciennes clés et
 des anciens volumes). Sans OpenBao, ils ne font que rafraîchir
-`secrets-agent/health.json`. Il crée aussi
-`/var/lib/harvester-ops-snapshots`, monté dans le conteneur de la console
-pour les instantanés de B1.
+`secrets-agent/health.json`. L'unité de la console crée
+`/var/lib/harvester-ops-snapshots` à chaque démarrage s'il manque (au compte
+de la console, avant le conteneur) et le monte dans le conteneur de la console pour les
+instantanés de B1.
 
 Pour le mode B1, construisez le paquet OpenBao avec votre compte de service
 de l'Application Collection (`harvester-secrets bundle`, voir

@@ -96,9 +96,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   snapshot` is refused: `sudo -u harvester-ops harvester-secrets snapshot
   --dest DIR`. On openSUSE, use `sudo /usr/local/bin/harvester-secrets`.
 - **`install.sh` installs the agent units on every host**, with or without
-  OpenBao (they only refresh a health file then), creates
-  `/var/lib/harvester-ops-snapshots`, and queues a refresh of the B1
-  policies when B1 is posed.
+  OpenBao (they only refresh a health file then), and queues a refresh of
+  the B1 policies when B1 is posed. The console unit creates
+  `/var/lib/harvester-ops-snapshots` at start when it is missing.
 - **Rolling the console back below 2.9.0 is refused** (`secrets-in-openbao`)
   while the store is not local, a class is in OpenBao, a state is
   encrypted or `secrets-settings.json` exists but cannot be read, also for
@@ -196,7 +196,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   child token passes; a snapshot giving the agent policy to the console
   AppRole entity, and one with a `tf-x` entity alias carrying a policy, are
   both refused (the review before this fix let both through).
-- Mode A on Vault 1.14.2: same checks, activation, migration and return;
+- Mode A on Vault 1.14.2: a subset of the checks, then activation,
+  migration and return;
   Vault 1.17.6: activation and the acknowledgement screen.
 - OpenTofu states encrypted on harvlab2 (plan and apply of real resources,
   migration of a clear state, state unreadable in clear, child token refused
