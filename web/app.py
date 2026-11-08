@@ -161,6 +161,7 @@ BIN_DIR = _resolve_bin_dir()
 if str(BIN_DIR / "lib") not in sys.path:
     sys.path.append(str(BIN_DIR / "lib"))
 import secret_store as _sst  # noqa: E402  (2.9.0 : magasin de secrets)
+import secret_classes as _ssc  # noqa: E402  (2.9.0 : classes de secrets)
 # 2.9.0 : seule la configuration de la console désigne OpenBao. `VAULT_*` et
 # `BAO_*` hérités de l'environnement sont retirés du processus, donc de tous
 # les outils qu'il lance (un `BAO_TOKEN` d'administrateur ne doit jamais
@@ -1527,6 +1528,62 @@ def _identity_delegation_refused(e):
                     "code": "identity-delegation-unavailable"}), 503
 
 
+@app.errorhandler(_sst.SecretError)
+def _secret_store_refused(e):
+    """2.9.0 : un secret illisible ou une écriture refusée par OpenBao ; le
+    message porte la classe, le nom et le code, jamais une valeur."""
+    return jsonify({"error": str(e)[:300], "code": e.code}), 503
+
+
+def _secret_migrated(cls):
+    """La classe est-elle migrée dans OpenBao (support actif) ? Un secret
+    nouveau d'une classe migrée y va directement (plan, « Migration »)."""
+    try:
+        return _sst.store().migrated(cls)
+    except Exception:                          # noqa: BLE001 : réglages illisibles = local
+        return False
+
+
+def _secret_actor():
+    """Personne de la console pour l'en-tête X-Hops-Actor (None hors requête)."""
+    try:
+        return current_user() or None
+    except RuntimeError:                       # fil d'une action, hors requête
+        return None
+
+
+def _secret_put(cls, path, field, value):
+    """2.9.0 tâche 8 : écrit un secret nouveau dans OpenBao quand sa classe
+    est migrée et rend sa référence ; None quand la classe est locale (ou
+    pour une valeur de plus de 1 Mio, qui reste locale pour ce nom) :
+    l'appelant écrit alors en local comme avant. SecretError si OpenBao
+    refuse (gestionnaire 503)."""
+    if not _secret_migrated(cls):
+        return None
+    if isinstance(value, bytes):
+        value = value.decode()
+    try:
+        return _sst.store().put(cls, path, field, value, actor=_secret_actor())
+    except _sst.SecretError as e:
+        if e.code == "secret-too-big":
+            return None
+        raise
+    except ValueError:                         # nom qui ne fait pas une référence : reste local
+        return None
+
+
+def _secret_forget(value):
+    """Retire de OpenBao le secret désigné par `value` quand c'est une
+    référence (cluster, Rancher ou hôte supprimé), au mieux : un échec est
+    journalisé, jamais bloquant."""
+    if not (isinstance(value, str) and _sst.is_openbao_ref(value)):
+        return
+    try:
+        _sst.store().delete(value, actor=_secret_actor())
+    except (_sst.SecretError, _sst.SecretMissing, ValueError) as e:
+        log.warning("secret %s not removed from OpenBao: %s", value.split("#")[0], getattr(e, "code", e))
+
+
 def _identity_kubeconfig(src_kc, identity):
     """Copie de `src_kc` portant `as`/`as-groups`. Rend le chemin d'origine
     quand il n'y a rien à usurper, pour que le chemin nominal soit inchangé.
@@ -2236,7 +2293,8 @@ def run_action_thread(run: ActionRun):
 
     secret_env, secret_map = {}, None
     try:
-        secret_env, secret_map = _spawn_secret_env([run.cluster])
+        secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
+                                                   getattr(run, "secret_refs", ()), getattr(run, "secret_files", None))
         run.proc = subprocess.Popen(
             run.cmd,
             stdout=subprocess.PIPE,
@@ -6627,9 +6685,16 @@ def _bm_cluster_files(name):
     `<état>/ssh/<nom>_id` (0600), sa publique, les clés d'hôte vues au
     premier contact, et le kubeconfig `<état>/kubeconfigs/<nom>.yaml`."""
     d = _state_ssh_dir()
-    return {"key": d / f"{name}_id", "pub": d / f"{name}_id.pub",
-            "known_hosts": d / f"{name}_known_hosts",
-            "kubeconfig": _state_kubeconfigs_dir() / f"{name}.yaml"}
+    out = {"key": d / f"{name}_id", "pub": d / f"{name}_id.pub",
+           "known_hosts": d / f"{name}_known_hosts",
+           "kubeconfig": _state_kubeconfigs_dir() / f"{name}.yaml"}
+    # 2.9.0 tâche 8 : classe migrée -> la clé privée et le kubeconfig ne
+    # touchent jamais le disque persistant ; copies de travail sur tmpfs le
+    # temps de l'installation, rangées dans OpenBao à la déclaration
+    for cls, k in (("ssh-cluster", "key"), ("kubeconfig", "kubeconfig")):
+        if _secret_migrated(cls):
+            out[k] = _sst.secret_files_dir(_sst.store().settings) / f"bm-{name}-{k}"
+    return out
 
 
 def _bm_cluster_keypair(name):
@@ -6640,9 +6705,17 @@ def _bm_cluster_keypair(name):
     f = _bm_cluster_files(name)
     for k in ("key", "pub", "known_hosts"):
         f[k].unlink(missing_ok=True)
+    Path(str(f["key"]) + ".pub").unlink(missing_ok=True)
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"harvester-ops:{name}",
                     "-f", str(f["key"])], check=True, capture_output=True, timeout=30)
     os.chmod(f["key"], 0o600)
+    made_pub = Path(str(f["key"]) + ".pub")
+    if made_pub != f["pub"]:                   # clé privée sur tmpfs : la publique reste dans l'état
+        shutil.copyfile(made_pub, f["pub"])
+        made_pub.unlink(missing_ok=True)
+        # rangée dans OpenBao dès sa création : une installation coupée avant
+        # la déclaration ne perd pas la seule clé du cluster installé
+        _secret_put("ssh-cluster", name, "private_key", f["key"].read_text())
     return f
 
 
@@ -6742,10 +6815,23 @@ def _bm_declare_cluster(name, kubeconfig, key, hostname, ip):
     cluster["kubeconfig"] = str(kubeconfig)
     # clé créée par la console : un nœud qui rejoint reçoit la même
     cluster["ssh"]["generated"] = True
+    # 2.9.0 tâche 8 : classes migrées -> la déclaration porte les références
+    # (copies de travail tmpfs effacées une fois la déclaration écrite)
+    moved = []
+    for cls, field, src, setter in (
+            ("kubeconfig", "kubeconfig", Path(kubeconfig), lambda r: cluster.__setitem__("kubeconfig", r)),
+            ("ssh-cluster", "private_key", Path(key), lambda r: cluster["ssh"].__setitem__("key", r))):
+        if _secret_migrated(cls):
+            ref = _secret_put(cls, name, field, src.read_text())
+            if ref:
+                setter(ref)
+                moved.append(src)
     with CONFIG_LOCK:
         if any(c.get("name") == name for c in load_config().get("clusters", [])):
             raise ValueError(f"cluster '{name}' already exists")
         _write_console_cluster(cluster)
+    for src in moved:
+        src.unlink(missing_ok=True)
     return cluster
 
 
@@ -7538,7 +7624,8 @@ def _baremetal_install_steps(run, opts, state):
                                        f"{_BM_OS_USER} to read its kubeconfig")
             _bm_declare_cluster(name, files["kubeconfig"], files["key"], opts["hostname"],
                                 opts.get("ip") or opts["vip"])
-            kubeconfig = files["kubeconfig"]
+            # 2.9.0 : kubeconfig rangé dans OpenBao -> copie de travail
+            kubeconfig = _cluster_kubeconfig_path(name, missing_ok=True) or files["kubeconfig"]
             step("declare", "done", f"{name} déclaré dans la console")
         # sautés s'il n'y en a pas : aucune étape affichée
         if pools:
@@ -9173,7 +9260,7 @@ def _cluster_ssh_key_path(ssh, purpose="ssh-cluster"):
     return _sst.path_of(key, purpose) if key else key
 
 
-def _spawn_secret_env(clusters):
+def _spawn_secret_env(clusters, refs=(), files=None):
     """Revue I6 : un outil lancé par la console ne se connecte pas à OpenBao.
     Pour les clusters de l'action dont le kubeconfig ou la clé SSH porte une
     référence, la console remet des copies de travail tmpfs (tenues par le
@@ -9184,8 +9271,26 @@ def _spawn_secret_env(clusters):
     l'outil le dit (`openbao-spawned-no-file`) pour ce cluster seulement."""
     if not _sst.is_active():
         return {}, None
+    # 2.9.0 tâche 8 : `kvm:<hôte>` remet la clé de l'hôte KVM ; `refs` des
+    # références de plus (secrets de la réplication) ; `files` des copies
+    # déjà écrites par l'appelant ({référence: chemin}, clé d'un hôte ajouté)
     names = {c for c in clusters or () if c}
-    refs = {}
+    wanted = list(refs or ())
+    for n in sorted(names):
+        if n.startswith("kvm:") and _kvm_check_host(n[4:]):
+            try:
+                v = _kd.load(_state_dir(), n[4:]).get("ssh_key")
+            except (OSError, ValueError):
+                v = None
+            if isinstance(v, str) and _sst.is_ref(v):
+                wanted.append(v)
+    refs = dict(files or {})
+    for v in wanted:
+        if v not in refs:
+            try:
+                refs[v] = str(_sst.store().shared_file(v, "tool"))
+            except (_sst.SecretError, _sst.SecretMissing) as e:
+                log.warning("secret %s not handed to the tool: %s", v.split("#")[0], getattr(e, "code", e))
     for entry in load_config_ro().get("clusters", []):
         if entry.get("name") not in names:
             continue
@@ -10905,7 +11010,8 @@ def _folder_action(label, sub, objects=None, undoable=False, chosen=False, resul
     if spec is None and objects is not None:
         spec = _folder_spec(objects, chosen)
     run, err = _cli_action(FOLDERS_CLUSTER, f"folders:{label}", _folders_cmd(*sub), "harvester-folders",
-                           spec=spec, check_busy=False, id_arg=True, after=_folders_after, setup=setup)
+                           spec=spec, check_busy=False, id_arg=True, after=_folders_after, setup=setup,
+                           secret_clusters=tuple((spec or {}).get("kubeconfigs") or ()))
     if err:
         return err
     # rangée dès le départ (et non à la fin seulement) : une console arrêtée
@@ -12569,7 +12675,7 @@ def _kvm_base(*sub):
             f"--state-dir={_state_dir()}"]
 
 
-def _kvm_action(host, label, cmd, cleanup=None, cluster=None, waits=False):
+def _kvm_action(host, label, cmd, cleanup=None, cluster=None, waits=False, secret_files=None):
     """Action suivie du script KVM. `cluster` : étiquette d'une action qui ne
     vise aucun hôte (modèles : KVM_TEMPLATES_TAG) ; elle ne fait alors pas
     avancer de génération de relevés (aucun fichier survey-gen créé).
@@ -12611,7 +12717,8 @@ def _kvm_action(host, label, cmd, cleanup=None, cluster=None, waits=False):
         if not refreshed:
             refresh_views()
     run, err = _cli_action(cluster or f"kvm:{host}", label, cmd, "harvester-kvm", after=after,
-                           check_busy=False, capture=True, setup=setup)
+                           check_busy=False, capture=True, setup=setup,
+                           secret_clusters=(f"kvm:{host}",) if host else (), secret_files=secret_files)
     if err:
         if cleanup:
             cleanup()
@@ -12698,7 +12805,25 @@ def api_kvm_host_add():
         f"--name={name}", f"--address={decl['address']}", f"--port={decl['port']}",
         f"--user={decl['user']}", f"--ssh-key={key_path}", f"--fingerprint={fp}",
     ] + [f"--label={k}={v}" for k, v in sorted(decl["labels"].items())]
-    run, err = _kvm_action(name, f"kvm:host-add:{name}", cmd, cleanup=cleanup)
+    # 2.9.0 tâche 8 : classe ssh-kvm migrée -> la clé va dans OpenBao, la
+    # déclaration porte sa référence ; l'outil lit la copie privée pour ses tests
+    text = data.decode(errors="strict") if isinstance(data, bytes) else data
+    try:
+        ref = _secret_put("ssh-kvm", name, "private_key", text if text.endswith("\n") else text + "\n")
+    except _sst.SecretError:
+        cleanup()
+        raise
+    files = None
+    if ref:
+        cmd.append("--key-in-store")
+        files = {ref: key_path}
+        drop = cleanup
+
+        def cleanup():                         # ajout refusé : la clé ne reste pas dans OpenBao
+            drop()
+            if not _kd.decl_path(state, name).exists():
+                _secret_forget(ref)
+    run, err = _kvm_action(name, f"kvm:host-add:{name}", cmd, cleanup=cleanup, secret_files=files)
     if err:
         return err
     return jsonify({"action_id": run.id, "host": name}), 202
@@ -12723,8 +12848,20 @@ def api_kvm_host_remove(host):
     # requête n'a pas à les attendre)
     threading.Thread(target=_kvm_vnc_cut_host, args=(host,), daemon=True,
                      name=f"kvm-vnc-cut-{host}").start()
+    try:
+        key_value = _kd.load(_state_dir(), host).get("ssh_key")
+    except (OSError, ValueError):
+        key_value = None
+
+    def removed():
+        _kvm_vnc_cut_host(host)
+        # 2.9.0 : clé migrée retirée d'OpenBao une fois l'hôte retiré
+        if not _kd.decl_path(_state_dir(), host).exists():
+            _secret_forget(key_value)
+            with contextlib.suppress(Exception):
+                _sst.FileStore(_state_dir()).erase_original("ssh-kvm", host, "private_key")
     run, err = _kvm_action(host, f"kvm:host-remove:{host}", _kvm_base("host", "remove") + [host],
-                           cleanup=lambda: _kvm_vnc_cut_host(host))
+                           cleanup=removed)
     if err:
         return err
     return jsonify({"action_id": run.id, "host": host}), 202
@@ -13079,9 +13216,14 @@ def api_clusters_create():
                 yaml.safe_load(content)   # validate YAML structure
             except (yaml.YAMLError, UnicodeDecodeError) as e:
                 return jsonify({"error": "kubeconfig is not valid YAML", "detail": str(e)}), 400
-            kc_path = _state_kubeconfigs_dir() / f"{cluster['name']}.yaml"
-            _bm_write_private(kc_path, content)
-            cluster["kubeconfig"] = str(kc_path)
+            # 2.9.0 : classe migrée -> directement dans OpenBao, la déclaration porte la référence
+            ref = _secret_put("kubeconfig", cluster["name"], "kubeconfig", content)
+            if ref:
+                cluster["kubeconfig"] = ref
+            else:
+                kc_path = _state_kubeconfigs_dir() / f"{cluster['name']}.yaml"
+                _bm_write_private(kc_path, content)
+                cluster["kubeconfig"] = str(kc_path)
         elif data.get("kubeconfig"):
             # Path-only mode (legacy/CLI flow)
             cluster["kubeconfig"] = data["kubeconfig"]
@@ -13090,9 +13232,14 @@ def api_clusters_create():
 
         # Save SSH key
         if ssh_file:
-            key_path = _state_ssh_dir() / f"{cluster['name']}_id"
-            _bm_write_private(key_path, ssh_file.read())
-            cluster["ssh"]["key"] = str(key_path)
+            key_data = ssh_file.read()
+            ref = _secret_put("ssh-cluster", cluster["name"], "private_key", key_data)
+            if ref:
+                cluster["ssh"]["key"] = ref
+            else:
+                key_path = _state_ssh_dir() / f"{cluster['name']}_id"
+                _bm_write_private(key_path, key_data)
+                cluster["ssh"]["key"] = str(key_path)
 
         _write_console_cluster(cluster)
 
@@ -13198,6 +13345,12 @@ def api_clusters_delete(name):
             _atomic_write_config(raw)
         else:
             _delete_console_cluster(name)
+            # 2.9.0 : secrets migrés de ce cluster retirés d'OpenBao, originaux gardés effacés
+            for cls, field, value in (("kubeconfig", "kubeconfig", removed.get("kubeconfig")),
+                                      ("ssh-cluster", "private_key", (removed.get("ssh") or {}).get("key"))):
+                _secret_forget(value)
+                with contextlib.suppress(Exception):
+                    _sst.FileStore(_state_dir()).erase_original(cls, name, field)
     return jsonify({"removed": name})
 
 
@@ -13222,6 +13375,12 @@ def api_clusters_upload_kubeconfig(name):
         refused = _read_only_refusal(origin)
         if refused:
             return refused
+        # 2.9.0 : les kubeconfigs de config.yaml restent locaux (installateur)
+        ref = _secret_put("kubeconfig", name, "kubeconfig", content) if origin == "console" else None
+        if ref:
+            cluster["kubeconfig"] = ref
+            _save_cluster(origin, cluster, raw, idx)
+            return jsonify({"cluster": name, "kubeconfig": ref, "origin": origin})
         kc_path = _origin_dirs(origin)[0] / f"{name}.yaml"
         _bm_write_private(kc_path, content)
         cluster["kubeconfig"] = str(kc_path)
@@ -13249,8 +13408,12 @@ def api_clusters_upload_sshkey(name):
         refused = _read_only_refusal(origin)
         if refused:
             return refused
-        key_path = _origin_dirs(origin)[1] / f"{name}_id"
-        _bm_write_private(key_path, raw_key)
+        ref = _secret_put("ssh-cluster", name, "private_key", raw_key) if origin == "console" else None
+        if ref:
+            key_path = ref
+        else:
+            key_path = _origin_dirs(origin)[1] / f"{name}_id"
+            _bm_write_private(key_path, raw_key)
         cluster.setdefault("ssh", {})["key"] = str(key_path)
         # une clé téléversée n'est plus celle que la console a créée
         cluster["ssh"].pop("generated", None)
@@ -17758,7 +17921,8 @@ _UNSET = object()
 
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
                 capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
-                setup=None, parent=None, cluster_user=_UNSET, sink=None, busy_match=None):
+                setup=None, parent=None, cluster_user=_UNSET, sink=None, busy_match=None,
+                secret_clusters=(), secret_refs=(), secret_files=None):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
@@ -17779,7 +17943,11 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     sinon lu dans la requête. 2.7.0 : `sink(objet)`, l'objet JSON de stdout
     rendu en mémoire à l'appelant et jamais gardé (jeton, voir le relais).
     2.7.1 : `busy_match(action)`, toute action en cours qu'il retient bloque
-    aussi (contrôlé sous le même verrou que l'inscription)."""
+    aussi (contrôlé sous le même verrou que l'inscription).
+    2.9.0 : l'outil ne se connecte pas à OpenBao ; il reçoit les copies de
+    travail des secrets du cluster, des `busy_clusters`, des
+    `secret_clusters` (`kvm:<hôte>` pour un hôte KVM), des `secret_refs` et
+    les copies `secret_files` déjà écrites ({référence: chemin})."""
     wd = _capi_work_dir()
     spec_file = None
     if spec is not None:
@@ -17798,6 +17966,9 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     run = ActionRun(run_id, label, cluster, public, dry_run=dry_run)
     run.cluster_user = ((current_cluster_identity() or {}).get("user") if cluster_user is _UNSET
                         else cluster_user)
+    run.secret_clusters = tuple(c for c in (*(busy_clusters or ()), *(secret_clusters or ())) if c)
+    run.secret_refs = tuple(secret_refs or ())
+    run.secret_files = dict(secret_files or {})
     if setup is not None:
         setup(run)
     with ACTIONS_LOCK:
@@ -23667,7 +23838,8 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
         # dans le try : une erreur ici (disque plein) laissait l'action
         # « running » pour toujours
         out_file = tempfile.TemporaryFile() if capture and sink is None else None
-        secret_env, secret_map = _spawn_secret_env([run.cluster])
+        secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
+                                                   getattr(run, "secret_refs", ()), getattr(run, "secret_files", None))
         proc = subprocess.Popen(cmd, stdout=out_file or (subprocess.PIPE if sink is not None else subprocess.DEVNULL),
                                 stderr=subprocess.PIPE, text=True,
                                 **({"env": {**os.environ, **secret_env}} if secret_env else {}))
@@ -23764,6 +23936,7 @@ def _start_transfer(label, cluster, clusters, public_cmd, cmd, result=None):
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, label, cluster, public_cmd)
     run.result = dict(result or {})
+    run.secret_clusters = tuple(c for c in clusters or () if c)       # 2.9.0 : copies des deux clusters
     _ident = current_cluster_identity()
     run.cluster_user = (_ident or {}).get("user")
     with ACTIONS_LOCK:
@@ -28623,7 +28796,13 @@ def _tf_kvm_secret(ws, var):
     os.chmod(d, 0o700)
     f = d / var
     if not f.is_file():
-        _tf_private_write(f, _secrets.token_hex(32).encode())
+        value = _secrets.token_hex(32)
+        ref = None
+        # 2.9.0 tâche 8 : classe tf-kvm migrée -> le jeton va dans OpenBao, le
+        # fichier porte sa référence (`<hôte>/<décl>/<variable>`)
+        if ws.parent.name == "decls" and ws.parent.parent.parent.name == ".kvm":
+            ref = _secret_put("tf-kvm", f"{ws.parent.parent.name}/{ws.name}/{var}", "value", value)
+        _tf_private_write(f, ((ref + "\n") if ref else value).encode())
     # 2.9.0 : le fichier peut porter la référence du secret migré dans OpenBao
     return _sst.resolve_value(f.read_text().strip())
 
@@ -31704,7 +31883,8 @@ def _repl_action(plan, op, cmd, role, cluster=None, busy=True, busy_clusters=Non
                        capture=True,
                        busy_clusters=busy_clusters or (plan["source_cluster"], plan["target_cluster"]),
                        busy_prefix=f"replication:{plan['id']}:", summarize=_repl_summarize, id_arg=True,
-                       setup=setup)
+                       setup=setup, secret_clusters=(plan["source_cluster"], plan["target_cluster"]),
+                       secret_refs=_replication_secret_refs())
 
 
 def _repl_accepted(run, plan_id, **extra):
@@ -32098,6 +32278,9 @@ def api_replication_plan_create():
     def setup(run):
         run.required_role = "operator"
         run.cancel_waits = True
+    if (recovery or {}).get("hooks"):
+        # le plan n'a pas encore d'identifiant : chemin `new-<aléa>/<action>`
+        recovery = dict(recovery, hooks=_repl_hooks_to_refs(recovery["hooks"], f"new-{uuid.uuid4().hex[:12]}"))
     run, err = _cli_action(plan["source_cluster"], f"replication:create:{plan['name']}",
                            _repl_base("plan", "create") + argv, REPLICATION_TOOL,
                            spec={"recovery": recovery} if recovery else None,
@@ -32514,6 +32697,8 @@ def api_replication_settings(plan_id):
     err = _repl_budget_error(dict(plan, options=opts))
     if err:
         return err
+    if (spec.get("recovery") or {}).get("hooks"):
+        spec["recovery"] = dict(spec["recovery"], hooks=_repl_hooks_to_refs(spec["recovery"]["hooks"], plan["id"]))
     run, err = _repl_action(plan, "settings", _repl_base("plan", "set", plan["id"]) + argv, "operator",
                             busy_clusters=("",), spec=spec or None)
     if err:
@@ -32711,7 +32896,71 @@ def _repl_simple_action(label, cmd, role, spec=None, busy_clusters=None, setup_e
     return _cli_action(busy_clusters[0] if busy_clusters else "", label, cmd, REPLICATION_TOOL, spec=spec,
                        after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=bool(busy_clusters),
                        capture=True, busy_clusters=busy_clusters, busy_prefix=label if busy_clusters else None,
-                       summarize=_repl_summarize, id_arg=True, setup=setup)
+                       summarize=_repl_summarize, id_arg=True, setup=setup,
+                       secret_refs=_replication_secret_refs())
+
+
+def _repl_hooks_to_refs(hooks, plan_key):
+    """2.9.0 tâche 8 : classe `replication-hook` migrée -> chaque en-tête
+    secret nouveau d'une action annexe va dans OpenBao
+    (`replication-hook/<plan>/<action>#hdr_<nom>`) et la demande remise à
+    l'outil porte sa référence. `********` (valeur gardée) et les références
+    passent tels quels. Classe locale : inchangé."""
+    import copy
+    if not hooks or not _secret_migrated("replication-hook"):
+        return hooks
+    out = copy.deepcopy(hooks)
+    for h in out:
+        sh = h.get("secret_headers") if isinstance(h, dict) else None
+        if not isinstance(sh, dict):
+            continue
+        for k, v in list(sh.items()):
+            if isinstance(v, str) and v and v != _rp.MASK and not _sst.is_ref(v):
+                ref = _secret_put("replication-hook", f"{plan_key}/{h.get('name')}", _ssc.header_field(k), v)
+                if ref:
+                    sh[k] = ref
+    return out
+
+
+def _repl_notify_checked(body, stored):
+    """Le réglage contrôlé (normalize) : avec les valeurs des secrets rangés
+    dans OpenBao quand la classe `replication-notify` est migrée, pour que
+    les adresses soient contrôlées (address_refusal) avant toute écriture."""
+    if not _secret_migrated("replication-notify"):
+        return _rn.normalize(body, stored)
+    return _rn.normalize(body, _rn.resolve_secrets(stored or {}))
+
+
+def _repl_notify_to_refs(body, norm, stored):
+    """2.9.0 tâche 8 : classe `replication-notify` migrée -> chaque secret
+    nouveau du réglage contrôlé `norm` va dans OpenBao et le réglage remis à
+    l'outil (qui ne se connecte pas) porte sa référence ; un secret inchangé
+    garde la sienne. Classe locale : `body`, inchangé."""
+    import copy
+    if not _secret_migrated("replication-notify"):
+        return body
+    resolved = _rn.resolve_secrets(stored or {})
+    out = copy.deepcopy(norm)
+
+    def key(c, secret):
+        return (c.get("id"), secret if isinstance(secret, str) else ("header", secret[1]))
+    refs = {key(c, s): v for c, s, v in _rn.secret_slots(stored)}
+    values = {key(c, s): v for c, s, v in _rn.secret_slots(resolved)}
+    for c, secret, value in _rn.secret_slots(out):
+        if _sst.is_ref(value):
+            continue
+        k = key(c, secret)
+        old = refs.get(k)
+        if _sst.is_ref(old) and values.get(k) == value:
+            new = old
+        else:
+            new = _secret_put("replication-notify", _ssc.NOTIFY_PATH, _ssc.notify_field(c["id"], secret), value) \
+                or value
+        if isinstance(secret, tuple):
+            c["secret_headers"][secret[1]] = new
+        else:
+            c[secret] = new
+    return out
 
 
 @app.route("/api/replication/notify", methods=["PUT"])
@@ -32728,11 +32977,13 @@ def api_replication_notify_set():
     if err:
         return err
     try:
-        _rn.address_refusal(_rn.normalize(body, _repl_notify_stored()),
-                            _rh.allowlist(load_config_ro(), "notifications"))
+        stored = _repl_notify_stored()
+        checked = _repl_notify_checked(body, stored)
+        _rn.address_refusal(checked, _rh.allowlist(load_config_ro(), "notifications"))
     except _rn.NotifyError as e:
         return _repl_err(str(e), 400, e.code)
-    run, err = _repl_simple_action("replication:notify:set", _repl_base("notify", "set"), "admin", spec=body)
+    spec = _repl_notify_to_refs(body, checked, stored)
+    run, err = _repl_simple_action("replication:notify:set", _repl_base("notify", "set"), "admin", spec=spec)
     if err:
         return err
     return jsonify({"action_id": run.id}), 202
@@ -33268,6 +33519,106 @@ def _secret_refs_in(obj, out):
     return out
 
 
+SECRETS_TOOL = "harvester-secrets.py"
+SECRET_ORIGINALS_CHECK_S = 3600
+SECRET_ORIGINALS_PREFIX = "secrets:expire-originals:"
+
+
+def _secret_originals_due(now=None):
+    """(classes, jours) : classes migrées dont un original gardé a dépassé
+    le délai de garde (`originals_keep_days`, 7 par défaut, 1 à 30). Ne lit
+    aucune valeur (dates des originaux seulement)."""
+    if not _sst.is_active():
+        return [], 0
+    now = time.time() if now is None else now
+    settings = _sst.store().settings
+    days = settings["originals_keep_days"]
+    fs = _sst.FileStore(_state_dir())
+    due = []
+    for cls in sorted(settings.get("migrated") or {}):
+        try:
+            ad = _ssc.adapter(cls)
+            originals = ad.originals(fs) if ad.originals else []
+        except (ValueError, OSError):
+            continue
+        if any(now - float(o.get("at") or 0) >= days * 86400 for o in originals):
+            due.append(cls)
+    return due, days
+
+
+def _secret_originals_sweep(now=None):
+    """Délai de garde (plan, « Migration ») : pour chaque classe due, une
+    action suivie `harvester-secrets confirm --class C --older-than-days N`
+    (jamais deux à la fois pour une classe). Rend les actions lancées."""
+    started = []
+    script = BIN_DIR / SECRETS_TOOL
+    if not script.is_file():
+        return started
+    due, days = _secret_originals_due(now)
+    for cls in due:
+        label = f"{SECRET_ORIGINALS_PREFIX}{cls}"
+        with ACTIONS_LOCK:
+            if any(r.action == label and r.status in ("starting", "running") for r in ACTIONS.values()):
+                continue
+        with app.app_context():
+            run, err = _cli_action("", label, [sys.executable, str(script), "--actor", "service", "confirm",
+                                               "--class", cls, "--older-than-days", str(days)],
+                                   "harvester-secrets", check_busy=False, capture=True, cluster_user=None)
+        if run is not None:
+            started.append(run)
+    return started
+
+
+def _secret_originals_loop():
+    time.sleep(120)                            # après la vague de démarrage
+    while True:
+        try:
+            _secret_originals_sweep()
+        except Exception as e:                 # noqa: BLE001 : la tâche de fond ne tombe jamais
+            log.warning("secret originals sweep failed: %s", e)
+        time.sleep(SECRET_ORIGINALS_CHECK_S)
+
+
+def _start_secret_originals_sweeper():
+    if IS_READ_WORKER:
+        return None
+    t = threading.Thread(target=_secret_originals_loop, daemon=True, name="secret-originals")
+    t.start()
+    return t
+
+
+def _replication_secret_refs(clusters=False):
+    """2.9.0 : références des secrets de la réplication (notifications,
+    en-têtes des actions annexes) et, avec `clusters`, celles du kubeconfig
+    et de la clé SSH des clusters des plans (le suiveur les lit par leur
+    nom). () sans OpenBao."""
+    if not _sst.is_active():
+        return ()
+    refs, names = set(), set()
+    try:
+        conn = _replication_conn()
+    except Exception:                          # noqa: BLE001 : réplication indisponible
+        return ()
+    try:
+        _secret_refs_in(_rdb.get_setting(conn, "notify") or {}, refs)
+        for opts, src, dst in conn.execute("SELECT options, source_cluster, target_cluster FROM plans"):
+            names |= {src, dst}
+            try:
+                _secret_refs_in(json.loads(opts or "{}"), refs)
+            except ValueError:
+                continue
+    finally:
+        conn.close()
+    if clusters:
+        for entry in load_config_ro().get("clusters", []):
+            if entry.get("name") in names:
+                for v in (entry.get("kubeconfig"), (entry.get("ssh") or {}).get("key")
+                          if isinstance(entry.get("ssh"), dict) else None):
+                    if isinstance(v, str) and _sst.is_openbao_ref(v):
+                        refs.add(v)
+    return tuple(sorted(refs))
+
+
 def _replication_follow_secret_env():
     """Revue I6 : copies de travail des secrets de notification et des
     en-têtes des actions annexes, pour le suiveur de réplication qui ne se
@@ -33278,17 +33629,7 @@ def _replication_follow_secret_env():
     Rend {HARVESTER_OPS_SECRET_FILES: correspondance} ou {}."""
     if not _sst.is_active():
         return {}
-    refs = set()
-    conn = _replication_conn()
-    try:
-        _secret_refs_in(_rdb.get_setting(conn, "notify") or {}, refs)
-        for (opts,) in conn.execute("SELECT options FROM plans"):
-            try:
-                _secret_refs_in(json.loads(opts or "{}"), refs)
-            except ValueError:
-                continue
-    finally:
-        conn.close()
+    refs = set(_replication_secret_refs(clusters=True))
     d = _sst.secret_files_dir(_sst.store().settings) / "replication-follow"
     d.mkdir(mode=0o700, exist_ok=True)
     files = {}
@@ -37971,6 +38312,10 @@ if __name__ == "__main__":
     except Exception as _e:                      # noqa: BLE001
         log_watch.error("replication follower startup failed: %s", _e)
     _announce_setup()
+    try:
+        _start_secret_originals_sweeper()        # 2.9.0 : délai de garde des originaux migrés
+    except Exception as _e:                      # noqa: BLE001
+        log.warning("secret originals sweeper startup failed: %s", _e)
     try:
         _tf_decl_startup_audit()
     except Exception as _e:                      # noqa: BLE001

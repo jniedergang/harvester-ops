@@ -16,7 +16,9 @@ externes (jetons, mots de passe, URL secrètes, réglage `notify` de la table
 `settings`) et les en-têtes secrets des actions annexes (`secret_headers`
 dans `plans.options`), avec leurs adresses complètes. Ils ne sortent jamais
 d'une lecture (`replication_notify.mask`, `replication.mask_plan`). Rien
-n'est jamais écrit sur un cluster.
+n'est jamais écrit sur un cluster. 2.9.0 : `harvester-secrets migrate`
+remplace aussi ces valeurs par leur référence OpenBao (table
+`secret_rollback` pour les originaux, jusqu'à la confirmation).
 """
 
 import json
@@ -271,6 +273,18 @@ TABLES = {
         ("updated_at", "TEXT NOT NULL DEFAULT ''"),
         ("updated_by", "TEXT NOT NULL DEFAULT ''"),
     ],
+    # 2.9.0 : originaux des secrets migrés dans OpenBao (notifications,
+    # en-têtes des actions annexes), gardés jusqu'à la confirmation ou au
+    # délai de garde ; la valeur rangée est remplacée par sa référence
+    "secret_rollback": [
+        ("cls", "TEXT NOT NULL"),
+        ("path", "TEXT NOT NULL"),
+        ("field", "TEXT NOT NULL"),
+        ("value", "TEXT NOT NULL"),
+        ("ref", "TEXT NOT NULL DEFAULT ''"),
+        ("at", "REAL NOT NULL DEFAULT 0"),
+        ("action_id", "TEXT NOT NULL DEFAULT ''"),
+    ],
     # essais actifs d'un lien entre deux clusters (`link test`)
     "link_tests": [
         ("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
@@ -295,6 +309,7 @@ KEYS = {
     "measures": ("plan_id", "generation", "source_volume", "backup"),
     "stats": ("plan_id", "generation", "resource_uid", "pass_at"),
     "tick_hours": ("plan_id", "generation", "source_volume", "hour"),
+    "secret_rollback": ("cls", "path", "field"),
 }
 INDEXES = (
     "CREATE INDEX IF NOT EXISTS resources_source ON plan_resources (source_host)",
@@ -1626,6 +1641,102 @@ def set_selector_watch(conn, plan_id, pending, left_uids, now=None):
                      (plan_id, json.dumps(vals["pending"], sort_keys=True), json.dumps(vals["left_uids"]),
                       vals["checked_at"]))
     return get_selector_watch(conn, plan_id)
+
+
+# ---------------------------------------------------------------------------
+# 2.9.0 : secrets migrés dans OpenBao (harvester-secrets migrate / confirm)
+# ---------------------------------------------------------------------------
+SECRET_CLASSES = ("replication-notify", "replication-hook")
+
+
+def _secret_slot(conn, cls, path, field):
+    """(lire, écrire) l'emplacement d'un secret dans le JSON rangé : la
+    valeur actuelle (None si absente) et une fonction qui la remplace et
+    réécrit la ligne. KeyError si l'emplacement n'existe pas."""
+    import secret_classes as sc
+    if cls == "replication-notify":
+        cid, secret = sc.local_location(cls, path, field, ".")[2]
+        r = conn.execute("SELECT value FROM settings WHERE key = 'notify'").fetchone()
+        cfg = json.loads(r["value"]) if r and r["value"] else None
+        for ch in (cfg or {}).get("channels") or []:
+            if not isinstance(ch, dict) or ch.get("id") != cid:
+                continue
+            if secret in sc.NOTIFY_SECRETS.get(ch.get("kind"), ()):
+                box, key = ch, secret
+            else:
+                key = next((k for k in (ch.get("secret_headers") or {}) if sc.header_field(k) == secret), None)
+                box = ch.get("secret_headers") if key else None
+            if box is None or key not in box:
+                break
+
+            def put(v, box=box, key=key):
+                box[key] = v
+                conn.execute("UPDATE settings SET value = ? WHERE key = 'notify'", (json.dumps(cfg, sort_keys=True),))
+            return box[key], put
+        raise KeyError(field)
+    if cls == "replication-hook":
+        plan, action, fld = sc.local_location(cls, path, field, ".")[2]
+        r = conn.execute("SELECT options FROM plans WHERE id = ?", (plan,)).fetchone()
+        opts = json.loads(r["options"] or "{}") if r else None
+        for h in (opts or {}).get("hooks") or []:
+            if isinstance(h, dict) and h.get("name") == action:
+                sh = h.get("secret_headers") or {}
+                key = next((k for k in sh if sc.header_field(k) == fld), None)
+                if key is None:
+                    break
+
+                def put(v, sh=sh, key=key):
+                    sh[key] = v
+                    conn.execute("UPDATE plans SET options = ? WHERE id = ?", (json.dumps(opts, sort_keys=True), plan))
+                return sh[key], put
+        raise KeyError(field)
+    raise ValueError("not a replication secret class")
+
+
+def secret_to_ref(conn, cls, path, field, ref, value, action_id="", now=None):
+    """Remplace la valeur rangée par sa référence, l'original gardé dans
+    `secret_rollback`, en une transaction. Refus (ValueError) si la valeur
+    rangée n'est plus celle qui a été migrée (changée entre-temps) : rien
+    n'est touché. Rend False si la référence était déjà posée."""
+    with _tx(conn):
+        cur, put = _secret_slot(conn, cls, path, field)
+        if cur == ref:
+            return False
+        if cur != value:
+            raise ValueError("stored value changed during the migration")
+        conn.execute("INSERT INTO secret_rollback (cls, path, field, value, ref, at, action_id)"
+                     " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (cls, path, field) DO UPDATE SET"
+                     " value = excluded.value, ref = excluded.ref, at = excluded.at,"
+                     " action_id = excluded.action_id",
+                     (cls, path, field, cur, ref, float(now if now is not None else datetime.now().timestamp()),
+                      action_id or ""))
+        put(ref)
+        return True
+
+
+def secret_from_ref(conn, cls, path, field, value):
+    """Retour en local : la valeur reprend la place de sa référence, et
+    l'original gardé est retiré (la valeur est de nouveau rangée ici)."""
+    with _tx(conn):
+        cur, put = _secret_slot(conn, cls, path, field)
+        if cur != value:
+            put(value)
+        conn.execute("DELETE FROM secret_rollback WHERE cls = ? AND path = ? AND field = ?", (cls, path, field))
+
+
+def secret_rollback_rows(conn, cls=None):
+    """[{cls, path, field, ref, at, action_id}] des originaux gardés, sans
+    leur valeur."""
+    sql = "SELECT cls, path, field, ref, at, action_id FROM secret_rollback"
+    rows = conn.execute(sql + (" WHERE cls = ?" if cls else "") + " ORDER BY cls, path, field",
+                        (cls,) if cls else ()).fetchall()
+    return [dict(r) for r in rows]
+
+
+def secret_rollback_delete(conn, cls, path, field):
+    with _tx(conn):
+        return conn.execute("DELETE FROM secret_rollback WHERE cls = ? AND path = ? AND field = ?",
+                            (cls, path, field)).rowcount
 
 
 def get_setting(conn, key, default=None):

@@ -37,6 +37,7 @@ ALLOWED = {
     "kubeconfig": _BIN_TOOLS_MATERIALIZED | {
         ("web/app.py", "_cluster_kubeconfig_path"),          # le lecteur
         ("web/app.py", "_spawn_secret_env"),                 # référence remise à un outil (revue I6)
+        ("web/app.py", "_replication_secret_refs"),          # références remises au suiveur (2.9.0 tâche 8)
         ("web/app.py", "_cluster_of_kubeconfig"),            # comparaison, puis le lecteur
         ("web/app.py", "_registry_console_address"),         # présence, puis le lecteur
         ("web/app.py", "_baremetal_install_steps"),          # kubeconfig neuf d'une installation (écrivain)
@@ -48,6 +49,7 @@ ALLOWED = {
     "ssh-key": {
         ("web/app.py", "_cluster_ssh_key_path"),             # le lecteur
         ("web/app.py", "_spawn_secret_env"),                 # référence remise à un outil (revue I6)
+        ("web/app.py", "_replication_secret_refs"),          # références remises au suiveur (2.9.0 tâche 8)
         ("web/app.py", "api_network_fabric_node_detail"), ("web/app.py", "_fabric_ssh_base"),  # présence
         ("web/app.py", "_bm_join_pubkey"),                   # drapeau `generated`, puis le lecteur
         ("web/app.py", "_validate_cluster_payload"), ("web/app.py", "api_clusters_create"),
@@ -60,7 +62,8 @@ ALLOWED = {
         ("web/app.py", "_kvm_add_request"),                  # chemin dérivé du nom (écrivains)
         ("web/app.py", "_bm_cluster_files"), ("web/app.py", "api_clusters_create"),
         ("web/app.py", "api_clusters_update"), ("web/app.py", "api_clusters_upload_sshkey"),
-        ("bin/lib/secret_classes.py", "local_location"), ("bin/lib/secret_store.py", "list_local"),
+        ("bin/lib/secret_classes.py", "local_location"),
+        ("bin/lib/secret_store.py", "restore_local"),        # chemin dérivé du nom (retour en local)
     },
     "oidc-secret": {
         ("web/rancher_servers.py", "delete"), ("web/rancher_servers.py", "set_sso"),
@@ -77,7 +80,7 @@ ALLOWED = {
         ("bin/harvester-replication.py", "cmd_notify_show"),  # masqué (rn.mask)
         ("bin/harvester-replication.py", "cmd_notify_set"),   # garde les valeurs rangées
         ("web/app.py", "_repl_notify_stored"),               # masqué / normalisé, jamais envoyé
-        ("web/app.py", "_replication_follow_secret_env"),    # références du suiveur (revue I6)
+        ("web/app.py", "_replication_secret_refs"),          # références du suiveur et des actions (revue I6)
     },
 }
 
@@ -87,7 +90,6 @@ ALLOWED = {
 # échouer le test ; une de moins demande de baisser le nombre. Absent = 1.
 COUNTS = {
     ("key-file", "bin/lib/secret_classes.py", "local_location"): 2,
-    ("key-file", "bin/lib/secret_store.py", "list_local"): 2,
     ("kubeconfig", "bin/harvester-containers.py", "targets_from"): 4,
     ("kubeconfig", "bin/harvester-registry.py", "_cluster_kube"): 2,
     ("kubeconfig", "bin/lib/cluster_decl.py", "_map_paths"): 4,
@@ -96,7 +98,12 @@ COUNTS = {
     ("kubeconfig", "web/app.py", "api_clusters_create"): 4,
     ("kubeconfig", "web/app.py", "api_clusters_update"): 2,
     ("oidc-secret", "bin/lib/secret_store.py", "list_local"): 2,
-    ("oidc-secret", "web/rancher_servers.py", "set_sso"): 2,
+    ("oidc-secret", "web/rancher_servers.py", "set_sso"): 3,
+    # 2.9.0 tâche 8 : le secret migré d'un élément supprimé est retiré d'OpenBao
+    ("kubeconfig", "web/app.py", "api_clusters_delete"): 2,
+    ("ssh-key", "web/app.py", "api_clusters_delete"): 2,
+    ("oidc-secret", "web/rancher_servers.py", "clear_sso"): 3,
+    ("oidc-secret", "web/rancher_servers.py", "delete"): 3,
     ("ssh-key", "bin/lib/cluster_decl.py", "_map_paths"): 4,
     ("ssh-key", "bin/lib/node_images.py", "ssh_options"): 2,
     ("ssh-key", "web/app.py", "api_clusters_update"): 5,

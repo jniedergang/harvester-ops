@@ -270,7 +270,8 @@ def test_remove_tolerates_missing_files_and_deletes_decl_first(tmp_path, monkeyp
         return real(self, missing_ok=missing_ok)
     monkeypatch.setattr(Path, "unlink", spy)
     assert kvm_decl.remove(tmp_path, "h1") is True
-    assert order == ["h1.yaml", "h1_id", "h1_known"]
+    # 2.9.0 : l'original gardé d'une clé migrée (`.migrated`) part avec l'hôte
+    assert order == ["h1.yaml", "h1_id", "h1_id.migrated", "h1_known"]
 
 
 # --- relevé des empreintes ----------------------------------------------

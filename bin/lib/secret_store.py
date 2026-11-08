@@ -63,6 +63,11 @@ CLASSES = {
 }
 
 SETTINGS_FILE = "secrets-settings.json"
+# 2.9.0 tâche 8 : originaux gardés après migration (sans valeur : chemins,
+# dates) ; le fichier gardé porte ce suffixe, 0600, à côté de l'original
+ORIGINALS_FILE = "secrets-originals.json"
+ORIGINALS_LOCK = ".secrets-originals.lock"
+MIGRATED_SUFFIX = ".migrated"
 OPENBAO_DIR_DEFAULT = "/etc/harvester-ops/openbao"
 DEFAULTS = {
     "mode": "local",              # local | a | b1
@@ -76,7 +81,10 @@ DEFAULTS = {
     "ca_file": None,              # CA d'OpenBao ailleurs que <openbao>/ca.pem (revue M7)
     "secret_files_dir": None,     # développement seulement, avec dev_disk_secret_files
     "dev_disk_secret_files": False,
+    "originals_keep_days": 7,     # garde des originaux migrés (1 à 30)
+    "outage_test": None,          # {"ok_at", "by"} : panne simulée réussie (point 255)
 }
+ORIGINALS_KEEP_RANGE = (1, 30)
 CACHE_TTL_RANGE = (1, 120)
 VALUE_MAX = 1 << 20               # 1 Mio
 TMPFS_TYPES = ("tmpfs", "ramfs")
@@ -219,6 +227,11 @@ def load_settings(state_dir=None):
     except (TypeError, ValueError):
         ttl = DEFAULTS["cache_ttl_min"]
     out["cache_ttl_min"] = max(CACHE_TTL_RANGE[0], min(CACHE_TTL_RANGE[1], ttl))
+    try:
+        keep = int(out["originals_keep_days"])
+    except (TypeError, ValueError):
+        keep = DEFAULTS["originals_keep_days"]
+    out["originals_keep_days"] = max(ORIGINALS_KEEP_RANGE[0], min(ORIGINALS_KEEP_RANGE[1], keep))
     if not out["prefix"] and out["console_id"]:
         out["prefix"] = f"consoles/{out['console_id']}"
     return out
@@ -545,19 +558,18 @@ class FileStore:
             names = {p.stem for p in (st / "clusters.d").glob("*.yaml")} | {
                 p.stem for p in (st / "kubeconfigs").glob("*.yaml")}
             out = [(n, "kubeconfig") for n in sorted(names) if self.read_local(cls, n, "kubeconfig") is not None]
-        elif cls == "ssh-cluster":
-            names = {p.stem for p in (st / "clusters.d").glob("*.yaml")}
-            out = [(n, "private_key") for n in sorted(names)
-                   if (st / "ssh" / f"{n}_id").is_file() or isinstance(self.local_file(cls, n, "private_key"), str)]
-        elif cls == "ssh-kvm":
-            names = {p.stem for p in (st / "kvm.d").glob("*.yaml")}
-            out = [(n, "private_key") for n in sorted(names) if (st / "ssh" / f"{n}_id").is_file()]
+        elif cls in ("ssh-cluster", "ssh-kvm"):
+            names = {p.stem for p in (st / ("clusters.d" if cls == "ssh-cluster" else "kvm.d")).glob("*.yaml")}
+            for n in sorted(names):
+                f = self.local_file(cls, n, "private_key")
+                if isinstance(f, str) or (isinstance(f, Path) and f.is_file()):
+                    out.append((n, "private_key"))
         elif cls == "rancher-oidc":
             out = [(p.name[: -len(".oidc-secret")], "client_secret")
                    for p in sorted((st / "rancher.d").glob("*.oidc-secret"))]
         elif cls == "tf-kvm":
             for p in sorted((self.tf_dir / ".kvm").glob("*/decls/*/.secrets/*")):
-                if p.is_file():
+                if p.is_file() and not p.name.endswith(MIGRATED_SUFFIX):
                     out.append((f"{p.parts[-5]}/{p.parts[-3]}/{p.name}", "value"))
         elif cls == "replication-notify":
             cfg = self._db_json("SELECT value FROM settings WHERE key = 'notify'") or {}
@@ -608,6 +620,207 @@ class FileStore:
             value = value + "\n"
         kvm_decl.write_private(f, value)
         return make_ref(cls, path, field)
+
+
+    # -- migration (2.9.0 tâche 8) ---------------------------------------------
+    def _base(self, cls):
+        return self.tf_dir if cls == "tf-kvm" else self.state_dir
+
+    def _norm(self, cls, data):
+        """Valeur d'un fichier telle que `read_local` la rend."""
+        text = data.decode()
+        return text.strip() if cls in ("rancher-oidc", "tf-kvm") else text
+
+    @contextlib.contextmanager
+    def _originals_lock(self):
+        import fcntl
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.state_dir / ORIGINALS_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    def _originals_doc(self):
+        try:
+            doc = json.loads((self.state_dir / ORIGINALS_FILE).read_text())
+            return doc if isinstance(doc, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _originals_save(self, doc):
+        import kvm_decl
+        kvm_decl.write_private(self.state_dir / ORIGINALS_FILE, json.dumps(doc, indent=2, sort_keys=True) + "\n")
+
+    def _set_decl(self, cls, path, decl, key, value):
+        """Champ de la déclaration (cluster ou hôte KVM) qui désigne le
+        secret : sa référence après migration, son chemin après retour."""
+        if cls == "ssh-kvm":
+            import kvm_decl
+            doc = kvm_decl.load(self.state_dir, path)
+            doc["ssh_key"] = value
+            kvm_decl.write(self.state_dir, doc)
+            return
+        import cluster_decl
+        import kvm_decl
+        with cluster_decl.decl_lock(self.state_dir, wait=30.0):
+            doc = _read_yaml(decl)
+            if not isinstance(doc, dict):
+                raise ValueError("cluster declaration unreadable")
+            if key == "kubeconfig":
+                doc["kubeconfig"] = value
+            else:
+                doc["ssh"] = dict(doc.get("ssh") or {}, key=value)
+            try:
+                import yaml
+                text = yaml.safe_dump(doc, default_flow_style=False, sort_keys=False)
+            except ImportError:                     # pragma: no cover  (JSON est du YAML)
+                text = json.dumps(doc, indent=2)
+            kvm_decl.write_private(decl, text)
+
+    def eligible(self, cls, path, field):
+        """None si le secret peut migrer, sinon le code de ce qui le garde en
+        local : fichier hors du répertoire d'état (fichier de l'opérateur),
+        lien, déclaration absente, nom qui ne fait pas une référence."""
+        try:
+            kind, _p, extra = self.location(cls, path, field)
+            make_ref(cls, path, field, "openbao")
+        except ValueError:
+            return "secret-bad-name"
+        if kind in ("file", "decl-file"):
+            f = self.local_file(cls, path, field)
+            if isinstance(f, str):
+                return None
+            base = os.path.abspath(str(self._base(cls)))
+            if not os.path.abspath(str(f)).startswith(base + os.sep) or os.path.islink(f):
+                return "secret-outside-state"
+            if kind == "decl-file" and not Path(extra[0]).is_file():
+                return "secret-no-declaration"
+        return None
+
+    def write_ref(self, cls, path, field, ref, value=None, action=None):
+        """La valeur locale devient sa référence `openbao:`, l'original gardé
+        (`<fichier>.migrated` 0600 noté dans secrets-originals.json, ou table
+        `secret_rollback`). `value` : la valeur migrée ; refus (ValueError)
+        si la valeur locale a changé entre-temps, rien n'est touché."""
+        if not is_openbao_ref(ref):
+            raise ValueError("an openbao: reference is expected")
+        kind, _p, extra = self.location(cls, path, field)
+        if kind in ("notify", "hook"):
+            import replication_db
+            conn = replication_db.connect(self.repl_db)
+            try:
+                replication_db.secret_to_ref(conn, cls, path, field, ref, value, action)
+            finally:
+                conn.close()
+            return
+        import kvm_decl
+        f = self.local_file(cls, path, field)
+        if not isinstance(f, Path):
+            raise ValueError("no local file for this secret")
+        data = f.read_bytes()
+        if value is not None and self._norm(cls, data) != value:
+            raise ValueError("local value changed during the migration")
+        base = self._base(cls)
+        mig = f.with_name(f.name + MIGRATED_SUFFIX)
+        with self._originals_lock():
+            kvm_decl.write_private(mig, data)
+            doc = self._originals_doc()
+            doc[f"{cls}/{path}#{field}"] = {
+                "cls": cls, "path": path, "field": field, "at": time.time(), "action": action or "",
+                "file": Path(os.path.relpath(mig, base)).as_posix(),
+                "dest": Path(os.path.relpath(f, base)).as_posix()}
+            self._originals_save(doc)
+        if kind == "file":
+            kvm_decl.write_private(f, ref + "\n")
+        else:
+            self._set_decl(cls, path, extra[0], extra[1], ref)
+            _unlink(f)
+
+    def restore_local(self, cls, path, field, value):
+        """Retour en local : la valeur relue dans OpenBao réécrite à son
+        emplacement (0600), les octets de l'original gardé quand il porte la
+        même valeur ; l'original gardé est ensuite retiré."""
+        kind, p, extra = self.location(cls, path, field)
+        if kind in ("notify", "hook"):
+            import replication_db
+            conn = replication_db.connect(self.repl_db)
+            try:
+                replication_db.secret_from_ref(conn, cls, path, field, value)
+            finally:
+                conn.close()
+            return
+        import kvm_decl
+        base = self._base(cls)
+        key = f"{cls}/{path}#{field}"
+        with self._originals_lock():
+            ent = self._originals_doc().get(key) or {}
+        dest = base / ent["dest"] if ent.get("dest") else p
+        mig = base / ent["file"] if ent.get("file") else None
+        data = None
+        if mig is not None and mig.is_file():
+            raw = mig.read_bytes()
+            if self._norm(cls, raw) == value:
+                data = raw
+        if data is None:
+            data = value.encode()
+            if cls in ("rancher-oidc", "tf-kvm") and not data.endswith(b"\n"):
+                data += b"\n"
+        kvm_decl.write_private(dest, data)
+        if kind == "decl-file":
+            rel = kvm_decl.key_rel(path) if cls == "ssh-kvm" else Path(os.path.relpath(dest, base)).as_posix()
+            self._set_decl(cls, path, extra[0], extra[1], rel)
+        with self._originals_lock():
+            doc = self._originals_doc()
+            if doc.pop(key, None) is not None:
+                self._originals_save(doc)
+        if mig is not None:
+            _unlink(mig)
+
+    def originals(self, cls):
+        """[{path, field, at, where}] des originaux gardés d'une classe, sans
+        valeur."""
+        if cls in ("replication-notify", "replication-hook"):
+            if not self.repl_db.is_file():
+                return []
+            import replication_db
+            conn = replication_db.connect(self.repl_db)
+            try:
+                rows = replication_db.secret_rollback_rows(conn, cls)
+            finally:
+                conn.close()
+            return [{"path": r["path"], "field": r["field"], "at": r["at"], "where": "db"} for r in rows]
+        return [{"path": e["path"], "field": e["field"], "at": e.get("at") or 0, "where": "file"}
+                for e in sorted(self._originals_doc().values(), key=lambda e: (e.get("path"), e.get("field")))
+                if isinstance(e, dict) and e.get("cls") == cls]
+
+    def erase_original(self, cls, path, field):
+        """Efface l'original gardé (confirmation, délai de garde). Rend True
+        s'il y en avait un."""
+        if cls in ("replication-notify", "replication-hook"):
+            if not self.repl_db.is_file():
+                return False
+            import replication_db
+            conn = replication_db.connect(self.repl_db)
+            try:
+                return bool(replication_db.secret_rollback_delete(conn, cls, path, field))
+            finally:
+                conn.close()
+        kind, _p, _extra = self.location(cls, path, field)
+        base = self._base(cls)
+        with self._originals_lock():
+            doc = self._originals_doc()
+            ent = doc.pop(f"{cls}/{path}#{field}", None)
+            if not ent:
+                return False
+            _unlink(base / ent["file"])
+            # reste d'une migration coupée entre la référence et le retrait
+            # du fichier : effacé seulement si la déclaration porte la référence
+            if kind == "decl-file" and is_openbao_ref(self.read_local(cls, path, field)):
+                _unlink(base / ent["dest"])
+            self._originals_save(doc)
+        return True
 
 
 def _notify_secret(cfg, cid, secret):

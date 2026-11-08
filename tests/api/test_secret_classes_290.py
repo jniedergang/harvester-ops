@@ -53,7 +53,7 @@ def test_unknown_class():
 @pytest.mark.parametrize("cls,path,field,kind,tail", [
     ("kubeconfig", "h1", "kubeconfig", "decl-file", "kubeconfigs/h1.yaml"),
     ("ssh-cluster", "h1", "private_key", "decl-file", "ssh/h1_id"),
-    ("ssh-kvm", "k1", "private_key", "file", "ssh/k1_id"),
+    ("ssh-kvm", "k1", "private_key", "decl-file", "ssh/k1_id"),
     ("rancher-oidc", "r1", "client_secret", "file", "rancher.d/r1.oidc-secret"),
     ("tf-kvm", "k1/d1/tok", "value", "file", "terraform/.kvm/k1/decls/d1/.secrets/tok"),
     ("replication-notify", "global", "mx_1__token", "notify", "replication.db"),
@@ -111,9 +111,11 @@ def test_adapter_lists_and_reads(tmp_path):
     a = sc.adapter("rancher-oidc")
     assert a.list_local(fs) == [("r1", "client_secret")]
     assert a.read_local(fs, "r1", "client_secret") == "v"
-    with pytest.raises(NotImplementedError):
-        a.write_ref(fs, "r1", "client_secret", "openbao:rancher-oidc/r1#client_secret")
+    assert a.eligible(fs, "r1", "client_secret") is None
+    assert a.originals(fs) == []
     assert sc.adapter("plan-run").list_local(fs) == []
+    with pytest.raises(ValueError):
+        sc.adapter("plan-run").write_ref(fs, "a1/x", "token", "openbao:plan-run/a1/x#token")
 
 
 def test_readers_are_named():

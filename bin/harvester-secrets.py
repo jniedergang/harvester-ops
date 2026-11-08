@@ -10,7 +10,8 @@
     harvester-secrets enable --mode b1 --bundle FILE --ack-offline-copy [--dry-run]
     harvester-secrets disable [--remove-b1] [--dry-run]
     harvester-secrets migrate --to openbao|local [--class C ...] [--name N] [--dry-run]
-    harvester-secrets confirm --class C
+    harvester-secrets confirm --class C [--older-than-days N]
+    harvester-secrets outage-test
     harvester-secrets versions REF
     harvester-secrets rollback REF --version N [--dry-run]
     harvester-secrets rotate secret-id | unseal-key --ack-offline-copy | transit DECL | ssh-kvm HOST
@@ -66,6 +67,7 @@ AGENT_TIMEOUT = {"b1-install": 1800, "b1-upgrade": 1800, "restore-snapshot": 180
 SNAP_RE = re.compile(r"^openbao-[0-9A-Za-z_.-]{1,80}\.snap$")
 COSIGN_KEY = HERE.parent / "config" / "openbao" / "application-collection-cosign.pub"
 ARGS = argparse.Namespace(id=None, actor=None)
+OUTAGE_ADDR = "https://127.0.0.1:9"           # panne simulée : port sans serveur (discard)
 
 
 def step(sid, status, msg=""):
@@ -507,14 +509,66 @@ def _sha(v):
     return hashlib.sha256(v.encode()).hexdigest()
 
 
+def _drop_cache(bao, cls, path):
+    with bao._lock:
+        for r in [r for r in bao._cache if r.startswith(f"openbao:{cls}/{path}#")]:
+            del bao._cache[r]
+
+
+def _write_cas0(bao, cls, path, want, actor=None, action=None, dry_run=False):
+    """Écrit les champs `want` d'un chemin avec `cas=0` (plan, « Migration »).
+    Refus de `cas` : OpenBao rend le même 400 que la valeur soit la même ou
+    non (essai 5), la valeur rangée est donc relue et comparée par SHA-256 en
+    mémoire, champ par champ. Rend {champ: written|resumed|conflict} ; un
+    champ absent d'un chemin qui existe (reprise d'une classe à plusieurs
+    champs) est ajouté par une écriture à la version courante."""
+    c = bao._client(actor, action)
+    kv = bao._kv(cls, path)
+    if dry_run:
+        data, _m = bao._read(cls, path, actor, action)
+        data = data or {}
+        return {f: ("write" if f not in data else "resume" if _sha(data[f]) == _sha(v) else "conflict")
+                for f, v in want.items()}
+    try:
+        try:
+            w = c.kv_put(bao.mount, kv, dict(want), cas=0,
+                         custom_metadata=ss.version_metadata({}, 1, cls, actor, action))
+            bao.last_metadata_error = getattr(w, "metadata_error", None)
+            return {f: "written" for f in want}
+        except oc.OpenBaoError as e:
+            if e.code != "openbao-cas-conflict":
+                raise
+        try:
+            data, _m = c.kv_get(bao.mount, kv)
+        except oc.OpenBaoError as e:
+            if e.code != "openbao-missing":
+                raise
+            data = {}                       # dernière version supprimée ou détruite
+    except oc.OpenBaoError as e:
+        raise (bao._failed(e, cls, path) or ss.SecretError(e.code, cls, path, e.detail)) from None
+    out = {}
+    for f, v in want.items():
+        if f in data:
+            out[f] = "resumed" if _sha(data[f]) == _sha(v) else "conflict"
+        else:
+            bao.put(cls, path, f, v, actor=actor, action=action)
+            out[f] = "written"
+    return out
+
+
 def migrate_class(bao, fs, cls, name=None, dry_run=False, actor=None, action=None):
     """Migration d'une classe vers OpenBao (plan, « Migration ») : pour
-    chaque secret, valeur déjà là identique -> reprise sans écriture ;
-    différente -> conflit, local intact ; sinon écriture (cas), relecture
-    hors cache, SHA-256 comparés, PUIS la valeur locale devient la
-    référence (l'adaptateur garde l'original). Rend (faits, erreurs)."""
+    chaque chemin, écriture `cas=0` ; refus de `cas` -> valeur relue et
+    comparée (identique : reprise sans écriture ; différente : conflit, local
+    intact) ; relecture hors cache, SHA-256 comparés, PUIS la valeur locale
+    devient la référence (l'adaptateur garde l'original). Un secret trop gros,
+    hors du répertoire d'état ou sans déclaration reste local. Une panne
+    d'OpenBao ou une relecture différente arrête la classe : ce qui est fait
+    reste fait (références), le reste est intact, une relance reprend.
+    Rend (faits, erreurs)."""
     ad = sc.adapter(cls)
     done, errors = [], []
+    groups = {}
     for path, field in ad.list_local(fs):
         if name and path.split("/")[0] != name:
             continue
@@ -527,38 +581,60 @@ def migrate_class(bao, fs, cls, name=None, dry_run=False, actor=None, action=Non
             errors.append({"secret": label, "code": "secret-too-big"})
             step(f"migrate-{cls}", "error", f"{label}: secret-too-big, stays local")
             continue
-        data, _m = bao._read(cls, path, actor, action)
-        if data and field in data:
-            if _sha(data[field]) != _sha(value):
+        why = ad.eligible(fs, path, field) if ad.eligible else None
+        if why:
+            errors.append({"secret": label, "code": why})
+            step(f"migrate-{cls}", "error", f"{label}: {why}, stays local")
+            continue
+        groups.setdefault(path, []).append((field, value, label))
+    for path, items in groups.items():
+        want = {f: v for f, v, _l in items}
+        try:
+            status = _write_cas0(bao, cls, path, want, actor, action, dry_run)
+        except ss.SecretError as e:
+            for _f, _v, label in items:
+                errors.append({"secret": label, "code": e.code})
+            step(f"migrate-{cls}", "error", f"{cls}/{path}: {e.code}, local kept")
+            if e.code in ss.DOWN_CODES:
+                break                        # OpenBao ne répond plus : la classe s'arrête
+            continue
+        if dry_run:
+            for f, _v, label in items:
+                done.append({"secret": label, "would": status[f]})
+            continue
+        _drop_cache(bao, cls, path)
+        try:
+            back, _m = bao._read(cls, path, actor, action)
+        except ss.SecretError as e:
+            errors += [{"secret": label, "code": e.code} for _f, _v, label in items]
+            step(f"migrate-{cls}", "error", f"{cls}/{path}: read back failed ({e.code}), local kept")
+            break
+        stop = False
+        for f, v, label in items:
+            if status[f] == "conflict":
                 errors.append({"secret": label, "code": "openbao-cas-conflict"})
                 step(f"migrate-{cls}", "error", f"{label}: another value already in OpenBao, local kept")
                 continue
-            resumed = True
-        else:
-            resumed = False
-        if dry_run:
-            done.append({"secret": label, "would": "resume" if resumed else "write"})
-            continue
-        if not resumed:
-            ref = bao.put(cls, path, field, value, actor=actor, action=action)
-        else:
-            ref = ss.make_ref(cls, path, field, "openbao")
-        with bao._lock:
-            for r in [r for r in bao._cache if r.startswith(f"openbao:{cls}/{path}#")]:
-                del bao._cache[r]
-        back, _m = bao._read(cls, path, actor, action)
-        if not back or _sha(back.get(field, "")) != _sha(value):
-            errors.append({"secret": label, "code": "migrate-readback-mismatch"})
-            step(f"migrate-{cls}", "error", f"{label}: read back differs, local kept, class stopped")
+            if not back or _sha(back.get(f, "")) != _sha(v):
+                errors.append({"secret": label, "code": "migrate-readback-mismatch"})
+                step(f"migrate-{cls}", "error", f"{label}: read back differs, local kept, class stopped")
+                stop = True
+                break
+            ref = ss.make_ref(cls, path, f, "openbao")
+            try:
+                ad.write_ref(fs, path, f, ref, v, action)
+            except TypeError:                # adaptateur simulé (fs, path, field, ref)
+                ad.write_ref(fs, path, f, ref)
+            except (ValueError, KeyError, OSError) as e:
+                errors.append({"secret": label, "code": "local-reference-failed"})
+                step(f"migrate-{cls}", "error", f"{label}: local value not replaced ({type(e).__name__}), "
+                      "local kept")
+                continue
+            resumed = status[f] == "resumed"
+            done.append({"secret": label, "resumed": resumed})
+            step(f"migrate-{cls}", "running", f"{label}: {'already there' if resumed else 'migrated'}")
+        if stop:
             break
-        try:
-            ad.write_ref(fs, path, field, ref)
-        except NotImplementedError:
-            errors.append({"secret": label, "code": "class-adapter-pending"})
-            step(f"migrate-{cls}", "error", f"{label}: written in OpenBao, local reference not supported yet")
-            break
-        done.append({"secret": label, "resumed": resumed})
-        step(f"migrate-{cls}", "running", f"{label}: {'already there' if resumed else 'migrated'}")
     return done, errors
 
 
@@ -576,60 +652,198 @@ def restore_class(bao, fs, cls, name=None, dry_run=False, actor=None, action=Non
         if dry_run:
             done.append({"secret": ref, "would": "restore"})
             continue
-        value = bao.get(ref, actor)
+        try:
+            value = bao.get(ref, actor)
+        except ss.SecretMissing:
+            errors.append({"secret": ref, "code": "openbao-missing"})
+            step(f"restore-{cls}", "error", f"{ref}: absent from OpenBao, reference kept")
+            continue
+        except ss.SecretError as e:
+            errors.append({"secret": ref, "code": e.code})
+            step(f"restore-{cls}", "error", f"{ref}: {e.code}, reference kept")
+            if e.code in ss.DOWN_CODES:
+                break
+            continue
         try:
             ad.restore_local(fs, path, field, value)
         except NotImplementedError:
             errors.append({"secret": ref, "code": "class-adapter-pending"})
             break
+        except (ValueError, KeyError, OSError) as e:
+            errors.append({"secret": ref, "code": "restore-local-failed"})
+            step(f"restore-{cls}", "error", f"{ref}: local write failed ({type(e).__name__}), kept in OpenBao")
+            continue
         if ad.read_local(fs, path, field) != value:
             errors.append({"secret": ref, "code": "restore-readback-mismatch"})
+            step(f"restore-{cls}", "error", f"{ref}: local read back differs, kept in OpenBao")
             break
-        bao.delete(ref, actor=actor, action=action)
+        try:
+            bao.delete(ref, actor=actor, action=action)
+        except ss.SecretError as e:
+            errors.append({"secret": ref, "code": e.code})
+            step(f"restore-{cls}", "error", f"{ref}: local again, not yet removed from OpenBao ({e.code})")
+            continue
         done.append({"secret": ref})
+        step(f"restore-{cls}", "running", f"{ref}: back to local")
     return done, errors
+
+
+def _refs_left(fs, cls):
+    ad = sc.adapter(cls)
+    return [f"{cls}/{p}#{f}" for p, f in ad.list_local(fs) if ss.is_openbao_ref(ad.read_local(fs, p, f))]
+
+
+def _kubeconfig_gate(doc):
+    """Point 255 : la classe `kubeconfig` (sans elle, plus aucun cluster) ne
+    migre qu'après une autre classe migrée et une panne simulée réussie."""
+    others = [c for c in (doc.get("migrated") or {}) if c != "kubeconfig"]
+    if not others:
+        return "migrate another class first (replication-notify, rancher-oidc, ...)"
+    if not (doc.get("outage_test") or {}).get("ok_at"):
+        return "run a simulated outage first (harvester-secrets outage-test)"
+    return None
 
 
 def cmd_migrate(args):
     s = settings()
-    classes = args.cls or [c for c in sc.MIGRATION_ORDER if c != "plan-run"]
-    for c in classes:
-        try:
-            sc.require_migratable(c)
-        except (sc.NotMigratable, ValueError):
-            return refuse("class-not-migratable", f"{c} cannot move to OpenBao")
+    classes = args.cls or []
+    if len(classes) != 1:
+        return refuse("one-class-per-action", "give exactly one --class (one action per class)")
+    c = classes[0]
+    try:
+        sc.require_migratable(c)
+    except (sc.NotMigratable, ValueError):
+        return refuse("class-not-migratable", f"{c} cannot move to OpenBao")
+    if c == "plan-run":
+        return refuse("class-not-migratable", "plan-run has nothing to migrate (new runs go to OpenBao)")
+    doc = raw_settings()
+    if args.to == "openbao" and c == "kubeconfig" and not args.dry_run:
+        why = _kubeconfig_gate(doc)
+        if why:
+            return refuse("kubeconfig-gate", why)
     bao = admin_store(s)
     fs = ss.FileStore(state())
-    report, all_errors = {}, []
-    doc = raw_settings()
-    for c in classes:
-        fn = migrate_class if args.to == "openbao" else restore_class
-        done, errors = fn(bao, fs, c, args.name, args.dry_run, ARGS.actor, ARGS.id)
-        report[c] = {"done": done, "errors": errors}
-        all_errors += errors
-        if not args.dry_run and not errors and not args.name:
-            mig = doc.setdefault("migrated", {})
-            if args.to == "openbao":
-                mig[c] = {"at": int(time.time()), "by": ARGS.actor or "cli"}
-            else:
-                mig.pop(c, None)
-            save_settings(doc)
-    out({"ok": not all_errors, "to": args.to, "dry_run": args.dry_run, "classes": report})
-    return EXIT_OK if not all_errors else EXIT_FAIL
+    fn = migrate_class if args.to == "openbao" else restore_class
+    done, errors = fn(bao, fs, c, args.name, args.dry_run, ARGS.actor, ARGS.id)
+    if not args.dry_run:
+        # une classe dont un secret est une référence est migrée (même en
+        # partie) : `disable` refusé, les nouveaux secrets vont dans OpenBao
+        left = _refs_left(fs, c)
+        doc = raw_settings()
+        mig = doc.setdefault("migrated", {})
+        if left:
+            prev = mig.get(c) or {}
+            mig[c] = {"at": prev.get("at") or int(time.time()), "by": prev.get("by") or ARGS.actor or "cli",
+                      "action": prev.get("action") or ARGS.id or "", "complete": not errors}
+        else:
+            mig.pop(c, None)
+        save_settings(doc)
+        step("class", "done", f"{c}: {len(left)} secret(s) in OpenBao")
+    out({"ok": not errors, "to": args.to, "dry_run": args.dry_run, "classes": {c: {"done": done, "errors": errors}}})
+    return EXIT_OK if not errors else EXIT_FAIL
 
 
 def cmd_confirm(args):
+    """Efface les originaux gardés d'une classe migrée (confirmation), ou
+    ceux de plus de `--older-than-days` jours (délai de garde, lancé par la
+    tâche de fond de la console). Un original n'est effacé que si OpenBao
+    rend encore le secret qui l'a remplacé."""
     doc = raw_settings()
-    if args.cls not in (doc.get("migrated") or {}):
+    try:
+        sc.require_migratable(args.cls)
+    except (sc.NotMigratable, ValueError):
+        return refuse("class-not-migratable", f"{args.cls} has no originals")
+    fs = ss.FileStore(state())
+    ad = sc.adapter(args.cls)
+    originals = ad.originals(fs) if ad.originals else []
+    if args.cls not in (doc.get("migrated") or {}) and not originals:
         return refuse("class-not-migrated", f"{args.cls} is not migrated")
-    confirm = getattr(sc, "confirm_class", None)
-    if confirm is None:
-        return fail("class-adapter-pending", "erasing the originals of this class is not supported yet")
-    n = confirm(args.cls, ss.FileStore(state()))
-    doc["migrated"][args.cls]["confirmed"] = int(time.time())
-    save_settings(doc)
-    out({"ok": True, "class": args.cls, "originals_erased": n})
-    return EXIT_OK
+    now = time.time()
+    due = [o for o in originals
+           if args.older_than_days is None or now - float(o.get("at") or 0) >= args.older_than_days * 86400]
+    bao = admin_store() if due else None
+    erased, errors = 0, []
+    for o in due:
+        label = f"{args.cls}/{o['path']}#{o['field']}"
+        local = ad.read_local(fs, o["path"], o["field"])
+        if ss.is_openbao_ref(local):
+            try:
+                bao.get(local, ARGS.actor)
+            except ss.SecretMissing:
+                errors.append({"secret": label, "code": "openbao-missing"})
+                step("confirm", "error", f"{label}: absent from OpenBao, original kept")
+                continue
+            except ss.SecretError as e:
+                errors.append({"secret": label, "code": e.code})
+                step("confirm", "error", f"{label}: {e.code}, original kept")
+                if e.code in ss.DOWN_CODES:
+                    break
+                continue
+        if ad.erase_original(fs, o["path"], o["field"]):
+            erased += 1
+            step("confirm", "running", f"{label}: original erased")
+    doc = raw_settings()
+    if args.cls in (doc.get("migrated") or {}) and not errors and len(due) == len(originals):
+        doc["migrated"][args.cls]["confirmed"] = int(now)
+        save_settings(doc)
+    out({"ok": not errors, "class": args.cls, "originals_erased": erased,
+         "originals_kept": len(originals) - erased, "errors": errors})
+    return EXIT_OK if not errors else EXIT_FAIL
+
+
+def cmd_outage_test(args):
+    """Panne simulée (point 255) : un secret d'une classe migrée est lu
+    (cache chaud), puis la connexion est coupée le temps d'une lecture :
+    la valeur doit venir du cache (état « dégradé »), et une lecture à
+    froid doit être refusée avec la classe et le nom, sans repli local."""
+    s = settings()
+    doc = raw_settings()
+    fs = ss.FileStore(state())
+    ref = next((r for c in (doc.get("migrated") or {}) for r in _refs_left(fs, c)), None)
+    if ref is None:
+        return refuse("class-not-migrated", "migrate a class first: the test reads one of its secrets")
+    bao = admin_store(s)
+    ref = f"openbao:{ref}"
+    cls, path, _f = ss.parse_ref(ref)
+    checks = []
+    warm = _sha(bao.get(ref, ARGS.actor))
+    real = bao._factory
+
+    def cut(actor=None, action=None):
+        # adresse sans serveur (port 9, discard) : la requête échoue au réseau
+        c = oc.Client(OUTAGE_ADDR, timeout=5, retry_delays=(), actor=actor or "service", action=action)
+        c.set_token("outage-test")
+        return c
+    bao._factory = cut
+    try:
+        served = _sha(bao.get(ref, ARGS.actor))
+        try:
+            bao._read(cls, path)             # lecture à froid : met l'état à jour
+        except ss.SecretError:
+            pass
+        st = bao.status()
+        checks.append({"id": "cache", "ok": served == warm and st.get("state") == "degraded",
+                       "reason": f"state {st.get('state')}"})
+        bao.clear_cache()
+        try:
+            bao.get(ref, ARGS.actor)
+            checks.append({"id": "cold-refused", "ok": False, "reason": "a value was served without OpenBao"})
+        except ss.SecretError as e:
+            checks.append({"id": "cold-refused", "ok": e.code == "openbao-unreachable" and e.cls == cls,
+                           "reason": e.code})
+        except ss.SecretMissing:
+            checks.append({"id": "cold-refused", "ok": False, "reason": "missing instead of unreachable"})
+    finally:
+        bao._factory = real
+    ok = all(c["ok"] for c in checks)
+    for c in checks:
+        step(f"outage-{c['id']}", "done" if c["ok"] else "error", c["reason"])
+    if ok:
+        doc = raw_settings()
+        doc["outage_test"] = {"ok_at": int(time.time()), "by": ARGS.actor or "cli"}
+        save_settings(doc)
+    out({"ok": ok, "checks": checks})
+    return EXIT_OK if ok else EXIT_FAIL
 
 
 def cmd_versions(args):
@@ -851,6 +1065,8 @@ def parser():
     s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("confirm")
     s.add_argument("--class", dest="cls", required=True)
+    s.add_argument("--older-than-days", type=int, help="only originals kept longer (background task)")
+    sub.add_parser("outage-test")
     s = sub.add_parser("versions")
     s.add_argument("ref")
     s = sub.add_parser("rollback")
@@ -884,7 +1100,7 @@ def parser():
 
 COMMANDS = {"status": cmd_status, "assistant": cmd_assistant, "check": cmd_check, "enable": cmd_enable,
             "disable": cmd_disable, "migrate": cmd_migrate, "confirm": cmd_confirm, "versions": cmd_versions,
-            "rollback": cmd_rollback, "rotate": cmd_rotate, "snapshot": cmd_snapshot, "restore": cmd_restore,
+            "rollback": cmd_rollback, "outage-test": cmd_outage_test, "rotate": cmd_rotate, "snapshot": cmd_snapshot, "restore": cmd_restore,
             "bundle": cmd_bundle, "file": cmd_file}
 
 

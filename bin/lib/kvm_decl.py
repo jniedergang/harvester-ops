@@ -368,7 +368,8 @@ def remove(state, name):
     # la déclaration d'abord : un retrait interrompu ne laisse jamais une
     # déclaration qui pointe vers une clé effacée
     path.unlink(missing_ok=True)
-    for rel in (key_rel(name), known_hosts_rel(name)):
+    # 2.9.0 : l'original gardé d'une clé migrée dans OpenBao part avec l'hôte
+    for rel in (key_rel(name), key_rel(name) + ".migrated", known_hosts_rel(name)):
         (Path(state) / rel).unlink(missing_ok=True)
     return existed
 

@@ -29,7 +29,12 @@ import re
 from pathlib import Path
 
 ClassSpec = collections.namedtuple("ClassSpec", "local_paths bao_path migratable readers")
-Adapter = collections.namedtuple("Adapter", "list_local read_local write_ref restore_local")
+# 2.9.0 tâche 8 : `eligible` (code d'un secret qui reste local, ou None),
+# `originals` (originaux gardés après migration, sans valeur) et
+# `erase_original` (confirmation ou délai de garde) ; facultatifs pour un
+# adaptateur simulé.
+Adapter = collections.namedtuple("Adapter", "list_local read_local write_ref restore_local eligible originals "
+                                 "erase_original", defaults=(None, None, None))
 
 # Emplacements locaux (descriptifs), chemin dans OpenBao (sous le préfixe de
 # la console), lecteurs autorisés (`fichier:fonction`, relus par le test de
@@ -154,7 +159,8 @@ def local_location(cls, path, field, state_dir, tf_dir=None, repl_db=None):
         return ("decl-file", state / "ssh" / f"{name}_id", (state / "clusters.d" / f"{name}.yaml", "ssh.key"))
     if cls == "ssh-kvm":
         _one(segs)
-        return ("file", state / "ssh" / f"{name}_id", None)
+        # 2.9.0 : la déclaration de l'hôte porte la référence après migration
+        return ("decl-file", state / "ssh" / f"{name}_id", (state / "kvm.d" / f"{name}.yaml", "ssh_key"))
     if cls == "rancher-oidc":
         _one(segs)
         return ("file", state / "rancher.d" / f"{name}.oidc-secret", None)
@@ -181,17 +187,25 @@ def _one(segs):
         raise ValueError("this class takes a single name")
 
 
-def _not_yet(*_a, **_k):
-    raise NotImplementedError("migration adapters arrive with the migration task")
-
-
 def adapter(cls):
-    """Adaptateur de migration d'une classe. En 2.9.0 tâche 3, la liste et la
-    lecture locales (par le support fichier `fs`) ; l'écriture de la
-    référence et le retour en local viennent avec la migration."""
+    """Adaptateur de migration d'une classe : lecture, liste, pose de la
+    référence (original gardé : `<fichier>.migrated` ou table
+    `secret_rollback`), retour en local, originaux gardés et leur effacement.
+    Les entrées-sorties sont celles du support fichier `fs` passé à chaque
+    appel (secret_store.FileStore)."""
     require_migratable(cls)
     if cls == "plan-run":
-        return Adapter(lambda fs: [], lambda fs, path, field: None, _not_yet, _not_yet)
+        return Adapter(lambda fs: [], lambda fs, path, field: None, _nothing, _nothing,
+                       lambda fs, path, field: None, lambda fs: [], _nothing)
     return Adapter(lambda fs: fs.list_local(cls),
                    lambda fs, path, field: fs.read_local(cls, path, field),
-                   _not_yet, _not_yet)
+                   lambda fs, path, field, ref, value=None, action=None: fs.write_ref(cls, path, field, ref,
+                                                                                       value, action),
+                   lambda fs, path, field, value: fs.restore_local(cls, path, field, value),
+                   lambda fs, path, field: fs.eligible(cls, path, field),
+                   lambda fs: fs.originals(cls),
+                   lambda fs, path, field: fs.erase_original(cls, path, field))
+
+
+def _nothing(*_a, **_k):
+    raise ValueError("plan-run secrets are never migrated (new runs go to OpenBao directly)")

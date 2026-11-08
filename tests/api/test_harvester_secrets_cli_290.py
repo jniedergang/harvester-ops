@@ -298,6 +298,10 @@ def mig(env, monkeypatch):
     return fa
 
 
+def version(env, name):
+    return env["srv"].kv[("harvester-ops", f"{PREFIX}/rancher-oidc/{name}")]["current"]
+
+
 def writes(env, name):
     return [r for r in env["srv"].log if r["method"] == "POST" and r["path"].endswith(f"/data/{PREFIX}/rancher-oidc/{name}")]
 
@@ -315,9 +319,10 @@ def test_migrate_interrupted_then_resumed_without_double_write(env, mig, capsys)
     assert mig.values["r1"] == "openbao:rancher-oidc/r1#client_secret" and mig.values["r2"] == VALUE + "-2"
     rc, doc, _ = cli(["migrate", "--to", "openbao", "--class", "rancher-oidc"], capsys=capsys)
     assert rc == 0, doc
-    assert len(writes(env, "r1")) == 1 and len(writes(env, "r2")) == 1
+    # r1 jamais réécrit (déjà une référence), r2 écrit une seule fois
+    assert len(writes(env, "r1")) == 1 and version(env, "r1") == 1 and version(env, "r2") == 1
     assert read_settings(env)["migrated"]["rancher-oidc"]["at"]
-    assert json.loads(writes(env, "r2")[0]["raw"])["options"] == {"cas": 0}
+    assert all(json.loads(w["raw"])["options"] == {"cas": 0} for w in writes(env, "r2"))
 
 
 def test_migrate_resumes_a_value_already_written(env, mig, capsys):
@@ -325,7 +330,8 @@ def test_migrate_resumes_a_value_already_written(env, mig, capsys):
     réécrit, la référence est posée."""
     env["srv"].put_raw("harvester-ops", f"{PREFIX}/rancher-oidc/r1", {"client_secret": VALUE + "-1"})
     rc, doc, _ = cli(["migrate", "--to", "openbao", "--class", "rancher-oidc"], capsys=capsys)
-    assert rc == 0 and not writes(env, "r1") and ("write_ref", "r1") in mig.events
+    # cas=0 refusé (même 400 pour la même valeur, essai 5) : relu, comparé, rien réécrit
+    assert rc == 0 and version(env, "r1") == 1 and ("write_ref", "r1") in mig.events
     assert doc["classes"]["rancher-oidc"]["done"][0]["resumed"] is True
 
 
@@ -369,14 +375,23 @@ def test_migrate_back_to_local(env, mig, capsys):
     assert "rancher-oidc" not in read_settings(env).get("migrated", {})
 
 
-def test_migrate_adapter_pending(env, capsys, tmp_path, monkeypatch):
+def test_migrate_real_adapter(env, capsys):
     creds(env)
     settings(env)
     (env["state"] / "rancher.d").mkdir()
     (env["state"] / "rancher.d" / "r1.oidc-secret").write_text(VALUE)
     rc, doc, _ = cli(["migrate", "--to", "openbao", "--class", "rancher-oidc"], capsys=capsys)
-    assert rc == 1 and doc["classes"]["rancher-oidc"]["errors"][0]["code"] == "class-adapter-pending"
-    assert (env["state"] / "rancher.d" / "r1.oidc-secret").read_text() == VALUE
+    assert rc == 0, doc
+    assert (env["state"] / "rancher.d" / "r1.oidc-secret").read_text() == "openbao:rancher-oidc/r1#client_secret\n"
+    assert (env["state"] / "rancher.d" / "r1.oidc-secret.migrated").read_text() == VALUE
+
+
+@pytest.mark.parametrize("argv", [["migrate", "--to", "openbao"],
+                                  ["migrate", "--to", "openbao", "--class", "rancher-oidc", "--class", "tf-kvm"]])
+def test_migrate_one_class_per_action(env, capsys, argv):
+    settings(env)
+    rc, doc, _ = cli(argv, capsys=capsys)
+    assert rc == 2 and doc["code"] == "one-class-per-action"
 
 
 @pytest.mark.parametrize("cls", ["accounts", "plan-run-x", "web-auth"])
@@ -391,7 +406,7 @@ def test_confirm(env, capsys):
     assert cli(["confirm", "--class", "rancher-oidc"], capsys=capsys)[0] == 2
     settings(env, migrated={"rancher-oidc": {"at": 1}})
     rc, doc, _ = cli(["confirm", "--class", "rancher-oidc"], capsys=capsys)
-    assert rc == 1 and doc["code"] == "class-adapter-pending"
+    assert rc == 0 and doc["originals_erased"] == 0
 
 
 # ---------------------------------------------------------------------------
