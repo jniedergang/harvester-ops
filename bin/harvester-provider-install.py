@@ -39,9 +39,10 @@ from pathlib import Path
 
 REPO = "harvester/terraform-provider-harvester"
 RELEASE_URL = "https://github.com/" + REPO + "/releases/download"
-# Adresse des releases remplaçable (miroir interne, copie locale des fichiers
-# officiels en file://), comme LIBVIRT_PROVIDER_BASE_URL : l'archive ET son
-# SHA256SUMS y sont lus, la somme reste vérifiée.
+# Adresse des releases remplaçable (miroir interne en https://, copie locale
+# des fichiers officiels en file://), comme LIBVIRT_PROVIDER_BASE_URL :
+# l'archive ET son SHA256SUMS y sont lus ; la somme du miroir est comparée
+# mais ne vaut pas vérification (`verified: false`) sans --sha256.
 BASE_URL_ENV = "HARVESTER_PROVIDER_BASE_URL"
 # Développement seulement : installer une VERSION dont la somme publiée est
 # illisible. Sans elle, une somme invérifiable est un échec (2.9.0).
@@ -49,7 +50,19 @@ ALLOW_UNVERIFIED_ENV = "HARVESTER_PROVIDER_ALLOW_UNVERIFIED"
 
 
 def release_url():
-    return (os.environ.get(BASE_URL_ENV) or RELEASE_URL).rstrip("/")
+    base = (os.environ.get(BASE_URL_ENV) or RELEASE_URL).rstrip("/")
+    # une adresse en clair laisserait n'importe qui sur le chemin servir une
+    # archive et la somme qui va avec (revue I5 de la 2.9.0)
+    if not base.startswith(("https://", "file://")):
+        raise Failure("resolve", "%s doit être en https:// ou file:// (http:// refusé)" % BASE_URL_ENV)
+    return base
+
+
+def from_mirror():
+    """Vrai quand les releases viennent d'un miroir (HARVESTER_PROVIDER_BASE_URL) :
+    sa somme ne prouve que l'accord du téléchargement avec le miroir, jamais
+    l'origine du fichier ; elle ne rend pas à elle seule `verified: true`."""
+    return bool(os.environ.get(BASE_URL_ENV))
 
 # Une version pure, éventuellement préfixée d'un v et suivie d'un suffixe de
 # pré-release (`1.8.0-rc1`). Tout le reste est traité comme une URL ou un
@@ -205,15 +218,22 @@ def sha256_of(path):
     return h.hexdigest()
 
 
-def verify(path, expected):
+# Provenance de l'empreinte comparée, écrite dans provider.json (`reference`)
+REFERENCES = {"pinned": "empreinte épinglée (--sha256)",
+              "github": "SHA256SUMS publié par la release GitHub",
+              "mirror": "SHA256SUMS du miroir %s (accord avec le miroir seulement)" % BASE_URL_ENV}
+
+
+def verify(path, expected, reference=""):
     digest = sha256_of(path)
     if expected:
         if digest != expected.lower():
             raise Failure(
                 "checksum",
-                "empreinte incorrecte : attendu %s, obtenu %s"
-                % (expected, digest))
-        step("checksum", "done", "%s (vérifiée)" % digest)
+                "empreinte incorrecte : attendu %s, obtenu %s (%s)"
+                % (expected, digest, REFERENCES.get(reference, reference)))
+        step("checksum", "warn" if reference == "mirror" else "done",
+             "%s (comparée à : %s)" % (digest, REFERENCES.get(reference, reference)))
     else:
         step("checksum", "done", "%s (aucune référence à comparer)" % digest)
     return digest
@@ -284,7 +304,7 @@ def sniff(path):
 # ---------------------------------------------------------------------------
 # Installation
 # ---------------------------------------------------------------------------
-def install(binary, dest, version, digest, origin, arch, verified=False):
+def install(binary, dest, version, digest, origin, arch, verified=False, reference=""):
     """Pose le binaire de façon atomique et écrit sa fiche."""
     bindir = dest / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
@@ -302,7 +322,10 @@ def install(binary, dest, version, digest, origin, arch, verified=False):
     meta = {
         "version": version,
         "sha256": digest,
-        "verified": bool(verified),        # empreinte comparée à une référence (somme publiée ou --sha256)
+        # empreinte comparée à une référence de confiance : épinglée
+        # (--sha256) ou publiée par GitHub ; jamais la somme d'un miroir seule
+        "verified": bool(verified),
+        "reference": reference,
         "source": origin,
         "arch": arch,
         "size": final.stat().st_size,
@@ -343,7 +366,8 @@ def main(argv=None):
             args.source, args.arch, workdir, published=not args.sha256)
 
         expected = args.sha256 or pub_sha
-        digest = verify(local, expected)
+        reference = "pinned" if args.sha256 else ("mirror" if from_mirror() else "github") if pub_sha else ""
+        digest = verify(local, expected, reference)
 
         kind = sniff(local)
         if kind == "zip":
@@ -368,7 +392,8 @@ def main(argv=None):
                 "--version X.Y.Z.")
 
         meta = install(binary, dest, version, digest,
-                       args.source_label or origin, args.arch, verified=bool(expected))
+                       args.source_label or origin, args.arch,
+                       verified=reference in ("pinned", "github"), reference=reference)
     except Failure as e:
         step(e.sid, "error", str(e))
         return 1

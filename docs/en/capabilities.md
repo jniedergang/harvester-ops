@@ -2755,6 +2755,15 @@ Drive the Terraform provider for Harvester from saved declarations.
   Every workspace is re-initialised on its next apply; Terraform state is
   never touched. The same install runs from the CLI:
   `bin/harvester-provider-install.py 1.7.3 --dest <dir>`.
+  Since 2.9.0 a version is only installed once its checksum is checked.
+  Offline, or when GitHub cannot be reached, an update by version number
+  fails instead of installing an unchecked build: upload the archive, or
+  give `--sha256`. A mirror set with `HARVESTER_PROVIDER_BASE_URL` must use
+  `https://` or `file://`; its own `SHA256SUMS` only shows the download
+  matches the mirror, so the provider is recorded as not verified
+  (`verified: false`, `reference: mirror`) unless `--sha256` is given. The
+  provider embedded in the package is checked against the checksum pinned
+  in `scripts/embedded-providers.env`.
 
 ## 6. Bare-metal (console)
 

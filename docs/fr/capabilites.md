@@ -3013,6 +3013,16 @@ sauvegardées.
   workspace est réinitialisé à son prochain apply ; le state Terraform
   n'est jamais touché. La même installation se fait en CLI :
   `bin/harvester-provider-install.py 1.7.3 --dest <rep>`.
+  Depuis la 2.9.0, une version n'est installée qu'une fois sa somme
+  vérifiée. Hors ligne, ou quand GitHub ne répond pas, une mise à jour par
+  numéro de version échoue au lieu d'installer un binaire non vérifié :
+  téléverser l'archive, ou donner `--sha256`. Un miroir réglé par
+  `HARVESTER_PROVIDER_BASE_URL` doit être en `https://` ou `file://` ; son
+  propre `SHA256SUMS` montre seulement que le téléchargement est celui du
+  miroir, le provider est donc noté non vérifié (`verified: false`,
+  `reference: mirror`) sauf avec `--sha256`. Le provider embarqué dans le
+  livrable est comparé à la somme épinglée dans
+  `scripts/embedded-providers.env`.
 
 ## 6. Bare-metal (console)
 
