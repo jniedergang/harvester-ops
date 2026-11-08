@@ -518,3 +518,20 @@ def test_cli_forget_secrets(bao, plans_cli, capsys):
     rc = plans_cli.main(["forget-secrets", PREV])
     d = json.loads(capsys.readouterr().out)
     assert rc == 0 and d["removed"] == [PREV] and kv_paths(bao["srv"], PREV) == []
+
+
+# Revue m13 : reprise sans installation, OpenBao coupé, secrets Git manquants :
+# le même 503 `secrets_prompt` que pour une installation
+def test_gitops_only_resume_with_openbao_down_prompts_for_the_git_secrets(env, bao, monkeypatch):
+    keep(bao["store"], gitops=True)
+    prev_run(install=False)
+    bao["store"].clear_cache()
+    bao["srv"].sealed = True
+    monkeypatch.setattr(wapp, "_deploy_route_cluster", lambda c: ("kc", None))
+    monkeypatch.setattr(wapp, "_deploy_launch_checked", lambda *a, **kw: (
+        {"error": "blocked", "findings": [{"code": "gitops-secret-missing", "level": "blocking",
+                                           "phase": "gitops", "detail": "repo1"}]}, 400))
+    r = env["client"].post("/api/deploy/rack-a/resume", json={"action_id": PREV})
+    body = r.get_json()
+    assert r.status_code == 503 and body["secrets_prompt"] is True and body["fields"] == ["gitops_secrets"]
+    assert body["code"] == "openbao-sealed"

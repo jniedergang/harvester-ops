@@ -37803,6 +37803,12 @@ def api_deploy_resume(cluster):
         update_differing=result.get("update_differing") is True, role=current_role(), gitops_secrets=gsec)
     if status != 202 and store is not None:
         store.delete_tree(_dch.SECRET_CLASS, run_id)
+    if status != 202 and bao_err and any(f.get("code") == "gitops-secret-missing"
+                                         for f in (body.get("findings") or []) if isinstance(f, dict)):
+        # revue m13 des tâches 9-10 : même réponse que pour une installation
+        return jsonify({"error": f"OpenBao does not answer ({bao_err}): type the Git secrets to resume",
+                        "code": bao_err, "fields": ["gitops_secrets"], "secrets_prompt": True,
+                        "findings": body.get("findings")}), 503
     if status == 202:
         _deploy_resume_forget(data["action_id"])
         if from_bao:
