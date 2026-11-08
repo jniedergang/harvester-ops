@@ -1168,6 +1168,10 @@ artefacts, rancher-import, clusters, registre, terraform.
 - Quand le cluster d'un import est défait aussi, l'étape de l'import
   s'achève « laissé à la suppression de son cluster » : la suppression
   retire l'import sans rien lire dans le cluster enfant.
+- Depuis 2.8.2, l'aperçu d'un import dit aussi ce que devient le Bundle
+  d'agent que Rancher laisse dans Fleet (`fleet-agent-<nom>`) : supprimé
+  une fois son cluster Fleet parti, gardé (pas exactement l'agent de ce
+  cluster), illisible, ou non cherché (nom de plus de 63 caractères).
 - Une entrée Fleet demande une session Rancher. Sans elle, son élément
   échoue avec `rancher-session-needed`, jamais « déjà parti ».
 - Le Défaire est refusé pendant un renouvellement de machines sur le

@@ -51,8 +51,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   name over 63 characters, which Fleet shortens).
   A refusal or an unreadable Bundle is said in the steps and does not
   undo the removal. The dry run reports it (`agent_bundle`). Without a
-  Rancher session the existing rules apply. Verified by tests only; to be
-  checked on the next bench.
+  Rancher session the existing rules apply. The undo preview of an
+  import says what happens to the Bundle (deleted, kept, unreadable or not
+  looked for), with a tooltip, in five languages. Verified by tests only;
+  to be checked on the next bench.
 
 ### Tests
 - `test_deploy_tf_refs_later_282.py`: one case per resource kind and per
@@ -71,6 +73,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   Rancher unreachable), dry runs, no session, cluster left in Rancher,
   and the Fleet cluster (still there, gone during the wait, unreadable,
   Rancher cluster already absent, dry runs).
+- `test_bm_plans_gitops_280.py` (e2e): the undo preview of an import
+  tells each outcome of the agent Bundle, escaped, with its tooltip.
 
 ## [2.8.1] - 2026-11-08 - Offline child clusters skip the package update, self-hosted registry warning
 

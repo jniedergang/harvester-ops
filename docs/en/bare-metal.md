@@ -1106,6 +1106,10 @@ clusters, registry, terraform.
 - When the cluster of an import is undone too, the import step ends
   "left to the removal of its cluster": the deletion drops the import
   without reading the child cluster.
+- Since 2.8.2 the preview of an import also says what happens to the
+  agent Bundle Rancher leaves in Fleet (`fleet-agent-<name>`): deleted
+  once its Fleet cluster is gone, kept (not exactly the agent of this
+  cluster), unreadable, or not looked for (name over 63 characters).
 - A Fleet entry needs a Rancher session. Without one, its item fails
   with `rancher-session-needed`, never "already gone".
 - Undo is refused while a machine renewal runs on the Harvester cluster
