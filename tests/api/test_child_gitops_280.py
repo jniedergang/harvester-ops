@@ -169,11 +169,14 @@ def test_fleet_objects():
                          "targets": [{"clusterName": "harvlab2-rke2-banc"}], "clientSecretName": "s"}
     assert cg.fleet_ours(o, "harvlab2", "rke2-banc", "rke2-banc", g, "0123456789ab")
     assert not cg.fleet_ours(o, "harvlab2", "rke2-banc", "rke2-banc", g, "ffffffffffff")
+    # banc 2.8.0 : la version du HelmOp est celle du chart (6.9.2), jamais
+    # celle du paquet (1.0.0, « could not find tag matching constraint »)
     h = cg.fleet_object(entry(source=dict(CHART)), "f", "harvlab2", "n", "c",
-                        chart_repo="oci://172.16.2.76:5000/charts/podinfo", secret_name="p")
+                        chart=("oci://172.16.2.76:5000/charts/podinfo", "6.9.2"), secret_name="p")
+    assert CHART["version"] != "6.9.2"
     assert h["kind"] == "HelmOp" and h["spec"]["helm"] == {"releaseName": "demo",
                                                             "repo": "oci://172.16.2.76:5000/charts/podinfo",
-                                                            "version": "1.0.0"}
+                                                            "version": "6.9.2"}
     assert h["spec"]["helmSecretName"] == "p" and h["spec"]["namespace"] == "equipe-a"
     with pytest.raises(cg.GitopsError):
         cg.fleet_object(entry(), "f", "h", "n", "c")

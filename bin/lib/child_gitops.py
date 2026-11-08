@@ -339,11 +339,12 @@ def fleet_labels(harvester, ns, cluster, entry):
 A_PLAN = "harvester-ops.io/plan"
 
 
-def fleet_object(entry, fleet_cluster, harvester, ns, cluster, chart_repo=None, secret_name=None,
+def fleet_object(entry, fleet_cluster, harvester, ns, cluster, chart=None, secret_name=None,
                  by="", run=None, plan=None):
     """`GitRepo` (source git) ou `HelmOp` (source chart) de `fleet-default`,
-    ciblé sur le cluster Fleet du cluster importé. `chart_repo` :
-    `oci://<registre>/<chemin du chart>` ; `secret_name` : Secret de
+    ciblé sur le cluster Fleet du cluster importé. `chart` :
+    (`oci://<registre>/<chemin du chart>`, version du chart lue dans le
+    paquet ; banc 2.8.0 : la version du paquet n'est pas celle du chart) ; `secret_name` : Secret de
     `fleet-default` (clé SSH ou compte de lecture). `plan` (revue 5-8
     I-11) : le plan qui la pose, comparé à la reprise comme pour Flux."""
     src = entry["source"]
@@ -362,7 +363,8 @@ def fleet_object(entry, fleet_cluster, harvester, ns, cluster, chart_repo=None, 
             spec["clientSecretName"] = secret_name
         return {"apiVersion": FLEET_API, "kind": "GitRepo", "metadata": meta, "spec": spec}
     if src["type"] == "chart":
-        spec = {"helm": {"releaseName": entry["name"], "repo": chart_repo, "version": src["version"]},
+        repo, version = chart
+        spec = {"helm": {"releaseName": entry["name"], "repo": repo, "version": version},
                 "namespace": entry["namespace"], "targets": targets}
         if secret_name:
             spec["helmSecretName"] = secret_name

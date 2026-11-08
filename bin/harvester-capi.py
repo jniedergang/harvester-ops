@@ -3079,7 +3079,7 @@ def _fleet_deploy(kube, spec, harvester, timeout):
         if not _fleet_secret_ours(api, f"{name}{suffix}", labels)[1]:
             step("check", "error", f"gitops-name-taken: the secret {name}{suffix} exists in Fleet for something else")
             return EXIT_BLOCKED
-    secret_name, chart_repo = None, None
+    secret_name, chart = None, None
     if src["type"] == "git" and src.get("secret"):
         s = spec["secrets"][src["secret"]]
         secret_name = f"{name}-auth"
@@ -3103,13 +3103,13 @@ def _fleet_deploy(kube, spec, harvester, timeout):
             return EXIT_BLOCKED
         meta = ol.chart_meta(Path(pkg["path"]) / it["chart"])
         repo, _tag = ol.chart_repo(meta["name"], meta["version"])
-        chart_repo = f"oci://{decl['endpoint']}/{repo}"
+        chart = (f"oci://{decl['endpoint']}/{repo}", meta["version"])
         secret_name = f"{name}-pull"
         data = {"username": creds["username"], "password": creds["password"]}
         if decl.get("ca_pem"):
             data["cacerts"] = rg.ca_bundle(decl)              # revue 5-8 I-6 : transition comprise
         _fleet_secret(api, secret_name, labels, data, "Opaque")
-    obj = cg.fleet_object(entry, have["name"], harvester, ns, cluster, chart_repo=chart_repo,
+    obj = cg.fleet_object(entry, have["name"], harvester, ns, cluster, chart=chart,
                           secret_name=secret_name, by=spec["by"], run=spec["origin"].get("run"),
                           plan=spec["origin"].get("plan"))
     if st == 200:
