@@ -316,3 +316,39 @@ def test_batch_window_asks_the_git_secrets_of_the_chained_plan(context, flask_se
     assert batches[0]["gitops_secrets"] == {"depot": {"identity": KEY}}
     expect(block.locator('[data-gop-k="identity"]')).to_have_value("")          # jamais gardé
     assert not st["errors"]
+
+
+@pytest.mark.parametrize("bundle,cls,text", [
+    ({"name": "fleet-default/fleet-agent-a", "present": True, "delete": True}, "udw-bundle-goes",
+     "fleet-default/fleet-agent-a"),
+    ({"name": "fleet-default/fleet-agent-a", "present": True, "delete": False}, "udw-bundle-kept",
+     "fleet-default/fleet-agent-a"),
+    ({"name": "fleet-default/fleet-agent-a", "present": None, "delete": False}, "udw-bundle-unread",
+     "fleet-default/fleet-agent-a"),
+    ({"name": "", "present": None, "delete": False}, "udw-bundle-not-looked", "63"),
+    ({"name": "fleet-default/fleet-agent-a", "present": False, "delete": False}, None, None),
+])
+def test_undo_window_tells_the_agent_bundle(context, flask_server, monkeypatch, bundle, cls, text):
+    """2.8.2 (rapport, point 5) : l'aperçu du Défaire dit ce qu'il advient du
+    Bundle d'agent laissé par Rancher (essai `agent_bundle`), avec info-bulle."""
+    import test_deploy_undo_270 as t270
+    items = [{"id": "rancher-import-a/a", "kind": "rancher-import", "ref": "a/a", "phase": "rancher-import",
+              "run": t270.RUN["id"], "proven": True, "default": True, "note": "", "selected": True,
+              "details": {"rancher": "https://rancher.example", "name": "a", "present": True, "delete": [],
+                          "kept": [], "refused": [], "agent_bundle": dict(bundle, name=bundle["name"] and
+                                                                          bundle["name"] + EVIL)}}]
+    monkeypatch.setattr(t270, "ITEMS", items)
+    page, st = t270.open_page(context, flask_server)
+    t270.row(page, t270.RUN["id"]).locator(".bm-deploy-undo").click()
+    win = page.locator(f'#fp-deploy-undo-{t270.RUN["id"]}')
+    expect(win.locator(".udw-rancher")).to_contain_text("https://rancher.example")
+    if cls is None:
+        expect(win.locator(".udw-bundle")).to_have_count(0)
+    else:
+        el = win.locator(f".udw-bundle.{cls}")
+        expect(el).to_contain_text(text)
+        assert el.get_attribute("data-tip")
+        if bundle["name"]:
+            expect(el).to_contain_text(EVIL)                 # échappé, affiché tel quel
+    assert page.evaluate("window.__gop280") is None
+    assert st["errors"] == []

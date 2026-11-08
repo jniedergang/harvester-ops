@@ -2797,7 +2797,9 @@ de **[procedure-operationnelle.md](procedure-operationnelle.md)**
   Turtles intégré (`rancher-import-conflict`). L'image de l'agent est
   d'abord sondée dans les registres du cluster. L'onglet Membres gère les
   membres de l'enfant importé. Retirer l'import ne retire que les restes
-  qui portent une marque de Rancher (`kept-not-rancher` sinon). Supprimer
+  qui portent une marque de Rancher (`kept-not-rancher` sinon), et le
+  Bundle `fleet-agent-<nom>` que Rancher laisse dans `fleet-default`
+  (2.8.2). Supprimer
   un enfant importé le retire de Rancher sans rien lire dans l'enfant ;
   `delete --forget-rancher` (admin) quand ce Rancher a disparu.
 - **OIDC de l'API de l'enfant.** Option `oidc` (émetteur `https`,

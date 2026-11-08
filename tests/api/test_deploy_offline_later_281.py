@@ -111,3 +111,17 @@ def test_the_two_findings_together_are_both_later(reg):
     got, out = run_check(reg, offline_plan(), ["offline-needs-no-fallback", "offline-rke2-missing"])
     later = [f for f in out["findings"] if f["code"] == "offline-later"]
     assert len(later) == 2 and not out["blocking"], out["findings"]
+
+
+def test_dry_run_passes_what_the_registry_phase_would_make(reg):
+    """Relecture 2.8.2 I-1 : en essai, la phase Registre ne pose rien ; les
+    constats reportés au lancement ne font pas échouer l'essai."""
+    import test_deploy_capi_250 as tc
+    rke2_package(reg["state"])
+    got, out = run_check(reg, offline_plan(), ["offline-needs-no-fallback", "offline-rke2-missing"])
+    assert not out["blocking"], out["findings"]
+    run = tr.start(reg, dry_run=True)
+    ph = tc.phase(run, "clusters")
+    assert ph["status"] == "done", run.result
+    assert ph["deferred"] == ["offline-needs-no-fallback", "offline-rke2-missing"]
+    assert reg["capi"].subs("create") == []

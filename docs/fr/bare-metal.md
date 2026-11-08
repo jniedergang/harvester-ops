@@ -780,7 +780,27 @@ pour chaque cluster.
   avertissements de la fenêtre de création (un seul nœud de plan de
   contrôle, version non éprouvée...).
 - Information : `cluster-exists`, `capi-later`, `refs-later`,
-  `fleet-dhcp-leases`, `fleet-sizes`.
+  `terraform-ref-later`, `fleet-dhcp-leases`, `fleet-sizes`.
+
+`terraform-ref-later` (2.8.2) : l'image, la paire de clés ou le pool
+d'adresses qu'un modèle de cluster désigne manque, mais une déclaration de
+la phase Terraform de ce plan le crée. La console le lit dans les
+ressources rendues des modèles du plan (`image`, `ssh_key`, `ippool`, ou
+code libre dont le bloc `resource` a un nom littéral, sans `count` ni
+`for_each` ; un espace de noms écrit comme une expression écarte le
+bloc). Une ressource qui ne se rend pas (champ manquant) ne compte pas.
+Une image se reconnaît à `namespace/nom` ou `namespace/nom affiché` ;
+sans espace de noms écrit, c'est `default`. Une
+déclaration gardée avec d'autres valeurs compte avec ses propres
+ressources. La phase Clusters revérifie avant toute création et bloque si
+la référence manque encore. En essai à blanc, les phases d'avant ne
+créent rien : quand chaque constat bloquant de ce contrôle a été reporté
+au lancement (`terraform-ref-later`, `refs-later`,
+`cluster-registry-later`, `offline-later`, même cluster et mêmes faits),
+la phase Clusters se termine par « dry run: the clusters are checked once
+the earlier phases of the plan have made what they name », sans rien
+créer. Tout autre constat bloquant arrête l'essai comme il arrête une
+exécution.
 
 Un manque que la fenêtre de création signale seulement en avertissement
 bloque un plan : la chaîne tourne sans surveillance.
@@ -1148,6 +1168,10 @@ artefacts, rancher-import, clusters, registre, terraform.
 - Quand le cluster d'un import est défait aussi, l'étape de l'import
   s'achève « laissé à la suppression de son cluster » : la suppression
   retire l'import sans rien lire dans le cluster enfant.
+- Depuis 2.8.2, l'aperçu d'un import dit aussi ce que devient le Bundle
+  d'agent que Rancher laisse dans Fleet (`fleet-agent-<nom>`) : supprimé
+  une fois son cluster Fleet parti, gardé (pas exactement l'agent de ce
+  cluster), illisible, ou non cherché (nom de plus de 63 caractères).
 - Une entrée Fleet demande une session Rancher. Sans elle, son élément
   échoue avec `rancher-session-needed`, jamais « déjà parti ».
 - Le Défaire est refusé pendant un renouvellement de machines sur le

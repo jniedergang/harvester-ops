@@ -23,8 +23,14 @@ sys.path.insert(0, str(ROOT / "web"))
 
 def install_bundles(tmp_path, script_dir, state_dir):
     src = (ROOT / "install.sh").read_text()
-    fn = src[src.index("install_bundles() {"):].split("\n}\n", 1)[0] + "\n}\n"
-    script = ("set -eo pipefail\nok(){ echo \"OK $*\"; }\nwarn(){ echo \"WARN $*\"; }\n"
+    # 2.8.3 : install_bundles passe par _safe_fs (bin/lib/safe_fs.py du livrable)
+    fn = "".join(src[src.index(f"\n{n}() {{") + 1:].split("\n}\n", 1)[0] + "\n}\n"
+                 for n in ("detect_update_python", "_safe_fs", "install_bundles"))
+    lib = Path(script_dir) / "bin" / "lib"
+    lib.mkdir(parents=True, exist_ok=True)
+    if not (lib / "safe_fs.py").exists():
+        (lib / "safe_fs.py").symlink_to(ROOT / "bin" / "lib" / "safe_fs.py")
+    script = ("set -eo pipefail\nok(){ echo \"OK $*\"; }\nwarn(){ echo \"WARN $*\"; }\nerr(){ echo \"ERR $*\" >&2; }\n"
               f"SCRIPT_DIR={script_dir}\nSTATE_DIR={state_dir}\n{fn}\ninstall_bundles\n")
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr

@@ -73,6 +73,19 @@ render_container_service() {
         --runtime "$CONTAINER_RUNTIME" --template "$SCRIPT_DIR/config/systemd/harvester-ops.service"
 }
 
+# 2.8.3 : $STATE_DIR appartient au compte de la console, que son conteneur
+# monte en lecture-écriture : un lien qu'il y pose ferait écrire root, ou lui
+# donnerait, un fichier quelconque de l'hôte (`printf >`, `install -d -o` et
+# `chown` suivent les liens). Root n'y écrit, n'y crée et n'y donne donc rien
+# qu'au travers de bin/lib/safe_fs.py (descripteurs, O_NOFOLLOW, rename).
+# Il tourne avec tout python3 (bibliothèque standard, 3.6 compris) : les
+# fournisseurs embarqués s'installent aussi sans l'agent, qui exige 3.9.
+_safe_fs() {
+    local python
+    python="$(detect_update_python 2>/dev/null)" || python="$(command -v python3)" || return 2
+    "$python" "$SCRIPT_DIR/bin/lib/safe_fs.py" "$@"
+}
+
 # Render into a temporary file of the same directory, then rename: systemd
 # never reads a half-written unit, and the mode does not depend on the umask.
 write_container_service() {
@@ -529,8 +542,8 @@ install_update_agent() {
         install -m 0644 "$SCRIPT_DIR/config/update-signers" "$INSTALL_DIR/update-signers"
     fi
     install -d -m 0750 "$STATE_DIR"
-    install -d -m 0750 -o harvester-ops -g harvester-ops "$STATE_DIR/updates" "$STATE_DIR/updates/staged" 2>/dev/null \
-        || install -d -m 0750 "$STATE_DIR/updates" "$STATE_DIR/updates/staged"
+    _safe_fs --owner harvester-ops mkdir "$STATE_DIR" updates 0750
+    _safe_fs --owner harvester-ops mkdir "$STATE_DIR" updates/staged 0750
     local u
     for u in harvester-ops-update.service harvester-ops-update.path; do
         install -m 0644 "$SCRIPT_DIR/config/systemd/$u" "/etc/systemd/system/$u"
@@ -538,8 +551,7 @@ install_update_agent() {
     render_update_service "$update_python" > /etc/systemd/system/harvester-ops-update.service
     # la console sait ainsi qu'un agent l'attend (elle ne voit pas l'hôte)
     printf '{"installed": "%s", "ts": %s}\n' "$(cat "$SCRIPT_DIR/VERSION")" "$(date +%s)" \
-        > "$STATE_DIR/updates/agent.json"
-    chown harvester-ops:harvester-ops "$STATE_DIR/updates/agent.json" 2>/dev/null || true
+        | _safe_fs --owner harvester-ops write "$STATE_DIR" updates/agent.json 0644
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now harvester-ops-update.path >/dev/null 2>&1 \
         && ok "Update agent installed (updates from the web UI)" \
@@ -632,47 +644,51 @@ install_uninstaller() {
 install_bundles() {
     local src="$SCRIPT_DIR/bundles"
     [[ -d "$src" ]] || return 0
-    local owner="harvester-ops:harvester-ops"
-    id harvester-ops >/dev/null 2>&1 || owner="root:root"
+    # 2.8.3 : sous $STATE_DIR (au compte de la console), tout passe par
+    # _safe_fs, qui ne suit aucun lien et donne ce qu'il crée au compte de
+    # service quand celui-ci existe (root sinon).
+    local own=(--owner harvester-ops)
     local b name last=""
     if compgen -G "$src/capi/*.tar.gz" >/dev/null; then
-        install -d -m 0750 "$STATE_DIR" "$STATE_DIR/capi-bundles"
+        install -d -m 0750 "$STATE_DIR"
+        _safe_fs "${own[@]}" mkdir "$STATE_DIR" capi-bundles 0750
         for b in "$src"/capi/*.tar.gz; do
             name="$(basename "$b")"
             if ! (cd "$src/capi" && sha256sum -c "$name.sha256" >/dev/null 2>&1); then
                 warn "Cluster API bundle $name: checksum mismatch, not installed"
                 continue
             fi
-            if [[ ! -f "$STATE_DIR/capi-bundles/$name" ]]; then
-                install -m 0640 "$b" "$STATE_DIR/capi-bundles/$name"
-                install -m 0640 "$b.sha256" "$STATE_DIR/capi-bundles/$name.sha256"
-            fi
+            _safe_fs "${own[@]}" install "$b" "$STATE_DIR" "capi-bundles/$name" 0640 --keep
+            _safe_fs "${own[@]}" install "$b.sha256" "$STATE_DIR" "capi-bundles/$name.sha256" 0640 --keep
             last="$name"
         done
-        if [[ -n "$last" && ! -f "$STATE_DIR/capi-bundles/active.json" ]]; then
-            printf '{"filename": "%s"}\n' "$last" > "$STATE_DIR/capi-bundles/active.json"
+        if [[ -n "$last" ]] && ! _safe_fs exists "$STATE_DIR" capi-bundles/active.json; then
+            printf '{"filename": "%s"}\n' "$last" \
+                | _safe_fs "${own[@]}" write "$STATE_DIR" capi-bundles/active.json 0640
             ok "Cluster API bundle $last installed and active"
         elif [[ -n "$last" ]]; then
             ok "Cluster API bundle $last available (the active bundle is kept)"
         fi
-        chown -R "$owner" "$STATE_DIR/capi-bundles" 2>/dev/null || warn "could not give $STATE_DIR/capi-bundles to $owner"
+        _safe_fs "${own[@]}" chown-tree "$STATE_DIR" capi-bundles || warn "could not give capi-bundles to harvester-ops"
     fi
     local tf="$src/terraform-provider"
     if [[ -x "$tf/bin/terraform-provider-harvester" ]]; then
-        local dest="$STATE_DIR/.local/share/harvester-ops/terraform-provider"
-        if [[ ! -f "$dest/provider.json" ]] || grep -q '"embedded' "$dest/provider.json"; then
-            install -d -m 0750 "$dest/bin"
-            install -m 0755 "$tf/bin/terraform-provider-harvester" "$dest/bin/terraform-provider-harvester"
+        local rel=".local/share/harvester-ops/terraform-provider" meta="" rc=0
+        install -d -m 0750 "$STATE_DIR"
+        meta="$(_safe_fs read "$STATE_DIR" "$rel/provider.json")" || rc=$?
+        if [[ $rc -ne 0 ]] || grep -q '"embedded' <<<"$meta"; then
+            _safe_fs "${own[@]}" mkdir "$STATE_DIR" "$rel/bin" 0750
+            _safe_fs "${own[@]}" install "$tf/bin/terraform-provider-harvester" \
+                "$STATE_DIR" "$rel/bin/terraform-provider-harvester" 0755
             # la fiche garde le chemin où le binaire se trouve vraiment
-            python3 - "$tf/provider.json" "$dest/provider.json" "$dest/bin/terraform-provider-harvester" <<'PY'
+            python3 - "$tf/provider.json" "$STATE_DIR/$rel/bin/terraform-provider-harvester" <<'PY' \
+                | _safe_fs "${own[@]}" write "$STATE_DIR" "$rel/provider.json" 0644
 import json, sys
 meta = json.load(open(sys.argv[1]))
-meta["binary"] = sys.argv[3]
-with open(sys.argv[2], "w") as f:
-    json.dump(meta, f, indent=2)
+meta["binary"] = sys.argv[2]
+json.dump(meta, sys.stdout, indent=2)
 PY
-            chmod 0644 "$dest/provider.json"
-            chown -R "$owner" "$STATE_DIR/.local" 2>/dev/null || warn "could not give $STATE_DIR/.local to $owner"
+            _safe_fs "${own[@]}" chown-tree "$STATE_DIR" .local || warn "could not give .local to harvester-ops"
             ok "Terraform provider $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","?"))' "$tf/provider.json") installed"
         else
             ok "Terraform provider: the one installed from the console is kept"
@@ -680,13 +696,15 @@ PY
     fi
     # 2.6.0 : les images du registre d'amorçage, importées sur les nœuds
     # Harvester par `harvester-registry deploy` ; sommes vérifiées
-    local rb="$src/registry"
+    local rb="$src/registry" f
     if [[ -f "$rb/registry-images.tar" ]]; then
         if (cd "$rb" && sha256sum -c SHA256SUMS >/dev/null 2>&1); then
-            install -d -m 0750 "$STATE_DIR" "$STATE_DIR/registry-bundle"
-            install -m 0640 "$rb/registry-images.tar" "$rb/registry-images.json" "$rb/SHA256SUMS" \
-                "$STATE_DIR/registry-bundle/"
-            chown -R "$owner" "$STATE_DIR/registry-bundle" 2>/dev/null || warn "could not give $STATE_DIR/registry-bundle to $owner"
+            install -d -m 0750 "$STATE_DIR"
+            _safe_fs "${own[@]}" mkdir "$STATE_DIR" registry-bundle 0750
+            for f in registry-images.tar registry-images.json SHA256SUMS; do
+                _safe_fs "${own[@]}" install "$rb/$f" "$STATE_DIR" "registry-bundle/$f" 0640
+            done
+            _safe_fs "${own[@]}" chown-tree "$STATE_DIR" registry-bundle || warn "could not give registry-bundle to harvester-ops"
             ok "Bootstrap registry images installed"
         else
             warn "bootstrap registry images: checksum mismatch, not installed"
@@ -713,11 +731,13 @@ PY
     # (signature GPG + somme) ; celui du livrable remplace toujours le précédent
     local lv="$src/terraform-provider-libvirt"
     if [[ -x "$lv/bin/terraform-provider-libvirt" ]]; then
-        local ldest="$STATE_DIR/.local/share/harvester-ops/terraform-provider-libvirt"
-        install -d -m 0750 "$ldest/bin"
-        install -m 0755 "$lv/bin/terraform-provider-libvirt" "$ldest/bin/terraform-provider-libvirt"
-        install -m 0644 "$lv/provider.json" "$ldest/provider.json"
-        chown -R "$owner" "$STATE_DIR/.local" 2>/dev/null || warn "could not give $STATE_DIR/.local to $owner"
+        local lrel=".local/share/harvester-ops/terraform-provider-libvirt"
+        install -d -m 0750 "$STATE_DIR"
+        _safe_fs "${own[@]}" mkdir "$STATE_DIR" "$lrel/bin" 0750
+        _safe_fs "${own[@]}" install "$lv/bin/terraform-provider-libvirt" \
+            "$STATE_DIR" "$lrel/bin/terraform-provider-libvirt" 0755
+        _safe_fs "${own[@]}" install "$lv/provider.json" "$STATE_DIR" "$lrel/provider.json" 0644
+        _safe_fs "${own[@]}" chown-tree "$STATE_DIR" .local || warn "could not give .local to harvester-ops"
         ok "libvirt Terraform provider $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","?"))' "$lv/provider.json") installed"
     fi
 }

@@ -646,7 +646,19 @@ never aimed at by this path.
    `management.cattle.io` and others, the namespace `local`) are removed,
    each judged by the server first. Only an object that carries a mark of
    Rancher goes (a `cattle.io` label, annotation or owner). Any other is
-   kept and named (`kept-not-rancher`).
+   kept and named (`kept-not-rancher`). Since 2.8.2 the agent Bundle
+   `fleet-agent-<name in Rancher>` that Rancher 2.14 leaves in
+   `fleet-default` is deleted too, here and when an imported child cluster
+   is deleted or undone. Only when its name is exact, each of its targets
+   names this cluster alone, it carries a mark of Rancher or Fleet and no
+   label of the console, and once the Fleet cluster of that name is gone
+   (waited for up to 60 s: Rancher removes it after its own cluster; while
+   it is there Fleet would recreate the Bundle, or it is the agent of a
+   live Fleet cluster). Otherwise it is kept and named in the steps
+   (`kept-not-rancher`; `kept-fleet-cluster`; `kept-not-matched` when the
+   name is over 63 characters, since Fleet shortens it). A refusal of Rancher on the
+   Bundle is said and does not undo the removal. Verified by tests only
+   so far.
 7. **Delete an imported child cluster.** The cluster is removed from
    Rancher first, without reading the child cluster (a dead child stays
    deletable). If Rancher is unreachable or you have no session, the

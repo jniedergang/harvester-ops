@@ -207,6 +207,7 @@ const BMPlans = (() => {
     'offline-disk-small': () => tr('dpw.f.offlineDiskSmall'),                       // 2.8.1
     'offline-node-packages': () => tr('dpw.f.offlineNodePackages'),                 // 2.8.1 (relecture I-1)
     'offline-later': () => tr('dpw.f.offlineLater'),                                // 2.8.1 (banc R12)
+    'terraform-ref-later': () => tr('dpw.f.terraformRefLater'),                     // 2.8.2 (décision 246)
   };
   const LEVELS = {
     blocking: () => tr('dpw.lvl.blocking'), warning: () => tr('dpw.lvl.warning'), info: () => tr('dpw.lvl.info'),
@@ -2145,6 +2146,17 @@ const BMPlans = (() => {
     return JSON.stringify(o);
   }
 
+  /** 2.8.2 : Bundle d'agent que Rancher laisse dans Fleet (essai
+   *  `agent_bundle` de rancher-unimport) ; rien s'il n'y en a pas. */
+  function undoBundleHtml(b) {
+    if (!b || b.present === false) return '';
+    const v = { name: b.name || '' };
+    const [cls, txt] = !b.name ? ['udw-bundle-not-looked', tr('udw.agentBundleNotLooked')]
+      : b.delete ? ['udw-bundle-goes', tr('udw.agentBundleGoes', v)]
+        : b.present ? ['udw-bundle-kept', tr('udw.agentBundleKept', v)] : ['udw-bundle-unread', tr('udw.agentBundleUnread', v)];
+    return `<p class="form-hint tip udw-bundle ${cls}" data-tip="${esc(tr('udw.t.agentBundle'))}">${esc(txt)}</p>`;
+  }
+
   /** Ce qui partira pour un élément du plan de destruction (échappé). */
   function undoDetailsHtml(u) {
     const d = u.details || {};
@@ -2180,6 +2192,7 @@ const BMPlans = (() => {
     }
     if (u.kind === 'rancher-import') {
       return `<p class="udw-rancher">${esc(tr('udw.rancherGoes', { name: d.name || '', rancher: d.rancher || '' }))}</p>
+        ${undoBundleHtml(d.agent_bundle)}
         ${(d.delete || []).length ? `<p>${esc(tr('udw.objectsDeleted', { n: d.delete.length }))}</p><ul class="bm-paths udw-delete">${li(d.delete)}</ul>` : ''}
         ${(d.kept || []).length ? `<p>${esc(tr('udw.objectsKept'))}</p><ul class="bm-paths udw-kept">${li(d.kept)}</ul>` : ''}
         ${(d.refused || []).length ? `<div class="bm-refusal">${icon('fail', { size: 13 })} ${esc(tr('udw.objectsRefused'))}<ul class="bm-paths">${li(d.refused)}</ul></div>` : ''}`;

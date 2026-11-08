@@ -2556,8 +2556,9 @@ Full references: **[gitops.md](gitops.md)**, the Cluster API part of
   embedded Turtles import (`rancher-import-conflict`). The agent image is
   probed in the registries of the cluster first. The Members tab manages
   the members of the imported child. Removing the import removes only
-  leftovers that carry a mark of Rancher (`kept-not-rancher` otherwise).
-  Deleting an imported child removes it from Rancher without reading the
+  leftovers that carry a mark of Rancher (`kept-not-rancher` otherwise),
+  and the Bundle `fleet-agent-<name>` Rancher leaves in `fleet-default`
+  (2.8.2). Deleting an imported child removes it from Rancher without reading the
   child; `delete --forget-rancher` (admin) when that Rancher is gone.
 - **OIDC of the child API.** Option `oidc` (issuer `https`, audience,
   claims, prefixes never empty nor `system:`, CA, `admin_group` bound to

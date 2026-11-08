@@ -440,6 +440,20 @@ encore un correctif amont. Pour vérifier soi-même une image construite :
 `python3 tools/release/check_image_trust.py localhost/harvester-ops:<version>`
 (depuis les sources).
 
+**Correctif de sécurité (2.8.3).** L'agent de mise à jour et
+`install.sh --upgrade` travaillent en root dans `/var/lib/harvester-ops` et
+`/var/log/harvester-ops`, qui appartiennent au compte de la console. Depuis
+la 2.8.3, ils n'y suivent plus aucun lien : les fichiers s'ouvrent par
+descripteur sans suivre de lien, s'écrivent sous un nom neuf puis sont
+renommés, et changent de propriétaire sur leur descripteur. `status.json` et
+le journal `update-*.log` de l'agent restent à root et la console les lit par
+le groupe `harvester-ops`. Un lien trouvé à la place d'un répertoire dont
+l'installeur a besoin est retiré et le répertoire recréé. La mise à jour
+vers la 2.8.3 est encore faite par l'agent déjà installé : pour appliquer le
+correctif tout de suite, installer la 2.8.3 avec `sudo ./install.sh
+--upgrade`. Revenir à une version plus ancienne réinstalle son agent et son
+installeur, sans ce correctif.
+
 ## Déplacer harvops vers un autre hôte
 
 La console sépare deux répertoires, et les copier tous les deux suffit à
