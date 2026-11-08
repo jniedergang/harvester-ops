@@ -122,6 +122,29 @@ def images_for(text, cni="calico"):
     return out
 
 
+# 2.8.1 (banc R11) : images des modules que la console pose dans chaque
+# cluster enfant par ClusterResourceSet (bin/caphv-generate : fournisseur de
+# cloud Harvester, pilote CSI et ses compagnons ; bin/lib/kube-vip.yaml).
+# Sans elles, un cluster sans Internet est disponible mais sans
+# LoadBalancer ni stockage Harvester. Un test les compare à ces sources.
+ADDON_IMAGES = (
+    "docker.io/rancher/harvester-cloud-provider:v0.2.5",
+    "docker.io/rancher/harvester-csi-driver:v0.1.6",
+    "docker.io/longhornio/csi-node-driver-registrar:v2.12.0",
+    "docker.io/longhornio/csi-resizer:v1.12.0",
+    "docker.io/longhornio/csi-provisioner:v5.1.0",
+    "docker.io/longhornio/csi-attacher:v4.7.0",
+    "docker.io/rancher/mirrored-kube-vip-kube-vip-iptables:v1.2.3",
+)
+
+
+def child_images(text, cni="calico"):
+    """Images d'un cluster enfant sans Internet : celles de RKE2 pour la CNI
+    choisie (`images_for`), puis celles des modules de la console."""
+    out = images_for(text, cni)
+    return out + [x for x in ADDON_IMAGES if x not in out]
+
+
 def download_urls(version):
     """{fichier: adresse} des fichiers d'une version (côté connecté) ;
     `install.sh` vient du site officiel de RKE2."""

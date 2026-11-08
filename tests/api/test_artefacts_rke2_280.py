@@ -82,7 +82,8 @@ def test_fetch_rke2_writes_the_three_files_and_returns_the_cni_images(tmp_path, 
     it = {"name": "rke2", "kind": "rke2", "rke2": {"version": V, "cni": "calico"}}
     imgs = cli.fetch_rke2(cli.Sources({}), it, tmp_path)
     assert sorted(p.name for p in (tmp_path / "rke2" / V).iterdir()) == sorted(ro.FILES)
-    assert [i["ref"] for i in imgs] == ["docker.io/rancher/rke2-runtime:v1.34.11-rke2r1"]
+    # 2.8.1 : les images des modules de la console suivent celles de RKE2
+    assert [i["ref"] for i in imgs] == ["docker.io/rancher/rke2-runtime:v1.34.11-rke2r1"] + list(ro.ADDON_IMAGES)
     assert f"{ro.DOWNLOAD}/v1.34.11%2Brke2r1/rke2.linux-amd64.tar.gz" in urls
 
 

@@ -127,6 +127,12 @@ harvester-artefacts pack socle.json --out dist/ --sign-key ~/.ssh/artefacts_ed25
   `sha256sum-amd64.txt`. The system images are the list
   `rke2-images-all.linux-amd64.txt` of the version, filtered by the CNI
   (`calico`, `canal`, `cilium`, `flannel`, `none`), copied like any image.
+  Since 2.8.1 the item also carries the images of the modules the console
+  lays in every child cluster: the Harvester cloud provider, the Harvester
+  CSI driver and its four `longhornio/csi-*` sidecars, and kube-vip (63
+  images for v1.34.11 with calico). A package built by 2.8.0 lacks them:
+  a cluster without Internet is then available, but without LoadBalancer
+  nor Harvester storage. Build it again.
   Downloads send a `User-Agent` (`get.rke2.io` refuses the default one of
   Python with HTTP 403).
 

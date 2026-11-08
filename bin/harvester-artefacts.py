@@ -557,8 +557,9 @@ def fetch_rke2(sources, it, root):
                 None)
     if want is None or want != ol.sha256_file(d / "rke2.linux-amd64.tar.gz"):
         raise ValueError(f"RKE2 {v}: rke2.linux-amd64.tar.gz does not match sha256sum-amd64.txt")
-    refs = ro.images_for(listing.decode(), cni)
-    step("rke2", "done", f"RKE2 {v}: 3 file(s), {len(refs)} system image(s) for {cni}")
+    refs = ro.child_images(listing.decode(), cni)
+    step("rke2", "done", f"RKE2 {v}: 3 file(s), {len(refs)} image(s) for {cni} "
+                         f"(the console addons included)")
     return [{"ref": r, "as": None, "name": stored_name(r)} for r in refs]
 
 

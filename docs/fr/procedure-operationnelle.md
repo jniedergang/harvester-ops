@@ -794,7 +794,10 @@ Internet** ; ou un modèle de cluster).
 
 1. **Sur une machine connectée :** `harvester-artefacts pack --rke2
    v1.34.11+rke2r1 --cni calico`, importez le paquet, publiez-le dans un
-   registre qui sert les images.
+   registre qui sert les images. Depuis la 2.8.1, le paquet porte aussi
+   les images du fournisseur de cloud, du pilote CSI et de kube-vip que la
+   console pose dans chaque cluster enfant : reconstruisez un paquet fait
+   par la 2.8.0.
 2. **Créez le cluster** avec ce registre. Il faut :
    - un registre qui miroite `docker.io` avec **Pas de repli vers
      Internet** (`offline-needs-no-fallback`) ;

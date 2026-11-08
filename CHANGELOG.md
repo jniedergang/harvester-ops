@@ -26,6 +26,16 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   left aside because the directory was used meanwhile). Online clusters
   are unchanged. `cloud-init status` reports an error on these nodes, by
   design (the package module fails without repositories).
+- **Child cluster without Internet without LoadBalancer nor storage** (R11
+  of the 2.8.1 bench). The cluster became available, but the Harvester
+  cloud provider, the Harvester CSI driver and its four `longhornio/csi-*`
+  sidecars stayed in ImagePullBackOff (`not found` in the registry):
+  `pack --rke2` carried the images of RKE2 only, not those of the modules
+  the console lays by ClusterResourceSet. The `rke2` item now also carries
+  them (63 images for v1.34.11 with calico, kube-vip was already in the
+  RKE2 list). A test compares the list with the images of
+  `bin/caphv-generate` and `bin/lib/kube-vip.yaml`. Rebuild an `rke2`
+  package made by 2.8.0.
 - `additionalUserData` of the RKE2 templates is merged, not replaced: an
   existing `strict` or `data` is kept, and another `config` already there
   is refused instead of being overwritten.
@@ -67,6 +77,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   Harvester nodes window. Unreadable Services do not stop the merge.
 
 ### Upgrade notes
+- An `rke2` package built by 2.8.0 lacks the images of the console
+  modules: build it again with `pack --rke2` and publish it.
 - A child cluster created without Internet by 2.8.0 keeps its templates:
   delete it and create it again with 2.8.1.
 - The node image of a cluster without Internet must already carry

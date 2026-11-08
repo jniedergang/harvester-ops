@@ -748,7 +748,9 @@ registry: option `offline: true` (creation window, Registries menu,
 
 1. **On a connected machine:** `harvester-artefacts pack --rke2
    v1.34.11+rke2r1 --cni calico`, import the package, publish it to a
-   registry that serves images.
+   registry that serves images. Since 2.8.1 the package also carries the
+   images of the cloud provider, the CSI driver and kube-vip that the
+   console lays in every child cluster: rebuild a package made by 2.8.0.
 2. **Create the cluster** with that registry. Required:
    - a registry that mirrors `docker.io` with **No fallback to Internet**
      (`offline-needs-no-fallback`);
