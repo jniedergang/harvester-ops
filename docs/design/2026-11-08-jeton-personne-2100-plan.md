@@ -1533,3 +1533,10 @@ Rancher.
 | 305 | Forme du magasin après l'essai 7 (`ClusterSecretStore` isolé par namespace) | A un `SecretStore` par namespace activé (plan) ; B un `ClusterSecretStore` avec `conditions.namespaceSelector` sur `harvester-ops.io/eso: "on"`, compte `hops-eso` par namespace, `processClusterStore: true` | A : réconciliateur des magasins de portée cluster éteint, règle des manifestes inchangée (aucune sorte de portée cluster depuis un paquet) ; le motif du plan est corrigé, pas le choix |
 | 306 | Droits de l'agent sur les groupes (escalade de l'essai 6) | A accepter : l'agent est déjà root sur l'hôte et détient la clé de descellement (décision 271), garde par la revue d'instantané et la liste fermée d'opérations ; B l'agent ne gère jamais les groupes, l'administrateur d'OpenBao les pose par les commandes rendues même en B1 | A, en écrivant dans la doc que `allowed_parameters` ne restreint pas les politiques d'un groupe |
 | 307 | Connexion d'ESO à chaque réconciliation | A défaut d'ESO (connexion puis révocation à chaque passage), exemple d'`ExternalSecret` à `refreshInterval: 1h` ; B `vault.enableTokenCache: true` (jetons gardés en mémoire d'ESO jusqu'à 10 min, plus de révocation) | A : un jeton ne survit pas à son usage, volume d'audit maîtrisé par l'intervalle |
+
+## Décisions après les essais (08/11/2026)
+
+Points 303 à 307 : recommandations retenues (303 A groupes internes seuls,
+304 B liste des namespaces activés dans le rôle, 305 A un `SecretStore` par
+namespace, 306 A droits de l'agent gardés par la revue d'instantané, 307 A
+défaut d'ESO avec exemple à `refreshInterval: 1h`).
