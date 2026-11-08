@@ -4,6 +4,222 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.9.0] - 2026-11-08 - OpenBao secret store
+
+### Added
+- **Console secrets in OpenBao** (decisions 133 to 145, points 249 to 279).
+  The secrets of the console move from local files to OpenBao class by
+  class, and come back the same way: `kubeconfig`, `ssh-cluster`,
+  `ssh-kvm`, `rancher-oidc`, `replication-notify`, `replication-hook`,
+  `tf-kvm`. Each secret is written with `cas=0`, read back and compared by
+  SHA-256 in memory; the local value becomes a reference
+  (`openbao:<class>/<path>#<field>`) and the original is kept as
+  `.migrated` for 7 days (1 to 30) or until confirmed. `kubeconfig` is
+  offered last, after another class and a simulated outage. Accounts,
+  public keys, `htpasswd`, the console TLS key and the kubeconfigs of
+  `config.yaml` stay local. Doc: `docs/en/secrets.md`.
+- **Mode A**: your OpenBao or Vault. AppRole login, wrapped `secret_id`
+  deposited by the host agent after its creation path is checked,
+  assistant with the `bao` commands and the exact policy, checks (address,
+  CA, seal, wrap, then after the deposit login, KV v2, capabilities, test
+  write, transit, OpenTofu token role); nothing is activated while one is
+  red.
+- **Mode B1**: OpenBao of the SUSE Application Collection
+  (`2.7.2-5.4`, index pinned, cosign verified) in a container next to the
+  console on `127.0.0.1:8210`: separate bundle built by the client
+  (`harvester-secrets bundle`, about 59 MB, image 202 MB loaded),
+  declarative initialization (no root token returned, no recovery key),
+  static unseal key held by root and handed as a podman secret, TLS by a CA
+  of the agent, audit log declared in the configuration, `--read-only`,
+  `--memory 512m`, all capabilities dropped (40 MB used). Offline copy of
+  the unseal key: one download, then an acknowledgement before any class
+  moves. `harvester-secrets upgrade-b1 --bundle` changes the image after a
+  pre-upgrade snapshot and goes back if OpenBao does not unseal.
+- **Host agent for secrets** (`harvester-secrets-agent`, root, closed list
+  of operations, one at a time): deposit of the `secret_id`, B1 install,
+  upgrade, removal, policies refresh, rotations, restore. Units
+  `harvester-secrets-agent.path` / `.service` (`ProtectHome=read-only`,
+  `PrivateTmp=yes`) and `harvester-secrets-rotate.timer` (hourly).
+- **Cache and outages**: values in memory 15 minutes (1 to 120), never on
+  disk; working copies for `kubectl`, `ssh` and `tofu` on tmpfs, erased
+  after the action. Stable codes (`openbao-unreachable`, `-sealed`,
+  `-denied` with the capabilities read, `-login-failed`, `-unwrap-used`,
+  `-internal` for a full audit log...), global banner "served from memory
+  until HH:MM", metric `harvester_ops_openbao_up`, **Test an outage**.
+- **Rotation**: console `secret_id` every 30 days by the agent, B1 unseal
+  key with `sys/rotate/root` (old key kept 14 days for the snapshots that
+  need it), SSH key of a KVM host (added, tested, stored, old one removed
+  and checked refused, previous state back on failure), transit keys; age of
+  the secrets the console does not own.
+- **Versions** of each secret with author and action (`custom_metadata`),
+  never a value; rollback to an older version.
+- **B1 snapshots**: daily at `snapshot_time` (UTC), 14 kept, in
+  `/var/lib/harvester-ops-snapshots` (mounted in the console container, a
+  share may be mounted there; a root-squashed share is read by the agent as
+  the console account); "Secret store" protected object in the Disaster
+  Recovery overview; restore into a fresh instance with the snapshot key.
+- **Restore preflight**: before anything stops, the console lists running
+  actions, encrypted declarations whose transit key is newer than the
+  snapshot, KVM keys rotated since and classes moved since; the typed
+  identifier acknowledges the list.
+- **Restore review by allowlist**: exact names and texts of the policies
+  (`default` compared with the hash recorded at install), auth methods,
+  AppRole roles with their policies, address ranges and single
+  `secret_id`, token roles, no identity group, mounts and audit device;
+  then every token of the snapshot is revoked.
+- **OpenTofu states encrypted by transit**: one key per declaration, child
+  token limited to that key by an entity alias template, migration of a
+  clear state, `state pull` / `state push -` for moves, **Put back in
+  clear**, keys of removed declarations kept 30 days; acknowledgement for
+  a Vault newer than 1.14.
+- **Secrets of a deployment plan kept in OpenBao** while it runs: a stopped
+  plan resumes without retyping them; erased at the end, after 7 days, or by
+  **Forget the kept secrets**.
+- **Audit correlation**: `X-Hops-Action` (the console action id) and
+  `X-Hops-Actor` on every request, recorded in clear.
+- Settings > Secret store (Status, Classes, Versions, Rotation, Snapshots),
+  activation assistant, banner, five languages.
+
+### Changed
+- **Writes to `/api/secrets/*` are for administrators**; status for
+  operators (Disaster Recovery card), the banner for everyone.
+- **Secret store actions are shown to administrators only** (dock, action
+  details, stream, Activity and its filters): they name secrets and paths.
+- **`sudo harvester-secrets`**: as root the tool only does the agent call;
+  everything else runs in a child dropped to `harvester-ops` before the
+  state is read. Files typed by the administrator are opened by root only
+  when the console account cannot have placed them (no link, not owned or
+  writable by it); otherwise the child opens them. `sudo harvester-secrets
+  snapshot` is refused: `sudo -u harvester-ops harvester-secrets snapshot
+  --dest DIR`. On openSUSE, use `sudo /usr/local/bin/harvester-secrets`.
+- **`install.sh` installs the agent units on every host**, with or without
+  OpenBao (they only refresh a health file then), creates
+  `/var/lib/harvester-ops-snapshots`, and queues a refresh of the B1
+  policies when B1 is posed.
+- **Rolling the console back below 2.9.0 is refused** (`secrets-in-openbao`)
+  while the store is not local, a class is in OpenBao or a state is
+  encrypted, also for an install with "allow older". Seen for real on the
+  client VM before this guard: a 2.8.3 console reads the references as
+  paths or values (clusters with a moved kubeconfig in error, a `status`
+  action reported done while kubectl failed, SSH key not found,
+  notifications sending the reference as the token); B1 and the 2.9.0 agent
+  units keep running; the `.migrated` originals stay until they expire;
+  reinstalling 2.9.0 serves everything again. Way out: bring every class
+  back, put states back in clear, disable, then roll back. `install.sh`
+  run by hand with an older release is not guarded.
+- `VAULT_*` and `BAO_*` are removed from the environment of the console and
+  of the tools it launches.
+- Adding a KVM host refuses a key that is not UTF-8. `_encryption.tf` is a
+  reserved name in a Terraform workspace.
+
+### Fixed (found by the real checks and the final review of this release)
+- Mode A could never be activated from the assistant: the check before
+  activation was red on the login, which only `enable` can deposit; it is
+  now "after", and credentials left by an earlier server are never used.
+- The restore review compared address ranges as text; OpenBao returns a
+  /32 token range as a bare address, so every genuine snapshot was refused.
+- `custom_metadata` was never written for a write without an action id
+  (OpenBao refuses an empty value), and tool actions never received their
+  action id: the audit showed `bg-console`.
+- The snapshot directory could not be a host directory in the package; a
+  share mounted under `/var/log/harvester-ops` broke the console restart.
+- A snapshot refused before starting was relaunched every 5 minutes;
+  `--keep` was unbounded.
+- The old volume kept by a restore was removed at the next hourly pass (age
+  read from the directory mtime); two agents could run at once.
+- The transit key of a declaration recreated with the same id was removed
+  after 30 days; a retired id is no longer reused at creation.
+- The console cache kept the old value after a KVM key rotation, a version
+  rollback or a restore it launched.
+- `harvester-secrets bundle` run from `/usr/local/bin` did not find its
+  template; nothing could request the agent's B1 upgrade.
+- A tool run by hand did not see the Terraform workspaces of the console
+  (`disable` could pass with encrypted states): the console records its
+  root in `<state>/console-paths.json`.
+
+### Upgrade notes
+- Nothing changes until you enable the store. To use B1, build the OpenBao
+  bundle with your Application Collection service account first.
+- Before rolling back below 2.9.0: bring classes back, put states back in
+  clear, disable the store.
+
+### Known limits
+- The first action of a declaration after activation migrates its state by
+  `apply -refresh-only`: provider and cluster must be reachable, the state
+  is refreshed (drift included).
+- The `.pre-move-*` copy of the shared workspace of a cluster stays in
+  clear after resources move to an encrypted declaration.
+- A declaration view with a stale cache may create a child token and the
+  transit key (not a tracked action).
+- **Put back in clear** is for "before disabling": any later action encrypts
+  again while OpenBao is active.
+- No local fallback copy: past the cache, an action that needs a secret is
+  refused. Cluster connections already open keep working.
+- **Empty the cache** applies to the console process; each tool run logs in
+  and leaves its token to expire (1 h period).
+- Restoring by hand does not check the console's running actions.
+- `snapshot_time` is UTC; the screens show local times.
+- Two consoles with the same identifier on a shared mode A server sweep each
+  other's keys and orphans.
+- The console can remove the transit keys of its own prefix.
+- `disable --remove-b1` sets the B1 data and keys aside and leaves the
+  account, the images and the staged bundle; a console rolled back to 2.8.x
+  keeps the 2.9.0 agent units running. Clean-up list in
+  `docs/en/secrets.md`; `uninstall.sh` removes the units.
+
+### Tests
+- API: client, store, classes, policies, agent, CLI and root drop, routes,
+  migration, rotation, snapshots and allowlist review (16 crafted snapshots
+  refused), preflight, rollback guard, admin-only actions, encrypted
+  states, plan secrets; fake OpenBao servers updated with the real messages
+  seen on OpenBao 2.7.2. E2E: secret store tabs, assistant with the real
+  check output, banner, restore preflight, plan resume.
+
+### Verified for real
+- Mode A on OpenBao 2.7.2 (Application Collection image, TLS by a private
+  CA): each check failed once (address, CA, sealed, wrap already
+  unwrapped, KV v1, missing capability, transit absent) then activation
+  from the console; `ssh-cluster` and `kubeconfig` moved, console
+  restarted, values identical by SHA-256, `custom_metadata` with the action
+  id, back to local identical; a harv1 kubeconfig in OpenBao used to list
+  VMs and to start and stop a test VM, the only copy on tmpfs; outages:
+  cache warm then cold, sealed, console tokens revoked (login again),
+  policy narrowed to one class, audit log full (`openbao-internal`, back at
+  once); audit entries found by `X-Hops-Action`.
+- Mode A on Vault 1.14.2: same checks, activation, migration and return;
+  Vault 1.17.6: activation and the acknowledgement screen.
+- OpenTofu states encrypted on harvlab2 (plan and apply of real resources,
+  migration of a clear state, state unreadable in clear, child token refused
+  on another key, put back in clear, encrypted again).
+- A plan with Git secrets on harvlab2 stopped and resumed twice without
+  retyping them; no plan secret left in OpenBao at the end.
+- SSH key rotation of the KVM host node2 (old key refused, new key works,
+  failure in the middle restored the previous state).
+- B1 on the client VM from the real Application Collection: bundle built
+  with cosign verified, install with the hardened agent unit, offline copy,
+  three classes moved (harv1 kubeconfig among them), VM reboot unsealed by
+  itself and the console served without a gesture, `sudo harvester-secrets`
+  dropped to the console account, `secret_id` and unseal key rotations,
+  scheduled snapshot in the live console, orphan sweep, upgrade with B1
+  posed (policies refreshed), screens of every tab and the banner; after
+  the fixes: snapshot in `/var/lib/harvester-ops-snapshots`, restore of a
+  genuine snapshot with the preflight and the allowlist review (24 tokens of
+  the snapshot revoked, console reconnected, witness read back), the same
+  directory on a root-squashed NFS share (console restart, snapshot,
+  restore read as the console account), old volumes kept by the hourly
+  pass, `upgrade-b1` with its pre-upgrade snapshot, audit entries carrying
+  the console action ids, rollback to 2.8.3 refused with
+  `secrets-in-openbao`, then classes back, `disable --remove-b1` and the
+  console rollback to 2.8.3 accepted.
+
+### Not verified for real
+- OpenBao as a cluster at a customer, Vault Enterprise with namespaces.
+- Rotation of the SSH keys of a fleet of several KVM hosts.
+- The GitOps phase of a plan stopped then resumed (no Cluster API child
+  with Flux on the bench).
+- The 30-day `secret_id` rotation fired by the timer.
+- The B1 audit-space warning before refusal.
+
 ## [2.8.3] - 2026-11-08 - Root no longer follows links in the console's directories
 
 ### Security
