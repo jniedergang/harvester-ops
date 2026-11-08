@@ -387,17 +387,65 @@ def _spawn_unprivileged(fn, handler):
     return os.waitstatus_to_exitcode(status)
 
 
+def _console_account():
+    import pwd
+    try:
+        return pwd.getpwnam(SERVICE_ACCOUNT)
+    except KeyError:
+        return None
+
+
+def _console_controls(st, acct):
+    """Vrai si le compte de la console possède cet objet ou peut l'écrire
+    (groupe, ou tous sans sticky bit pour un répertoire)."""
+    if acct is None:
+        return False
+    if st.st_uid == acct.pw_uid:
+        return True
+    if st.st_gid == acct.pw_gid and st.st_mode & stat.S_IWGRP:
+        return True
+    return bool(st.st_mode & stat.S_IWOTH) and not (stat.S_ISDIR(st.st_mode) and st.st_mode & stat.S_ISVTX)
+
+
+def _root_may_open(path, acct):
+    """Relecture finale I6 : root n'ouvre que le fichier ordinaire d'un
+    chemin absolu dont aucun composant n'est un lien ni n'est contrôlé par
+    le compte de la console (sinon un lien posé dans `staged/` lui faisait
+    lire un fichier de root). Le reste est ouvert par le fils, sans droit."""
+    if not os.path.isabs(path):
+        return False
+    parts = Path(path).parts
+    cur = Path(parts[0])
+    try:
+        for name in parts[1:]:
+            st = os.lstat(cur)
+            if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or _console_controls(st, acct):
+                return False
+            cur = cur / name
+        st = os.lstat(cur)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and not _console_controls(st, acct)
+
+
 def _preopen(args):
     """Fichiers de l'administrateur (chemins tapés après sudo) ouverts par
     root avant de quitter ses droits : le fils les lit ou les écrit par
-    descripteur, jamais par chemin."""
+    descripteur, jamais par chemin. Un chemin que la console contrôle est
+    laissé au fils, qui l'ouvre sous le compte de la console."""
+    acct = _console_account()
     for attr in ("ca", "bundle"):
         path = getattr(args, attr, None)
-        if path:
+        if path and _root_may_open(path, acct):
             try:
-                INPUT_FDS[path] = os.open(path, os.O_RDONLY | os.O_NOCTTY)
+                fd = os.open(path, os.O_RDONLY | os.O_NOCTTY | os.O_NOFOLLOW | os.O_NONBLOCK)
             except OSError:
-                pass                    # le fils le dira (il l'ouvre alors sans droit particulier)
+                continue                # le fils le dira (il l'ouvre alors sans droit particulier)
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or _console_controls(st, acct):
+                os.close(fd)            # changé entre le contrôle et l'ouverture
+                continue
+            INPUT_FDS[path] = fd
     to = getattr(args, "to", None) if args.cmd == "offline-copy" else None
     if to:
         try:
