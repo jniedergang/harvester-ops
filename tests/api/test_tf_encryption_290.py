@@ -691,3 +691,33 @@ def test_a_shared_session_creates_one_token_for_concurrent_threads(wapp, tfx):
     tok = sess.token
     sess.revoke()
     assert sess.scrub(f"x {tok} y") == "x *** y"
+
+
+# Revue m4, m9, m14 des tâches 9-10
+def test_state_out_with_two_dashes_is_refused(wapp, tfx):
+    rc, _out, err = wapp._tf_run_cmd(tfx.tmp, tfx.kc, ["state", "mv", "--state-out=/tmp/x", "a", "b"])
+    assert rc == 126 and "state-out" in err
+
+
+def test_removal_lists_the_state_afresh_not_from_a_stale_cache(wapp, tfx):
+    d = decl(tfx)
+    assert run_decl(wapp, tfx, d, "apply").status == "done"
+    sf = tfx.ws / "terraform.tfstate"
+    # cache d'un état vide écrit pour la même date (état restauré par cp -p)
+    (tfx.ws / wapp.TF_ADDRESSES_CACHE).write_text(json.dumps({"state_mtime_ns": sf.stat().st_mtime_ns,
+                                                              "addresses": []}))
+    ok, deployed = wapp._tf_decl_remove(DECL)
+    assert ok is False and deployed == ["harvester_ssh_key.ops"]
+    assert sf.exists()
+
+
+def test_view_survives_an_unreadable_encryption_file(wapp, tfx):
+    d = decl(tfx)
+    assert run_decl(wapp, tfx, d, "apply").status == "done"
+    f = tfx.ws / "_encryption.tf"
+    f.chmod(0)
+    try:
+        v = wapp._tf_encryption_view(tfx.ws)
+    finally:
+        f.chmod(0o600)
+    assert v["block"] == "unreadable"

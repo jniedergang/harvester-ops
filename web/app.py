@@ -29472,7 +29472,8 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(),
     _TF_ENV_KEEP ; jeton de la session de l'action, sinon un jeton créé et
     révoqué pour cette commande. `-state-out` est refusé (essai 8 : la
     destination serait écrite en clair)."""
-    if any(str(a).startswith(_TF_REFUSED_ARGS) for a in args):
+    # revue m9 des tâches 9-10 : `--state-out=...` vaut `-state-out` pour Go
+    if any(("-" + str(a).lstrip("-")).startswith(_TF_REFUSED_ARGS) for a in args):
         return 126, "", "refused: -state-out writes the destination state in clear text"
     _tf_secure_ws(ws_dir)
     # 2.3.1 : dernier rempart, quel que soit le chemin qui a écrit les
@@ -29830,17 +29831,22 @@ def _tf_encryption_view(ws):
     f = ws / _tfe.ENCRYPTION_FILE
     cid, decl_id = _tf_console_id(), _tf_ws_decl_id(ws)
     if f.is_file() and cid and decl_id:
-        text = f.read_text()
-        blk = next((m for m in _tfe.MODES if _tfe.block(cid, decl_id, m) == text), "unknown")
+        try:
+            text = f.read_text()
+            blk = next((m for m in _tfe.MODES if _tfe.block(cid, decl_id, m) == text), "unknown")
+        except (OSError, UnicodeDecodeError):          # revue m14 des tâches 9-10
+            blk = "unreadable"
     warning = _tfe.WARN_NEEDS_OPENTOFU if TF_FLAVOR != "opentofu" and _sst.is_active() else None
     return {"state": state, "block": blk, "warning": warning}
 
 
-def _tf_addresses(ws, tf=None):
+def _tf_addresses(ws, tf=None, fresh=False):
     """Adresses gérées de l'état d'un espace. État clair : lu en JSON
     (tf_state). État chiffré : `tofu state list` (jeton enfant), gardé à
     côté de l'état (`.hops-addresses.json`, adresses seules) tant que l'état
-    ne change pas. TfStateUnreadable si OpenTofu ne peut pas le lire."""
+    ne change pas (date, taille et inode : revue m4 des tâches 9-10).
+    `fresh` : jamais le cache (avant une suppression). TfStateUnreadable si
+    OpenTofu ne peut pas le lire."""
     ws = Path(ws)
     try:
         return _tfst.addresses(ws)
@@ -29848,14 +29854,15 @@ def _tf_addresses(ws, tf=None):
         pass
     sf = _tf_state_file(ws)
     try:
-        stamp = sf.stat().st_mtime_ns
+        sst = sf.stat()
+        stamp = f"{sst.st_mtime_ns}:{sst.st_size}:{sst.st_ino}"
     except OSError:
         return []
     cache = ws / TF_ADDRESSES_CACHE
-    if tf is None:
+    if tf is None and not fresh:
         try:
             c = json.loads(cache.read_text())
-            if c.get("state_mtime_ns") == stamp and isinstance(c.get("addresses"), list):
+            if c.get("state_stamp") == stamp and isinstance(c.get("addresses"), list):
                 return list(c["addresses"])
         except (OSError, ValueError):
             pass
@@ -29868,7 +29875,7 @@ def _tf_addresses(ws, tf=None):
 
     addrs = _tfst.addresses(ws, lister)
     try:
-        _tf_private_write(cache, json.dumps({"state_mtime_ns": stamp, "addresses": addrs}).encode())
+        _tf_private_write(cache, json.dumps({"state_stamp": stamp, "addresses": addrs}).encode())
     except OSError:
         pass
     return addrs
@@ -30413,7 +30420,7 @@ def _tf_decl_remove(decl_id):
     try:
         ws = _tf_decl_ws(d, create=False)
         try:
-            deployed = _tf_addresses(ws) if ws.exists() else []
+            deployed = _tf_addresses(ws, fresh=True) if ws.exists() else []
         except TfStateUnreadable:
             return False, "state-unreadable"
         if deployed:
@@ -36971,7 +36978,7 @@ def _deploy_cleanup_dry(created):
             continue
         ws = _tf_decl_ws(d, create=False)
         try:
-            kept = ws.exists() and _tf_addresses(ws)
+            kept = ws.exists() and _tf_addresses(ws, fresh=True)
         except TfStateUnreadable:
             kept = True
         if kept:
@@ -37049,8 +37056,6 @@ PLAN_SECRETS_FORGET_LABEL = "secrets:plan-run-forget:"
 PLAN_SECRETS_SWEEP_LABEL = "secrets:plan-run-sweep"
 PLAN_SECRETS_SWEEP_S = 3600
 PLAN_SECRETS_ORPHAN_S = 3600          # secrets sans action connue (lancement en cours)
-_PLAN_SECRETS_DOWN = ("openbao-unreachable", "openbao-tls", "openbao-sealed", "openbao-internal",
-                      "openbao-login-failed")
 
 
 def _deploy_keep_secrets(store, run, status):
