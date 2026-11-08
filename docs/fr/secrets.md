@@ -321,8 +321,9 @@ volume.
 
 - `disable` est refusé tant qu'une classe est dans OpenBao ou qu'un état
   est chiffré. Il efface d'abord les secrets des déroulés de plan arrêtés.
-  `disable --remove-b1` retire aussi le conteneur B1, son unité, son compte
-  et son volume.
+  `disable --remove-b1` arrête et retire aussi l'unité B1 et ses secrets
+  podman, et met les données de B1 de côté ; le compte, les images et le
+  paquet restent (voir plus bas).
 - De B1 vers A : ramener toutes les classes (`migrate --to local`),
   `disable --remove-b1`, puis activer le mode A.
 - **Revenir à une console antérieure à la 2.9.0** (Mise à jour > Revenir
@@ -355,28 +356,55 @@ met les données de côté (jamais supprimées sur le moment) :
   Collection, le paquet dans `/var/lib/harvester-ops/secrets-agent/staged/`,
   le répertoire vide `/etc/harvester-ops/openbao`.
 
+#### Retirer les restes de B1, console gardée en 2.9.x
+
+Gardez `/opt/harvester-ops/openbao`, `harvester-secrets-agent.path`,
+`harvester-secrets-agent.service` et `harvester-secrets-rotate.timer` : la
+2.9.0 en a besoin pour activer B1 de nouveau et pour garder le `secret_id`
+de la console tourné.
+
+```bash
+# toutes les images B1 existantes : current, le tag de version, et previous
+# seulement si une mise à jour a eu lieu (xargs -r n'appelle podman rmi
+# zéro fois sur une liste vide : une console jamais mise à jour n'y échoue pas)
+sudo podman images --format '{{.Repository}}:{{.Tag}}' \
+    | grep '^localhost/harvester-ops-openbao:' | xargs -r sudo podman rmi -i
+# l'image de l'Application Collection chargée par le paquet : même registre
+# et même tag que ceux utilisés par `harvester-secrets bundle`
+# (dp.apps.rancher.io/containers/openbao par défaut ; vérifier `podman
+# images` si le paquet venait d'un miroir)
+sudo podman rmi -i dp.apps.rancher.io/containers/openbao:<tag-de-version>
+sudo rm -f /var/lib/harvester-ops/secrets-agent/staged/harvester-ops-openbao-*
+sudo rmdir /etc/harvester-ops/openbao 2>/dev/null || true
+sudo userdel harvester-ops-openbao   # recréé automatiquement si B1 est réactivé
+```
+
+Si ces secrets peuvent encore servir, gardez d'abord ailleurs une copie du
+dernier instantané et de sa clé de descellement.
+
+#### Retirer l'agent de magasin de secrets de la 2.9.0, après un retour en 2.8.x
+
 Une console ramenée en 2.8.x ne connaît pas les unités du magasin de
 secrets de la 2.9.0 : `harvester-secrets-agent.path` et
 `harvester-secrets-rotate.timer` restent actives (elles ne font que
-rafraîchir un fichier de santé une fois le magasin local). Pour tout retirer
-à la main, quand vous n'avez plus besoin des instantanés ni des clés :
+rafraîchir un fichier de santé une fois le magasin local). Pour les retirer
+à la main :
 
 ```bash
-sudo systemctl disable --now harvester-secrets-agent.path harvester-secrets-rotate.timer
+sudo systemctl disable --now harvester-secrets-agent.path harvester-secrets-rotate.timer \
+    harvester-ops-openbao
 sudo rm -f /etc/systemd/system/harvester-secrets-agent.{path,service} \
-           /etc/systemd/system/harvester-secrets-rotate.timer /usr/local/bin/harvester-secrets*
+           /etc/systemd/system/harvester-secrets-rotate.timer \
+           /etc/systemd/system/harvester-ops-openbao.service /usr/local/bin/harvester-secrets*
 sudo systemctl daemon-reload
 sudo rm -rf /opt/harvester-ops/openbao /etc/harvester-ops/openbao \
             /var/lib/harvester-ops-openbao.* /etc/harvester-ops-openbao.* \
             /var/lib/harvester-secrets-agent /var/lib/harvester-secrets-agent.lock
-sudo podman rmi localhost/harvester-ops-openbao:current localhost/harvester-ops-openbao:previous
-sudo userdel harvester-ops-openbao
 ```
 
-Si ces secrets peuvent encore servir, gardez d'abord ailleurs une copie du
-dernier instantané et de sa clé de descellement. `uninstall.sh` retire
-lui-même les unités ; `uninstall.sh --purge` retire aussi les données et
-les clés de B1.
+Retirez ensuite les restes de B1 avec les commandes ci-dessus si ce n'est pas
+déjà fait. `uninstall.sh` retire lui-même les unités ; `uninstall.sh --purge`
+retire aussi les données et les clés de B1.
 
 ## Ligne de commande
 

@@ -304,7 +304,8 @@ below 1 GiB free or 10 % of the volume.
 
 - `disable` is refused while a class is in OpenBao or a state is encrypted.
   It erases the secrets of stopped plan runs first. `disable --remove-b1`
-  also removes the B1 container, unit, account and volume.
+  also stops and removes the B1 unit and its podman secrets, and sets the
+  B1 data aside; the account, the images and the bundle stay (see below).
 - B1 to A: bring every class back (`migrate --to local`), `disable
   --remove-b1`, then enable mode A.
 - **Rolling the console back below 2.9.0** (Update > Roll back, or Install
@@ -334,27 +335,53 @@ and sets the data aside (never deleted on the spot):
   the bundle in `/var/lib/harvester-ops/secrets-agent/staged/`, the empty
   `/etc/harvester-ops/openbao`.
 
-A console rolled back to 2.8.x does not know the 2.9.0 secret store units:
-`harvester-secrets-agent.path` and `harvester-secrets-rotate.timer` stay
-active (they only refresh a health file once the store is local). To remove
-everything by hand once you no longer need the snapshots and keys:
+#### Removing the B1 leftovers, console staying on 2.9.x
+
+Keep `/opt/harvester-ops/openbao`, `harvester-secrets-agent.path`,
+`harvester-secrets-agent.service` and `harvester-secrets-rotate.timer`:
+2.9.0 needs them to enable B1 again and to keep the console's own
+`secret_id` rotated.
 
 ```bash
-sudo systemctl disable --now harvester-secrets-agent.path harvester-secrets-rotate.timer
-sudo rm -f /etc/systemd/system/harvester-secrets-agent.{path,service} \
-           /etc/systemd/system/harvester-secrets-rotate.timer /usr/local/bin/harvester-secrets*
-sudo systemctl daemon-reload
-sudo rm -rf /opt/harvester-ops/openbao /etc/harvester-ops/openbao \
-            /var/lib/harvester-ops-openbao.* /etc/harvester-ops-openbao.* \
-            /var/lib/harvester-secrets-agent /var/lib/harvester-secrets-agent.lock
-sudo podman rmi localhost/harvester-ops-openbao:current localhost/harvester-ops-openbao:previous
-sudo userdel harvester-ops-openbao
+# every B1 image tag that exists: current, the version tag, and previous
+# only if an upgrade ever ran (xargs -r runs podman rmi 0 times on an
+# empty list, so a console that never upgraded B1 is not an error here)
+sudo podman images --format '{{.Repository}}:{{.Tag}}' \
+    | grep '^localhost/harvester-ops-openbao:' | xargs -r sudo podman rmi -i
+# the Application Collection image the bundle loaded: same registry and
+# tag `harvester-secrets bundle` used (dp.apps.rancher.io/containers/openbao
+# by default; check `podman images` if the bundle came from a mirror)
+sudo podman rmi -i dp.apps.rancher.io/containers/openbao:<version-tag>
+sudo rm -f /var/lib/harvester-ops/secrets-agent/staged/harvester-ops-openbao-*
+sudo rmdir /etc/harvester-ops/openbao 2>/dev/null || true
+sudo userdel harvester-ops-openbao   # recreated automatically if B1 is enabled again
 ```
 
 Keep a copy of the last snapshot and of its unseal key elsewhere first if
 you may need these secrets again.
-`uninstall.sh` removes the units itself; `uninstall.sh --purge` also
-removes the B1 data and keys.
+
+#### Removing the 2.9.0 secret store agent, after a rollback to 2.8.x
+
+A console rolled back to 2.8.x does not know the 2.9.0 secret store units:
+`harvester-secrets-agent.path` and `harvester-secrets-rotate.timer` stay
+active (they only refresh a health file once the store is local). To remove
+them by hand:
+
+```bash
+sudo systemctl disable --now harvester-secrets-agent.path harvester-secrets-rotate.timer \
+    harvester-ops-openbao
+sudo rm -f /etc/systemd/system/harvester-secrets-agent.{path,service} \
+           /etc/systemd/system/harvester-secrets-rotate.timer \
+           /etc/systemd/system/harvester-ops-openbao.service /usr/local/bin/harvester-secrets*
+sudo systemctl daemon-reload
+sudo rm -rf /opt/harvester-ops/openbao /etc/harvester-ops/openbao \
+            /var/lib/harvester-ops-openbao.* /etc/harvester-ops-openbao.* \
+            /var/lib/harvester-secrets-agent /var/lib/harvester-secrets-agent.lock
+```
+
+Then remove the B1 leftovers with the commands above if it was not done
+already. `uninstall.sh` removes the units itself; `uninstall.sh --purge`
+also removes the B1 data and keys.
 
 ## Command line
 
