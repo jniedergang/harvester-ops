@@ -7,6 +7,9 @@
 * repr, pickle et json d'un magasin rempli ne portent aucune valeur ;
 * fils concurrents.
 
+2.9.0 : `openbao:` est une forme valide (lue seulement si OpenBao est actif,
+`openbao-inactive` sinon : test_secret_store_290).
+
 Mutations jouées (voir le rapport de la tâche 1) : préfixe comparé sans
 séparateur (le cas a1/a10 casse), `__repr__` qui montre le dictionnaire
 (les cas repr cassent).
@@ -45,7 +48,9 @@ VALUE = "S3CRET-value-240"
     ("local:plan-run/A1#token", False),                    # chemin en majuscules
     ("local:plan-run/a1#" + "f" * 65, False),
     ("local:plan-run/a1", False),                          # pas de champ
-    ("openbao:kv/a1#token", False),                        # autre support
+    ("openbao:kv/a1#token", False),                        # classe inconnue
+    ("openbao:plan-run/a1#token", True),                   # 2.9.0 : support OpenBao (refusé à la lecture s'il est inactif)
+    ("vault:plan-run/a1#token", False),                    # support inconnu
     ("", False),
     (None, False),
     (42, False),
