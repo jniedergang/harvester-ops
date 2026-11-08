@@ -291,6 +291,11 @@ if _PROMETHEUS_AVAILABLE:
         "RPO objective of a replication plan.",
         labelnames=("plan", "source", "target"),
     )
+    # 2.9.0 (plan, « Cache et pannes ») : sonde sys/health du magasin de secrets
+    metric_openbao_up = Gauge(
+        "harvester_ops_openbao_up",
+        "1 when the OpenBao secret store answers unsealed (0 when inactive or down).",
+    )
 else:
     class _NoopMetric:
         def labels(self, **kw): return self
@@ -309,6 +314,7 @@ else:
     metric_repl_plans_followed = _NoopMetric()
     metric_repl_rpo_held = _NoopMetric()
     metric_repl_rpo_objective = _NoopMetric()
+    metric_openbao_up = _NoopMetric()
 
 
 @app.route("/metrics")
@@ -1276,6 +1282,14 @@ def required_role_for(path, method):
     # en opérateur)
     if path.startswith("/api/replication/"):
         return _replication_required_role(path, method)
+    # 2.9.0 : magasin de secrets. Bandeau de panne pour tous ; état pour les
+    # opérateurs ; tout le reste (noms, versions, gestes) à l'administrateur
+    if path.startswith("/api/secrets/") and method in ("GET", "HEAD", "OPTIONS"):
+        if path == "/api/secrets/banner":
+            return "viewer"
+        if path == "/api/secrets/status":
+            return "operator"
+        return "admin"
     if method in ("GET", "HEAD", "OPTIONS"):
         if path.startswith("/api/capi/") and path.endswith(OPERATOR_READ_SUFFIXES):
             return "operator"
@@ -34218,10 +34232,32 @@ _OFFLINE_DOWNLOADED = set()
 _OFFLINE_LOCK = threading.Lock()
 
 
-def _secrets_tool_action(label, args):
+def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=()):
+    """Action suivie `harvester-secrets ...`. `private` : valeurs tapées
+    (jeton d'enveloppe, CA) remises à l'outil par un fichier 0600 sur tmpfs
+    (`--spec`), effacé à la fin de l'action ; jamais en argument."""
     script = BIN_DIR / SECRETS_TOOL
-    return _cli_action("", label, [sys.executable, str(script), "--actor", current_user() or "console", *args],
-                       "harvester-secrets", check_busy=False, capture=True, cluster_user=None)
+    after, cmd_tail = None, []
+    if private:
+        try:
+            spec = _sst.write_private_copy(_sst.secret_files_dir(_secrets_settings()), "secrets-spec",
+                                           json.dumps(private))
+        except _sst.SecretError as e:
+            return None, (jsonify({"error": str(e), "code": e.code}), 503)
+        cmd_tail = ["--spec", str(spec)]
+        after = lambda: Path(spec).unlink(missing_ok=True)     # noqa: E731
+    who = actor or (current_user() if _has_request() else None) or "console"
+    run, err = _cli_action("", label, [sys.executable, str(script), "--actor", who, *args, *cmd_tail],
+                           "harvester-secrets", check_busy=False, capture=True, cluster_user=None, after=after,
+                           secret_clusters=secret_clusters)
+    if run is None and after:
+        after()
+    return run, err
+
+
+def _has_request():
+    from flask import has_request_context
+    return has_request_context()
 
 
 def _secrets_b1_refusal():
@@ -34334,6 +34370,830 @@ def _tf_entity_remove_start(decl_id, trial=False):
                                  *(["--trial"] if trial else [])],
                                 "harvester-secrets", check_busy=False, capture=True, cluster_user=None)
     return run
+
+
+# ---------------------------------------------------------------------------
+# 2.9.0 tâches 11-12 : état du magasin de secrets, tâches de fond, routes de
+# l'onglet Secrets des Paramètres. Les lectures passent par le magasin dans
+# le processus (métadonnées seules, jamais de valeur) ; toute écriture est
+# une action suivie `harvester-secrets ...` (parité CLI et interface).
+# ---------------------------------------------------------------------------
+SECRETS_PROBE_S = 30
+SECRETS_HOUSEKEEPING_S = 300
+SECRETS_DAILY_S = 86400
+SNAPSHOT_STALE_S = 2 * 86400            # plan, tâche 11 : objet protégé en avertissement
+SNAPSHOT_RETRY_S = 3600
+AUDIT_LOW_BYTES = 1 << 30               # plan, « Audit » : 1 Gio libre ou 10 % du volume
+AUDIT_LOW_RATIO = 0.10
+SECRET_ID_ROTATE_S = 30 * 86400         # point 260 : la minuterie de l'agent tourne le secret_id à 30 jours
+SECRET_ID_OVERDUE_S = 32 * 86400
+KVM_KEY_OLD_S = 365 * 86400             # point 260 : avertissement au-delà d'un an
+SECRETS_SNAPSHOT_LABEL = "secrets:snapshot"
+_SECRETS_PROBE = {"at": None, "ok": None}
+_SECRETS_DAILY = {"at": 0.0}
+_SECRET_REF_RE = re.compile(r"^openbao:[a-z][a-z0-9-]{1,40}/[A-Za-z0-9._/-]{1,200}#[a-z0-9_]{1,64}$")
+_SNAP_NAME_RE = re.compile(r"^openbao-[0-9A-Za-z_.-]{1,80}\.snap$")
+
+
+def _secrets_settings():
+    return _sst.load_settings(_state_dir())
+
+
+def _secrets_raw():
+    """Réglages tels qu'écrits (clés hors DEFAULTS : copie hors ligne)."""
+    try:
+        doc = json.loads((_state_dir() / _sst.SETTINGS_FILE).read_text())
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _secrets_agent_dir():
+    return _state_dir() / "secrets-agent"
+
+
+def _secrets_health():
+    """`health.json` de l'agent (root, sans valeur), {} sans agent."""
+    try:
+        doc = json.loads((_secrets_agent_dir() / "health.json").read_text())
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _secret_id_age_s(health=None, now=None):
+    now = time.time() if now is None else now
+    try:
+        return int(now - (_sst.openbao_dir() / "secret-id").stat().st_mtime)
+    except OSError:
+        a = (health or {}).get("secret_id_age_s")
+        return int(a) if isinstance(a, (int, float)) else None
+
+
+def _secrets_store_status(s):
+    if not _sst.openbao_active(s):
+        return {"state": "inactive"}
+    try:
+        st = _sst.store()
+        bao = st.openbao
+        out = bao.status() if bao is not None else {"state": "inactive"}
+    except Exception as e:                  # noqa: BLE001 : l'état se lit toujours
+        return {"state": "down", "error": getattr(e, "code", type(e).__name__)}
+    if out.get("cache_left_s"):
+        out["cache_until"] = int(time.time() + out["cache_left_s"])
+    out["last_probe_at"] = _SECRETS_PROBE["at"]
+    return out
+
+
+def _snapshot_slot(hhmm, now):
+    """Dernière échéance HH:MM (heure de la console) passée à `now`."""
+    try:
+        h, m = (int(x) for x in str(hhmm).split(":"))
+    except ValueError:
+        h, m = 2, 30
+    lt = time.localtime(now)
+    slot = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, h, m, 0, 0, 0, -1))
+    return slot if slot <= now else slot - 86400
+
+
+def _secrets_warnings(s, health, store_st, now=None):
+    """Avertissements de l'onglet et de la vue Disaster Recovery : codes
+    stables et leurs faits (jamais de valeur)."""
+    now = time.time() if now is None else now
+    out = []
+    if not _sst.openbao_active(s):
+        return out
+    if store_st.get("state") in ("down", "degraded"):
+        out.append({"code": "openbao-" + store_st["state"], "level": "error" if store_st["state"] == "down"
+                    else "warn", "error": store_st.get("error"), "since": store_st.get("down_since")})
+    agent = (_secrets_agent_dir() / "agent.json").is_file()
+    if not agent:
+        out.append({"code": "agent-missing", "level": "warn"})
+    age = _secret_id_age_s(health, now)
+    if age is not None and age > SECRET_ID_OVERDUE_S:
+        out.append({"code": "secret-id-overdue", "level": "warn", "age_s": age})
+    if s.get("mode") == "b1":
+        if (_secrets_raw().get("offline_copy") or {}).get("pending"):
+            out.append({"code": "offline-copy-pending", "level": "warn"})
+        snaps = s.get("snapshots") if isinstance(s.get("snapshots"), dict) else {}
+        last_ok = snaps.get("last_ok_at")
+        if not s.get("snapshot_dir"):
+            out.append({"code": "snapshot-dir-unset", "level": "warn"})
+        elif not last_ok or now - float(last_ok) > SNAPSHOT_STALE_S:
+            out.append({"code": "snapshot-stale", "level": "warn", "last_ok_at": last_ok})
+        if snaps.get("last_error") and float(snaps.get("last_error_at") or 0) > float(last_ok or 0):
+            out.append({"code": "snapshot-failed", "level": "error", "error": snaps.get("last_error"),
+                        "at": snaps.get("last_error_at")})
+        audit = health.get("audit") if isinstance(health.get("audit"), dict) else None
+        if audit and audit.get("total"):
+            free, total = int(audit.get("free") or 0), int(audit["total"])
+            if free < AUDIT_LOW_BYTES or free < AUDIT_LOW_RATIO * total:
+                out.append({"code": "audit-space-low", "level": "error", "free": free, "total": total})
+    if s.get("tf_entities_pending"):
+        out.append({"code": "tf-entities-pending", "level": "info", "count": len(s["tf_entities_pending"])})
+    return out
+
+
+def _secrets_banner():
+    """Pour le bandeau global (tout rôle) : mode, état, depuis quand, jusqu'à
+    quand le cache tient. Aucune adresse, aucun nom."""
+    s = _secrets_settings()
+    st = _secrets_store_status(s)
+    return {"active": _sst.openbao_active(s), "mode": s.get("mode"), "state": st.get("state"),
+            "down_since": st.get("down_since"), "cache_until": st.get("cache_until"),
+            "error": st.get("error")}
+
+
+def _secrets_status(admin=False):
+    s = _secrets_settings()
+    health = _secrets_health()
+    st = _secrets_store_status(s)
+    raw_oc = _secrets_raw().get("offline_copy")
+    mig = {c: {k: v for k, v in (e or {}).items() if k in ("at", "by", "complete", "confirmed")}
+           for c, e in (s.get("migrated") or {}).items()}
+    out = {
+        "mode": s.get("mode"), "active": _sst.openbao_active(s), "addr": s.get("addr"),
+        "mount": s.get("mount"), "prefix": s.get("prefix"), "store": st,
+        "settings": {k: s.get(k) for k in ("cache_ttl_min", "timeout", "originals_keep_days",
+                                           "plan_secrets_keep_days", "snapshot_dir", "snapshot_time",
+                                           "snapshot_keep")},
+        "migrated": mig, "outage_test": s.get("outage_test"), "tf_vault_ack": s.get("tf_vault_ack"),
+        "tf_entities_pending": list(s.get("tf_entities_pending") or []),
+        "offline_copy": raw_oc if isinstance(raw_oc, dict) else None,
+        "snapshots": s.get("snapshots") if isinstance(s.get("snapshots"), dict) else None,
+        "agent": {"present": (_secrets_agent_dir() / "agent.json").is_file(),
+                  "health_at": health.get("at"), "version": health.get("agent_version"),
+                  "b1_installed": health.get("b1_installed"), "current_key": health.get("current_key"),
+                  "openbao_version": health.get("version"), "audit": health.get("audit"),
+                  "secret_id_age_s": _secret_id_age_s(health)},
+        "credentials": (_sst.openbao_dir() / "role-id").is_file(),
+        "tf_flavor": TF_FLAVOR,
+        "warnings": _secrets_warnings(s, health, st),
+    }
+    if admin:
+        out["console_id"] = s.get("console_id")
+    try:
+        last = json.loads((_secrets_agent_dir() / "status.json").read_text())
+        out["agent"]["last"] = {k: last.get(k) for k in ("op", "state", "message", "code", "requested_by")}
+    except (OSError, ValueError):
+        out["agent"]["last"] = None
+    return out
+
+
+def _secret_class_rows():
+    """Tableau des classes (ordre du point 255) : secrets locaux et dans
+    OpenBao (comptés sur les déclarations locales, aucune lecture d'OpenBao),
+    marque de migration, originaux gardés, barrières."""
+    s = _secrets_settings()
+    fs = _sst.FileStore(_state_dir(), tf_dir=TF_WORKSPACES, repl_db=_replication_db_path())
+    raw = _secrets_raw()
+    pending_copy = bool((raw.get("offline_copy") or {}).get("pending")) and s.get("mode") == "b1"
+    others = [c for c in (s.get("migrated") or {}) if c != "kubeconfig"]
+    ot = s.get("outage_test") or {}
+    gate = None
+    if not others:
+        gate = "migrate-another-first"
+    elif not ot.get("ok_at"):
+        gate = "outage-test-first"
+    elif (ot.get("addr"), ot.get("mode")) != (s.get("addr"), s.get("mode")):
+        gate = "outage-test-again"
+    rows = []
+    for cls in _ssc.MIGRATION_ORDER:
+        local = bao = 0
+        try:
+            items = fs.list_local(cls)
+        except (OSError, ValueError):
+            items = []
+        for path, field in items:
+            try:
+                v = fs.read_local(cls, path, field)
+            except (OSError, ValueError):
+                continue
+            if isinstance(v, str) and _sst.is_openbao_ref(v):
+                bao += 1
+            elif v is not None:
+                local += 1
+        try:
+            ad = _ssc.adapter(cls)
+            originals = ad.originals(fs) if ad.originals else []
+        except (ValueError, OSError):
+            originals = []
+        m = (s.get("migrated") or {}).get(cls)
+        rows.append({"class": cls, "local": local, "openbao": bao,
+                     "migrated": {k: m.get(k) for k in ("at", "by", "complete", "confirmed")} if m else None,
+                     "originals": len(originals),
+                     "originals_oldest": min((float(o.get("at") or 0) for o in originals), default=None),
+                     "gate": gate if cls == "kubeconfig" else None,
+                     "offline_copy_pending": pending_copy})
+    return rows
+
+
+def _secret_names(cls):
+    """Secrets d'une classe gardés dans OpenBao : références seules (nom et
+    champ), pour l'historique des versions."""
+    fs = _sst.FileStore(_state_dir(), tf_dir=TF_WORKSPACES, repl_db=_replication_db_path())
+    out = []
+    for path, field in fs.list_local(cls):
+        try:
+            v = fs.read_local(cls, path, field)
+        except (OSError, ValueError):
+            continue
+        if isinstance(v, str) and _sst.is_openbao_ref(v):
+            out.append({"ref": v, "name": path, "field": field})
+    return out
+
+
+def _secrets_rotation_view(now=None):
+    """Âges et gestes de rotation (point 260), sans valeur : secret_id, clé
+    de descellement, clés SSH des hôtes KVM, clés transit des états
+    chiffrés, et l'âge des secrets que la console ne possède pas."""
+    now = time.time() if now is None else now
+    s = _secrets_settings()
+    health = _secrets_health()
+    fs = _sst.FileStore(_state_dir(), tf_dir=TF_WORKSPACES, repl_db=_replication_db_path())
+    st = _sst.store() if _sst.openbao_active(s) else None
+
+    def age_of(cls, path, field):
+        try:
+            v = fs.read_local(cls, path, field)
+        except (OSError, ValueError):
+            return None, "local"
+        if isinstance(v, str) and _sst.is_openbao_ref(v):
+            try:
+                vs = st.versions(v) if st else []
+                t = max((x.get("created") or "" for x in vs), default="")
+                return (now - _iso_ts(t) if t else None), "openbao"
+            except Exception:              # noqa: BLE001 : OpenBao coupé : âge inconnu
+                return None, "openbao"
+        f = fs.local_file(cls, path, field)
+        try:
+            return (now - Path(f).stat().st_mtime) if isinstance(f, Path) else None, "local"
+        except OSError:
+            return None, "local"
+    kvm = []
+    for path, field in fs.list_local("ssh-kvm"):
+        a, where = age_of("ssh-kvm", path, field)
+        kvm.append({"host": path, "age_s": int(a) if a is not None else None, "store": where,
+                    "old": a is not None and a > KVM_KEY_OLD_S})
+    owned = []
+    for cls in ("rancher-oidc", "replication-notify", "kubeconfig", "ssh-cluster"):
+        for path, field in fs.list_local(cls):
+            a, where = age_of(cls, path, field)
+            owned.append({"class": cls, "name": path, "field": field, "store": where,
+                          "age_s": int(a) if a is not None else None})
+    transit = []
+    for d in _tf_encrypted_decls():
+        transit.append({"decl": d, "key": _tfe.key_name(s.get("console_id") or "", d) if s.get("console_id") else None})
+    keys = health.get("keys") if isinstance(health.get("keys"), list) else []
+    cur = health.get("current_key")
+    return {"mode": s.get("mode"), "active": _sst.openbao_active(s),
+            "secret_id": {"age_s": _secret_id_age_s(health, now), "rotate_every_s": SECRET_ID_ROTATE_S,
+                          "agent": (_secrets_agent_dir() / "agent.json").is_file()},
+            "unseal_key": {"current": cur, "created": next((k.get("created") for k in keys if k.get("id") == cur),
+                                                           None)} if s.get("mode") == "b1" else None,
+            "kvm": kvm, "kvm_old_s": KVM_KEY_OLD_S, "transit": transit, "owned": owned}
+
+
+def _iso_ts(text):
+    try:
+        import calendar
+        return calendar.timegm(time.strptime(str(text)[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return 0
+
+
+def _tf_encrypted_decls():
+    """Déclarations dont l'état est chiffré (clés de premier niveau du
+    fichier, jamais le contenu)."""
+    out = set()
+    root = Path(TF_WORKSPACES)
+    for f in list(root.glob("*/decls/*/terraform.tfstate")) + list(root.glob(".kvm/*/decls/*/terraform.tfstate")):
+        try:
+            if not f.is_symlink() and _tfe.is_encrypted(f.read_text()):
+                out.add(f.parent.name)
+        except OSError:
+            continue
+    return sorted(out)
+
+
+def _secrets_inline_action(label, fn):
+    """Action suivie jouée dans le processus (geste sur la mémoire de la
+    console, sans outil : vider le cache)."""
+    run = ActionRun(uuid.uuid4().hex[:12], label, "", ["console"], dry_run=False)
+    run.result = {"by": current_user() or "console"}
+    run.required_role = "admin"
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    try:
+        msg = fn()
+        run.emit({"type": "step", "step_id": "done", "status": "done", "message": msg, "ts": time.time()})
+        run.status, run.exit_code = "done", 0
+    except Exception as e:                  # noqa: BLE001
+        run.emit({"type": "step", "step_id": "failed", "status": "error", "message": type(e).__name__,
+                  "ts": time.time()})
+        run.status, run.exit_code = "error", 1
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
+    run.close()
+    return run
+
+
+# -- tâches de fond -----------------------------------------------------------
+def _secrets_probe_tick():
+    """Sonde `sys/health` (sans jeton) : état du bandeau et métrique."""
+    s = _secrets_settings()
+    if not _sst.openbao_active(s):
+        metric_openbao_up.set(0)
+        return None
+    try:
+        bao = _sst.store().openbao
+        ok = bool(bao.probe()) if bao is not None else False
+    except Exception:                       # noqa: BLE001
+        ok = False
+    _SECRETS_PROBE.update(at=time.time(), ok=ok)
+    metric_openbao_up.set(1 if ok else 0)
+    return ok
+
+
+def _secrets_running(label):
+    with ACTIONS_LOCK:
+        return any(r.action == label and r.status in ("starting", "running") for r in ACTIONS.values())
+
+
+def _secrets_service_action(label, args):
+    with app.app_context():
+        run, _err = _secrets_tool_action(label, args, actor="service")
+    return run
+
+
+def _secrets_housekeeping_tick(now=None):
+    """Instantané planifié de B1 (point 259 : chaque jour à `snapshot_time`,
+    réessai horaire après un échec), puis une fois par jour : clés transit
+    échues (décision 278) et secrets orphelins. Rend les actions lancées."""
+    now = time.time() if now is None else now
+    s = _secrets_settings()
+    started = []
+    if not _sst.openbao_active(s) or not (BIN_DIR / SECRETS_TOOL).is_file():
+        return started
+    snaps = s.get("snapshots") if isinstance(s.get("snapshots"), dict) else {}
+    if s.get("mode") == "b1" and s.get("snapshot_dir"):
+        slot = _snapshot_slot(s.get("snapshot_time"), now)
+        last_ok = float(snaps.get("last_ok_at") or 0)
+        last_err = float(snaps.get("last_error_at") or 0)
+        if last_ok < slot and (last_err < slot or now - last_err >= SNAPSHOT_RETRY_S) \
+                and not _secrets_running(SECRETS_SNAPSHOT_LABEL):
+            run = _secrets_service_action(SECRETS_SNAPSHOT_LABEL, ["snapshot"])
+            if run is not None:
+                started.append(run)
+    if now - _SECRETS_DAILY["at"] >= SECRETS_DAILY_S:
+        _SECRETS_DAILY["at"] = now
+        retired = s.get("tf_keys_retired") or {}
+        if any(isinstance(e, dict) and now >= float(e.get("at") or 0) + (0 if e.get("trial") else 30 * 86400)
+               for e in retired.values()) and not _secrets_running("secrets:tf-keys-sweep"):
+            run = _secrets_service_action("secrets:tf-keys-sweep", ["tf-keys", "sweep"])
+            if run is not None:
+                started.append(run)
+        if not _secrets_running("secrets:sweep-orphans"):
+            run = _secrets_service_action("secrets:sweep-orphans", [
+                "sweep-orphans", f"--tf-dir={TF_WORKSPACES}", f"--repl-db={_replication_db_path()}"])
+            if run is not None:
+                started.append(run)
+    return started
+
+
+def _secrets_background_loop():
+    time.sleep(90)                             # après la vague de démarrage
+    last_hk = 0.0
+    while True:
+        try:
+            _secrets_probe_tick()
+            if time.time() - last_hk >= SECRETS_HOUSEKEEPING_S:
+                last_hk = time.time()
+                _secrets_housekeeping_tick()
+        except Exception as e:                 # noqa: BLE001 : la tâche de fond ne tombe jamais
+            log.warning("secret store housekeeping failed: %s", type(e).__name__)
+        time.sleep(SECRETS_PROBE_S)
+
+
+def _start_secrets_background():
+    if IS_READ_WORKER:
+        return None
+    t = threading.Thread(target=_secrets_background_loop, daemon=True, name="secrets-background")
+    t.start()
+    return t
+
+
+# -- lectures -----------------------------------------------------------------
+@app.route("/api/secrets/banner", methods=["GET"])
+@requires_auth
+def api_secrets_banner():
+    return jsonify(_secrets_banner())
+
+
+@app.route("/api/secrets/status", methods=["GET"])
+@requires_auth
+def api_secrets_status():
+    return jsonify(_secrets_status(admin=current_role() == "admin"))
+
+
+@app.route("/api/secrets/classes", methods=["GET"])
+@requires_auth
+def api_secrets_classes():
+    return jsonify({"classes": _secret_class_rows(), "order": list(_ssc.MIGRATION_ORDER)})
+
+
+@app.route("/api/secrets/secrets", methods=["GET"])
+@requires_auth
+def api_secrets_names():
+    cls = str(request.args.get("class") or "")
+    if cls not in _ssc.MIGRATABLE or cls == "plan-run":
+        return jsonify({"error": "unknown secret class", "code": "bad-input"}), 400
+    return jsonify({"class": cls, "secrets": _secret_names(cls)})
+
+
+@app.route("/api/secrets/versions", methods=["GET"])
+@requires_auth
+def api_secrets_versions():
+    """Historique d'un secret (décision 274) : version, date, auteur, action ;
+    métadonnées seules, jamais la valeur."""
+    ref = str(request.args.get("ref") or "")
+    if not _SECRET_REF_RE.match(ref) or ".." in ref:
+        return jsonify({"error": "openbao: reference expected", "code": "bad-input"}), 400
+    try:
+        vs = _sst.store().versions(ref)
+    except _sst.SecretError as e:
+        return jsonify({"error": str(e), "code": e.code}), 503
+    except _sst.SecretMissing:
+        return jsonify({"error": "no such secret", "code": "openbao-missing"}), 404
+    clean = [{k: v.get(k) for k in ("version", "created", "actor", "action", "deleted", "destroyed")} for v in vs]
+    return jsonify({"ref": ref, "versions": clean})
+
+
+@app.route("/api/secrets/rotation", methods=["GET"])
+@requires_auth
+def api_secrets_rotation():
+    return jsonify(_secrets_rotation_view())
+
+
+@app.route("/api/secrets/snapshots", methods=["GET"])
+@requires_auth
+def api_secrets_snapshots():
+    s = _secrets_settings()
+    health = _secrets_health()
+    d = s.get("snapshot_dir")
+    files = []
+    if isinstance(d, str) and os.path.isabs(d):
+        try:
+            for n in sorted(os.listdir(d)):
+                if not _SNAP_NAME_RE.match(n):
+                    continue
+                st_ = os.lstat(os.path.join(d, n))
+                if _stat.S_ISREG(st_.st_mode):
+                    files.append({"file": n, "bytes": st_.st_size, "at": int(st_.st_mtime), "where": "dir"})
+        except OSError:
+            pass
+    agent = [dict(f, where="agent") for f in (health.get("snapshots") or []) if isinstance(f, dict)]
+    return jsonify({"mode": s.get("mode"), "dir": d, "time": s.get("snapshot_time"), "keep": s.get("snapshot_keep"),
+                    "last": s.get("snapshots") if isinstance(s.get("snapshots"), dict) else None,
+                    "files": files, "agent_files": agent, "current_key": health.get("current_key"),
+                    "keys": health.get("keys") or [], "stale_after_s": SNAPSHOT_STALE_S})
+
+
+@app.route("/api/secrets/tf-keys", methods=["GET"])
+@requires_auth
+def api_secrets_tf_keys():
+    s = _secrets_settings()
+    rows = []
+    now = time.time()
+    for decl, e in sorted((s.get("tf_keys_retired") or {}).items()):
+        if not isinstance(e, dict) or not s.get("console_id"):
+            continue
+        at = int(e.get("at") or 0)
+        due = at if e.get("trial") else at + 30 * 86400
+        rows.append({"decl": decl, "key": _tfe.key_name(s["console_id"], decl), "retired_at": at,
+                     "delete_after": due, "due": now >= due, "trial": bool(e.get("trial")),
+                     "error": e.get("error")})
+    return jsonify({"keep_days": 30, "keys": rows, "entities_pending": list(s.get("tf_entities_pending") or [])})
+
+
+@app.route("/api/secrets/bundles", methods=["GET"])
+@requires_auth
+def api_secrets_bundles():
+    """Paquets OpenBao déposés par install.sh (staged/), noms seuls."""
+    import openbao_bundle as _obn
+    d = _secrets_agent_dir() / "staged"
+    names = []
+    try:
+        names = sorted(n for n in os.listdir(d) if _obn.NAME_RE.match(n))
+    except OSError:
+        pass
+    return jsonify({"bundles": names, "agent": (_secrets_agent_dir() / "agent.json").is_file()})
+
+
+@app.route("/api/secrets/assistant", methods=["GET"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_secrets_assistant():
+    """Commandes `bao` du mode A, rendues par l'outil (aucune valeur : le
+    `secret_id` est emballé chez le client)."""
+    addr, cidr = str(request.args.get("addr") or ""), str(request.args.get("cidr") or "")
+    mount = str(request.args.get("mount") or "harvester-ops")
+    prefix = str(request.args.get("prefix") or "")
+    argv = [sys.executable, str(BIN_DIR / SECRETS_TOOL), "assistant", "--addr", addr, "--console-cidr", cidr,
+            "--mount", mount] + (["--prefix", prefix] if prefix else [])
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+                           env={k: v for k, v in os.environ.items() if not k.startswith(("VAULT_", "BAO_"))})
+        doc = json.loads(r.stdout or "{}")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return jsonify({"error": "the assistant could not run", "code": "assistant-failed"}), 500
+    return jsonify(doc), (200 if r.returncode == 0 else 400)
+
+
+# -- gestes (administrateur, actions suivies) ------------------------------------
+def _secrets_body():
+    return request.get_json(force=True, silent=True) or {}
+
+
+def _secrets_accepted(run, err):
+    if err:
+        return err
+    return jsonify({"action_id": run.id}), 202
+
+
+def _secrets_confirm_ok(data):
+    cid = _secrets_settings().get("console_id") or ""
+    return bool(cid) and str(data.get("confirm") or "") == cid
+
+
+_SECRETS_ADDR_RE = re.compile(r"^https?://[A-Za-z0-9.:\[\]-]{1,253}(:[0-9]{1,5})?/?$")
+_SECRETS_MOUNT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+_SECRETS_PREFIX_RE = re.compile(r"^[a-z0-9][a-z0-9/_-]{0,126}$")
+
+
+def _secrets_target_args(data):
+    """--addr/--mount/--prefix contrôlés (aucun texte libre ne part tel quel)."""
+    args = []
+    if data.get("addr"):
+        if not _SECRETS_ADDR_RE.match(str(data["addr"])):
+            return None, "addr: https://host:port expected"
+        args += ["--addr", str(data["addr"])]
+    if data.get("mount"):
+        if not _SECRETS_MOUNT_RE.match(str(data["mount"])):
+            return None, "mount: lowercase name expected"
+        args += ["--mount", str(data["mount"])]
+    if data.get("prefix"):
+        if not _SECRETS_PREFIX_RE.match(str(data["prefix"])) or ".." in str(data["prefix"]):
+            return None, "prefix: lowercase path expected"
+        args += ["--prefix", str(data["prefix"])]
+    return args, None
+
+
+def _secrets_private(data):
+    private = {k: str(data[k]) for k in ("wrap_token", "ca_pem") if isinstance(data.get(k), str) and data[k]}
+    if len(private.get("ca_pem", "")) > 65536 or len(private.get("wrap_token", "")) > 512:
+        return None
+    return private
+
+
+@app.route("/api/secrets/check", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_check():
+    data = _secrets_body()
+    mode = data.get("mode")
+    if mode not in ("a", "b1"):
+        return jsonify({"error": "mode a or b1 expected", "code": "bad-input"}), 400
+    args, why = _secrets_target_args(data) if mode == "a" else ([], None)
+    private = _secrets_private(data)
+    if why or private is None:
+        return jsonify({"error": why or "value too long", "code": "bad-input"}), 400
+    extra = (["--transit"] if data.get("transit") else []) + (["--dry-run"] if data.get("dry_run") else [])
+    return _secrets_accepted(*_secrets_tool_action("secrets:check", ["check", "--mode", mode, *args, *extra],
+                                                   private=private))
+
+
+@app.route("/api/secrets/enable", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_enable():
+    import openbao_bundle as _obn
+    data = _secrets_body()
+    mode = data.get("mode")
+    if mode == "b1":
+        name = str(data.get("bundle") or "")
+        if not _obn.NAME_RE.match(name) or not (_secrets_agent_dir() / "staged" / name).is_file():
+            return jsonify({"error": "choose an OpenBao bundle deposited by install.sh", "code": "bad-input"}), 400
+        return _secrets_accepted(*_secrets_tool_action(
+            "secrets:enable-b1", ["enable", "--mode", "b1", "--bundle", str(_secrets_agent_dir() / "staged" / name)]))
+    if mode != "a":
+        return jsonify({"error": "mode a or b1 expected", "code": "bad-input"}), 400
+    args, why = _secrets_target_args(data)
+    private = _secrets_private(data)
+    role_id = str(data.get("role_id") or "")
+    if why or private is None or not re.match(r"^[A-Za-z0-9-]{8,64}$", role_id) or not data.get("addr") \
+            or not (private or {}).get("wrap_token"):
+        return jsonify({"error": why or "addr, role_id and the wrapping token are expected",
+                        "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action(
+        "secrets:enable-a", ["enable", "--mode", "a", "--role-id", role_id, *args], private=private))
+
+
+@app.route("/api/secrets/disable", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_disable():
+    data = _secrets_body()
+    if not _secrets_confirm_ok(data):
+        return jsonify({"error": "type the console identifier to confirm", "code": "confirmation-required"}), 400
+    args = ["disable"] + (["--remove-b1"] if data.get("remove_b1") else []) + \
+        (["--dry-run"] if data.get("dry_run") else [])
+    return _secrets_accepted(*_secrets_tool_action("secrets:disable", args))
+
+
+def _secrets_class_arg(data):
+    cls = str(data.get("class") or "")
+    return cls if cls in _ssc.MIGRATION_ORDER else None
+
+
+@app.route("/api/secrets/migrate", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_migrate():
+    data = _secrets_body()
+    cls, to = _secrets_class_arg(data), data.get("to")
+    if not cls or to not in ("openbao", "local"):
+        return jsonify({"error": "class and to (openbao or local) expected", "code": "bad-input"}), 400
+    args = ["migrate", "--to", to, "--class", cls]
+    if data.get("name"):
+        if not re.match(r"^[A-Za-z0-9._/-]{1,200}$", str(data["name"])) or ".." in str(data["name"]):
+            return jsonify({"error": "bad secret name", "code": "bad-input"}), 400
+        args += ["--name", str(data["name"])]
+    if data.get("replace_existing"):
+        args.append("--replace-existing")
+    if data.get("dry_run"):
+        args.append("--dry-run")
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:migrate-{to}:{cls}", args))
+
+
+@app.route("/api/secrets/confirm", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_confirm():
+    cls = _secrets_class_arg(_secrets_body())
+    if not cls:
+        return jsonify({"error": "class expected", "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:confirm:{cls}", ["confirm", "--class", cls]))
+
+
+@app.route("/api/secrets/outage-test", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_outage_test():
+    return _secrets_accepted(*_secrets_tool_action("secrets:outage-test", ["outage-test"]))
+
+
+@app.route("/api/secrets/cache/clear", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_cache_clear():
+    def clear():
+        _sst.store().clear_cache()
+        return "cache emptied: the next reads go to OpenBao"
+    run = _secrets_inline_action("secrets:cache-clear", clear)
+    return jsonify({"action_id": run.id}), 202
+
+
+@app.route("/api/secrets/rollback", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_rollback():
+    data = _secrets_body()
+    ref = str(data.get("ref") or "")
+    try:
+        version = int(data.get("version"))
+    except (TypeError, ValueError):
+        version = 0
+    if not _SECRET_REF_RE.match(ref) or ".." in ref or version < 1:
+        return jsonify({"error": "ref and version expected", "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action("secrets:rollback", ["rollback", ref, "--version", str(version)]))
+
+
+@app.route("/api/secrets/rotate", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_rotate():
+    data = _secrets_body()
+    what, target = data.get("what"), str(data.get("target") or "")
+    if what not in ("secret-id", "unseal-key", "transit", "ssh-kvm"):
+        return jsonify({"error": "what: secret-id, unseal-key, transit or ssh-kvm", "code": "bad-input"}), 400
+    if what in ("transit", "ssh-kvm") and not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$", target):
+        return jsonify({"error": "target expected", "code": "bad-input"}), 400
+    if what == "unseal-key" and not _secrets_confirm_ok(data):
+        return jsonify({"error": "type the console identifier to confirm", "code": "confirmation-required"}), 400
+    args = ["rotate", what] + ([target] if what in ("transit", "ssh-kvm") else [])
+    label = f"secrets:rotate-{what}" + (f":{target}" if target and what in ("transit", "ssh-kvm") else "")
+    # rotation d'une clé KVM : l'outil reçoit la copie de la clé en service
+    # (il ne se connecte pas pour une lecture ordinaire, revue I6)
+    return _secrets_accepted(*_secrets_tool_action(label, args, secret_clusters=(
+        (f"kvm:{target}",) if what == "ssh-kvm" else ())))
+
+
+@app.route("/api/secrets/snapshot", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_snapshot():
+    if _secrets_running(SECRETS_SNAPSHOT_LABEL):
+        return jsonify({"error": "a snapshot is being taken", "code": "busy"}), 409
+    return _secrets_accepted(*_secrets_tool_action(SECRETS_SNAPSHOT_LABEL, ["snapshot"]))
+
+
+@app.route("/api/secrets/restore", methods=["POST"])
+@requires_auth
+@_rate_limit("3/minute")
+def api_secrets_restore():
+    data = _secrets_body()
+    name = str(data.get("file") or "")
+    if not _SNAP_NAME_RE.match(name):
+        return jsonify({"error": "snapshot file name expected", "code": "snapshot-bad-name"}), 400
+    if not _secrets_confirm_ok(data):
+        return jsonify({"error": "type the console identifier to confirm", "code": "confirmation-required"}), 400
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:restore:{name}", ["restore", name]))
+
+
+_SECRETS_SETTABLE = ("cache_ttl_min", "timeout", "originals_keep_days", "plan_secrets_keep_days",
+                     "snapshot_dir", "snapshot_time", "snapshot_keep")
+
+
+@app.route("/api/secrets/settings", methods=["PUT"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_settings():
+    data = _secrets_body()
+    sets = []
+    for k in _SECRETS_SETTABLE:
+        if k in data:
+            v = "" if data[k] is None else str(data[k])
+            if "\n" in v or len(v) > 4096:
+                return jsonify({"error": f"{k}: bad value", "code": "bad-input"}), 400
+            sets += ["--set", f"{k}={v}"]
+    if not sets:
+        return jsonify({"error": "nothing to change", "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action("secrets:settings", ["settings", *sets]))
+
+
+@app.route("/api/secrets/tf-keys/delete", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_tf_keys_delete():
+    data = _secrets_body()
+    decl = str(data.get("decl") or "")
+    if not _tfs.ID_RE.match(decl) or str(data.get("confirm") or "") != decl:
+        return jsonify({"error": "type the declaration identifier again to delete its key",
+                        "code": "confirmation-required"}), 400
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:tf-key-delete:{decl}",
+                                                   ["tf-keys", "delete", decl, "--confirm", decl]))
+
+
+@app.route("/api/secrets/tf-entity-done", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_tf_entity_done():
+    decl = str(_secrets_body().get("decl") or "")
+    if not _tfs.ID_RE.match(decl):
+        return jsonify({"error": "declaration identifier expected", "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:tf-entity-done:{decl}",
+                                                   ["tf-entity-remove", decl, "--done"]))
+
+
+@app.route("/api/secrets/tf-entity-commands", methods=["GET"])
+@requires_auth
+def api_secrets_tf_entity_commands():
+    """Commandes `bao` du mode A pour retirer les entités notées (aucune valeur)."""
+    s = _secrets_settings()
+    rows = []
+    for decl in s.get("tf_entities_pending") or []:
+        try:
+            alias = _opol.tf_alias(decl)
+        except ValueError:
+            continue
+        rows.append({"decl": decl, "alias": alias, "commands": [
+            "ACCESSOR=$(bao auth list -format=json | jq -r '.\"token/\".accessor')",
+            f"ID=$(bao write -field=id identity/lookup/entity alias_name={alias} alias_mount_accessor=$ACCESSOR)",
+            "bao delete identity/entity/id/$ID"]})
+    return jsonify({"entities": rows})
+
+
+@app.route("/api/secrets/sweep-orphans", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_sweep_orphans():
+    args = ["sweep-orphans", f"--tf-dir={TF_WORKSPACES}", f"--repl-db={_replication_db_path()}"]
+    if _secrets_body().get("dry_run"):
+        args.append("--dry-run")
+    return _secrets_accepted(*_secrets_tool_action("secrets:sweep-orphans", args))
 
 
 @app.route("/api/tf-declarations/<decl_id>/decrypt-state", methods=["POST"])
@@ -39435,6 +40295,7 @@ if __name__ == "__main__":
     _announce_setup()
     try:
         _start_secret_originals_sweeper()        # 2.9.0 : délai de garde des originaux migrés
+        _start_secrets_background()              # 2.9.0 : sonde, instantanés, clés transit, orphelins
         _start_plan_secrets_sweeper()            # 2.9.0 : secrets des déroulés finis ou expirés
     except Exception as _e:                      # noqa: BLE001
         log.warning("secret originals sweeper startup failed: %s", _e)

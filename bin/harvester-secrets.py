@@ -16,7 +16,10 @@
     harvester-secrets rollback REF --version N [--dry-run]
     harvester-secrets rotate secret-id | unseal-key | transit DECL | ssh-kvm HOST
     harvester-secrets offline-copy export [--to FILE] | done | ack --key-id ID
-    harvester-secrets snapshot [--dest DIR] [--dry-run]
+    harvester-secrets snapshot [--dest DIR] [--keep N] [--dry-run]
+    harvester-secrets snapshots
+    harvester-secrets settings [--set KEY=VALUE ...]
+    harvester-secrets sweep-orphans [--class C ...] [--min-age-days N] [--dry-run]
     harvester-secrets restore FILE [--dry-run]
     harvester-secrets bundle --registry R --user U --password-stdin [--repository P] [--tag T]
                              [--cosign-key FILE] -o DIR|FILE
@@ -45,6 +48,7 @@ Plan : docs/design/2026-11-08-openbao-290-plan.md (tâches 7, 8, 11).
 """
 
 import argparse
+import calendar
 import hashlib
 import importlib.util
 import json
@@ -52,6 +56,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -71,6 +76,7 @@ AGENT_TIMEOUT = {"b1-install": 1800, "b1-upgrade": 1800, "restore-snapshot": 180
 SNAP_RE = re.compile(r"^openbao-[0-9A-Za-z_.-]{1,80}\.snap$")
 COSIGN_KEY = HERE.parent / "config" / "openbao" / "application-collection-cosign.pub"
 ARGS = argparse.Namespace(id=None, actor=None)
+SPEC = {}                     # --spec : fichier 0600 de la console (jeton d'enveloppe, CA), effacé par elle
 SERVICE_ACCOUNT = "harvester-ops"
 # 2.9.0, revue de la seconde passe (I1) : lancé en root, l'outil ne fait
 # lui-même que l'appel en mémoire à l'agent ; tout le reste tourne dans un
@@ -84,6 +90,7 @@ AGENT_CHANNEL = None          # fils : envoie une demande au parent root, rend s
 INPUT_FDS = {}                # chemin donné par l'administrateur -> fd ouvert par root
 OUTPUT_FDS = {}
 REQUEST_LINE_MAX = 64 << 10
+ROTATE_RUNNER = None                          # ssh de la rotation d'une clé KVM (tests)
 OUTAGE_ADDR = "https://127.0.0.1:9"           # panne simulée : port sans serveur (discard)
 
 
@@ -595,8 +602,10 @@ def cmd_check(args):
     doc = raw_settings()
     cid = ensure_console_id(doc)
     addr, ca, mount = _mode_target(args, s)
+    if args.mode == "a" and SPEC.get("ca_pem"):
+        ca = SPEC["ca_pem"]
     prefix = args.prefix or s["prefix"] or f"consoles/{cid}"
-    wrap = sys.stdin.readline().strip() if args.wrapped_stdin else None
+    wrap = SPEC.get("wrap_token") or (sys.stdin.readline().strip() if args.wrapped_stdin else None)
     res = run_checks(addr, ca, mount, prefix, cid, b1=args.mode == "b1", wrap=wrap,
                      mutate=not args.dry_run, transit=args.transit or args.mode == "b1")
     ok = all_green(res)
@@ -614,12 +623,12 @@ def cmd_enable(args):
 
 
 def _enable_a(args, doc):
-    if not args.addr or not args.role_id or not args.wrapped_stdin:
+    if not args.addr or not args.role_id or not (args.wrapped_stdin or SPEC.get("wrap_token")):
         return refuse("bad-input", "mode a needs --addr, --role-id and --wrapped-stdin")
-    wrap = sys.stdin.readline().strip()
+    wrap = SPEC.get("wrap_token") or sys.stdin.readline().strip()
     if not wrap:
         return refuse("bad-input", "no wrapping token on stdin")
-    ca = read_input_text(args.ca) if args.ca else None
+    ca = read_input_text(args.ca) if args.ca else (SPEC.get("ca_pem") or None)
     cid = ensure_console_id(doc)
     mount = args.mount or pol.DEFAULT_MOUNT
     prefix = args.prefix or f"consoles/{cid}"
@@ -1248,8 +1257,80 @@ def cmd_rollback(args):
     return EXIT_OK
 
 
+def _rotate_ssh_kvm(args, s):
+    """Point 260 : rotation de la clé SSH d'un hôte KVM (kvm_host.rotate_key),
+    sous le verrou des déclarations d'hôtes. Clé locale ou dans OpenBao ; les
+    copies de travail vont sur tmpfs quand OpenBao est actif, sinon dans un
+    répertoire privé de l'état ; effacées à la fin."""
+    import kvm_decl
+    import kvm_host
+    name = args.target or ""
+    try:
+        kvm_decl.decl_path(state(), name)
+    except kvm_decl.DeclError:
+        return refuse("bad-input", "rotate ssh-kvm HOST: declared KVM host name expected")
+    sd = state()
+    try:
+        with kvm_decl.decl_lock(sd):
+            try:
+                decl = kvm_decl.load(sd, name)
+            except FileNotFoundError:
+                return refuse("not-found", f"no KVM host {name}")
+            value = decl["ssh_key"]
+            in_bao = isinstance(value, str) and value.startswith("openbao:")
+            if args.dry_run:
+                out({"ok": True, "dry_run": True, "host": name, "store": "openbao" if in_bao else "local",
+                     "would": ["new key pair", "new public key added with the current key",
+                               "test login with the new key", "new key stored",
+                               "old public key removed with the new key"]})
+                return EXIT_OK
+            bao = admin_store(s) if in_bao else None
+            if in_bao:
+                old_text = bao.get(value, ARGS.actor)
+            else:
+                old_text = kvm_decl.resolve(sd, value).read_text()
+            base = ss.secret_files_dir(s) if ss.openbao_active(s) else kvm_decl.ssh_dir(sd)
+            Path(base).mkdir(parents=True, exist_ok=True, mode=0o700)
+            work = Path(tempfile.mkdtemp(prefix="rotate-", dir=str(base)))
+            try:
+                old_key, new_key = work / "old", work / "new"
+                fd = os.open(old_key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    f.write(old_text if old_text.endswith("\n") else old_text + "\n")
+                stamp = time.strftime("%Y%m%d", time.gmtime())
+                r = subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C",
+                                    f"harvester-ops {name} {stamp}", "-f", str(new_key)],
+                                   capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+                o = subprocess.run(["ssh-keygen", "-y", "-f", str(old_key)], capture_output=True, text=True,
+                                   timeout=30, stdin=subprocess.DEVNULL)
+                if r.returncode != 0 or o.returncode != 0:
+                    return fail("ssh-keygen-failed", "ssh-keygen could not make or read a key")
+                new_text = new_key.read_text()
+                new_pub = (work / "new.pub").read_text().strip()
+
+                def put(text):
+                    if in_bao:
+                        bao.put("ssh-kvm", name, "private_key", text, actor=ARGS.actor, action=ARGS.id)
+                    else:
+                        kvm_decl.write_key(sd, name, text)
+                res = kvm_host.rotate_key(decl, sd, old_key, new_key, o.stdout.strip(), new_pub,
+                                          lambda: put(new_text), lambda: put(old_text), step=step,
+                                          runner=ROTATE_RUNNER or subprocess.run)
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+    except TimeoutError as e:
+        return refuse("kvm-busy", str(e))
+    except kvm_host.KvmError as e:
+        return fail(f"kvm-{e.kind}", f"key rotation of {name} failed, previous key kept: {e.message}"[:300])
+    out({"ok": True, "rotated": "ssh-kvm", "host": name, "old_refused": res["old_refused"],
+         "store": "openbao" if in_bao else "local"})
+    return EXIT_OK
+
+
 def cmd_rotate(args):
     s = settings()
+    if args.what == "ssh-kvm":
+        return _rotate_ssh_kvm(args, s)
     if not ss.openbao_active(s):
         return refuse("openbao-inactive", "OpenBao is not active")
     if args.what == "secret-id":
@@ -1283,27 +1364,235 @@ def cmd_rotate(args):
         admin_client(s=s).transit_rotate(key)
         out({"ok": True, "rotated": "transit", "key": key})
         return EXIT_OK
-    return refuse("not-available", "KVM host key rotation is not available in this build")
+    return refuse("bad-input", "unknown rotation")
+
+
+KEY_ID_RE = re.compile(r"^hops-[0-9]{8}-[0-9]{1,4}$")
+
+
+def agent_health():
+    """`health.json` de l'agent (sans valeur) : clé en service, ses
+    instantanés, place du volume d'audit, âge du secret_id."""
+    try:
+        doc = json.loads((state() / "secrets-agent" / "health.json").read_text())
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def snapshot_files(dest):
+    """Instantanés d'un répertoire : fichiers ordinaires au nom attendu, du
+    plus ancien au plus récent (la date est dans le nom)."""
+    out = []
+    try:
+        names = os.listdir(dest)
+    except OSError:
+        return out
+    for n in sorted(names):
+        if not SNAP_RE.match(n):
+            continue
+        try:
+            st = os.lstat(os.path.join(dest, n))
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode):
+            out.append({"file": n, "bytes": st.st_size, "at": int(st.st_mtime)})
+    return out
+
+
+def _snapshot_dest(raw, given=None):
+    dest = Path(given or raw.get("snapshot_dir") or "")
+    if not dest.is_absolute() or not dest.is_dir():
+        raise CliError("bad-input", "give --dest (an existing absolute directory) or set snapshot_dir", EXIT_REFUSED)
+    try:
+        dest.resolve().relative_to(state().resolve())
+        raise CliError("snapshot-in-state-dir", "never in the state directory (it is backed up with the console)",
+                       EXIT_REFUSED)
+    except ValueError:
+        pass
+    return dest
 
 
 def cmd_snapshot(args):
-    s = settings()
+    """Instantané raft de B1 (point 259) : `openbao-<date>-<clé>.snap` 0600
+    dans le répertoire réglé (jamais sous l'état), la clé de descellement en
+    service dans le nom (lue dans l'état de l'agent, sans valeur) ; les
+    plus anciens au-delà de `snapshot_keep` (14) effacés. Résultat gardé
+    dans les réglages (dernier réussi, dernière erreur)."""
+    s, raw = settings(), raw_settings()
     if s["mode"] != "b1" or not ss.openbao_active(s):
         return refuse("b1-only", "snapshots are taken in mode B1 (in mode A the server belongs to you)")
-    dest = Path(args.dest or raw_settings().get("snapshot_dir") or "")
-    if not dest.is_absolute() or not dest.is_dir():
-        return refuse("bad-input", "give --dest (an existing absolute directory) or set snapshot_dir")
-    try:
-        dest.resolve().relative_to(state().resolve())
-        return refuse("snapshot-in-state-dir", "never in the state directory (it is backed up with the console)")
-    except ValueError:
-        pass
-    name = f"openbao-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}.snap"
+    dest = _snapshot_dest(raw, args.dest)
+    key = str(agent_health().get("current_key") or "")
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    name = f"openbao-{stamp}-{key}.snap" if KEY_ID_RE.match(key) else f"openbao-{stamp}.snap"
+    keep = args.keep or s["snapshot_keep"]
     if args.dry_run:
-        out({"ok": True, "dry_run": True, "file": name})
+        out({"ok": True, "dry_run": True, "file": name, "keep": keep})
         return EXIT_OK
-    n = admin_client(s=s).raft_snapshot(str(dest / name))
-    out({"ok": True, "file": name, "bytes": n})
+
+    def record(**kw):
+        doc = raw_settings()
+        doc["snapshots"] = dict(doc.get("snapshots") or {}, **kw)
+        save_settings(doc)
+    try:
+        n = admin_client(s=s).raft_snapshot(str(dest / name))
+    except (oc.OpenBaoError, OSError) as e:
+        code = getattr(e, "code", None) or type(e).__name__
+        record(last_error=code, last_error_at=int(time.time()))
+        return fail("snapshot-failed", f"snapshot not taken ({code})")
+    step("snapshot", "done", f"{name}, {n} bytes")
+    files = snapshot_files(dest)
+    pruned = [f["file"] for f in files[:-keep]] if len(files) > keep else []
+    for f in pruned:
+        try:
+            os.unlink(dest / f)
+        except OSError:
+            pass
+    if pruned:
+        step("retention", "done", f"{len(pruned)} older snapshot(s) removed, {keep} kept")
+    record(last_ok_at=int(time.time()), last_file=name, bytes=n, last_error=None, last_error_at=None)
+    out({"ok": True, "file": name, "bytes": n, "key_id": key or None, "pruned": pruned})
+    return EXIT_OK
+
+
+def cmd_snapshots(args):
+    """Liste sans valeur : instantanés du répertoire réglé et ceux de
+    l'agent (rotation, avant une mise à jour), réglages, dernier résultat."""
+    s, raw = settings(), raw_settings()
+    d = raw.get("snapshot_dir")
+    h = agent_health()
+    out({"ok": True, "mode": s["mode"], "dir": d, "time": s["snapshot_time"], "keep": s["snapshot_keep"],
+         "files": snapshot_files(d) if isinstance(d, str) and os.path.isabs(d) else [],
+         "agent_files": h.get("snapshots") or [], "keys": h.get("keys") or [],
+         "current_key": h.get("current_key"), "last": s.get("snapshots") or None})
+    return EXIT_OK
+
+
+SETTABLE = {
+    "cache_ttl_min": ss.CACHE_TTL_RANGE, "originals_keep_days": ss.ORIGINALS_KEEP_RANGE,
+    "plan_secrets_keep_days": ss.PLAN_SECRETS_KEEP_RANGE, "snapshot_keep": ss.SNAPSHOT_KEEP_RANGE,
+    "timeout": (5, 60), "snapshot_time": None, "snapshot_dir": None,
+}
+
+
+def cmd_settings(args):
+    """Réglages sans secret, modifiables à chaud (point 269) : `--set
+    CLÉ=VALEUR` (bornes vérifiées), sinon affichage."""
+    doc = raw_settings()
+    changed = {}
+    for item in args.set or []:
+        k, sep, v = item.partition("=")
+        if not sep or k not in SETTABLE:
+            return refuse("bad-input", f"unknown setting {k!r} (allowed: {', '.join(sorted(SETTABLE))})")
+        rng = SETTABLE[k]
+        if rng:
+            try:
+                n = int(v)
+            except ValueError:
+                return refuse("bad-input", f"{k}: integer expected")
+            if not rng[0] <= n <= rng[1]:
+                return refuse("bad-input", f"{k}: between {rng[0]} and {rng[1]}")
+            changed[k] = n
+        elif k == "snapshot_time":
+            if not ss.SNAPSHOT_TIME_RE.match(v):
+                return refuse("bad-input", "snapshot_time: HH:MM expected")
+            changed[k] = v
+        else:
+            if v == "":
+                changed[k] = None
+                continue
+            _snapshot_dest(doc, v)
+            if not os.access(v, os.W_OK | os.X_OK):
+                return refuse("snapshot-dir-not-writable", "the console account cannot write in this directory")
+            changed[k] = str(Path(v))
+    if changed:
+        doc = raw_settings()
+        doc.update(changed)
+        save_settings(doc)
+        step("settings", "done", ", ".join(f"{k}={v}" for k, v in sorted(changed.items())))
+    s = settings()
+    out({"ok": True, "changed": sorted(changed), "settings": {k: s.get(k) for k in SETTABLE}})
+    return EXIT_OK
+
+
+# Balayage des secrets orphelins (rapport de la tâche 8, point 2) : canal de
+# notification ou action annexe retirés, espace Terraform KVM supprimé. Un
+# chemin n'est effacé que si AUCUNE référence locale ne le désigne, s'il n'a
+# pas été écrit depuis `min_age_days`, et si la source locale de la classe a
+# été trouvée (une source absente ou vide ne vaut pas « rien n'est utilisé »).
+SWEEP_CLASSES = ("replication-notify", "replication-hook", "tf-kvm")
+REPORT_CLASSES = ("rancher-oidc", "ssh-kvm", "ssh-cluster", "kubeconfig")
+
+
+def _last_written(versions):
+    best = 0.0
+    for v in versions or []:
+        t = str(v.get("created") or "")
+        try:
+            best = max(best, calendar.timegm(time.strptime(t[:19], "%Y-%m-%dT%H:%M:%S")))
+        except ValueError:
+            continue
+    return best or None
+
+
+def orphan_scan(bao, fs, classes, min_age_days, now=None):
+    now = time.time() if now is None else now
+    rows = []
+    for cls in classes:
+        source = fs.repl_db if cls.startswith("replication-") else (fs.tf_dir if cls == "tf-kvm" else fs.state_dir)
+        used = set()
+        for path, field in fs.list_local(cls):
+            v = fs.read_local(cls, path, field)
+            if isinstance(v, str) and ss.is_openbao_ref(v):
+                used.add(v)
+        by_path = {}
+        for top in bao.children(cls):
+            for ref in bao.refs(cls, top):
+                _b, c, path, _f = ss.parse_ref_full(ref)
+                by_path.setdefault(path, []).append(ref)
+        for path, refs in sorted(by_path.items()):
+            unused = [r for r in refs if r not in used]
+            if not unused:
+                continue
+            whole = len(unused) == len(refs)
+            written = _last_written(bao.versions(refs[0]))
+            age_ok = written is not None and now - written >= min_age_days * 86400
+            why = None
+            if not Path(source).exists():
+                why = "local source not found"
+            elif not used:
+                why = "no local reference seen for this class"
+            elif not whole:
+                why = "some fields of this secret are still used"
+            elif not age_ok:
+                why = f"written less than {min_age_days} days ago"
+            rows.append({"class": cls, "path": path, "fields": len(unused), "written": written,
+                         "sweepable": why is None and cls in SWEEP_CLASSES, "kept_because": why})
+    return rows
+
+
+def cmd_sweep_orphans(args):
+    s = settings()
+    if not ss.openbao_active(s):
+        return refuse("openbao-inactive", "OpenBao is not active")
+    fs = ss.FileStore(state(), tf_dir=args.tf_dir, repl_db=args.repl_db)
+    bao = admin_store(s)
+    classes = [c for c in (args.cls or SWEEP_CLASSES + REPORT_CLASSES) if c in SWEEP_CLASSES + REPORT_CLASSES]
+    rows = orphan_scan(bao, fs, classes, args.min_age_days)
+    removed = []
+    for r in rows:
+        if not r["sweepable"]:
+            continue
+        if args.dry_run:
+            continue
+        try:
+            bao.delete_tree(r["class"], r["path"], actor=ARGS.actor, action=ARGS.id)
+            removed.append(f"{r['class']}/{r['path']}")
+            step(f"orphan-{r['class']}", "done", f"{r['class']}/{r['path']} removed (no reference)")
+        except ss.SecretError as e:
+            step(f"orphan-{r['class']}", "error", f"{r['class']}/{r['path']}: {e.code}")
+    out({"ok": True, "dry_run": args.dry_run, "orphans": rows, "removed": removed})
     return EXIT_OK
 
 
@@ -1592,12 +1881,14 @@ def parser():
     s.add_argument("--wrapped-stdin", action="store_true")
     s.add_argument("--transit", action="store_true")
     s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--spec", help=argparse.SUPPRESS)       # console : jeton d'enveloppe et CA par fichier privé
     s = sub.add_parser("enable")
     s.add_argument("--mode", choices=("a", "b1"), required=True)
     for o in ("--addr", "--role-id", "--ca", "--mount", "--prefix", "--bundle"):
         s.add_argument(o)
     s.add_argument("--wrapped-stdin", action="store_true")
     s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--spec", help=argparse.SUPPRESS)
     s = sub.add_parser("disable")
     s.add_argument("--remove-b1", action="store_true")
     s.add_argument("--leave-plan-secrets", action="store_true",
@@ -1630,6 +1921,16 @@ def parser():
     s.add_argument("--key-id")
     s = sub.add_parser("snapshot")
     s.add_argument("--dest")
+    s.add_argument("--keep", type=int, help="snapshots kept in the directory (default: snapshot_keep, 14)")
+    s.add_argument("--dry-run", action="store_true")
+    sub.add_parser("snapshots", help="snapshots of the set directory and of the agent, no value")
+    s = sub.add_parser("settings", help="settings without secret, changed at once")
+    s.add_argument("--set", action="append", metavar="KEY=VALUE")
+    s = sub.add_parser("sweep-orphans", help="OpenBao secrets no local reference points to")
+    s.add_argument("--class", dest="cls", action="append")
+    s.add_argument("--min-age-days", type=int, default=7)
+    s.add_argument("--tf-dir")
+    s.add_argument("--repl-db")
     s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("restore")
     s.add_argument("file")
@@ -1663,12 +1964,34 @@ COMMANDS = {"status": cmd_status, "assistant": cmd_assistant, "check": cmd_check
             "rollback": cmd_rollback, "outage-test": cmd_outage_test, "rotate": cmd_rotate, "snapshot": cmd_snapshot, "restore": cmd_restore,
             "bundle": cmd_bundle, "file": cmd_file, "offline-copy": cmd_offline_copy,
             "tf-encryption": cmd_tf_encryption, "tf-entity-remove": cmd_tf_entity_remove,
-            "tf-keys": cmd_tf_keys}
+            "tf-keys": cmd_tf_keys, "snapshots": cmd_snapshots, "settings": cmd_settings,
+            "sweep-orphans": cmd_sweep_orphans}
+
+
+def _load_spec(path):
+    """Fichier de spécification de `_cli_action` (0600, même propriétaire, pas
+    de lien) : le jeton d'enveloppe et la CA tapés dans l'interface ne passent
+    jamais par la ligne de commande."""
+    SPEC.clear()
+    if not path:
+        return
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd) as f:
+        st = os.fstat(f.fileno())
+        if st.st_mode & 0o077 or st.st_uid != os.geteuid():
+            raise CliError("bad-input", "the spec file must be private (0600, same owner)", EXIT_REFUSED)
+        doc = json.loads(f.read(1 << 20) or "{}")
+    if isinstance(doc, dict):
+        SPEC.update({k: v for k, v in doc.items() if k in ("wrap_token", "ca_pem") and isinstance(v, str)})
 
 
 def main(argv=None):
     args = parser().parse_args(argv)
     ARGS.id, ARGS.actor = args.id, args.actor
+    try:
+        _load_spec(getattr(args, "spec", None))
+    except (OSError, ValueError, CliError) as e:
+        return refuse("bad-input", f"spec file unreadable ({type(e).__name__})")
     for k in [k for k in os.environ if k.startswith(("VAULT_", "BAO_"))]:
         os.environ.pop(k, None)
     if _is_root() and AGENT_CHANNEL is None:

@@ -266,8 +266,10 @@ def control_path(decl, state):
     return path
 
 
-def _ssh_base(decl, state):
-    """ssh et ses options pour une déclaration, sans destination."""
+def _ssh_base(decl, state, control=True):
+    """ssh et ses options pour une déclaration, sans destination.
+    `control=False` : connexion propre (ControlPath=none), le chemin du
+    socket maître n'est alors ni calculé ni contrôlé."""
     name = decl.get("name") if isinstance(decl, dict) else "?"
     why = kvm_decl.check_decl(kvm_decl.normalize(decl)) if isinstance(decl, dict) else "not a mapping"
     if why:
@@ -277,7 +279,7 @@ def _ssh_base(decl, state):
         known = kvm_decl.resolve(state, decl["known_hosts"])
     except kvm_decl.DeclError as e:
         raise KvmError("failed", f"{name}: failed: invalid declaration: {e}", host=name) from None
-    cpath = control_path(decl, state)
+    cpath = control_path(decl, state) if control else None
     return [
         "ssh",
         "-o", "BatchMode=yes",
@@ -291,8 +293,8 @@ def _ssh_base(decl, state):
         # seule l'empreinte épinglée compte, pas celles du système
         "-o", "GlobalKnownHostsFile=/dev/null",
         "-o", "IdentitiesOnly=yes",
-        "-o", "ControlMaster=auto",
-        "-o", f"ControlPath={_ssh_opt_path(cpath)}",
+        "-o", "ControlMaster=auto" if control else "ControlMaster=no",
+        "-o", f"ControlPath={_ssh_opt_path(cpath)}" if control else "ControlPath=none",
         "-o", "ControlPersist=60",
         "-i", str(key),
         "-p", str(decl.get("port", kvm_decl.DEFAULT_PORT)),
@@ -308,11 +310,7 @@ def ssh_argv(decl, state, remote_argv, fresh=False):
     (reprise d'une lecture après la mort du maître). KvmError (`failed`)
     pour une déclaration ou un chemin rangé invalide."""
     remote = " ".join(shlex.quote(str(a)) for a in remote_argv)
-    base = _ssh_base(decl, state)
-    if fresh:
-        base[base.index("ControlMaster=auto")] = "ControlMaster=no"
-        i = next(i for i, a in enumerate(base) if a.startswith("ControlPath="))
-        base[i] = "ControlPath=none"
+    base = _ssh_base(decl, state, control=not fresh)
     return [*base, "--", decl["address"], remote]
 
 
@@ -1519,3 +1517,112 @@ def vm_detail(host, name):
                "autostart": info["autostart"], "managed_save": info["managed_save"],
                "stats": stats.get(vm["name"]) or next(iter(stats.values()), {})})
     return vm
+
+
+# ---------------------------------------------------------------------------
+# 2.9.0 tâche 11 (point 260) : rotation de la clé SSH d'un hôte KVM
+# ---------------------------------------------------------------------------
+# Nouvelle clé ajoutée à `authorized_keys` par l'ancienne, connexion d'essai
+# avec la nouvelle (connexion propre, jamais la connexion partagée), clé
+# rangée, PUIS ancienne retirée par la nouvelle. Toute étape en échec rend
+# l'état d'avant : ancienne clé toujours acceptée, nouvelle retirée de
+# `authorized_keys`, ancienne valeur reposée. Les domaines de l'hôte ne sont
+# jamais touchés (seul `~/.ssh/authorized_keys` de l'utilisateur déclaré).
+# Les clés publiques passent sur l'entrée standard, jamais en argument.
+_AK_ADD = ('umask 077; d="$HOME/.ssh"; f="$d/authorized_keys"; mkdir -p "$d" || exit 3; '
+           'IFS= read -r k || exit 4; [ -n "$k" ] || exit 4; touch "$f" || exit 3; '
+           'grep -qxF -- "$k" "$f" || printf "%s\\n" "$k" >> "$f"')
+# l'ancienne clé est retirée par son seul corps base64 (le commentaire peut
+# différer) ; le fichier est réécrit en place (droits et inode gardés)
+_AK_REMOVE = ('f="$HOME/.ssh/authorized_keys"; IFS= read -r b || exit 4; [ -n "$b" ] || exit 4; '
+              '[ -f "$f" ] || exit 0; t="$f.hops-rotate.$$"; umask 077; '
+              'grep -vF -- "$b" "$f" > "$t"; rc=$?; [ $rc -le 1 ] || { rm -f "$t"; exit 5; }; '
+              'cat "$t" > "$f" && rm -f "$t"')
+
+
+def _key_blob(pub):
+    parts = str(pub or "").split()
+    if len(parts) < 2 or not parts[0].startswith(("ssh-", "ecdsa-", "sk-")):
+        raise KvmError("failed", "failed: not an OpenSSH public key")
+    return parts[1]
+
+
+def _with_key(argv, key_path):
+    """La même ligne ssh avec une autre clé (`-i`)."""
+    out = list(argv)
+    out[out.index("-i") + 1] = str(key_path)
+    return out
+
+
+def rotate_key(decl, state, old_key_path, new_key_path, old_pub, new_pub, store_new, restore_old,
+               runner=subprocess.run, timeout=30, step=None):
+    """Rotation de la clé d'un hôte (voir plus haut). `old_key_path`,
+    `new_key_path` : les clés privées (fichiers 0600 de l'appelant, sur
+    tmpfs si la classe est dans OpenBao), chaque connexion nomme la sienne ;
+    `store_new()` range la nouvelle clé (fichier ou OpenBao),
+    `restore_old()` repose l'ancienne. Rend {"old_refused": bool}. KvmError
+    (l'état d'avant rendu) sinon."""
+    step = step or (lambda sid, status, msg="": None)
+    decl = kvm_decl.normalize(decl)
+    name = decl.get("name")
+    new_line = " ".join(str(new_pub).split())          # une seule ligne, commentaire compris
+    old_blob, new_blob = _key_blob(old_pub), _key_blob(new_pub)
+    if old_blob == new_blob:
+        raise KvmError("failed", f"{name}: failed: the new key is the old one", host=name)
+
+    def ssh(remote, data, key):
+        argv = _with_key(ssh_argv(decl, state, ["sh", "-c", remote], fresh=True), key)
+        try:
+            res = runner(argv, input=data, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            raise KvmError("timeout", f"{name}: timeout after {timeout}s", host=name) from e
+        except OSError as e:
+            raise KvmError("failed", f"{name}: failed: cannot run ssh ({e.strerror})", host=name) from e
+        return res
+
+    def must(res):
+        if res.returncode != 0:
+            raise make_error(name, res.stderr, res.returncode, [str(state), str(new_key_path), str(old_key_path)],
+                             ssh_level=res.returncode == SSH_RC)
+
+    def undo_add():
+        """Nouvelle clé retirée par l'ancienne (toujours acceptée à ce stade)."""
+        try:
+            res = ssh(_AK_REMOVE, new_blob + "\n", old_key_path)
+            step("undo", "done" if res.returncode == 0 else "error",
+                 "new key removed from authorized_keys" if res.returncode == 0
+                 else "the new key could not be removed: remove it by hand")
+        except KvmError as e:
+            step("undo", "error", f"the new key could not be removed: {e.kind}")
+
+    close_master(decl, state, runner=runner)
+    step("add", "running", "new public key added with the current key")
+    must(ssh(_AK_ADD, new_line + "\n", old_key_path))
+    step("add", "done")
+    try:
+        step("test", "running", "test login with the new key (fresh connection)")
+        must(ssh("true", "", new_key_path))
+        step("test", "done")
+        step("store", "running")
+        store_new()
+        step("store", "done")
+    except BaseException:
+        undo_add()
+        raise
+    try:
+        step("remove-old", "running", "old public key removed with the new key")
+        must(ssh(_AK_REMOVE, old_blob + "\n", new_key_path))
+        step("remove-old", "done")
+    except BaseException:
+        try:
+            restore_old()
+        finally:
+            undo_add()
+        raise
+    close_master(decl, state, runner=runner)
+    res = ssh("true", "", old_key_path)
+    refused = res.returncode != 0
+    step("old-refused", "done" if refused else "warn",
+         "the old key is refused" if refused else
+         "the old key is still accepted (another authorized_keys entry?): check the host")
+    return {"old_refused": refused}

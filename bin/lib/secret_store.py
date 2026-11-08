@@ -87,7 +87,16 @@ DEFAULTS = {
     "plan_secrets_keep_days": 7,  # secrets d'un déroulé arrêté reprenable (1 à 30, décision 141)
     "tf_vault_ack": None,         # {"addr", "version", "at", "by"} : Vault > 1.14 acquitté (point 270)
     "tf_entities_pending": [],    # mode A : entités tf-<décl> à retirer par l'administrateur
+    # 2.9.0 tâche 11 (point 259) : instantanés de B1 dans un répertoire réglé
+    # par l'administrateur (jamais sous l'état), quotidiens, 14 gardés
+    "snapshot_dir": None,
+    "snapshot_time": "02:30",
+    "snapshot_keep": 14,
+    "snapshots": None,            # {"last_ok_at", "last_file", "bytes", "last_error", "last_error_at"}
+    "tf_keys_retired": {},        # décision 278 : décl -> {"at", "trial"[, "error"]}
 }
+SNAPSHOT_KEEP_RANGE = (1, 365)
+SNAPSHOT_TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
 ORIGINALS_KEEP_RANGE = (1, 30)
 PLAN_SECRETS_KEEP_RANGE = (1, 30)
 CACHE_TTL_RANGE = (1, 120)
@@ -216,7 +225,7 @@ def _state_dir(state_dir=None):
 def load_settings(state_dir=None):
     """`<état>/secrets-settings.json` avec les valeurs par défaut ; un
     fichier absent ou illisible vaut le mode local."""
-    out = dict(DEFAULTS, migrated={}, tf_entities_pending=[])
+    out = dict(DEFAULTS, migrated={}, tf_entities_pending=[], tf_keys_retired={})
     try:
         raw = json.loads((_state_dir(state_dir) / SETTINGS_FILE).read_text())
     except (OSError, ValueError):
@@ -244,6 +253,15 @@ def load_settings(state_dir=None):
     out["plan_secrets_keep_days"] = max(PLAN_SECRETS_KEEP_RANGE[0], min(PLAN_SECRETS_KEEP_RANGE[1], keep))
     if not isinstance(out["tf_entities_pending"], list):
         out["tf_entities_pending"] = []
+    try:
+        keep = int(out["snapshot_keep"])
+    except (TypeError, ValueError):
+        keep = DEFAULTS["snapshot_keep"]
+    out["snapshot_keep"] = max(SNAPSHOT_KEEP_RANGE[0], min(SNAPSHOT_KEEP_RANGE[1], keep))
+    if not isinstance(out["snapshot_time"], str) or not SNAPSHOT_TIME_RE.match(out["snapshot_time"]):
+        out["snapshot_time"] = DEFAULTS["snapshot_time"]
+    if not isinstance(out["tf_keys_retired"], dict):
+        out["tf_keys_retired"] = {}
     if not out["prefix"] and out["console_id"]:
         out["prefix"] = f"consoles/{out['console_id']}"
     return out

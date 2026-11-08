@@ -269,3 +269,141 @@ def test_health_lists_agent_snapshots(env):
     request(env, op="rotate-unseal-key")
     h = json.loads((env["p"].state / hsa.HEALTH).read_text())
     assert any(s["file"].endswith("-rotation.snap") for s in h["snapshots"])
+
+
+# ---------------------------------------------------------------------------
+# harvester-secrets snapshot / snapshots / settings (console, sans root)
+# ---------------------------------------------------------------------------
+import test_harvester_secrets_cli_290 as tcli  # noqa: E402
+from test_harvester_secrets_cli_290 import cli, creds, read_settings  # noqa: E402
+
+cli_env = tcli.env
+
+
+@pytest.fixture
+def b1(cli_env, tmp_path, monkeypatch):
+    # la console lance l'outil sous son compte (snapshot refusé en root)
+    monkeypatch.setattr(tcli.hsc, "_is_root", lambda: False)
+    creds(cli_env)
+    d = tmp_path / "nfs-snaps"
+    d.mkdir()
+    tcli.settings(cli_env, mode="b1", snapshot_dir=str(d))
+    agent_dir = cli_env["state"] / "secrets-agent"
+    agent_dir.mkdir(exist_ok=True)
+    (agent_dir / "health.json").write_text(json.dumps({"current_key": "hops-20261108-1"}))
+    return {**cli_env, "dir": d}
+
+
+def test_snapshot_written_0600_with_the_key_in_its_name(b1, capsys):
+    rc, doc, err = cli(["--actor", "service", "snapshot"], capsys=capsys)
+    assert rc == 0, (doc, err)
+    f = b1["dir"] / doc["file"]
+    assert doc["file"].endswith("-hops-20261108-1.snap") and hsa.SNAP_KEY_RE.search(doc["file"])
+    assert f.read_bytes() == b1["srv"].snapshot and oct(f.stat().st_mode & 0o777) == "0o600"
+    last = read_settings(b1)["snapshots"]
+    assert last["last_file"] == doc["file"] and last["last_error"] is None
+
+
+def test_snapshot_retention_keeps_14(b1, capsys):
+    for i in range(14):
+        (b1["dir"] / f"openbao-202610{i + 10:02d}T023000Z-hops-20261001-1.snap").write_bytes(b"x")
+    (b1["dir"] / "notes.txt").write_text("kept")
+    rc, doc, _ = cli(["snapshot"], capsys=capsys)
+    assert rc == 0
+    files = sorted(p.name for p in b1["dir"].glob("openbao-*.snap"))
+    assert len(files) == 14 and "openbao-20261010T023000Z-hops-20261001-1.snap" not in files
+    assert doc["pruned"] == ["openbao-20261010T023000Z-hops-20261001-1.snap"]
+    assert (b1["dir"] / "notes.txt").exists()
+
+
+def test_snapshot_failure_is_recorded(b1, capsys):
+    b1["srv"].sealed = True
+    rc, doc, err = cli(["snapshot"], capsys=capsys)
+    assert rc == 1 and doc["code"] == "snapshot-failed"
+    last = read_settings(b1)["snapshots"]
+    assert last["last_error"] == "openbao-sealed" and last["last_error_at"]
+
+
+@pytest.mark.parametrize("where,code", [("state", "snapshot-in-state-dir"), ("relative", "bad-input"),
+                                        ("missing", "bad-input")])
+def test_snapshot_never_in_the_state_directory(b1, capsys, where, code):
+    dest = {"state": str(b1["state"] / "snaps"), "relative": "snaps", "missing": "/nonexistent/x"}[where]
+    if where == "state":
+        (b1["state"] / "snaps").mkdir()
+    rc, doc, _ = cli(["snapshot", "--dest", dest], capsys=capsys)
+    assert rc == 2 and doc["code"] == code
+
+
+def test_snapshots_lists_both_places_without_values(b1, capsys):
+    (b1["dir"] / "openbao-20261101T023000Z-hops-20261101-1.snap").write_bytes(b"x")
+    (b1["state"] / "secrets-agent" / "health.json").write_text(json.dumps({
+        "current_key": "hops-20261108-1", "snapshots": [{"file": "openbao-a-hops-20261108-1-pre-upgrade.snap",
+                                                          "bytes": 3, "at": 1}]}))
+    rc, doc, _ = cli(["snapshots"], capsys=capsys)
+    assert rc == 0 and [f["file"] for f in doc["files"]] == ["openbao-20261101T023000Z-hops-20261101-1.snap"]
+    assert doc["agent_files"][0]["file"].endswith("pre-upgrade.snap") and doc["keep"] == 14
+
+
+@pytest.mark.parametrize("item,code", [
+    ("cache_ttl_min=0", "bad-input"), ("cache_ttl_min=121", "bad-input"), ("snapshot_keep=x", "bad-input"),
+    ("snapshot_time=25:00", "bad-input"), ("nope=1", "bad-input"), ("snapshot_dir=relative", "bad-input"),
+])
+def test_settings_refusals(b1, capsys, item, code):
+    rc, doc, _ = cli(["settings", "--set", item], capsys=capsys)
+    assert rc == 2 and doc["code"] == code
+
+
+def test_settings_set_and_state_dir_refused(b1, capsys, tmp_path):
+    rc, doc, _ = cli(["settings", "--set", "snapshot_time=03:15", "--set", "snapshot_keep=30",
+                      "--set", "cache_ttl_min=30"], capsys=capsys)
+    assert rc == 0 and doc["settings"]["snapshot_time"] == "03:15" and doc["settings"]["snapshot_keep"] == 30
+    (b1["state"] / "inside").mkdir()
+    rc, doc, _ = cli(["settings", "--set", f"snapshot_dir={b1['state'] / 'inside'}"], capsys=capsys)
+    assert rc == 2 and doc["code"] == "snapshot-in-state-dir"
+    rc, doc, _ = cli(["settings", "--set", "snapshot_dir="], capsys=capsys)
+    assert rc == 0 and doc["settings"]["snapshot_dir"] is None
+
+
+# ---------------------------------------------------------------------------
+# Secrets orphelins (rapport de la tâche 8, point 2)
+# ---------------------------------------------------------------------------
+def _tf_kvm(b1, used=("h1/d1/token",), orphans=("h1/d2/token",), created="2026-01-01T00:00:00Z"):
+    tf = b1["state"].parent / "tfws"
+    for u in used:
+        host, decl, var = u.split("/")
+        f = tf / ".kvm" / host / "decls" / decl / ".secrets" / var
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(f"openbao:tf-kvm/{u}#value")
+    for u in list(used) + list(orphans):
+        b1["srv"].put_raw("harvester-ops", f"{tcli.PREFIX}/tf-kvm/{u}", {"value": "v-" + u})
+    return tf
+
+
+def test_orphan_sweep_removes_only_unreferenced_old_secrets(b1, capsys, monkeypatch):
+    tcli.settings(b1, mode="a")
+    tf = _tf_kvm(b1)
+    monkeypatch.setattr(tcli.hsc.time, "time", lambda: 1794150000.0)    # fake : écrits le 2026-11-08
+    rc, doc, _ = cli(["sweep-orphans", "--class", "tf-kvm", "--tf-dir", str(tf), "--dry-run"], capsys=capsys)
+    assert rc == 0 and [o["path"] for o in doc["orphans"]] == ["h1/d2/token"]
+    assert doc["orphans"][0]["sweepable"] is False                      # écrit il y a moins de 7 jours
+    monkeypatch.setattr(tcli.hsc.time, "time", lambda: 1794150000.0 + 30 * 86400)
+    rc, doc, err = cli(["sweep-orphans", "--class", "tf-kvm", "--tf-dir", str(tf)], capsys=capsys)
+    assert rc == 0 and doc["removed"] == ["tf-kvm/h1/d2/token"]
+    kv = b1["srv"].kv
+    assert ("harvester-ops", f"{tcli.PREFIX}/tf-kvm/h1/d2/token") not in kv
+    assert ("harvester-ops", f"{tcli.PREFIX}/tf-kvm/h1/d1/token") in kv
+    assert "v-h1" not in err + json.dumps(doc)
+
+
+@pytest.mark.parametrize("case,why", [("no-source", "local source not found"),
+                                      ("no-local-ref", "no local reference seen for this class")])
+def test_orphan_sweep_never_trusts_a_missing_or_empty_source(b1, capsys, monkeypatch, case, why):
+    tcli.settings(b1, mode="a")
+    tf = _tf_kvm(b1, used=() if case == "no-local-ref" else ("h1/d1/token",))
+    if case == "no-local-ref":
+        (tf / ".kvm").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(tcli.hsc.time, "time", lambda: 1794150000.0 + 30 * 86400)
+    arg = str(tf) if case == "no-local-ref" else str(b1["state"].parent / "nowhere")
+    rc, doc, _ = cli(["sweep-orphans", "--class", "tf-kvm", "--tf-dir", arg], capsys=capsys)
+    assert rc == 0 and doc["removed"] == []
+    assert all(o["kept_because"] == why for o in doc["orphans"]) and doc["orphans"]
