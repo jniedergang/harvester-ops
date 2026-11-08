@@ -203,7 +203,7 @@ def test_check_login_red_when_active_and_credentials_gone(env, capsys):
 
 def test_check_all_green_dry_run(env, capsys):
     creds(env)
-    settings(env, mode="local")
+    settings(env)                                        # console active : vérification complète
     rc, doc, _ = cli(["check", "--mode", "a", "--addr", env["srv"].addr, "--dry-run"], capsys=capsys)
     assert rc == 0 and ids(doc)["capabilities"] and ids(doc)["roundtrip"] is None
     assert not [r for r in env["srv"].log if r["method"] == "POST" and "/data/" in r["path"]]
@@ -211,7 +211,7 @@ def test_check_all_green_dry_run(env, capsys):
 
 def test_check_writes_and_destroys_a_probe(env, capsys):
     creds(env)
-    settings(env, mode="local")
+    settings(env)                                        # console active : vérification complète
     rc, doc, _ = cli(["check", "--mode", "a", "--addr", env["srv"].addr, "--transit"], capsys=capsys)
     assert rc == 0, doc
     assert ids(doc)["roundtrip"] and ids(doc)["transit"] and ids(doc)["tf-role"]
@@ -225,7 +225,7 @@ def test_check_writes_and_destroys_a_probe(env, capsys):
 ])
 def test_check_one_red_per_cause(env, capsys, breakage, failed):
     creds(env)
-    settings(env, mode="local")
+    settings(env)                                        # console active : vérification complète
     breakage(env["srv"])
     rc, doc, _ = cli(["check", "--mode", "a", "--addr", env["srv"].addr, "--dry-run"], capsys=capsys)
     assert rc == 1 and ids(doc)[failed] is False
@@ -698,3 +698,17 @@ def test_metadata_never_carries_an_empty_action(env, capsys):
     assert all(v for v in md.values())
     assert "hops_action" not in md and "hops_v2_action" not in md and md["hops_v1_action"] == "act000000001"
     assert md["hops_actor"] == "service"
+
+
+def test_check_before_activation_ignores_credentials_left_by_a_previous_server(env, capsys):
+    """Tâche 13 (essai réel, Vault 1.14 après un OpenBao désactivé) : les
+    identifiants d'une activation précédente restent sur l'hôte ; la
+    vérification d'avant activation ne s'en sert pas (connexion « après »),
+    sinon elle était rouge et l'assistant ne pouvait pas activer. `enable`
+    dépose les nouveaux puis vérifie tout."""
+    creds(env)                                           # identifiants d'un autre serveur
+    settings(env, mode="local")
+    wrap, _ = wrapped(env)
+    rc, doc, _ = cli(["check", "--mode", "a", "--addr", env["srv"].addr, "--wrapped-stdin", "--dry-run"],
+                     stdin=wrap + "\n", capsys=capsys)
+    assert rc == 0 and ids(doc)["login"] is None and "kv2" not in ids(doc)

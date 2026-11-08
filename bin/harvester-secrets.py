@@ -505,7 +505,8 @@ def agent_ok(st):
 # Vérifications avant activation (plan, « Mode A ») : chacune son résultat
 # et sa raison ; rien n'est activé tant qu'une vérification est rouge
 # ---------------------------------------------------------------------------
-def run_checks(addr, ca, mount, prefix, cid, b1=False, wrap=None, use_creds=True, mutate=True, transit=False):
+def run_checks(addr, ca, mount, prefix, cid, b1=False, wrap=None, use_creds=True, mutate=True, transit=False,
+               precheck=False):
     res = []
 
     def put(cid_, ok, reason=""):
@@ -541,15 +542,15 @@ def run_checks(addr, ca, mount, prefix, cid, b1=False, wrap=None, use_creds=True
                 put("wrap", False, f"{e.code}: already unwrapped, expired or unknown")
         if not use_creds:
             return res
+        if precheck:
+            # relecture finale I7 (et tâche 13 : identifiants laissés par un
+            # serveur précédent) : avant activation, la connexion est
+            # « après » ; `enable` dépose puis refait toutes les vérifications
+            put("login", None, "after activation: enable deposits the AppRole credentials, then checks "
+                               "login, KV v2, capabilities and a test write before activating")
+            return res
         if not creds_present():
-            # relecture finale I7 : avant la première activation, rien n'est
-            # encore déposé ; `enable` dépose puis refait toutes les
-            # vérifications avant d'activer. Rouge seulement une fois actif.
-            if not ss.openbao_active(settings()):
-                put("login", None, "after activation: enable deposits the AppRole credentials, then checks "
-                                   "login, KV v2, capabilities and a test write before activating")
-            else:
-                put("login", False, "AppRole credentials missing on this host")
+            put("login", False, "AppRole credentials missing on this host")
             return res
         try:
             a = admin_client(addr, ca)
@@ -662,6 +663,7 @@ def cmd_check(args):
     prefix = args.prefix or s["prefix"] or f"consoles/{cid}"
     wrap = SPEC.get("wrap_token") or (sys.stdin.readline().strip() if args.wrapped_stdin else None)
     res = run_checks(addr, ca, mount, prefix, cid, b1=args.mode == "b1", wrap=wrap,
+                     precheck=not ss.openbao_active(s),
                      mutate=not args.dry_run, transit=args.transit or args.mode == "b1")
     ok = all_green(res)
     out({"ok": ok, "checks": res, "dry_run": args.dry_run})
