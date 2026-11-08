@@ -201,6 +201,31 @@ def test_activation_blocked_by_a_red_check_then_allowed(context, flask_server):
     assert enable["mode"] == "a" and enable["role_id"] == "rid-12345678"
 
 
+def test_mode_a_activation_allowed_with_the_real_check_output_before_deposit(context, flask_server):
+    """Relecture finale I7 : la sortie réelle de `check` sur une console
+    jamais activée (vecteur partagé avec test_harvester_secrets_cli_290 :
+    la connexion est « après », pas rouge) laisse Activer permis."""
+    real = json.loads((Path(__file__).resolve().parents[1] / "api" / "fixtures"
+                       / "secrets-check-a-before-deposit.json").read_text())
+    st = {"status": status_doc(mode="local", active=False, migrated={}),
+          "assistant": {"commands": ["bao secrets enable -path=harvester-ops kv-v2"],
+                        "policy": 'path "harvester-ops/data/consoles/x/*" {}', "prefix": "consoles/x"},
+          "next_output": {"check": real}}
+    page = open_secrets(context, flask_server, st)
+    body = to_tab(page)
+    body.locator('[data-sx="enable"]').click()
+    w = page.locator("#sx-wizard")
+    w.locator('[data-wz-mode="a"]').click()
+    w.locator('[data-wz="addr"]').fill("https://bao.example:8200")
+    w.locator('[data-wz="role"]').fill("rid-12345678")
+    w.locator('[data-wz="wrap"]').fill("s.WRAPPEDTOKEN0123456789")
+    w.locator('[data-wz-tab="checks"]').click()
+    w.locator('[data-wz="run-checks"]').click()
+    expect(w.locator('[data-wz-check="login"]')).to_have_class(re.compile("skip"))
+    expect(w.locator('[data-wz-check="wrap"]')).to_have_class(re.compile("ok"))
+    expect(w.locator('[data-wz="activate"]')).to_be_enabled()
+
+
 def test_classes_migrate_and_back_with_hostile_names_escaped(context, flask_server):
     st = {"status": status_doc()}
     page = open_secrets(context, flask_server, st)

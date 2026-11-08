@@ -180,9 +180,22 @@ def test_check_dry_run_with_wrap_before_deposit(env, capsys):
     wrap, _ = wrapped(env)
     rc, doc, err = cli(["check", "--mode", "a", "--addr", env["srv"].addr, "--wrapped-stdin", "--dry-run"],
                        stdin=wrap + "\n", capsys=capsys)
-    assert rc == 1 and ids(doc) == {"address": True, "tls": True, "seal": True, "wrap": True, "login": False}
+    # relecture finale I7 : avant le dépôt, la connexion est « après »
+    # (enable dépose puis vérifie tout), jamais rouge : sinon l'assistant
+    # ne pouvait jamais activer le mode A
+    assert rc == 0 and ids(doc) == {"address": True, "tls": True, "seal": True, "wrap": True, "login": None}
     assert wrap in env["srv"].wraps                      # lookup seulement, jamais déballée
     assert wrap not in json.dumps(doc) + err
+    # la sortie que l'assistant reçoit (vecteur partagé avec l'essai e2e)
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "secrets-check-a-before-deposit.json").read_text())
+    assert [(c["id"], c["ok"]) for c in doc["checks"]] == [(c["id"], c["ok"]) for c in fixture["checks"]]
+    assert doc["ok"] is fixture["ok"] is True
+
+
+def test_check_login_red_when_active_and_credentials_gone(env, capsys):
+    settings(env)                                        # mode a actif, identifiants absents
+    rc, doc, _ = cli(["check", "--mode", "a", "--addr", env["srv"].addr, "--dry-run"], capsys=capsys)
+    assert rc == 1 and ids(doc)["login"] is False
 
 
 def test_check_all_green_dry_run(env, capsys):

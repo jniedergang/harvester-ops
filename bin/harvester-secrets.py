@@ -494,7 +494,14 @@ def run_checks(addr, ca, mount, prefix, cid, b1=False, wrap=None, use_creds=True
         if not use_creds:
             return res
         if not creds_present():
-            put("login", False, "AppRole credentials not deposited yet (enable deposits them)")
+            # relecture finale I7 : avant la première activation, rien n'est
+            # encore déposé ; `enable` dépose puis refait toutes les
+            # vérifications avant d'activer. Rouge seulement une fois actif.
+            if not ss.openbao_active(settings()):
+                put("login", None, "after activation: enable deposits the AppRole credentials, then checks "
+                                   "login, KV v2, capabilities and a test write before activating")
+            else:
+                put("login", False, "AppRole credentials missing on this host")
             return res
         try:
             a = admin_client(addr, ca)
