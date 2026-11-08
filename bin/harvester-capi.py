@@ -3558,6 +3558,13 @@ def _renew_start(args, kube, ns, cluster, whats, req):
         old_secrets = ([sname] if sname and sname != f"{cluster}-registries-r{revision}" else []) \
             + [a["metadata"]["name"] for a in auth] \
             + [rg.child_secret_names(cluster, r)["ca"] for r in before if r not in kept]
+        # banc 2.8.0 : un renouvellement abandonné laisse le Secret des nœuds
+        # de sa révision d'avant ; le suivant le retire aussi à la fin (plus
+        # aucune machine ne le lit alors)
+        old_secrets += sorted(
+            n for n in (x["metadata"]["name"] for x in kube.list("secrets", ns, selector=f"{cc.GENERATED}=true"))
+            if rg.is_nodes_secret_of(n, cluster) and n not in (sname, f"{cluster}-registries-r{revision}")
+            and n not in old_secrets)
     # machines d'avant la bascule relevées par leur UID AVANT de repointer
     # la ClusterClass (revue 5-8 I-2 : aucune horloge comparée)
     old = [cr.machine_id(m) for m in _renew_machines(kube, ns, cluster) if cr.in_roles(m, roles, cl)]

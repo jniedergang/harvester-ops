@@ -623,3 +623,17 @@ def test_a_group_change_alone_is_a_renewal_without_machines(run, cli, capsys, mo
     _ev, cap = events(capsys)
     out = json.loads(cap.out)
     assert out["changes"] == [] and out["access_changed"] is True and out["secrets_changed"] is False
+
+
+def test_a_nodes_secret_left_by_an_abandoned_renewal_goes_with_the_next_one(run, capsys):
+    """Banc 2.8.0 (c27 sur harvlab2) : après `--abandon`, le renouvellement
+    suivant retirait les gabarits laissés mais gardait `<c>-registries-r<N>`
+    de la révision abandonnée. Un Secret d'un autre cluster (`web-x`) reste."""
+    mgmt = world()
+    for name in ("web-registries-r7", "web-x-registries-r1"):
+        mgmt.objs[("secrets", NS, name)] = {"metadata": {"name": name, "namespace": NS,
+                                                         "labels": {t.cc.GENERATED: "true"}}}
+    assert run(mgmt, "registries", {"registries": ["amorcage", "client"]}) == 0
+    deleted = [o[2] for o in mgmt.ops if o[0] == "delete" and o[1] == "secrets"]
+    assert "web-registries-r7" in deleted and "web-x-registries-r1" not in deleted
+    assert "web-registries" in deleted
