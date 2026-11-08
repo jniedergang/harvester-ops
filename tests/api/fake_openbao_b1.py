@@ -57,7 +57,7 @@ class FakeB1(FakeOpenBao):
             return h._err(code, msg)
         if path == "sys/seal-status":
             return h._send(200, {"type": "static", "initialized": self.initialized, "sealed": self.sealed,
-                                 "version": "2.0.0-HEAD"})
+                                 "version": self.seal_version})
         tok = self._auth(rec)
         parts = path.split("/")
         if path.startswith("auth/approle/role/") and tok:

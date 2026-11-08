@@ -21,6 +21,8 @@
     harvester-secrets bundle --registry R --user U --password-stdin [--repository P] [--tag T]
                              [--cosign-key FILE] -o DIR|FILE
     harvester-secrets file REF
+    harvester-secrets tf-encryption status | ack-vault
+    harvester-secrets tf-entity-remove DECL [--done]
 
 Options communes : `--id` (action de la console, en-tête X-Hops-Action),
 `--actor` (personne, en-tête X-Hops-Actor).
@@ -699,12 +701,41 @@ def _enable_b1(args, doc):
     return EXIT_OK
 
 
+def tf_workspaces_dir():
+    """Racine des espaces Terraform de la console (comme web/app.py)."""
+    env = os.environ.get("HARVESTER_OPS_TF_WORKSPACES")
+    if env:
+        return Path(env)
+    p = Path("/var/lib/harvester-ops/terraform")
+    return p if p.is_dir() else Path(tempfile.gettempdir()) / "harvester-ops-terraform"
+
+
+def encrypted_states(root=None):
+    """Identifiants des déclarations dont l'état est chiffré (clés de
+    premier niveau seulement, jamais le contenu)."""
+    import tf_encryption as tfe
+    root = Path(root or tf_workspaces_dir())
+    out = set()
+    for f in list(root.glob("*/decls/*/terraform.tfstate")) + list(root.glob(".kvm/*/decls/*/terraform.tfstate")):
+        try:
+            if not f.is_symlink() and tfe.is_encrypted(f.read_text()):
+                out.add(f.parent.name)
+        except OSError:
+            continue
+    return sorted(out)
+
+
 def cmd_disable(args):
     doc = raw_settings()
     migrated = sorted((doc.get("migrated") or {}))
     if migrated:
         return refuse("classes-still-migrated", "bring these classes back first (migrate --to local): "
                       + ", ".join(migrated), classes=migrated)
+    # 2.9.0 (tâche 9) : un état chiffré deviendrait illisible sans OpenBao
+    enc = encrypted_states()
+    if enc:
+        return refuse("tf-states-encrypted", "put these declaration states back in clear text first "
+                      "(POST /api/tf-declarations/<id>/decrypt-state): " + ", ".join(enc), declarations=enc)
     was = doc.get("mode") or "local"
     if args.remove_b1 and was != "b1":
         return refuse("bad-input", "--remove-b1 only in mode b1")
@@ -1348,6 +1379,74 @@ def cmd_file(args):
     return EXIT_OK
 
 
+def cmd_tf_encryption(args):
+    """États OpenTofu chiffrés (point 270 B) : `status` dit si le serveur
+    est vérifié (OpenBao, ou Vault 1.14 au plus) ; `ack-vault` acquitte un
+    Vault plus récent, pour cette adresse et cette version majeure.mineure."""
+    import tf_encryption as tfe
+    s, doc = settings(), raw_settings()
+    if not ss.openbao_active(s):
+        return refuse("openbao-inactive", "OpenBao is not active")
+    try:
+        status = oc.Client(s["addr"], ca_pem=ca_of(s.get("ca_file")),
+                           timeout=oc.clamp_timeout(s.get("timeout"))).seal_status()
+    except oc.OpenBaoError as e:
+        return fail(e.code, f"OpenBao at {s['addr']} does not answer")
+    v = tfe.server_version(status)
+    verdict = tfe.server_verdict(s.get("mode"), status)
+    acked = tfe.ack_matches(s.get("tf_vault_ack"), s.get("addr"), status)
+    info = {"mode": s.get("mode"), "addr": s.get("addr"), "version": f"{v[0]}.{v[1]}" if v else None,
+            "warning": verdict, "acknowledged": acked, "encrypted_declarations": encrypted_states(),
+            "entities_pending": list(s.get("tf_entities_pending") or [])}
+    if args.what == "status":
+        out(dict(info, ok=True))
+        return EXIT_OK
+    if verdict is None:
+        return refuse("not-needed", "this server needs no acknowledgement", **info)
+    if v is None:
+        return refuse("tf-encryption-version-unknown", "the server version cannot be read: nothing to acknowledge")
+    doc["tf_vault_ack"] = {"addr": s["addr"], "version": f"{v[0]}.{v[1]}", "at": int(time.time()),
+                           "by": ARGS.actor or "cli"}
+    save_settings(doc)
+    step("ack", "done", f"OpenTofu state encryption accepted on {s['addr']} (version {v[0]}.{v[1]})")
+    out(dict(info, ok=True, acknowledged=True))
+    return EXIT_OK
+
+
+def cmd_tf_entity_remove(args):
+    """Entité d'identité `tf-<décl>` d'une déclaration supprimée : retirée
+    par l'agent en B1 ; en mode A, notée à retirer par l'administrateur
+    (commandes `bao` rendues), `--done` la retire de la liste."""
+    try:
+        alias = pol.tf_alias(args.decl)
+    except ValueError as e:
+        return refuse("bad-input", str(e))
+    s, doc = settings(), raw_settings()
+    if not ss.openbao_active(s):
+        return refuse("openbao-inactive", "OpenBao is not active")
+    pending = [d for d in (doc.get("tf_entities_pending") or []) if isinstance(d, str)]
+    if args.done:
+        doc["tf_entities_pending"] = [d for d in pending if d != args.decl]
+        save_settings(doc)
+        out({"ok": True, "pending": doc["tf_entities_pending"]})
+        return EXIT_OK
+    if s.get("mode") == "b1":
+        st = agent_ok(run_agent({"op": "tf-entity-remove", "decl": args.decl}))
+        out({"ok": True, "mode": "b1", "alias": alias, "agent": st.get("message")})
+        return EXIT_OK
+    if args.decl not in pending:
+        doc["tf_entities_pending"] = pending + [args.decl]
+        save_settings(doc)
+    step("pending", "done", f"identity entity {alias} to be removed by the administrator of {s['addr']}")
+    out({"ok": True, "mode": "a", "alias": alias, "pending": doc.get("tf_entities_pending", pending),
+         "commands": [f"ACCESSOR=$(bao auth list -format=json | jq -r '.\"token/\".accessor')",
+                      f"ID=$(bao write -field=id identity/lookup/entity alias_name={alias} "
+                      "alias_mount_accessor=$ACCESSOR)",
+                      "bao delete identity/entity/id/$ID",
+                      f"harvester-secrets tf-entity-remove {args.decl} --done"]})
+    return EXIT_OK
+
+
 # ---------------------------------------------------------------------------
 def parser():
     p = argparse.ArgumentParser(prog="harvester-secrets", description="Console secret store (OpenBao).")
@@ -1419,13 +1518,19 @@ def parser():
     s.add_argument("--plain-http", action="store_true", help=argparse.SUPPRESS)
     s = sub.add_parser("file")
     s.add_argument("ref")
+    s = sub.add_parser("tf-encryption", help="OpenTofu state encryption: server check, Vault acknowledgement")
+    s.add_argument("what", choices=("status", "ack-vault"))
+    s = sub.add_parser("tf-entity-remove", help="identity entity of a removed encrypted declaration")
+    s.add_argument("decl")
+    s.add_argument("--done", action="store_true", help="mode a: the administrator removed it")
     return p
 
 
 COMMANDS = {"status": cmd_status, "assistant": cmd_assistant, "check": cmd_check, "enable": cmd_enable,
             "disable": cmd_disable, "migrate": cmd_migrate, "confirm": cmd_confirm, "versions": cmd_versions,
             "rollback": cmd_rollback, "outage-test": cmd_outage_test, "rotate": cmd_rotate, "snapshot": cmd_snapshot, "restore": cmd_restore,
-            "bundle": cmd_bundle, "file": cmd_file, "offline-copy": cmd_offline_copy}
+            "bundle": cmd_bundle, "file": cmd_file, "offline-copy": cmd_offline_copy,
+            "tf-encryption": cmd_tf_encryption, "tf-entity-remove": cmd_tf_entity_remove}
 
 
 def main(argv=None):

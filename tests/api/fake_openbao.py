@@ -35,6 +35,17 @@ MSG_BAD_SECRET_ID = "invalid secret id"
 _UNAUTH = ("sys/health", "sys/seal-status", "sys/wrapping/lookup", "auth/approle/login", "sys/wrapping/unwrap")
 
 
+def _ttl_s(v, default):
+    """Durée d'OpenBao (`90`, `90s`, `5m`, `1h`) en secondes."""
+    v = str(v or "").strip()
+    try:
+        if v.endswith(("s", "m", "h")):
+            return int(v[:-1]) * {"s": 1, "m": 60, "h": 3600}[v[-1]]
+        return int(v) if v else default
+    except ValueError:
+        return default
+
+
 def new_token(prefix="s."):
     return prefix + secrets.token_urlsafe(18)[:24]
 
@@ -62,6 +73,9 @@ class FakeOpenBao:
         self.renew_fails = False
         self.lose_reply = 0                  # écritures KV dont la réponse arrive après le délai du client
         self.lose_sleep = 0.0
+        self.child_ttl = None                # durée imposée aux jetons enfants (essais d'expiration)
+        self.datakeys = []                   # clés transit dont une clé de données a été tirée
+        self.seal_version = "2.0.0-HEAD"     # `version` de sys/seal-status (Vault : 1.x)
         self.httpd = None
 
     # -- vie du serveur ----------------------------------------------------
@@ -177,7 +191,7 @@ class FakeOpenBao:
             return h._send(200, {"initialized": True, "sealed": False, "version": "2.0.0-HEAD"})
         if path == "sys/seal-status":
             return h._send(200, {"type": "static", "initialized": True, "sealed": self.sealed,
-                                 "version": "2.0.0-HEAD"})
+                                 "version": self.seal_version})
         if self.sealed:
             return h._err(503, MSG_SEALED)
         if self.audit_full:
@@ -233,8 +247,10 @@ class FakeOpenBao:
             if alias is not None and not str(alias).startswith("tf-"):
                 return h._err(400, MSG_ALIAS)
             t = new_token()
-            self.tokens[t] = {"ttl": 60, "policies": body.get("policies", []), "created": time.time()}
-            return h._send(200, {"auth": {"client_token": t, "lease_duration": 60, "renewable": False}})
+            ttl = self.child_ttl if self.child_ttl is not None else _ttl_s(body.get("ttl"), 60)
+            self.tokens[t] = {"ttl": ttl, "policies": body.get("policies", []), "created": time.time(),
+                              "alias": alias, "role": path[len("auth/token/create/"):]}
+            return h._send(200, {"auth": {"client_token": t, "lease_duration": ttl, "renewable": False}})
         if path.startswith("sys/internal/ui/mounts/"):
             mount = path.split("/", 4)[4].strip("/")
             v = self.mounts.get(mount)
@@ -252,6 +268,13 @@ class FakeOpenBao:
             return h._send(204)
         top, _, rest = path.partition("/")
         if self.mounts.get(top) == "transit":
+            alias = self.tokens.get(tok, {}).get("alias")
+            if alias is not None:
+                # politique fixe à gabarit des jetons d'OpenTofu (essai 8) :
+                # datakey/plaintext et decrypt de la seule clé de son alias
+                op, _, key = rest.partition("/")
+                if op not in ("datakey", "decrypt") or not key.split("/")[-1].endswith("-" + alias):
+                    return h._err(403, MSG_DENIED)
             return self._transit(h, rest, body)
         if top in self.mounts:
             return self._kv(h, m, top, rest, body, rec)
@@ -268,6 +291,13 @@ class FakeOpenBao:
                 return h._send(204)
             self.transit.setdefault(key, 1)
             return h._send(204)
+        if op == "datakey" and key.startswith("plaintext/"):
+            k = key[len("plaintext/"):]
+            if k not in self.transit:
+                return h._err(400, "encryption key not found")
+            pt = base64.b64encode(secrets.token_bytes(int(body.get("bits", 256)) // 8)).decode()
+            self.datakeys.append(k)
+            return h._send(200, {"data": {"plaintext": pt, "ciphertext": "vault:v1:" + pt[::-1]}})
         if key not in self.transit:
             return h._err(400, "encryption key not found")
         if op == "encrypt":

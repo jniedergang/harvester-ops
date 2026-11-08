@@ -1111,9 +1111,12 @@ ADMIN_ONLY_PREFIXES = (
     "/api/kubeovn/",            # réseaux kube-ovn : un changement peut couper des VMs
     "/api/addons/",             # v1.57.0 : activer un add-on installe un chart sur le cluster
     "/api/rancher/",            # v1.79.0 : Rancher réglés, enregistrement SSO, chart RBAC
+    "/api/secrets/",            # 2.9.0 : magasin de secrets OpenBao (gestes d'administration)
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
+                       # 2.9.0 : remettre l'état chiffré d'une déclaration en clair
+                       "/decrypt-state",
                        # v1.43.0 : une maintenance déplace ou arrête des VMs.
                        "/maintenance")
 
@@ -29448,7 +29451,7 @@ def _terraform_cli_version():
     return "?"
 
 
-def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=()):
+def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(), stdin_text=None):
     """Invoke terraform with the right env vars (HARVESTER_KUBECONFIG) and
     return (rc, stdout, stderr).
 
@@ -29458,12 +29461,23 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
     with constraints-mismatch errors) and nothing is fetched from the
     Internet. `extra_env` : variables ajoutées (jeton RKE2 en TF_VAR_, jamais
     dans argv) ; `drop_env` : variables retirées (SSH_AUTH_SOCK : seule la
-    clé de l'hôte doit servir)."""
+    clé de l'hôte doit servir) ; `stdin_text` : entrée standard (`state
+    push -`, 2.9.0).
+
+    2.9.0 (tâche 9) : un espace qui porte `_encryption.tf` reçoit BAO_ADDR,
+    BAO_TOKEN (jeton enfant de la déclaration) et BAO_CACERT dans
+    l'environnement de ce seul processus, après le nettoyage de
+    _TF_ENV_KEEP ; jeton de la session de l'action, sinon un jeton créé et
+    révoqué pour cette commande. `-state-out` est refusé (essai 8 : la
+    destination serait écrite en clair)."""
+    if any(str(a).startswith(_TF_REFUSED_ARGS) for a in args):
+        return 126, "", "refused: -state-out writes the destination state in clear text"
     _tf_secure_ws(ws_dir)
     # 2.3.1 : dernier rempart, quel que soit le chemin qui a écrit les
     # fichiers (déclaration, ancien espace partagé, fichier posé à la main) :
     # OpenTofu ne se lance jamais sur une construction refusée.
-    refused = _tfg.check_workspace(ws_dir, known_headers=(_TF_HEADER,))
+    refused = _tfg.check_workspace(ws_dir, known_headers=(_TF_HEADER,),
+                                   known_encryption=_tf_known_encryption(ws_dir))
     if refused:
         log_tf.warning("terraform %s refused in %s: %s", args[0] if args else "?", ws_dir.name,
                        "; ".join(str(v) for v in refused[:5]))
@@ -29480,9 +29494,21 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
     for k in drop_env:
         env.pop(k, None)
     env.update(extra_env or {})
+    sess, temp = None, None
+    if (ws_dir / _tfe.ENCRYPTION_FILE).exists():
+        sess = _tf_bao_session_of(ws_dir)
+        if sess is None:
+            sess = temp = _TfBaoSession(_tf_ws_decl_id(ws_dir), timeout)
+        try:
+            env.update(sess.env())
+        except (_sst.SecretError, _oc.OpenBaoError, ValueError, KeyError) as e:
+            if temp is not None:
+                temp.revoke()
+            code = getattr(e, "code", None) or type(e).__name__
+            return 125, "", f"state encryption: OpenBao child token unavailable ({code})"
     try:
         # umask 077 : état, copies et plans que crée tofu naissent en 0600
-        r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env,
+        r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env, input=stdin_text,
                            capture_output=True, text=True, timeout=timeout, umask=0o077)
         # 2.3.0 : un espace dont le verrou a été écrit d'après un provider
         # téléchargé sur Internet (OpenTofu, avant le double miroir) refuse le
@@ -29495,12 +29521,16 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
             (ws_dir / ".terraform.lock.hcl").unlink()
             log_tf.warning("terraform lock file of %s did not match the local mirror: recreated",
                            ws_dir.name)
-            r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env,
+            r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env, input=stdin_text,
                                capture_output=True, text=True, timeout=timeout, umask=0o077)
+        if sess is not None:
+            return r.returncode, sess.scrub(r.stdout), sess.scrub(r.stderr)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
     finally:
+        if temp is not None:
+            temp.revoke()
         _tf_secure_ws(ws_dir)
 
 
@@ -29531,6 +29561,319 @@ def _tf_env(ws_dir):
 _TF_STALE_LOCK = "doesn't match any of the checksums previously recorded in the dependency lock file"
 
 
+# ---------------------------------------------------------------------------
+# 2.9.0 (tâche 9, décision 140, points 261 et 270) : états OpenTofu chiffrés
+# par le moteur transit d'OpenBao. La console écrit `_encryption.tf` dans
+# l'espace d'une déclaration (jamais le code de l'utilisateur, tf_guard le
+# refuse), crée un jeton enfant par action (rôle `hops-tf-<console>`,
+# politique fixe à gabarit, alias d'entité `tf-<décl>` : il ne vaut que
+# pour la clé de sa déclaration ; aucune politique écrite), le remet au
+# seul processus `tofu` par son environnement et le révoque à la fin de
+# l'action. Un état chiffré ne se lit plus en JSON : `tofu state list`,
+# `state pull`, `state push -`.
+# ---------------------------------------------------------------------------
+import openbao_client as _oc  # noqa: E402
+import openbao_policy as _opol  # noqa: E402
+import tf_encryption as _tfe  # noqa: E402
+
+TF_BAO_SESSION_TIMEOUT = 1800        # plus longue commande d'une action (apply KVM)
+TF_ADDRESSES_CACHE = ".hops-addresses.json"
+_TF_BAO_SESSIONS = {}                # str(espace) -> _TfBaoSession de l'action en cours
+_TF_BAO_LOCK = threading.Lock()
+_TF_SERVER_STATUS = {}               # adresse -> (instant, sys/seal-status)
+_TF_SERVER_TTL = 600
+_TF_REFUSED_ARGS = ("-state-out",)   # essai 8 : la destination serait écrite en clair
+
+
+class TfStateUnreadable(Exception):
+    """L'état chiffré d'un espace n'a pas pu être lu par OpenTofu."""
+
+    def __init__(self, code, detail=""):
+        super().__init__(f"{code}: {detail}"[:300])
+        self.code, self.detail = code, detail
+
+
+def _tf_ws_decl_id(ws):
+    """Identifiant de la déclaration d'un espace `.../decls/<id>`, ou None
+    (espace partagé d'un cluster : jamais chiffré)."""
+    ws = Path(ws)
+    return ws.name if ws.parent.name == "decls" and _tfs.ID_RE.match(ws.name) else None
+
+
+def _tf_settings():
+    """Réglages du magasin, relus à chaud (MultiStore._refresh)."""
+    st = _sst.store()
+    st.active()
+    return st.settings
+
+
+def _tf_console_id():
+    try:
+        return _tf_settings().get("console_id")
+    except Exception:                      # noqa: BLE001 : réglages illisibles = pas de chiffrement
+        return None
+
+
+def _tf_known_encryption(ws):
+    """Textes permis de `_encryption.tf` dans cet espace (tf_guard)."""
+    decl_id, cid = _tf_ws_decl_id(ws), _tf_console_id()
+    if not decl_id or not cid:
+        return ()
+    try:
+        return _tfe.all_blocks(cid, decl_id)
+    except ValueError:
+        return ()
+
+
+def _tf_bao_ca(settings):
+    """(chemin du fichier de CA pour BAO_CACERT, contenu PEM) ou (None, None)."""
+    p = Path(settings.get("ca_file") or (_sst.openbao_dir() / "ca.pem"))
+    try:
+        return (str(p), p.read_text()) if p.is_file() else (None, None)
+    except OSError:
+        return None, None
+
+
+class _TfBaoSession:
+    """Jeton enfant d'OpenTofu pour une déclaration, le temps d'une action.
+    Créé au premier besoin, recréé si son heure d'expiration est passée
+    (un jeton expiré au départ donne 403, indiscernable d'une mauvaise
+    clé : la console compare elle-même l'heure), révoqué à la fin."""
+
+    def __init__(self, decl_id, timeout=TF_BAO_SESSION_TIMEOUT, action=None, actor=None):
+        self.decl_id, self.timeout, self.action, self.actor = decl_id, int(timeout), action, actor
+        self.token, self.expires, self.addr, self.ca_file, self._ca_pem = None, 0.0, None, None, None
+
+    def __repr__(self):
+        return f"<TfBaoSession {self.decl_id} {'open' if self.token else 'closed'}>"
+
+    def _open(self):
+        st = _sst.store()
+        client = st.bao_client(self.actor or None, self.action)     # réglages relus
+        s = st.settings
+        cid = s.get("console_id")
+        key = _tfe.key_name(cid, self.decl_id)
+        try:
+            client.transit_create(key)                 # idempotent (vu sur OpenBao 2.7.2)
+            ttl = _tfe.child_ttl(self.timeout)
+            role = _opol.tf_role(cid)
+            token = client.token_create_child(role, [role], f"{ttl}s", entity_alias=_tfe.alias(self.decl_id))
+        except _oc.OpenBaoError as e:
+            raise _sst.SecretError(e.code, "tf-state", self.decl_id, e.detail) from None
+        self.addr = s["addr"]
+        self.ca_file, self._ca_pem = _tf_bao_ca(s)
+        self.token, self.expires = token, time.time() + ttl
+
+    def env(self):
+        if self.token is None or time.time() >= self.expires - 30:
+            self.revoke()
+            self._open()
+        return _tfe.env(self.addr, self.token, self.ca_file)
+
+    def revoke(self):
+        tok, self.token = self.token, None
+        if not tok:
+            return
+        try:
+            c = _oc.Client(self.addr, ca_pem=self._ca_pem, timeout=10, actor=self.actor or "service",
+                           action=self.action)
+            c.set_token(tok)
+            c.revoke_self()
+        except Exception as e:             # noqa: BLE001 : jeton déjà expiré, OpenBao coupé
+            log_tf.warning("OpenTofu child token of %s not revoked: %s", self.decl_id, type(e).__name__)
+
+    def scrub(self, text):
+        return text.replace(self.token, "***") if self.token and text else text
+
+
+@contextlib.contextmanager
+def _tf_bao_session(ws, decl_id, timeout=TF_BAO_SESSION_TIMEOUT, action=None, actor=None):
+    """Session d'une action sur l'espace `ws` : toutes les commandes `tofu`
+    de l'action dans cet espace partagent un jeton, révoqué à la sortie
+    (réussite, échec ou exception)."""
+    sess = _TfBaoSession(decl_id, timeout, action=action, actor=actor)
+    key = str(Path(ws))
+    with _TF_BAO_LOCK:
+        prev = _TF_BAO_SESSIONS.get(key)
+        _TF_BAO_SESSIONS[key] = sess
+    try:
+        yield sess
+    finally:
+        with _TF_BAO_LOCK:
+            if prev is None:
+                _TF_BAO_SESSIONS.pop(key, None)
+            else:
+                _TF_BAO_SESSIONS[key] = prev
+        sess.revoke()
+
+
+def _tf_bao_session_of(ws):
+    with _TF_BAO_LOCK:
+        return _TF_BAO_SESSIONS.get(str(Path(ws)))
+
+
+def _tf_server_status(settings):
+    """`sys/seal-status` du serveur (version), gardé 10 min par adresse.
+    OpenBaoError si le serveur ne répond pas."""
+    addr = settings.get("addr")
+    hit = _TF_SERVER_STATUS.get(addr)
+    if hit and time.time() - hit[0] < _TF_SERVER_TTL:
+        return hit[1]
+    _f, pem = _tf_bao_ca(settings)
+    status = _oc.Client(addr, ca_pem=pem, timeout=_oc.clamp_timeout(settings.get("timeout"))).seal_status()
+    _TF_SERVER_STATUS[addr] = (time.time(), status)
+    return status
+
+
+def _tf_state_file(ws):
+    return Path(ws) / _tfst.STATE_FILE
+
+
+def _tf_encryption_prepare(ws, decl, mode):
+    """Écrit (ou retire) `_encryption.tf` avant la première commande de
+    l'action. Rend {"encrypt", "migrate", "decrypt", "warning", "refuse",
+    "message"} :
+    - état clair existant et chiffrement voulu : bloc de migration (repli
+      `unencrypted`), `migrate` vrai ; le bloc définitif est posé à la fin
+      de l'action (_tf_encryption_finalize) ;
+    - `decrypt-state` : bloc de retour en clair ;
+    - pas de chiffrement : le fichier est retiré (l'état est clair)."""
+    out = {"encrypt": False, "migrate": False, "decrypt": False, "warning": None, "refuse": None,
+           "message": ""}
+    f = Path(ws) / _tfe.ENCRYPTION_FILE
+    st = _sst.store()
+    active = st.active()
+    s = st.settings
+    encrypted = _tfst.state_encrypted(ws)
+    if mode == "decrypt-state":
+        if not encrypted:
+            out.update(refuse="tf-state-not-encrypted", message="the state of this declaration is not encrypted")
+            return out
+        if TF_FLAVOR != "opentofu" or not active:
+            out.update(refuse="tf-state-encrypted-openbao-inactive" if TF_FLAVOR == "opentofu"
+                       else _tfe.WARN_NEEDS_OPENTOFU,
+                       message="the encrypted state is read with OpenTofu and OpenBao only")
+            return out
+        _tf_private_write(f, _tfe.block(s["console_id"], decl["id"], "migrate-out").encode())
+        out.update(encrypt=True, decrypt=True)
+        return out
+    warning, acked = None, False
+    if active and TF_FLAVOR == "opentofu" and not encrypted:
+        try:
+            status = _tf_server_status(s)
+        except _oc.OpenBaoError as e:
+            out.update(refuse=e.code, message=f"OpenBao at {s.get('addr')} does not answer ({e.code}): "
+                                              "the state encryption cannot be decided")
+            return out
+        warning = _tfe.server_verdict(s.get("mode"), status)
+        acked = bool(warning) and _tfe.ack_matches(s.get("tf_vault_ack"), s.get("addr"), status)
+    d = _tfe.decide(TF_FLAVOR, active, encrypted, warning, acked)
+    out.update(warning=d["warning"], refuse=d["refuse"])
+    if d["refuse"]:
+        out["message"] = ("the state of this declaration is encrypted: it needs OpenTofu"
+                          if d["refuse"] == _tfe.WARN_NEEDS_OPENTOFU
+                          else "the state of this declaration is encrypted and OpenBao is not active")
+        return out
+    if not d["encrypt"]:
+        f.unlink(missing_ok=True)
+        return out
+    sf = _tf_state_file(ws)
+    plain = sf.is_file() and sf.stat().st_size > 0 and not encrypted
+    _tf_private_write(f, _tfe.block(s["console_id"], decl["id"], "migrate-in" if plain else "enforced").encode())
+    out.update(encrypt=True, migrate=plain)
+    return out
+
+
+def _tf_encryption_finalize(ws, decl_id):
+    """Fin d'action : un espace resté au bloc de migration dont l'état est
+    désormais chiffré passe au bloc définitif (`enforced`)."""
+    f = Path(ws) / _tfe.ENCRYPTION_FILE
+    cid = _tf_console_id()
+    try:
+        if cid and f.is_file() and f.read_text() == _tfe.block(cid, decl_id, "migrate-in") \
+                and _tfst.state_encrypted(ws):
+            _tf_private_write(f, _tfe.block(cid, decl_id, "enforced").encode())
+    except (OSError, ValueError) as e:
+        log_tf.warning("state encryption block of %s: %s", decl_id, e)
+
+
+def _tf_encryption_view(ws):
+    """Pour l'affichage d'une déclaration : état chiffré ou clair, bloc
+    écrit, avertissement Terraform. Sans appel réseau."""
+    ws = Path(ws) if ws else None
+    if ws is None or not ws.exists():
+        return {"state": "none", "block": None, "warning": None}
+    sf = _tf_state_file(ws)
+    state = "encrypted" if _tfst.state_encrypted(ws) else ("plain" if sf.is_file() else "none")
+    blk = None
+    f = ws / _tfe.ENCRYPTION_FILE
+    cid, decl_id = _tf_console_id(), _tf_ws_decl_id(ws)
+    if f.is_file() and cid and decl_id:
+        text = f.read_text()
+        blk = next((m for m in _tfe.MODES if _tfe.block(cid, decl_id, m) == text), "unknown")
+    warning = _tfe.WARN_NEEDS_OPENTOFU if TF_FLAVOR != "opentofu" and _sst.is_active() else None
+    return {"state": state, "block": blk, "warning": warning}
+
+
+def _tf_addresses(ws, tf=None):
+    """Adresses gérées de l'état d'un espace. État clair : lu en JSON
+    (tf_state). État chiffré : `tofu state list` (jeton enfant), gardé à
+    côté de l'état (`.hops-addresses.json`, adresses seules) tant que l'état
+    ne change pas. TfStateUnreadable si OpenTofu ne peut pas le lire."""
+    ws = Path(ws)
+    try:
+        return _tfst.addresses(ws)
+    except _tfst.StateEncrypted:
+        pass
+    sf = _tf_state_file(ws)
+    try:
+        stamp = sf.stat().st_mtime_ns
+    except OSError:
+        return []
+    cache = ws / TF_ADDRESSES_CACHE
+    if tf is None:
+        try:
+            c = json.loads(cache.read_text())
+            if c.get("state_mtime_ns") == stamp and isinstance(c.get("addresses"), list):
+                return list(c["addresses"])
+        except (OSError, ValueError):
+            pass
+
+    def lister(w):
+        rc, out, err = tf(["state", "list"], 60) if tf else _tf_run_cmd(w, "", ["state", "list"], timeout=60)
+        if rc != 0:
+            raise TfStateUnreadable("tf-state-unreadable", (err or out or "").strip()[:200])
+        return out
+
+    addrs = _tfst.addresses(ws, lister)
+    try:
+        _tf_private_write(cache, json.dumps({"state_mtime_ns": stamp, "addresses": addrs}).encode())
+    except OSError:
+        pass
+    return addrs
+
+
+def _tf_state_io(ws, encrypted, tf):
+    """(lire, écrire) de l'état d'un espace pour tf_state.move : fichier JSON
+    pour un espace clair, `tofu state pull` / `tofu state push -` pour un
+    espace chiffré (sortie et entrée gardées en mémoire, jamais un fichier
+    en clair)."""
+    if not encrypted:
+        return _tfst.read_file_state, _tfst.write_file_state
+
+    def read(w):
+        rc, out, err = tf(["state", "pull"], 120)
+        if rc != 0:
+            raise TfStateUnreadable("tf-state-unreadable", (err or "").strip()[:200])
+        return json.loads(out) if out.strip() else None
+
+    def write(w, data):
+        rc, _out, err = tf(["state", "push", "-"], 120, stdin=json.dumps(data))
+        if rc != 0:
+            raise TfStateUnreadable("tf-state-push-failed", (err or "").strip()[:200])
+    return read, write
+
+
 @app.route("/api/terraform/<cluster>/state")
 @requires_auth
 def api_terraform_state(cluster):
@@ -29548,10 +29891,15 @@ def api_terraform_state(cluster):
     # lancer Terraform ni d'un `init` pour lister).
     ws = _tf_workspace_dir(cluster)
     spaces = [(None, ws)] + _tf_decl_workspaces(cluster)
-    resources, detail = [], []
+    resources, detail, state_errors = [], [], []
     for decl_id, space in spaces:
         decl = TF_DECLS.get(decl_id) if decl_id else None
-        for addr in _tfst.addresses(space):
+        try:
+            space_addrs = _tf_addresses(space)
+        except TfStateUnreadable as e:
+            state_errors.append({"workspace": decl_id or "shared", "code": e.code})
+            continue
+        for addr in space_addrs:
             local = addr.split(".", 1)[1] if "." in addr else addr
             side = space / f"{local}.json"
             d = {"address": addr, "local_name": local, "has_sidecar": False,
@@ -29573,7 +29921,7 @@ def api_terraform_state(cluster):
     return jsonify({
         "initialized": initialized, "workspace": str(ws),
         "resources": resources, "resources_detail": detail,
-        "resource_count": len(resources),
+        "resource_count": len(resources), "state_errors": state_errors,
     })
 
 
@@ -29998,6 +30346,9 @@ def api_tf_declaration_delete(decl_id):
     if why == "running":
         return jsonify({"error": "this declaration is running", "code": "running",
                         "hint": "wait for the current plan, apply or destroy to end"}), 409
+    if why == "state-unreadable":
+        return jsonify({"error": "the encrypted state of this declaration cannot be read: "
+                                 "is OpenBao reachable?", "code": "tf-state-unreadable"}), 503
     if isinstance(why, list):
         return jsonify({"error": "declaration still has deployed resources",
                         "code": "deployed", "deployed": why}), 409
@@ -30017,15 +30368,21 @@ def _tf_decl_remove(decl_id):
             return False, "running"
     try:
         ws = _tf_decl_ws(d, create=False)
-        deployed = _tfst.addresses(ws) if ws.exists() else []
+        try:
+            deployed = _tf_addresses(ws) if ws.exists() else []
+        except TfStateUnreadable:
+            return False, "state-unreadable"
         if deployed:
             return False, deployed
+        encrypted = ws.exists() and ((ws / _tfe.ENCRYPTION_FILE).exists() or _tfst.state_encrypted(ws))
         TF_DECLS.delete(decl_id)
         if ws.exists():
             import shutil as _shutil
             _shutil.rmtree(ws, ignore_errors=True)
     finally:
         _flock_release(fd)
+    if encrypted:
+        _tf_entity_remove_start(decl_id)
     return True, None
 
 
@@ -30131,7 +30488,7 @@ def _tf_render_resources(resources, target_kind="harvester"):
     caractères de son code, `resource_harvester_ssh_`, audit D6)."""
     # 2.3.1 : `_providers` est le fichier de la console (une ressource de ce
     # nom écrasait l'en-tête et ses providers)
-    rendered, errors, seen = [], [], {"_providers"}
+    rendered, errors, seen = [], [], {"_providers", "_encryption"}
     target_kind = target_kind or "harvester"
     taken = {}                       # adresse -> rang, pour les ressources KVM
     for i, res in enumerate(resources or []):
@@ -30325,7 +30682,8 @@ def _tf_apply_declaration_runner(run, cluster, kc, rendered, dry_run,
 
 
 # Fichiers d'un espace de déclaration qui ne décrivent pas une ressource.
-_TF_KEEP = {"_providers.tf", "kubeconfig", "terraformrc", "tfplan", "tfplan.meta", ".outputs.json"}
+_TF_KEEP = {"_providers.tf", "kubeconfig", "terraformrc", "tfplan", "tfplan.meta", ".outputs.json",
+            "_encryption.tf", ".hops-addresses.json"}
 
 
 def _tf_decl_hash(rendered):
@@ -30371,7 +30729,11 @@ def _tf_decl_view(decl):
         ws = _tf_decl_ws(decl, create=False)
     except ValueError:
         pass
-    d["deployed"] = _tfst.addresses(ws) if ws and ws.exists() else []
+    try:
+        d["deployed"] = _tf_addresses(ws) if ws and ws.exists() else []
+    except TfStateUnreadable as e:
+        d["deployed"], d["state_error"] = None, e.code
+    d["encryption"] = _tf_encryption_view(ws)
     # sorties non sensibles du dernier apply (adresses des nœuds RKE2...)
     d["outputs"] = None
     if ws and (ws / ".outputs.json").exists():
@@ -30447,7 +30809,8 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
         raise TfLaunchError(409, {"error": "plan outdated",
                                   "hint": "the declaration changed since this plan; plan again"})
     label = {"plan": "tf-plan-decl", "apply": "tf-apply-decl",
-             "destroy": "tf-destroy-decl", "destroy-plan": "tf-destroy-decl"}[mode]
+             "destroy": "tf-destroy-decl", "destroy-plan": "tf-destroy-decl",
+             "decrypt-state": "tf-decrypt-state-decl"}[mode]
     if target_kind == "kvm" and (not _tf_libvirt_binary() or not _tf_libvirt_version()):
         raise TfLaunchError(503, {"error": "the libvirt Terraform provider is not installed",
                                   "hint": "it ships with the harvester-ops package; see the Installation tab"})
@@ -30499,8 +30862,11 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
     déclaration (toute cible)."""
     kvm = (decl.get("target_kind") or "harvester") == "kvm"
     try:
-        return _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash,
-                                    use_saved_plan, user)
+        # 2.9.0 : un jeton enfant d'OpenTofu pour toute l'action, révoqué à
+        # la sortie (réussite, échec, exception)
+        with _tf_bao_session(_tf_decl_ws(decl), decl["id"], action=run.id, actor=user or None):
+            return _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash,
+                                        use_saved_plan, user)
     except Exception as e:                 # noqa: BLE001 : l'action ne reste pas « en cours »
         log_tf.exception("declaration %s", decl.get("id"))
         if run.status not in ("done", "error"):
@@ -30513,6 +30879,10 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
                 msg = _tf_kvm_scrub(msg, TF_WORKSPACES)
             _close_err(run, "internal", msg[:300])
     finally:
+        try:
+            _tf_encryption_finalize(_tf_decl_ws(decl, create=False), decl["id"])
+        except ValueError:
+            pass
         if kvm:
             try:
                 ws = _tf_decl_ws(decl, create=False)
@@ -30580,22 +30950,52 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
         (ws / "_providers.tf").write_text(_TF_HEADER)
         kcp = str((ws / "kubeconfig").resolve())
 
-    def tf(args, timeout):
+    def tf(args, timeout, stdin=None):
+        more = {"stdin_text": stdin} if stdin is not None else {}
         if not kvm:
-            return _tf_run_cmd(ws, kcp, args, timeout=timeout)
-        rc, out, err = _tf_run_cmd(ws, kcp, args, timeout=timeout, extra_env=env, drop_env=drop)
-        if args and args[0] == "show":           # JSON lu par la console, jamais renvoyé tel quel
+            return _tf_run_cmd(ws, kcp, args, timeout=timeout, **more)
+        rc, out, err = _tf_run_cmd(ws, kcp, args, timeout=timeout, extra_env=env, drop_env=drop, **more)
+        if args and args[0] in ("show", "state"):    # JSON lu par la console, jamais renvoyé tel quel
             return rc, out, _tf_kvm_scrub(err, ws)
         return rc, _tf_kvm_scrub(out, ws), _tf_kvm_scrub(err, ws)
+
+    # 2.9.0 (tâche 9) : chiffrement de l'état décidé et `_encryption.tf`
+    # écrit avant la première commande
+    enc = _tf_encryption_prepare(ws, decl, mode)
+    if enc["refuse"]:
+        return _close_err(run, "preflight", f"{enc['refuse']}: {enc['message']}")
+    if enc["warning"]:
+        run.result = dict(run.result or {}, encryption_warning=enc["warning"])
+        step("encryption", "warn", enc["warning"] + (
+            ": the state stays in clear text (OpenTofu encrypts the state, Terraform does not)"
+            if enc["warning"] == _tfe.WARN_NEEDS_OPENTOFU else
+            ": this server is not a verified OpenBao or Vault 1.14; the state stays in clear text "
+            "until an administrator acknowledges it (harvester-secrets tf-encryption ack-vault)"))
+    elif enc["encrypt"] and not enc["decrypt"]:
+        step("encryption", "done", "state encrypted with the OpenBao transit key "
+                                   + _tfe.key_name(_tf_console_id(), decl["id"]))
 
     # Reprise : ce qui a été appliqué avant la v1.54 vit dans l'état partagé
     # (Harvester seulement : une cible KVM n'a jamais eu d'état partagé).
     shared = None if kvm else _tf_workspace_dir(cluster)
     wanted = {r[4] for r in rendered}
     lock_file = shared / ".terraform.tfstate.lock.info" if shared else None
-    if shared and wanted - set(_tfst.addresses(ws)) and not lock_file.exists():
+
+    def adopt():
+        if not (shared and wanted - set(_tf_addresses(ws, tf if enc["encrypt"] else None))
+                and not lock_file.exists()):
+            return
+        # espace chiffré : `state pull` / `state push -`, jamais un fichier
+        # d'état clair (essai 8)
+        read, write = _tf_state_io(ws, enc["encrypt"], tf)
+
+        def read_any(w):
+            return read(w) if Path(w) == Path(ws) else _tfst.read_file_state(w)
+
+        def write_any(w, data):
+            return write(w, data) if Path(w) == Path(ws) else _tfst.write_file_state(w, data)
         with TF_STATE_LOCK:
-            moved = _tfst.move(shared, ws, wanted)
+            moved = _tfst.move(shared, ws, wanted, read=read_any, write=write_any)
         for a in moved:
             local = a.split(".", 1)[1]
             for ext in (".tf", ".json"):
@@ -30603,6 +31003,9 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
         if moved:
             step("adopt", "done", f"{len(moved)} resource(s) taken over from the shared workspace: "
                                   + ", ".join(moved))
+
+    if not enc["encrypt"]:
+        adopt()
 
     # Les fichiers de l'espace suivent la déclaration : ce qui n'y est plus
     # disparaît, et sera détruit par l'apply (le plan le montre).
@@ -30631,6 +31034,31 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
             return _close_err(run, "init", err.strip()[:400] or out.strip()[:400])
         step("init", "done", "providers ready")
 
+    if enc["migrate"] or enc["decrypt"]:
+        # migration d'un état (essai 8) : `apply -refresh-only` sans aucun
+        # changement de ressource ; à l'aller le bloc de migration lit
+        # l'état clair et l'écrit chiffré, au retour l'inverse
+        sid = "decrypt-state" if enc["decrypt"] else "encrypt-state"
+        step(sid, "running", "apply -refresh-only")
+        rc, out, err = tf(["apply", "-refresh-only", "-auto-approve", "-input=false", "-no-color"],
+                          1800 if kvm else 900)
+        if rc != 0:
+            return _close_err(run, sid, err.strip()[:400] or out.strip()[:400])
+        if _tfst.state_encrypted(ws) == bool(enc["decrypt"]):
+            return _close_err(run, sid, "the state was not rewritten "
+                                        + ("in clear text" if enc["decrypt"] else "encrypted"))
+        if enc["decrypt"]:
+            (ws / _tfe.ENCRYPTION_FILE).unlink(missing_ok=True)
+            (ws / TF_ADDRESSES_CACHE).unlink(missing_ok=True)
+            step(sid, "done", "state written in clear text, encryption block removed")
+            return done({"encryption": "plain", "deployed": _tf_addresses(ws)})
+        step(sid, "done", "state encrypted")
+    if enc["encrypt"]:
+        try:
+            adopt()
+        except (TfStateUnreadable, ValueError) as e:
+            return _close_err(run, "adopt", str(e)[:300])
+
     if destroying:
         args = (["plan", "-destroy", "-input=false", "-no-color"] if mode == "destroy-plan"
                 else ["destroy", "-input=false", "-no-color", "-auto-approve"])
@@ -30645,11 +31073,11 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
             return _close_err(run, "destroy", err.strip()[:400] or out.strip()[:400])
         if mode == "destroy":
             for f in list(ws.glob("*.tf")) + list(ws.glob("*.json")) + [ws / "tfplan", ws / "tfplan.meta"]:
-                if f.name != "_providers.tf":
+                if f.name not in ("_providers.tf", _tfe.ENCRYPTION_FILE, TF_ADDRESSES_CACHE):
                     f.unlink(missing_ok=True)       # .outputs.json compris
             TF_DECLS.mark_applied(decl["id"], "destroyed", user)
         step("destroy", "done", f"declaration '{name}' destroyed" if mode == "destroy" else "destroy plan ready")
-        return done({"deployed": _tfst.addresses(ws)})
+        return done({"deployed": _tf_addresses(ws, tf if enc["encrypt"] else None)})
 
     summary = None
     if not (use_saved_plan and (ws / "tfplan").exists()):
@@ -30702,7 +31130,7 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
     if kvm:
         _tf_save_outputs(ws, tf, _tfk.output_names(rendered))
     step("apply", "done", f"declaration '{name}' applied ({len(rendered)} resources)")
-    return done({"plan": summary, "deployed": _tfst.addresses(ws)})
+    return done({"plan": summary, "deployed": _tf_addresses(ws, tf if enc["encrypt"] else None)})
 
 
 def _tf_save_outputs(ws, tf, wanted=None):
@@ -31356,7 +31784,12 @@ def api_terraform_destroy(cluster):
         # v1.54.0 : tout ce que Terraform gère sur ce cluster, c'est l'espace
         # partagé ET l'état de chaque déclaration.
         spaces = [(None, _tf_workspace_dir(cluster))] + _tf_decl_workspaces(cluster)
-        spaces = [(i, w) for i, w in spaces if (w / ".terraform").exists() and _tfst.addresses(w)]
+        def managed(w):
+            try:
+                return bool(_tf_addresses(w))
+            except TfStateUnreadable:
+                return True                     # illisible : tenté, OpenTofu dira pourquoi
+        spaces = [(i, w) for i, w in spaces if (w / ".terraform").exists() and managed(w)]
         if not spaces:
             return _close_err(run, "preflight", "nothing managed by Terraform on this cluster")
         args = ["plan", "-destroy", "-no-color"] if dry_run \
@@ -33811,6 +34244,63 @@ def api_secrets_offline_copy_ack():
     if err:
         return err
     return jsonify({"action_id": run.id}), 202
+
+
+# 2.9.0 (tâche 9, point 270 B) : un Vault plus récent que 1.14 en mode A
+# chiffre les états après acquittement de l'administrateur (l'outil lit la
+# version du serveur et la garde avec l'acquittement).
+@app.route("/api/secrets/tf-encryption/ack", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_tf_encryption_ack():
+    run, err = _secrets_tool_action("secrets:tf-encryption-ack", ["tf-encryption", "ack-vault"])
+    if err:
+        return err
+    _TF_SERVER_STATUS.clear()
+    return jsonify({"action_id": run.id}), 202
+
+
+def _tf_entity_remove_start(decl_id):
+    """Déclaration chiffrée supprimée : son entité d'identité `tf-<décl>`
+    est retirée par l'agent en B1, ou notée à retirer dans la fiche du mode
+    A (action suivie `harvester-secrets tf-entity-remove`). Rend l'action ou
+    None (OpenBao inactif, outil absent)."""
+    script = BIN_DIR / SECRETS_TOOL
+    if not script.is_file() or not _sst.is_active() or not _tfs.ID_RE.match(str(decl_id or "")):
+        return None
+    from flask import has_request_context
+    user = (current_user() or "console") if has_request_context() else "service"
+    ctx = app.app_context() if not has_request_context() else contextlib.nullcontext()
+    with ctx:
+        run, _err = _cli_action("", f"secrets:tf-entity-remove:{decl_id}",
+                                [sys.executable, str(script), "--actor", user, "tf-entity-remove", decl_id],
+                                "harvester-secrets", check_busy=False, capture=True, cluster_user=None)
+    return run
+
+
+@app.route("/api/tf-declarations/<decl_id>/decrypt-state", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_tf_declaration_decrypt_state(decl_id):
+    """Remet en clair l'état chiffré d'une déclaration (retour avant de
+    désactiver OpenBao, plan « États OpenTofu ») : action suivie,
+    `apply -refresh-only` avec le bloc de retour, puis le bloc retiré."""
+    d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
+    if d is None:
+        return jsonify({"error": "declaration not found"}), 404
+    kind = d.get("target_kind") or "harvester"
+    kc = None
+    if kind != "kvm":
+        kc = _kubectl_for_cluster(d["cluster"])
+        if not kc:
+            return jsonify({"error": f"unknown cluster: {d['cluster']}"}), 404
+    try:
+        run_id, _h = _tf_decl_launch(d["cluster"], kc, decl_id, "decrypt-state", user=current_user() or "",
+                                     cluster_user=(current_cluster_identity() or {}).get("user"),
+                                     target_kind=kind, role=current_role())
+    except TfLaunchError as e:
+        return jsonify(e.payload), e.status
+    return jsonify({"action_id": run_id}), 202
 
 
 def _replication_secret_refs(clusters=False):
@@ -36426,7 +36916,11 @@ def _deploy_cleanup_dry(created):
         if d is None:
             continue
         ws = _tf_decl_ws(d, create=False)
-        if ws.exists() and _tfst.addresses(ws):
+        try:
+            kept = ws.exists() and _tf_addresses(ws)
+        except TfStateUnreadable:
+            kept = True
+        if kept:
             continue                            # jamais : un essai n'applique rien
         TF_DECLS.delete(decl_id)
         _shutil.rmtree(ws, ignore_errors=True)
@@ -37239,8 +37733,12 @@ def _undo_details(kc, cluster, u, services):
     if d is None:
         return {"present": False}
     ws = _tf_decl_ws(d, create=False)
-    return {"present": True, "name": d["name"], "revision": d.get("revision"),
-            "resources": _tfst.addresses(ws) if ws.exists() else []}
+    try:
+        res = _tf_addresses(ws) if ws.exists() else []
+    except TfStateUnreadable as e:
+        return {"present": True, "name": d["name"], "revision": d.get("revision"), "resources": None,
+                "error": e.code}
+    return {"present": True, "name": d["name"], "revision": d.get("revision"), "resources": res}
 
 
 def _undo_include(undos, include):

@@ -83,6 +83,8 @@ DEFAULTS = {
     "dev_disk_secret_files": False,
     "originals_keep_days": 7,     # garde des originaux migrés (1 à 30)
     "outage_test": None,          # {"ok_at", "by"} : panne simulée réussie (point 255)
+    "tf_vault_ack": None,         # {"addr", "version", "at", "by"} : Vault > 1.14 acquitté (point 270)
+    "tf_entities_pending": [],    # mode A : entités tf-<décl> à retirer par l'administrateur
 }
 ORIGINALS_KEEP_RANGE = (1, 30)
 CACHE_TTL_RANGE = (1, 120)
@@ -211,7 +213,7 @@ def _state_dir(state_dir=None):
 def load_settings(state_dir=None):
     """`<état>/secrets-settings.json` avec les valeurs par défaut ; un
     fichier absent ou illisible vaut le mode local."""
-    out = dict(DEFAULTS, migrated={})
+    out = dict(DEFAULTS, migrated={}, tf_entities_pending=[])
     try:
         raw = json.loads((_state_dir(state_dir) / SETTINGS_FILE).read_text())
     except (OSError, ValueError):
@@ -232,6 +234,8 @@ def load_settings(state_dir=None):
     except (TypeError, ValueError):
         keep = DEFAULTS["originals_keep_days"]
     out["originals_keep_days"] = max(ORIGINALS_KEEP_RANGE[0], min(ORIGINALS_KEEP_RANGE[1], keep))
+    if not isinstance(out["tf_entities_pending"], list):
+        out["tf_entities_pending"] = []
     if not out["prefix"] and out["console_id"]:
         out["prefix"] = f"consoles/{out['console_id']}"
     return out
@@ -1682,6 +1686,18 @@ class MultiStore(LocalStore):
         if backend == "openbao":
             return self._need_bao(cls, path).refs(cls, path)
         return super().refs(cls, path)
+
+    def bao_client(self, actor=None, action=None):
+        """Client connecté de la console (identité de service), pour les
+        appels qui ne sont pas des lectures de secrets : jeton enfant
+        d'OpenTofu, clés transit (tâche 9). SecretError openbao-inactive
+        si OpenBao n'est pas actif."""
+        import openbao_client as oc
+        bao = self._need_bao()
+        try:
+            return bao._client(actor, action)
+        except oc.OpenBaoError as e:
+            raise (bao._failed(e, None, None) or SecretError(e.code, None, None, e.detail)) from None
 
     def versions(self, ref):
         backend, cls, path, _f = parse_ref_full(ref)

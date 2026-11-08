@@ -73,6 +73,13 @@ LIBVIRT_URI_RE = re.compile(
 # jamais : leur seule présence refuse l'exécution.
 FOREIGN_SUFFIXES = (".tf.json", ".tofu", ".tofu.json", ".tfvars", ".tfvars.json")
 HEADER_FILE = "_providers.tf"
+# 2.9.0 (tâche 9) : chiffrement de l'état par OpenBao, écrit par la console
+# seule. Le fichier n'est accepté que s'il porte exactement un des textes que
+# la console écrit pour cette déclaration ; un bloc `encryption`,
+# `key_provider` ou `method` dans le code d'une déclaration est refusé.
+ENCRYPTION_FILE = "_encryption.tf"
+ENCRYPTION_RESERVED = "tf-encryption-reserved"
+ENCRYPTION_BLOCKS = ("encryption", "key_provider", "method")
 
 
 def is_forbidden_function(name):
@@ -86,14 +93,18 @@ def is_forbidden_function(name):
 class Violation:
     """Une construction refusée : sa nature, sa ligne, le pourquoi."""
 
-    __slots__ = ("construct", "line", "message", "file")
+    __slots__ = ("construct", "line", "message", "file", "code")
 
-    def __init__(self, construct, line, message, file=""):
+    def __init__(self, construct, line, message, file="", code=None):
         self.construct, self.line, self.message, self.file = construct, line, message, file
+        self.code = code
 
     def as_dict(self):
-        return {"construct": self.construct, "line": self.line, "file": self.file,
-                "error": str(self)}
+        d = {"construct": self.construct, "line": self.line, "file": self.file,
+             "error": str(self)}
+        if self.code:
+            d["code"] = self.code
+        return d
 
     def __str__(self):
         where = f"{self.file}, line {self.line}" if self.file else f"line {self.line}"
@@ -560,6 +571,10 @@ def check_resources(text, target_kind="harvester", file=""):
         name, line, _ = root.attrs[0]
         out.append(Violation(f"attribute {name}", line, "top-level attributes are not allowed", file))
     for blk in root.blocks:
+        enc = _encryption_violation(blk, file)
+        if enc:
+            out.append(enc)
+            continue
         if blk.type not in TOP_BLOCKS:
             why = {"terraform": "backend, cloud and provider settings belong to the console",
                    "provider": "the console configures the provider itself",
@@ -579,6 +594,20 @@ def check_resources(text, target_kind="harvester", file=""):
     out += _keywords(streams, file)
     out += _functions(streams, file)
     return _dedup(out)
+
+
+def _encryption_violation(blk, file):
+    """Bloc de chiffrement de l'état (de premier niveau, ou dans un bloc
+    `terraform`) : réservé à la console (`tf-encryption-reserved`)."""
+    if blk.type in ENCRYPTION_BLOCKS:
+        return Violation(f"{blk.type} block", blk.line, "state encryption belongs to the console",
+                         file, code=ENCRYPTION_RESERVED)
+    if blk.type == "terraform":
+        sub = next((b for b in blk.blocks if b.type in ENCRYPTION_BLOCKS), None)
+        if sub is not None:
+            return Violation(f"terraform.{sub.type} block", sub.line, "state encryption belongs to the console",
+                             file, code=ENCRYPTION_RESERVED)
+    return None
 
 
 def resource_types(text):
@@ -629,6 +658,10 @@ def check_header(text, file=HEADER_FILE):
     for name, line, _ in root.attrs:
         out.append(Violation(f"attribute {name}", line, "top-level attributes are not allowed", file))
     for blk in root.blocks:
+        enc = _encryption_violation(blk, file)
+        if enc:
+            out.append(enc)
+            continue
         if blk.type == "terraform":
             for name, line, _ in blk.attrs:
                 if name != "required_version":
@@ -680,12 +713,14 @@ def _provider_source(vtoks):
     return None
 
 
-def check_workspace(ws, known_headers=()):
+def check_workspace(ws, known_headers=(), known_encryption=()):
     """Violations de tous les fichiers qu'OpenTofu chargerait depuis l'espace
     `ws` (dernier rempart, juste avant chaque commande, quel que soit le
     chemin qui a écrit les fichiers). `known_headers` : en-têtes que la
     console écrivait autrefois EN TÊTE de chaque fichier de ressource (espaces
-    partagés d'avant la v1.5) ; contrôlés comme un en-tête."""
+    partagés d'avant la v1.5) ; contrôlés comme un en-tête.
+    `known_encryption` (2.9.0) : les seuls textes permis de `_encryption.tf`
+    dans cet espace (tf_encryption.all_blocks) ; vide = fichier refusé."""
     ws = Path(ws)
     out = []
     try:
@@ -710,6 +745,11 @@ def check_workspace(ws, known_headers=()):
             continue
         if name == HEADER_FILE:
             out += check_header(text, name)
+            continue
+        if name == ENCRYPTION_FILE:
+            if text not in tuple(known_encryption or ()):
+                out.append(Violation(f"file {name}", 0, "differs from what the console writes",
+                                     name, code=ENCRYPTION_RESERVED))
             continue
         head = next((h for h in known_headers if h and text.startswith(h)), None)
         if head:

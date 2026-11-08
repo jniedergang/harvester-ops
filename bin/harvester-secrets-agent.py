@@ -60,7 +60,7 @@ import safe_fs as sf  # noqa: E402
 VERSION_FILE = Path(os.environ.get("HARVESTER_OPS_OPT", "/opt/harvester-ops")) / "VERSION"
 OPS = ("store-secret-id", "b1-install", "b1-upgrade", "b1-remove", "rotate-secret-id", "rotate-unseal-key",
        "restore-snapshot", "b1-policies", "export-unseal-key", "export-unseal-key-done", "ack-offline-copy",
-       "status")
+       "tf-entity-remove", "status")
 KEYS = {
     "store-secret-id": {"console_id", "addr", "role_id", "wrap_token", "ca_pem"},
     "b1-install": {"console_id", "bundle"},
@@ -73,6 +73,7 @@ KEYS = {
     "export-unseal-key": set(),
     "export-unseal-key-done": set(),
     "ack-offline-copy": {"key_id"},
+    "tf-entity-remove": {"decl"},
     "status": set(),
 }
 COMMON = {"op", "id", "requested_by"}
@@ -1133,6 +1134,20 @@ class Agent:
             return a.entity_delete_by_alias(pol.tf_alias(decl), acc)
         finally:
             a.revoke_self()
+
+    def op_tf_entity_remove(self, req):
+        """Déclaration chiffrée supprimée (tâche 9) : son entité `tf-<décl>`
+        retirée. Nom validé par openbao_policy.tf_alias."""
+        if not self.agent_state():
+            raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
+        try:
+            alias = pol.tf_alias(str(req.get("decl") or ""))
+        except ValueError:
+            raise AgentError("bad-request", "decl: declaration identifier expected") from None
+        self.step("entity", "running", alias)
+        gone = self.remove_tf_entity(req["decl"])
+        self.step("entity", "done", "removed" if gone else "no such entity")
+        return f"identity entity {alias} " + ("removed" if gone else "already absent")
 
     def op_b1_remove(self, req):
         st = self.agent_state()
