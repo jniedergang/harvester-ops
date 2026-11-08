@@ -4,7 +4,7 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
-## [2.8.1] - 2026-11-08 - Offline child clusters skip the package update
+## [2.8.1] - 2026-11-08 - Offline child clusters skip the package update, self-hosted registry warning
 
 ### Fixed
 - **Child cluster without Internet stuck before RKE2** (decision 241, R11
@@ -30,6 +30,16 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   20 GiB. At 10 GiB the 2.8.0 bench reached 78 % with the agent and Flux,
   and the image garbage collection failed. In the creation window (Nodes
   menu), in `harvester-capi check` and in the plans.
+- **Warning when Harvester nodes merges a registry hosted by the same
+  cluster** (decision 242, `harvester-nodes-self-hosted`, not blocking):
+  a bootstrap registry declared on this cluster, or an endpoint address
+  equal to the address of a LoadBalancer Service of the cluster
+  (kube-vip). The node that holds the address may not reach the registry
+  through it, and pulls on the Harvester nodes may fall back to the
+  origin or fail (R10 of the 2.8.0 bench). In the JSON of
+  `harvester-registry harvester-nodes`, the log of the action and the
+  Harvester nodes window. Unreadable Services do not stop the merge.
+
 ### Upgrade notes
 - A child cluster created without Internet by 2.8.0 keeps its templates:
   delete it and create it again with 2.8.1.
@@ -46,6 +56,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   version may merge differently.
 - Only zypper repositories are moved aside. An image with another package
   manager still tries to install the CAPHV package list.
+- The self-hosted check compares IP addresses only: a registry endpoint
+  given as a host name is not resolved.
 
 ### Tests
 - API tests: both templates carry the cloud-init in both modes and none
@@ -54,12 +66,16 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   repositories are set aside then restored by a real shell (twice, without
   a saved copy, placeholder used meanwhile, no zypper), the restore comes
   before the fetch, renewal keeps the cloud-init, the disk warning at its
-  threshold. Seven named mutations are killed.
+  threshold; `harvester-nodes` warns for a bootstrap registry of the same
+  cluster and for a LoadBalancer address with or without port, not for
+  another address, a host name, another cluster or a removal, writes the
+  setting in every case and still merges when Services cannot be read.
+  Eleven named mutations are killed.
 
 ### Not verified for real
 - Unit-tested only, no bench pass for this release: the offline
   cloud-init (R11 and R12 on harv4 and a real chained plan with a Git
-  secret are to run with 2.8.1).
+  secret are to run with 2.8.1) and the self-hosted warning.
 
 ## [2.8.0] - 2026-11-08 - Child cluster access, GitOps, machine renewal and finished registries
 

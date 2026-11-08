@@ -702,7 +702,8 @@ still has to be run on the bench).
 ### Harvester nodes merged, but images still come from the origin
 
 The nodes of the Harvester cluster that hosts a bootstrap registry may
-not reach the registry address themselves. Seen on harvlab2 (one node):
+not reach the registry address themselves. Since 2.8.1, Harvester nodes
+warns about this pairing (`harvester-nodes-self-hosted`, not blocking). Seen on harvlab2 (one node):
 the address is held on the node, and a connection from the node to it
 times out. containerd then falls back to the origin registry. Wire the
 Harvester nodes to a registry they can reach: a client registry, or the

@@ -905,6 +905,15 @@ harvester-registry harvester-nodes NOM --cluster C [--remove] [--dry-run] [--wai
 - La valeur précédente est rendue masquée, dans le résultat de l'action.
   Elle ne peut pas rendre les mots de passe.
 - `--remove` retire la seule entrée de ce registre.
+- **Avertissement quand le registre est hébergé par ce cluster** (2.8.1,
+  `harvester-nodes-self-hosted`, non bloquant) : registre d'amorçage
+  déclaré sur ce cluster, ou adresse du point d'accès égale à celle d'un
+  Service LoadBalancer de ce cluster (kube-vip). Le nœud qui porte
+  l'adresse peut ne pas y joindre le registre : les téléchargements des
+  nœuds Harvester peuvent retomber sur l'origine ou échouer (vu sur
+  harvlab2). Le constat est dans le JSON (`findings`), dans le journal de
+  l'action et dans la fenêtre. Un nom d'hôte n'est pas résolu, il n'est
+  donc pas comparé.
 
 ## Rôles
 

@@ -1044,6 +1044,17 @@ def cmd_harvester_nodes(args):
             step("harvester-nodes", "error", f"harvester-nodes-other-auth: {', '.join(others)} keep a password in "
                                              f"Harvester; changing the mirrors of {SETTING} would make Harvester erase "
                                              "it. Nothing written")
+    if not args.remove:
+        # 2.8.1 (décision 242) : registre hébergé par ce cluster, constat
+        # non bloquant ; des Services illisibles ne retiennent pas l'écriture
+        try:
+            services = [] if d.get("kind") == "bootstrap" and d.get("cluster") == args.cluster \
+                else kube.list("services")
+        except KubeError:
+            services = []
+        own = rg.self_hosted(d, args.cluster, services)
+        if own:
+            found = found + [own]
     for f in found:
         step("harvester-nodes", "error" if f["level"] == "block" else "running", f"{f['code']} {json.dumps(f['facts'])}")
     if cc.blocking(found):

@@ -162,6 +162,28 @@ def test_harvester_nodes_nothing_to_change_and_mirror_conflict_grey_the_launch(c
     expect(launch).to_be_disabled()
 
 
+def test_harvester_nodes_self_hosted_warning_does_not_grey_the_launch(context, flask_server):
+    """2.8.1 (décision 242) : registre hébergé par le cluster même, constat
+    affiché et traduit, Appliquer reste possible (non bloquant)."""
+    def nodes(b):
+        return 200, {"changed": True, "previous": "{}", "value": "{}", "additional_ca_changed": False,
+                     "blocked": False, "findings": [
+                         {"code": "harvester-nodes-self-hosted", "level": "warn",
+                          "facts": {"registry": "amorcage", "cluster": "harv-fake", "address": "172.16.2.76",
+                                    "by": "bootstrap"}},
+                         {"code": "harvester-rke2-restart", "level": "warn", "facts": {"setting": "containerd-registry"}}]}
+    page = open_detail(context, flask_server, {}, nodes=nodes)
+    page.locator("#registries-detail [data-reg-nodes]").click()
+    m = page.locator(".reg-modal")
+    m.locator('[data-reg-tab="checks"]').click()
+    expect(m.locator('[data-code="harvester-nodes-self-hosted"]')).to_contain_text(
+        "amorcage is hosted by harv-fake itself (172.16.2.76, bootstrap)")
+    expect(m.locator('[data-x="count"]')).to_have_text("0")
+    m.locator('[data-reg-tab="params"]').click()
+    m.locator('[data-f="rke2"]').check()
+    expect(m.locator("[data-reg-launch]")).to_be_enabled()
+
+
 def test_operator_sees_both_gestures_greyed_and_hostile_name_is_escaped(context, flask_server):
     hostile = dict(t260.BOOT, name=HOSTILE[:30], clusters=["harv-fake"])
     page, _ = t260.open_registries(context, flask_server, {}, role="operator", registries=[hostile])

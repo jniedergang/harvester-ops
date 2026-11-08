@@ -732,7 +732,9 @@ réel (2.8.1 reste à passer au banc).
 ### Nœuds Harvester posé, mais les images viennent encore de l'origine
 
 Les nœuds du cluster Harvester qui porte un registre d'amorçage peuvent ne
-pas joindre eux-mêmes l'adresse du registre. Vu sur harvlab2 (un nœud) :
+pas joindre eux-mêmes l'adresse du registre. Depuis 2.8.1, Nœuds Harvester
+avertit de cette association (`harvester-nodes-self-hosted`, non
+bloquant). Vu sur harvlab2 (un nœud) :
 l'adresse est portée par le nœud, et une connexion du nœud vers elle
 expire. containerd se replie alors sur le registre d'origine. Branchez les
 nœuds Harvester sur un registre qu'ils joignent : un registre du client, ou

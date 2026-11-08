@@ -872,6 +872,14 @@ harvester-registry harvester-nodes NAME --cluster C [--remove] [--dry-run] [--wa
 - The previous value is returned masked, in the result of the action.
   It cannot give the passwords back.
 - `--remove` takes out the entry of this registry only.
+- **Warning when the registry is hosted by this cluster** (2.8.1,
+  `harvester-nodes-self-hosted`, not blocking): a bootstrap registry
+  declared on this cluster, or an endpoint address equal to the address
+  of a LoadBalancer Service of this cluster (kube-vip). The node that
+  holds the address may not reach the registry through it: pulls on the
+  Harvester nodes may fall back to the origin or fail (seen on harvlab2).
+  The finding is in the JSON (`findings`), in the log of the action and in
+  the window. A host name is not resolved, so it is not compared.
 
 ## Roles
 
