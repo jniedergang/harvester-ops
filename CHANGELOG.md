@@ -100,8 +100,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `/var/lib/harvester-ops-snapshots`, and queues a refresh of the B1
   policies when B1 is posed.
 - **Rolling the console back below 2.9.0 is refused** (`secrets-in-openbao`)
-  while the store is not local, a class is in OpenBao or a state is
-  encrypted, also for an install with "allow older". Seen for real on the
+  while the store is not local, a class is in OpenBao, a state is
+  encrypted or `secrets-settings.json` exists but cannot be read, also for
+  an install with "allow older". Seen for real on the
   client VM before this guard: a 2.8.3 console reads the references as
   paths or values (clusters with a moved kubeconfig in error, a `status`
   action reported done while kubectl failed, SSH key not found,

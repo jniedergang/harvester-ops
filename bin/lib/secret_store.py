@@ -303,9 +303,18 @@ BACK_TO_LOCAL_STEPS = (
 
 def openbao_blockers(state_dir=None, tf_root=None):
     """Ce qui empêche une console plus ancienne que la 2.9.0 de reprendre
-    l'état : mode actif, classes migrées, états chiffrés ({} si rien)."""
+    l'état : mode actif, classes migrées, états chiffrés ({} si rien).
+    Relecture des corrections finales m2 : un fichier de réglages présent
+    mais illisible bloque (il vaudrait le mode local ailleurs)."""
     s = load_settings(state_dir)
     out = {}
+    f = _state_dir(state_dir) / SETTINGS_FILE
+    if os.path.lexists(f):
+        try:
+            if not isinstance(json.loads(f.read_text()), dict):
+                raise ValueError("not an object")
+        except (OSError, ValueError):
+            out["settings"] = "unreadable"
     if (s.get("mode") or "local") != "local":
         out["mode"] = s["mode"]
     if s.get("migrated"):

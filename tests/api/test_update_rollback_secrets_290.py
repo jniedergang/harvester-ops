@@ -106,3 +106,28 @@ def test_update_to_a_newer_release_not_blocked(ready, keys, tmp_path):
         staged(c, keys, tmp_path, "2.10.0")
         r = c.post("/api/update/apply", json={"archive": "harvester-ops-2.10.0.tar.gz"})
         assert r.status_code == 202, r.get_json()
+
+
+@pytest.mark.parametrize("label", ["not-json", "not-an-object", "no-permission", "directory"])
+def test_rollback_below_290_refused_while_the_settings_cannot_be_read(ready, keys, tmp_path, label):
+    """Relecture des corrections finales m2 : un secrets-settings.json présent
+    mais illisible ne vaut plus le mode local pour ce garde (le doute ferme)."""
+    wapp, state, tf = ready
+    f = state / "secrets-settings.json"
+    if label == "directory":
+        f.mkdir()
+    else:
+        f.write_text({"not-json": '{"mode": "b1",', "not-an-object": '["b1"]', "no-permission": '{"mode": "b1"}'}[label])
+    if label == "no-permission":
+        f.chmod(0)
+    try:
+        with wapp.app.test_client() as c:
+            staged(c, keys, tmp_path, "2.8.3")
+            r = c.post("/api/update/rollback", json={"archive": "harvester-ops-2.8.3.tar.gz", "confirm": "2.8.3"})
+            body = r.get_json()
+            assert r.status_code == 409 and body["code"] == "secrets-in-openbao", body
+            assert body["blockers"] == {"settings": "unreadable"}
+    finally:
+        if label == "no-permission":
+            f.chmod(0o600)
+    assert not (state / "updates" / "request.json").exists()

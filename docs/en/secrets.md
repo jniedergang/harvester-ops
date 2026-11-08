@@ -303,7 +303,8 @@ below 1 GiB free or 10 % of the volume.
   --remove-b1`, then enable mode A.
 - **Rolling the console back below 2.9.0** (Update > Roll back, or Install
   with "allow older") is refused while the store is not local, a class is in
-  OpenBao or a state is encrypted (`secrets-in-openbao`), with the steps to
+  OpenBao or a state is encrypted (`secrets-in-openbao`; also when
+  `secrets-settings.json` exists but cannot be read), with the steps to
   do first: bring every class back, put encrypted states back in clear,
   disable the store. A 2.8.x console would read the `openbao:` references as
   paths or values: clusters with a moved kubeconfig fail (a `status` action

@@ -321,7 +321,8 @@ volume.
 - **Revenir à une console antérieure à la 2.9.0** (Mise à jour > Revenir
   en arrière, ou Installer en autorisant une version plus ancienne) est
   refusé tant que le magasin n'est pas local, qu'une classe est dans
-  OpenBao ou qu'un état est chiffré (`secrets-in-openbao`). Le refus donne les étapes
+  OpenBao ou qu'un état est chiffré (`secrets-in-openbao` ; aussi quand
+  `secrets-settings.json` existe mais ne se lit pas). Le refus donne les étapes
   à faire d'abord : ramener toutes les classes, remettre en clair les états
   chiffrés, désactiver le magasin. Une console 2.8.x lirait les références
   `openbao:` comme des chemins ou des valeurs : les clusters au kubeconfig
