@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import calendar
 import contextlib
 import time
 import uuid
@@ -35194,6 +35195,70 @@ def api_secrets_snapshot():
     return _secrets_accepted(*_secrets_tool_action(SECRETS_SNAPSHOT_LABEL, ["snapshot"]))
 
 
+_SNAP_STAMP_RE = re.compile(r"(\d{8}T\d{6}Z)")
+
+
+def _secrets_restore_preflight(name):
+    """Relecture finale I2 : ce qu'une restauration casserait, lu AVANT tout
+    arrêt. Actions en cours (tuées avec la console) ; déclarations chiffrées
+    dont la clé transit a été créée ou tournée après l'instantané (état
+    illisible ensuite) ; clés KVM tournées depuis (OpenBao rendrait
+    l'ancienne, que l'hôte refuse) ; classes migrées depuis (leurs secrets
+    n'existent pas dans l'instantané). Aucune valeur."""
+    m = _SNAP_STAMP_RE.search(name)
+    snap_at = None
+    if m:
+        try:
+            snap_at = calendar.timegm(time.strptime(m.group(1), "%Y%m%dT%H%M%SZ"))
+        except ValueError:
+            snap_at = None
+    busy = [{"id": a["id"], "action": a["action"], "cluster": a["cluster"]} for a in _update_busy_actions()
+            if not str(a["action"]).startswith(SECRETS_ACTION_PREFIX)]
+    since = snap_at if snap_at is not None else 0
+    rotated = {}
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB))
+        try:
+            for label, at in conn.execute(
+                    "SELECT action, started_at FROM actions WHERE status = 'done' AND started_at > ? "
+                    "AND (action LIKE 'secrets:rotate-transit:%' OR action LIKE 'secrets:rotate-ssh-kvm:%')",
+                    (since,)):
+                rotated.setdefault(label, at)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+    tf = []
+    for decl in _sst.encrypted_states(TF_WORKSPACES):
+        d = TF_DECLS.get(decl) or {}
+        created = None
+        try:
+            created = calendar.timegm(time.strptime(str(d.get("created_at") or ""), "%Y-%m-%dT%H:%M:%SZ"))
+        except ValueError:
+            pass
+        why = ("created after the snapshot" if snap_at is None or (created is not None and created > snap_at)
+               else "transit key rotated after the snapshot"
+               if f"secrets:rotate-transit:{decl}" in rotated else None)
+        if why:
+            tf.append({"id": decl, "name": d.get("name"), "reason": why})
+    kvm = sorted(({"host": label.split(":", 2)[2], "rotated_at": at} for label, at in rotated.items()
+                  if label.startswith("secrets:rotate-ssh-kvm:")), key=lambda h: h["host"])
+    migrated = _secrets_settings().get("migrated") or {}
+    classes = sorted(c for c, e in migrated.items()
+                     if snap_at is None or float((e or {}).get("at") or 0) > snap_at)
+    return {"file": name, "snapshot_at": snap_at, "busy": busy, "tf_declarations": tf, "kvm_hosts": kvm,
+            "classes": classes, "risks": bool(tf or kvm or classes or snap_at is None)}
+
+
+@app.route("/api/secrets/restore/preflight", methods=["GET"])
+@requires_auth
+def api_secrets_restore_preflight():
+    name = str(request.args.get("file") or "")
+    if not _SNAP_NAME_RE.match(name):
+        return jsonify({"error": "snapshot file name expected", "code": "snapshot-bad-name"}), 400
+    return jsonify(_secrets_restore_preflight(name))
+
+
 @app.route("/api/secrets/restore", methods=["POST"])
 @requires_auth
 @_rate_limit("3/minute")
@@ -35204,6 +35269,13 @@ def api_secrets_restore():
         return jsonify({"error": "snapshot file name expected", "code": "snapshot-bad-name"}), 400
     if not _secrets_confirm_ok(data):
         return jsonify({"error": "type the console identifier to confirm", "code": "confirmation-required"}), 400
+    pre = _secrets_restore_preflight(name)
+    if pre["busy"] and not data.get("force"):
+        return jsonify(dict(pre, error="actions are running; the console stops during the restore and they "
+                                       "would be killed", code="actions-running")), 409
+    if pre["risks"] and data.get("ack_risks") is not True:
+        return jsonify(dict(pre, error="this restore breaks what is listed; acknowledge it to go on",
+                            code="restore-risks")), 409
     return _secrets_accepted(*_secrets_tool_action(f"secrets:restore:{name}", ["restore", name], clear_cache=True))
 
 

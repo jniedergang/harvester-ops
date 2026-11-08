@@ -93,7 +93,10 @@ def open_secrets(context, flask_server, state, viewport=None):
                "snapshots": lambda: state.get("snaps", {}), "bundles": lambda: state.get("bundles", {"bundles": []}),
                "secrets": lambda: state.get("names", {"secrets": []}),
                "versions": lambda: state.get("versions", {"versions": []}),
-               "assistant": lambda: state.get("assistant", {"commands": []})}.get(path)
+               "assistant": lambda: state.get("assistant", {"commands": []}),
+               "restore/preflight": lambda: state.get("preflight", {"busy": [], "tf_declarations": [],
+                                                                    "kvm_hosts": [], "classes": [],
+                                                                    "snapshot_at": 1794105000, "risks": False})}.get(path)
         return fulfill(route, doc() if doc else {"error": "x"}, 200 if doc else 404)
     page.route(re.compile(r".*/api/secrets/.*"), api)
 
@@ -313,7 +316,39 @@ def test_snapshots_restore_with_the_typed_console_id(context, flask_server):
     m.locator(".sx-typed").fill(CID)
     m.locator('[data-x="ok"]').click()
     expect(page.locator("#sx-feedback")).to_contain_text("Snapshot restored")
-    assert ("restore", {"file": "openbao-20261108T023000Z-hops-20261108-1.snap", "confirm": CID}) in st["calls"]
+    assert ("restore", {"file": "openbao-20261108T023000Z-hops-20261108-1.snap", "confirm": CID,
+                        "ack_risks": False, "force": False}) in st["calls"]
+
+
+def test_restore_shows_what_it_would_break_before_anything_stops(context, flask_server):
+    """Relecture finale I2 : contrôle avant restauration montré dans la
+    fenêtre (actions en cours, déclaration chiffrée plus récente, clé KVM
+    tournée, classe migrée depuis), noms échappés ; la saisie de
+    l'identifiant acquitte la liste."""
+    snap = "openbao-20261108T023000Z-hops-20261108-1.snap"
+    st = {"status": status_doc(),
+          "snaps": {"dir": "/mnt/backup/openbao", "time": "02:30", "keep": 14, "stale_after_s": 172800,
+                    "files": [{"file": snap, "bytes": 40000, "at": time.time() - 3600, "where": "dir"}],
+                    "agent_files": []},
+          "preflight": {"busy": [{"id": "a1", "action": "tf-apply:c1/web", "cluster": "c1"}],
+                        "tf_declarations": [{"id": "d1", "name": HOSTILE, "reason": "created after the snapshot"}],
+                        "kvm_hosts": [{"host": "node2", "rotated_at": 1}], "classes": ["kubeconfig"],
+                        "snapshot_at": 1794105000, "risks": True}}
+    page = open_secrets(context, flask_server, st)
+    body = to_tab(page, "snapshots")
+    body.locator(f'[data-sx-restore="{snap}"]').click()
+    m = page.locator("#sx-confirm")
+    items = m.locator("[data-sx-preflight] li")
+    expect(items).to_have_count(4)
+    expect(m).to_contain_text("tf-apply:c1/web")
+    expect(m).to_contain_text("KVM host node2")
+    expect(m).to_contain_text("Class kubeconfig")
+    expect(m).to_contain_text("onerror")                     # texte, pas balise
+    assert page.evaluate("() => window.__pwned") is None
+    m.locator(".sx-typed").fill(CID)
+    m.locator('[data-x="ok"]').click()
+    expect(page.locator("#sx-feedback")).to_contain_text("Snapshot restored")
+    assert ("restore", {"file": snap, "confirm": CID, "ack_risks": True, "force": True}) in st["calls"]
 
 
 def test_offline_copy_steps(context, flask_server):

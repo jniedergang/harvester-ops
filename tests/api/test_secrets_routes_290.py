@@ -111,6 +111,7 @@ def post(wapp, path, body=None, method="post"):
     ("/api/secrets/migrate", "POST", "admin"),
     ("/api/secrets/settings", "PUT", "admin"),
     ("/api/secrets/restore", "POST", "admin"),
+    ("/api/secrets/restore/preflight", "GET", "admin"),
     ("/api/secrets/cache/clear", "POST", "admin"),
 ])
 def test_roles(wapp, path, method, role):
@@ -506,3 +507,78 @@ def test_declaration_id_of_a_retired_key_is_not_reused(wapp, sx, requested, kept
     got = wapp._tf_decl_id_for_create(requested)
     assert (got == requested) is kept
     assert wapp._tfs.ID_RE.match(got) if hasattr(wapp._tfs, "ID_RE") else len(got) == 12
+
+
+# ---------------------------------------------------------------------------
+# Relecture finale I2 : contrôle avant restauration, avant tout arrêt
+# ---------------------------------------------------------------------------
+SNAP = "openbao-20261108T023000Z-hops-20261108-1.snap"
+SNAP_AT = 1794105000          # 2026-11-08T02:30:00Z
+
+
+@pytest.fixture
+def pre(wapp, sx, monkeypatch, tmp_path):
+    ws = tmp_path / "ws"
+    monkeypatch.setattr(wapp, "TF_WORKSPACES", ws)
+    monkeypatch.setattr(wapp, "ACTIONS", {})
+    monkeypatch.setattr(wapp, "ACTIONS_DB", tmp_path / "actions.db")
+    wapp._actions_init_db()
+    decls = {}
+    monkeypatch.setattr(wapp, "TF_DECLS", type("D", (), {"get": staticmethod(lambda i: decls.get(i))})())
+    sx.set(mode="b1")
+
+    def encrypted(decl, created):
+        d = ws / "c1" / "decls" / decl
+        d.mkdir(parents=True)
+        (d / "terraform.tfstate").write_text(json.dumps({"encrypted_data": "x", "encryption_version": "v0"}))
+        decls[decl] = {"id": decl, "name": f"n-{decl}", "created_at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(created))}
+
+    def done(label, at):
+        r = wapp.ActionRun(wapp.uuid.uuid4().hex[:12], label, "", [])
+        r.started_at = at
+        r.status, r.exit_code = "done", 0
+        r.close()
+        wapp.ACTIONS.pop(r.id, None)
+    return type("P", (), {"encrypted": staticmethod(encrypted), "done": staticmethod(done)})
+
+
+def test_preflight_lists_what_the_restore_would_break(wapp, sx, pre):
+    pre.encrypted("old0decl0001", SNAP_AT - 86400)          # existait à l'instantané : lisible
+    pre.encrypted("new0decl0001", SNAP_AT + 3600)           # créée après : clé absente de l'instantané
+    pre.encrypted("rot0decl0001", SNAP_AT - 86400)
+    pre.done("secrets:rotate-transit:rot0decl0001", SNAP_AT + 60)     # clé tournée après
+    pre.done("secrets:rotate-ssh-kvm:node2", SNAP_AT + 120)           # clé KVM tournée après
+    pre.done("secrets:rotate-ssh-kvm:node3", SNAP_AT - 120)           # avant : sans effet
+    sx.set(mode="b1", migrated={"kubeconfig": {"at": SNAP_AT + 30, "by": "alice"},
+                                "rancher-oidc": {"at": SNAP_AT - 30, "by": "alice"}})
+    status, doc = post(wapp, f"/api/secrets/restore/preflight?file={SNAP}", method="get")
+    assert status == 200, doc
+    assert doc["snapshot_at"] == SNAP_AT
+    assert sorted(d["id"] for d in doc["tf_declarations"]) == ["new0decl0001", "rot0decl0001"]
+    assert [h["host"] for h in doc["kvm_hosts"]] == ["node2"]
+    assert doc["classes"] == ["kubeconfig"]
+    assert doc["risks"] is True and doc["busy"] == []
+
+
+def test_restore_refused_while_actions_run_or_risks_are_not_acknowledged(wapp, sx, pre):
+    busy = wapp.ActionRun(wapp.uuid.uuid4().hex[:12], "tf-apply:c1/n", "c1", [])
+    busy.status = "running"
+    wapp.ACTIONS[busy.id] = busy
+    body = {"file": SNAP, "confirm": CID}
+    status, doc = post(wapp, "/api/secrets/restore", body)
+    assert status == 409 and doc["code"] == "actions-running" and doc["busy"][0]["id"] == busy.id
+    busy.status = "done"
+    pre.encrypted("new0decl0001", SNAP_AT + 3600)
+    status, doc = post(wapp, "/api/secrets/restore", body)
+    assert status == 409 and doc["code"] == "restore-risks" and doc["tf_declarations"][0]["id"] == "new0decl0001"
+    assert not sx.launched
+    status, doc = post(wapp, "/api/secrets/restore", dict(body, ack_risks=True))
+    assert status == 202, doc
+    assert sx.launched[-1]["label"] == f"secrets:restore:{SNAP}"
+
+
+def test_restore_without_risk_needs_no_acknowledgement(wapp, sx, pre):
+    pre.encrypted("old0decl0001", SNAP_AT - 86400)
+    status, doc = post(wapp, "/api/secrets/restore", {"file": SNAP, "confirm": CID})
+    assert status == 202, doc

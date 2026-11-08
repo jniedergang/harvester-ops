@@ -187,10 +187,11 @@ const Secrets = (() => {
 
   /** Confirmation à saisie (identifiant de la console, d'une déclaration) :
    *  le bouton n'est actif que quand la saisie est exacte. */
-  function typedConfirm({ title, intro, expect, label, action, danger = true }) {
+  function typedConfirm({ title, intro, expect, label, action, danger = true, details = [] }) {
     return new Promise((resolve) => {
       const w = modal('sx-confirm', title, `
         <p>${esc(intro)}</p>
+        ${details.length ? `<ul class="sx-preflight" data-sx-preflight>${details.map((d) => `<li class="fail">${esc(d)}</li>`).join('')}</ul>` : ''}
         <label class="login-field"><span>${esc(label)}</span>
           <input type="text" class="sx-typed tip" autocomplete="off" spellcheck="false" ${tipAttr(tr('sx.t.typed', { value: expect }))}
                  placeholder="${esc(expect)}"></label>`,
@@ -789,9 +790,24 @@ const Secrets = (() => {
     if (ed) { gesture('POST', '/api/secrets/tf-entity-done', { decl: ed.dataset.sxEntityDone }, tr('sx.done')); return; }
     const rs = e.target.closest('[data-sx-restore]');
     if (rs) {
-      const v = await typedConfirm({ title: tr('sx.restore'), intro: tr('sx.restoreIntro', { file: rs.dataset.sxRestore }),
+      // relecture finale I2 : ce que la restauration casserait, lu avant tout
+      // arrêt ; la saisie de l'identifiant vaut acquittement de cette liste
+      const file = rs.dataset.sxRestore;
+      const pre = await api('GET', `/api/secrets/restore/preflight?file=${encodeURIComponent(file)}`);
+      if (!pre.ok) { say(errOf(pre), true); return; }
+      const p = pre.d || {};
+      const details = [];
+      (p.busy || []).forEach((a) => details.push(tr('sx.pre.busy', { action: a.action })));
+      (p.tf_declarations || []).forEach((d) => details.push(tr('sx.pre.tf', { name: d.name || d.id })));
+      (p.kvm_hosts || []).forEach((h) => details.push(tr('sx.pre.kvm', { host: h.host })));
+      (p.classes || []).forEach((c) => details.push(tr('sx.pre.cls', { cls: c })));
+      if (p.snapshot_at == null) details.push(tr('sx.pre.undated'));
+      const v = await typedConfirm({ title: tr('sx.restore'), intro: tr('sx.restoreIntro', { file }), details,
                                      expect: cid, label: tr('sx.typeConsoleId'), action: tr('sx.restore') });
-      if (v) gesture('POST', '/api/secrets/restore', { file: rs.dataset.sxRestore, confirm: v }, tr('sx.restored'));
+      if (v) {
+        gesture('POST', '/api/secrets/restore', { file, confirm: v, ack_risks: !!p.risks,
+                                                  force: (p.busy || []).length > 0 }, tr('sx.restored'));
+      }
       return;
     }
     const cp = e.target.closest('[data-sx-copy]');
