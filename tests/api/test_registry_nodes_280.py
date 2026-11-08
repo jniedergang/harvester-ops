@@ -43,6 +43,8 @@ class Kube:
         return None
 
     def list(self, kind, ns=None, selector=None):
+        if (kind, ns, selector) == ("services", None, None):     # 2.8.1 : registre hébergé ici ?
+            return []
         assert (kind, ns, selector) == ("secrets", "fleet-local", "harvesterhci.io/setting=containerd-registry")
         return list(self.secrets)
 

@@ -703,20 +703,78 @@ de nouveau dans Harvester ensuite.
 
 ### Un cluster enfant sans Internet reste à 10 %
 
-CAPHV (v0.10.1) écrit `package_update: true` et `packages: [iptables]` dans
-le cloud-init de chaque machine. Sans Internet, zypper attend l'expiration
-de chaque dépôt de l'image (environ 5 minutes chacun, vu sur harvlab2 avec
-Leap 15.6) avant que les commandes RKE2 ne passent. Lisez la console de la
-machine (`kubectl -n <ns>-vms logs <pod virt-launcher> -c
-guest-console-log`) : lignes `Timeout exceeded when accessing ...`.
-Employez une image dont les dépôts visent un miroir que les machines
-joignent, ou qui n'en a aucun. La création sans Internet de bout en bout
-n'est pas vérifiée en réel en 2.8.0 pour cette raison.
+CAPHV (v0.10.1) écrit `package_update: true` et `packages:
+[qemu-guest-agent, iptables]` dans le cloud-init de chaque machine. Sans
+Internet, zypper attend l'expiration de chaque dépôt de l'image (environ
+5 minutes chacun, vu sur harvlab2 avec Leap 15.6) avant que les commandes
+RKE2 ne passent.
+
+Depuis 2.8.1, un cluster créé avec `offline: true` coupe la mise à jour
+des paquets et met de côté les dépôts zypper pendant le premier démarrage
+(voir la procédure opérationnelle, cluster enfant sans Internet). Si les
+lignes `Timeout exceeded when accessing ...` apparaissent encore dans la
+console de la machine (`kubectl -n <ns>-vms logs <pod virt-launcher> -c
+guest-console-log`) :
+
+- le cluster a été créé avant 2.8.1 : ses gabarits ne portent pas
+  `agentConfig.additionalUserData`. Supprimez-le et créez-le de nouveau ;
+- lisez le Secret cloud-init de la machine sur le cluster Harvester
+  (`<machine>-cloud-init` dans l'espace de noms des VMs, clé `userdata`).
+  Il doit porter `package_update: false` et la ligne `bootcmd`
+  `harvester-ops-repos-aside`. Si `package_update` vaut encore true, la
+  version de CAPHV fusionne cloud-init autrement : employez une image dont
+  les dépôts visent un miroir que les machines joignent, ou qui n'en a
+  aucun ;
+- le cluster emploie `offline_packages: keep` et un dépôt de l'image n'est
+  pas joignable : employez `skip`, ou corrigez les dépôts de l'image.
+
+`cloud-init status` signale une erreur sur ces nœuds avec
+`offline_packages: skip` : le module des paquets échoue faute de dépôt,
+c'est voulu. Ce n'est pas la cause d'un cluster bloqué.
+
+Vu en réel (2.8.1, harvlab2, Internet coupé par une règle de pont sur
+l'hôte) : un cluster 1+1 disponible en 441 s, le module des paquets en
+échec en 3 s, aucune requête vers Internet rejetée pendant la création.
+
+### Fournisseur de cloud et CSI en ImagePullBackOff sans Internet
+
+Le cluster enfant est disponible, mais `harvester-cloud-provider`,
+`harvester-csi-plugin` ou `csi-controller` restent en `ImagePullBackOff`
+avec `not found` : le registre n'a pas les images des modules que pose la
+console (fournisseur de cloud, pilote CSI et ses compagnons). Le paquet
+`rke2` a été construit avant la 2.8.1. Reconstruisez-le avec
+`harvester-artefacts pack --rke2`, importez-le et publiez-le dans le même
+registre : les pods tirent les images à leur essai suivant (ou
+supprimez-les). Sans ces modules, un Service LoadBalancer reste en
+attente et un PVC de la classe `harvester` n'est jamais lié.
+
+### Un nœud d'un cluster sans Internet n'a aucun dépôt zypper
+
+Avec `offline_packages: skip`, les dépôts sont mis de côté pendant le
+premier démarrage et remis par la première commande sans Internet. Ils
+restent de côté quand cloud-init s'arrête avant cette commande, ou quand
+quelque chose a écrit dans `/etc/zypp/repos.d` entre-temps. Lisez
+`/var/log/cloud-init-output.log` : `harvester-ops: ... is not empty,
+repositories left in ...`, ou aucune ligne `harvester-ops:`. Remise en
+place à la main, en root :
+
+```
+for d in /etc/zypp/repos.d /etc/zypp/services.d; do
+  [ -d "$d.harvester-ops-offline" ] || continue
+  mkdir -p "$d" && mv "$d.harvester-ops-offline"/* "$d"/ && rmdir "$d.harvester-ops-offline"
+done
+```
+
+Vérifiez d'abord qu'aucun fichier du même nom n'existe dans les deux
+répertoires. Pour une image dont les dépôts joignent un miroir du réseau
+local, employez `offline_packages: keep`.
 
 ### Nœuds Harvester posé, mais les images viennent encore de l'origine
 
 Les nœuds du cluster Harvester qui porte un registre d'amorçage peuvent ne
-pas joindre eux-mêmes l'adresse du registre. Vu sur harvlab2 (un nœud) :
+pas joindre eux-mêmes l'adresse du registre. Depuis 2.8.1, Nœuds Harvester
+avertit de cette association (`harvester-nodes-self-hosted`, non
+bloquant). Vu sur harvlab2 (un nœud) :
 l'adresse est portée par le nœud, et une connexion du nœud vers elle
 expire. containerd se replie alors sur le registre d'origine. Branchez les
 nœuds Harvester sur un registre qu'ils joignent : un registre du client, ou

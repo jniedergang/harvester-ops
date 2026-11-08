@@ -748,7 +748,9 @@ registry: option `offline: true` (creation window, Registries menu,
 
 1. **On a connected machine:** `harvester-artefacts pack --rke2
    v1.34.11+rke2r1 --cni calico`, import the package, publish it to a
-   registry that serves images.
+   registry that serves images. Since 2.8.1 the package also carries the
+   images of the cloud provider, the CSI driver and kube-vip that the
+   console lays in every child cluster: rebuild a package made by 2.8.0.
 2. **Create the cluster** with that registry. Required:
    - a registry that mirrors `docker.io` with **No fallback to Internet**
      (`offline-needs-no-fallback`);
@@ -767,11 +769,45 @@ registry: option `offline: true` (creation window, Registries menu,
      runs it (`agentConfig.airGapped: true`).
 4. `offline_artifacts: image`: the VM image already carries these files.
    Nothing is fetched.
+5. cloud-init without network (2.8.1, both modes). CAPHV asks cloud-init
+   for a package update and for `qemu-guest-agent` and `iptables` on every
+   machine. Without Internet, zypper waited about 5 minutes per repository
+   before RKE2. The console now sets `agentConfig.additionalUserData` in
+   both templates:
+   - `package_update`, `package_upgrade` and
+     `package_reboot_if_required` are false;
+   - at the first boot, a `bootcmd` moves `/etc/zypp/repos.d` and
+     `/etc/zypp/services.d` aside (once per instance). The package list of
+     CAPHV cannot be removed, and installing it would refresh the
+     repositories. Without repositories, it fails at once;
+   - the first command without Internet puts them back, before the fetch.
+
+   The image must therefore already carry `iptables` and
+   `qemu-guest-agent`: they are not installed. Without `iptables`, pods
+   that publish a host port (ingress-nginx) do not start. Without
+   `qemu-guest-agent`, the machines report no address. Every offline
+   creation and plan check shows the warning `offline-node-packages`
+   (not blocking); `image-sles-repos` is not shown in this mode.
+
+   `cloud-init status` reports an error on these nodes, by design: the
+   package module fails at once without repositories, and the boot goes
+   on. `repos_back` writes one line per directory in
+   `/var/log/cloud-init-output.log` (`harvester-ops: zypper repositories
+   restored in ...`).
+6. `offline_packages: keep` (creation window, Registries menu,
+   **Repositories of the image**; or a cluster template; default `skip`):
+   for an image whose repositories point at a mirror of the local network
+   (RMT, MLM). The repositories stay in place and cloud-init installs
+   `iptables` and `qemu-guest-agent` from the mirror. `package_update` and
+   `package_upgrade` stay false in both modes. With `keep`, a repository
+   that the machines cannot reach brings back the wait of several minutes
+   per repository.
 
 Limits: the fetch uses Basic authentication. A registry that only accepts
 token authentication on its blobs (Harbor, ghcr style) is not checked.
-Give workers a 20 GiB disk at least: at 10 GiB the bench reached 78 % with
-the agent and Flux, and the image garbage collection failed.
+A disk under 20 GiB is a warning (`offline-disk-small`): at 10 GiB the
+bench reached 78 % with the agent and Flux, and the image garbage
+collection failed.
 
 ### Roles (2.8.0)
 
@@ -805,6 +841,6 @@ On harvlab2 with a bench Dex (OIDC) and the external Rancher 2.14.1:
 Not verified for real: a client identity provider other than Dex
 (Keycloak, Entra ID), Rancher 2.15, a Rancher in airgap with
 `system-default-registry`, the child cluster without Internet end to end
-(stopped by the package update CAPHV asks of cloud-init, see
-troubleshooting), a plan chained to a real Harvester install with a Git
+(stopped in 2.8.0 by the package update CAPHV asks of cloud-init; 2.8.1
+skips it, the bench run is still to do), a plan chained to a real Harvester install with a Git
 secret, more than two child clusters, harv4 (two clusters in one run).

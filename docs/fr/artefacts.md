@@ -128,7 +128,13 @@ harvester-artefacts pack socle.json --out dist/ --sign-key ~/.ssh/artefacts_ed25
   `sha256sum-amd64.txt`. Les images système sont la liste
   `rke2-images-all.linux-amd64.txt` de la version, filtrée par la CNI
   (`calico`, `canal`, `cilium`, `flannel`, `none`), recopiées comme
-  n'importe quelle image. Les téléchargements envoient un `User-Agent`
+  n'importe quelle image. Depuis la 2.8.1, l'élément porte aussi les images
+  des modules que la console pose dans chaque cluster enfant : le
+  fournisseur de cloud Harvester, le pilote CSI Harvester et ses quatre
+  compagnons `longhornio/csi-*`, et kube-vip (63 images pour v1.34.11 avec
+  calico). Un paquet construit par la 2.8.0 ne les a pas : un cluster sans
+  Internet est alors disponible, mais sans LoadBalancer ni stockage
+  Harvester. Reconstruisez-le. Les téléchargements envoient un `User-Agent`
   (`get.rke2.io` refuse celui de Python par défaut, HTTP 403).
 
 ```bash
@@ -905,6 +911,15 @@ harvester-registry harvester-nodes NOM --cluster C [--remove] [--dry-run] [--wai
 - La valeur précédente est rendue masquée, dans le résultat de l'action.
   Elle ne peut pas rendre les mots de passe.
 - `--remove` retire la seule entrée de ce registre.
+- **Avertissement quand le registre est hébergé par ce cluster** (2.8.1,
+  `harvester-nodes-self-hosted`, non bloquant) : registre d'amorçage
+  déclaré sur ce cluster, ou adresse du point d'accès égale à celle d'un
+  Service LoadBalancer de ce cluster (kube-vip). Le nœud qui porte
+  l'adresse peut ne pas y joindre le registre : les téléchargements des
+  nœuds Harvester peuvent retomber sur l'origine ou échouer (vu sur
+  harvlab2). Le constat est dans le JSON (`findings`), dans le journal de
+  l'action et dans la fenêtre. Un nom d'hôte n'est pas résolu, il n'est
+  donc pas comparé.
 
 ## Rôles
 

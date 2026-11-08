@@ -794,7 +794,10 @@ Internet** ; ou un modèle de cluster).
 
 1. **Sur une machine connectée :** `harvester-artefacts pack --rke2
    v1.34.11+rke2r1 --cni calico`, importez le paquet, publiez-le dans un
-   registre qui sert les images.
+   registre qui sert les images. Depuis la 2.8.1, le paquet porte aussi
+   les images du fournisseur de cloud, du pilote CSI et de kube-vip que la
+   console pose dans chaque cluster enfant : reconstruisez un paquet fait
+   par la 2.8.0.
 2. **Créez le cluster** avec ce registre. Il faut :
    - un registre qui miroite `docker.io` avec **Pas de repli vers
      Internet** (`offline-needs-no-fallback`) ;
@@ -814,12 +817,47 @@ Internet** ; ou un modèle de cluster).
      lance (`agentConfig.airGapped: true`).
 4. `offline_artifacts: image` : l'image de VM porte déjà ces fichiers. Rien
    n'est récupéré.
+5. cloud-init sans réseau (2.8.1, les deux modes). CAPHV demande à
+   cloud-init une mise à jour des paquets, ainsi que `qemu-guest-agent` et
+   `iptables`, sur chaque machine. Sans Internet, zypper attendait environ
+   5 minutes par dépôt avant RKE2. La console pose désormais
+   `agentConfig.additionalUserData` dans les deux gabarits :
+   - `package_update`, `package_upgrade` et `package_reboot_if_required`
+     à false ;
+   - au premier démarrage, un `bootcmd` met de côté `/etc/zypp/repos.d` et
+     `/etc/zypp/services.d` (une fois par instance). La liste de paquets de
+     CAPHV ne peut pas être retirée, et son installation rafraîchirait les
+     dépôts. Sans dépôt, elle échoue tout de suite ;
+   - la première commande sans Internet les remet en place, avant la
+     récupération.
+
+   L'image doit donc déjà porter `iptables` et `qemu-guest-agent` : ils ne
+   sont pas installés. Sans `iptables`, les pods qui publient un port
+   d'hôte (ingress-nginx) ne démarrent pas. Sans `qemu-guest-agent`, les
+   machines ne remontent aucune adresse. Chaque création et chaque
+   contrôle de plan sans Internet affiche l'avertissement
+   `offline-node-packages` (non bloquant) ; `image-sles-repos` n'est pas
+   affiché dans ce mode.
+
+   `cloud-init status` signale une erreur sur ces nœuds, c'est voulu : le
+   module des paquets échoue tout de suite faute de dépôt, et le démarrage
+   continue. `repos_back` écrit une ligne par répertoire dans
+   `/var/log/cloud-init-output.log` (`harvester-ops: zypper repositories
+   restored in ...`).
+6. `offline_packages: keep` (fenêtre de création, menu Registres, **Dépôts
+   de l'image** ; ou un modèle de cluster ; `skip` par défaut) : pour une
+   image dont les dépôts visent un miroir du réseau local (RMT, MLM). Les
+   dépôts restent en place et cloud-init installe `iptables` et
+   `qemu-guest-agent` depuis le miroir. `package_update` et
+   `package_upgrade` restent à false dans les deux modes. Avec `keep`, un
+   dépôt que les machines ne joignent pas ramène l'attente de plusieurs
+   minutes par dépôt.
 
 Limites : la récupération emploie l'authentification Basic. Un registre
 qui n'accepte que l'authentification par jeton sur ses blobs (Harbor,
-façon ghcr) n'est pas contrôlé. Donnez aux workers un disque de 20 Gio au
-moins : à 10 Gio, le banc a atteint 78 % avec l'agent et Flux, et le
-ramasse-miettes des images échouait.
+façon ghcr) n'est pas contrôlé. Un disque de moins de 20 Gio est un
+avertissement (`offline-disk-small`) : à 10 Gio, le banc a atteint 78 %
+avec l'agent et Flux, et le ramasse-miettes des images échouait.
 
 ### Rôles (2.8.0)
 
@@ -855,7 +893,7 @@ Sur harvlab2, avec un Dex de banc (OIDC) et le Rancher externe 2.14.1 :
 Non vérifié en réel : un fournisseur d'identité de client autre que Dex
 (Keycloak, Entra ID), Rancher 2.15, un Rancher en airgap avec
 `system-default-registry`, le cluster enfant sans Internet de bout en bout
-(arrêté par la mise à jour de paquets que CAPHV demande à cloud-init, voir
-le dépannage), un plan enchaîné à une vraie installation de Harvester avec
+(arrêté en 2.8.0 par la mise à jour de paquets que CAPHV demande à
+cloud-init ; 2.8.1 la saute, l'essai au banc reste à faire), un plan enchaîné à une vraie installation de Harvester avec
 un secret Git, plus de deux clusters enfants, harv4 (deux clusters dans une
 exécution).

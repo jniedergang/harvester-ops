@@ -4,6 +4,186 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.8.1] - 2026-11-08 - Offline child clusters skip the package update, self-hosted registry warning
+
+### Fixed
+- **Child cluster without Internet stuck before RKE2** (decision 241, R11
+  of the 2.8.0 bench). CAPHV v0.10.1 merges its own base into the
+  cloud-init of every machine: `package_update: true` and `packages:
+  [qemu-guest-agent, iptables]`. Without Internet, zypper waited about 5
+  minutes per repository of the image, and RKE2 had not started after 21
+  minutes. For a cluster created with `offline: true` (both
+  `offline_artifacts` modes), the console now sets
+  `agentConfig.additionalUserData.config` in both RKE2 templates:
+  `package_update`, `package_upgrade` and `package_reboot_if_required`
+  are false, and a `bootcmd` moves `/etc/zypp/repos.d` and
+  `/etc/zypp/services.d` aside once per instance (`cloud-init-per
+  instance`). The package list of CAPHV is a merged list the console
+  cannot remove, and installing it would refresh the repositories; without
+  repositories it fails at once. The first command without Internet puts
+  the repositories back, before the RKE2 fetch, and writes one line per
+  directory in `cloud-init-output.log` (restored, nothing set aside, or
+  left aside because the directory was used meanwhile). Online clusters
+  are unchanged. `cloud-init status` reports an error on these nodes, by
+  design (the package module fails without repositories).
+- **Child cluster without Internet without LoadBalancer nor storage** (R11
+  of the 2.8.1 bench). The cluster became available, but the Harvester
+  cloud provider, the Harvester CSI driver and its four `longhornio/csi-*`
+  sidecars stayed in ImagePullBackOff (`not found` in the registry):
+  `pack --rke2` carried the images of RKE2 only, not those of the modules
+  the console lays by ClusterResourceSet. The `rke2` item now also carries
+  them (63 images for v1.34.11 with calico, kube-vip was already in the
+  RKE2 list). A test compares the list with the images of
+  `bin/caphv-generate` and `bin/lib/kube-vip.yaml`. Rebuild an `rke2`
+  package made by 2.8.0.
+- **Plan refused for a cluster without Internet whose registry the plan
+  lays** (R12 of the 2.8.1 bench, harv4). The launch check blocked on
+  `offline-needs-no-fallback` and `offline-rke2-missing`, because the
+  bootstrap registry and the `rke2` item come from the Registry phase of
+  the same plan. They are now `offline-later` (information) when that
+  phase lays a registry of the cluster that mirrors `docker.io` with
+  `no_fallback`, or publishes an `rke2` item of the version in a registry
+  of the cluster. The Clusters phase still replays the check before any
+  creation. Five languages.
+- `additionalUserData` of the RKE2 templates is merged, not replaced: an
+  existing `strict` or `data` is kept, and another `config` already there
+  is refused instead of being overwritten.
+- `harvester-nodes` logs a step when the Services of the cluster cannot be
+  read for the self-hosted check, so a missing warning is not read as
+  "not self-hosted".
+
+### Added
+- **Option `offline_packages`** (`skip`, the default, or `keep`) for a
+  cluster created with `offline: true`: `keep` leaves the repositories of
+  the image in place and lets cloud-init install `iptables` and
+  `qemu-guest-agent`, for an image whose repositories point at a mirror of
+  the local network (RMT, MLM). `package_update` and `package_upgrade` stay
+  false in both modes. In the creation window (Registries menu,
+  **Repositories of the image**, with a tooltip), cluster templates of the
+  plans and the `--spec` file of `harvester-capi`; any other value is
+  refused (`skip or keep`).
+- **Warning for the packages of the image without Internet**
+  (`offline-node-packages`, not blocking) on every offline creation and
+  plan check with `offline_packages: skip`: the image must already carry
+  `iptables` and `qemu-guest-agent` (without iptables, host-port pods stay
+  in ContainerCreating; without the guest agent, the machines report no
+  address). `image-sles-repos` is no longer shown in that mode, since its
+  advice (an openSUSE Leap image) does not help without repositories. In
+  the creation window (Nodes menu) and in the plans, five languages.
+- **Warning for a small disk without Internet** (`offline-disk-small`,
+  not blocking): a cluster created with `offline: true` and a disk under
+  20 GiB. At 10 GiB the 2.8.0 bench reached 78 % with the agent and Flux,
+  and the image garbage collection failed. In the creation window (Nodes
+  menu), in `harvester-capi check` and in the plans.
+- **Warning when Harvester nodes merges a registry hosted by the same
+  cluster** (decision 242, `harvester-nodes-self-hosted`, not blocking):
+  a bootstrap registry declared on this cluster, or an endpoint address
+  equal to the address of a LoadBalancer Service of the cluster
+  (kube-vip). The node that holds the address may not reach the registry
+  through it, and pulls on the Harvester nodes may fall back to the
+  origin or fail (R10 of the 2.8.0 bench). In the JSON of
+  `harvester-registry harvester-nodes`, the log of the action and the
+  Harvester nodes window. Unreadable Services do not stop the merge.
+
+### Upgrade notes
+- An `rke2` package built by 2.8.0 lacks the images of the console
+  modules: build it again with `pack --rke2` and publish it.
+- A child cluster created without Internet by 2.8.0 keeps its templates:
+  delete it and create it again with 2.8.1.
+- The node image of a cluster without Internet must already carry
+  `iptables` and `qemu-guest-agent` with `offline_packages: skip`: they
+  are not installed. Use `keep` when the image repositories reach a mirror
+  of the local network.
+
+**Back to 2.8.0**: nothing to undo. Templates made by 2.8.1 keep their
+`additionalUserData` until the cluster is deleted.
+
+### Known limits
+- The cloud-init change relies on how CAPHV v0.10.1 merges cloud-init
+  (`util/cloudinit.go`, MergeCloudInitData: the bootstrap data of CAPRKE2
+  come last and their simple keys win, lists are joined). Another CAPHV
+  version may merge differently.
+- Only zypper repositories are moved aside. An image with another package
+  manager still tries to install the CAPHV package list.
+- A test pins the bundled CAPHV (v0.10.1) and CAPRKE2 (v0.25.2) versions:
+  bumping either fails it until the merge is checked again.
+- The self-hosted check compares IP addresses only: a registry endpoint
+  given as a host name is not resolved.
+
+### Tests
+- API tests: both templates carry the cloud-init in both modes and none
+  online, a copy of the CAPHV merge turns the package update off, the
+  configuration survives CAPRKE2 (no ignored key, no Jinja marker), the
+  repositories are set aside then restored by a real shell (twice, without
+  a saved copy, placeholder used meanwhile, no zypper), the restore comes
+  before the fetch, renewal keeps the cloud-init, the disk warning at its
+  threshold; `harvester-nodes` warns for a bootstrap registry of the same
+  cluster and for a LoadBalancer address with or without port, not for
+  another address, a host name, another cluster or a removal, writes the
+  setting in every case and still merges when Services cannot be read.
+  Eleven named mutations are killed.
+- Review fixes: the packages warning in `skip` only and `image-sles-repos`
+  hidden there (table), `offline_packages` default, refusal of other values
+  in the request, the template and the `--spec` file, `keep` without
+  `bootcmd` nor restore in both templates and both modes, merge of
+  `additionalUserData`, the stderr lines of the restore played by a real
+  shell, the step for unreadable Services, the pinned provider versions;
+  e2e of the new selector in the creation window and the template editor.
+  Thirteen more named mutations are killed.
+
+### Verified for real
+- **Without Internet** (R11, harvlab2, Internet of the pool addresses cut
+  by a bridge rule on node2, only the LAN accepted): a 1+1 cluster with
+  `offline: true`, `no_fallback` and 20 GiB available in 441 s. The
+  `<machine>-cloud-init` Secret held `package_update: false`, the
+  `harvester-ops-repos-aside` bootcmd and the CAPHV package list (merge
+  order confirmed). On both nodes: marker
+  `bootper.harvester_ops_repos_aside.instance`, both `restored in` lines,
+  the 11 repositories back, no `Timeout exceeded`, the package module
+  failed in 3 s; RKE2 and every system image pulled from the bootstrap
+  registry (no `server` line for docker.io); `Machine.status.addresses`
+  filled. No packet to the Internet during the creation (drop counter 0;
+  later drops were the service address 10.43.0.1 during a worker reboot).
+  A rebooted worker kept its repositories. After the addon image fix: PVC
+  of the class `harvester` bound and mounted, LoadBalancer Service
+  answered. The warnings `offline-disk-small` (10 GiB) and
+  `offline-node-packages` showed in `harvester-capi check`.
+- **Two child clusters in one plan run** (R12, harv4): registry laid on
+  harv4, RKE2 and the bench package published, one cluster imported in
+  the external Rancher 2.14 (`auto` chose Fleet: `GitRepo` and `HelmOp`
+  ready 1/1, podinfo running), one without Internet (`auto` chose Flux:
+  `OCIRepository` and `GitRepository` with the plan secret, both
+  `Kustomization` applied, cloud provider and CSI running), 1309 s in
+  total. Undo in 400 s, registry data included; harv4 and the Rancher
+  cluster list identical to before. The Rancher agent bundle
+  `fleet-agent-<cluster>` of the removed import stayed in `fleet-default`
+  and was deleted by hand (Rancher leftover).
+- **Self-hosted warning** (harv4): `harvester-nodes --dry-run` on the
+  bootstrap registry of harv4 warned with `by: bootstrap`; on an external
+  registry whose endpoint is the LoadBalancer address of that registry,
+  with `by: harvester-ops-registry/<service>`; on the registry of another
+  cluster, no warning.
+- **Plan chained to a Harvester install with a Git secret** (Redfish
+  bench on node2): install, readiness, Terraform (VM network, image, key,
+  IP pool, storage class), registry, Cluster API stack, an offline child
+  cluster, Flux and two GitOps entries, done in 3151 s. The secret was
+  accepted at launch (refused without it, `gitops-secret-missing`),
+  reached the child (`hops-gitops-gitapp-git`, same key) and was found
+  nowhere in the state directory nor in `actions.db`, before and after
+  Undo. A cluster template with `rancher_external` and a Fleet entry were
+  both refused at launch with `rancher-session-in-chain`; an explicit
+  `fleet` entry alone is refused earlier by `gitops-fleet-needs-rancher`.
+  Undo removed everything, the Terraform content last; it stopped once on
+  `registry-in-use` because other saved plans named the registry, and
+  finished after they were deleted.
+
+### Not verified for real
+- `offline_packages: keep`: no LAN mirror of the Leap image on the bench.
+- An image without `qemu-guest-agent` (the Leap 15.6 image carries it,
+  and `iptables`).
+- The Internet was cut on harvlab2 only; on harv4 and the chained bench
+  the offline clusters had no fallback but the hosts kept Internet.
+
 ## [2.8.0] - 2026-11-08 - Child cluster access, GitOps, machine renewal and finished registries
 
 ### Added

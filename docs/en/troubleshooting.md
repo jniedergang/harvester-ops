@@ -674,20 +674,76 @@ them again in Harvester afterwards.
 
 ### A child cluster without Internet stays at 10 %
 
-CAPHV (v0.10.1) writes `package_update: true` and `packages: [iptables]`
-in the cloud-init of every machine. Without Internet, zypper waits for
-each repository of the image to time out (about 5 minutes each, seen on
-harvlab2 with Leap 15.6) before the RKE2 commands run. Read the console of
-the machine (`kubectl -n <ns>-vms logs <virt-launcher pod> -c
-guest-console-log`): lines `Timeout exceeded when accessing ...`. Use an
-image whose repositories point at a mirror the machines reach, or that
-has none. The end-to-end offline creation is not verified for real in
-2.8.0 for this reason.
+CAPHV (v0.10.1) writes `package_update: true` and `packages:
+[qemu-guest-agent, iptables]` in the cloud-init of every machine. Without
+Internet, zypper waits for each repository of the image to time out
+(about 5 minutes each, seen on harvlab2 with Leap 15.6) before the RKE2
+commands run.
+
+Since 2.8.1, a cluster created with `offline: true` turns the package
+update off and moves the zypper repositories aside during the first
+boot (see the operating procedure, child cluster without Internet). If
+the lines `Timeout exceeded when accessing ...` still show in the console
+of the machine (`kubectl -n <ns>-vms logs <virt-launcher pod> -c
+guest-console-log`):
+
+- the cluster was created before 2.8.1: its templates do not carry
+  `agentConfig.additionalUserData`. Delete it and create it again;
+- read the cloud-init Secret of the machine on the Harvester cluster
+  (`<machine>-cloud-init` in the VM namespace, key `userdata`). It should
+  hold `package_update: false` and the `bootcmd` line
+  `harvester-ops-repos-aside`. If `package_update` is still true, the
+  CAPHV version merges cloud-init differently: use an image whose
+  repositories point at a mirror the machines reach, or that has none;
+- the cluster uses `offline_packages: keep` and a repository of the image
+  is not reachable: use `skip`, or fix the repositories of the image.
+
+`cloud-init status` reports an error on these nodes with
+`offline_packages: skip`: the package module fails without repositories,
+by design. It is not the cause of a stuck cluster.
+
+Seen for real (2.8.1, harvlab2, Internet cut by a bridge rule on the
+host): a 1+1 cluster available in 441 s, the package module failed in 3
+s, no request to the Internet dropped during the creation.
+
+### Cloud provider and CSI in ImagePullBackOff without Internet
+
+The child cluster is available, but `harvester-cloud-provider`,
+`harvester-csi-plugin` or `csi-controller` stay in `ImagePullBackOff`
+with `not found`: the registry lacks the images of the modules the
+console lays (cloud provider, CSI driver and its sidecars). The `rke2`
+package was built before 2.8.1. Build it again with `harvester-artefacts
+pack --rke2`, import it and publish it to the same registry: the pods
+pull the images at their next try (or delete them). Without these
+modules, a LoadBalancer Service stays pending and a PVC of the class
+`harvester` is never bound.
+
+### A node of an offline cluster has no zypper repository
+
+With `offline_packages: skip`, the repositories are set aside during the
+first boot and put back by the first command without Internet. They stay
+aside when cloud-init stops before that command, or when something wrote
+into `/etc/zypp/repos.d` in the meantime. Read
+`/var/log/cloud-init-output.log`: `harvester-ops: ... is not empty,
+repositories left in ...` or no `harvester-ops:` line at all. Restore by
+hand, as root:
+
+```
+for d in /etc/zypp/repos.d /etc/zypp/services.d; do
+  [ -d "$d.harvester-ops-offline" ] || continue
+  mkdir -p "$d" && mv "$d.harvester-ops-offline"/* "$d"/ && rmdir "$d.harvester-ops-offline"
+done
+```
+
+Check first that no file of the same name exists in both directories.
+For an image whose repositories reach a mirror of the local network, use
+`offline_packages: keep`.
 
 ### Harvester nodes merged, but images still come from the origin
 
 The nodes of the Harvester cluster that hosts a bootstrap registry may
-not reach the registry address themselves. Seen on harvlab2 (one node):
+not reach the registry address themselves. Since 2.8.1, Harvester nodes
+warns about this pairing (`harvester-nodes-self-hosted`, not blocking). Seen on harvlab2 (one node):
 the address is held on the node, and a connection from the node to it
 times out. containerd then falls back to the origin registry. Wire the
 Harvester nodes to a registry they can reach: a client registry, or the

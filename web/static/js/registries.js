@@ -63,6 +63,8 @@ const Registries = (() => {
     'harvester-nodes-other-auth': (v) => tr('reg.fd.harvester-nodes-other-auth', '{hosts} keep a password in Harvester, which would erase it when the mirrors change: nothing written. Remove these credentials in Harvester first, then enter them again afterwards.', v),
     'harvester-nodes-mirror-conflict': (v) => tr('reg.fd.harvester-nodes-mirror-conflict', 'The Harvester nodes already mirror {origin} through {endpoints}: remove that entry first.', v),
     'harvester-rke2-restart': (v) => tr('reg.fd.harvester-rke2-restart', 'Harvester restarts RKE2 on every node to apply the setting {setting}.', v),
+    // 2.8.1 (décision 242) : registre hébergé par ce cluster même, non bloquant
+    'harvester-nodes-self-hosted': (v) => tr('reg.fd.harvester-nodes-self-hosted', '{registry} is hosted by {cluster} itself ({address}, {by}): its nodes may not reach this address, and pulls on the Harvester nodes may fall back to the origin or fail. Prefer a registry outside this cluster.', v),
     // revue 5-8 (I-7) et tâche 9 (constat 2) : refus rendus en JSON par l'outil
     'harvester-nodes-auth-inline': (v) => tr('reg.fd.harvester-nodes-auth-inline', 'After {seconds} s the read password of {registry} is still in the setting: Harvester did not move it into its auth-config Secret.', v),
     'harvester-nodes-value-unreadable': (v) => tr('reg.fd.harvester-nodes-value-unreadable', 'The current value of containerd-registry cannot be read: nothing is written.', v),

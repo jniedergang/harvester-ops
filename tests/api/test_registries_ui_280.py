@@ -10,7 +10,8 @@ JS = (Path(__file__).resolve().parents[2] / "web" / "static" / "js" / "registrie
 
 
 @pytest.mark.parametrize("code", ["registry-ca-key-missing", "registry-ca-transition-pending",
-                                  "harvester-nodes-mirror-conflict", "harvester-rke2-restart"])
+                                  "harvester-nodes-mirror-conflict", "harvester-rke2-restart",
+                                  "harvester-nodes-self-hosted"])  # 2.8.1
 def test_new_finding_codes_have_a_literal_translation(code):
     assert re.search(rf"'{re.escape(code)}': \(v\) => tr\('reg\.fd\.{re.escape(code)}'", JS)
 

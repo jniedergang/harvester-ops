@@ -24,8 +24,23 @@ registre :
 
 Les commandes ne portent aucun identifiant : le fichier netrc vient d'un
 Secret. Bibliothèque standard seulement.
+
+2.8.1 (décision 241) : cloud-init sans réseau. CAPHV v0.10.1 fusionne dans
+le cloud-init de chaque machine une base à lui (`package_update: true`,
+`packages: [qemu-guest-agent, iptables]`, harvestermachine_controller.go,
+buildVMTemplate) ; sans Internet, zypper attendait chaque dépôt de l'image
+(environ 5 minutes chacun, R11 de 2.8.0) avant les commandes de RKE2.
+`user_data()` est posé dans `agentConfig.additionalUserData.config` des
+deux gabarits (CAPRKE2 l'ajoute à la fin de son cloud-config) : clés de
+paquets à false (CAPHV fusionne les clés simples « la dernière gagne », et
+les données de CAPRKE2 passent en dernier, util/cloudinit.go) et `bootcmd`
+qui met de côté dépôts et services zypper une fois par instance : la liste
+`packages` est une section concaténée qu'on ne peut pas retirer, et
+l'installation rafraîchirait les dépôts. `repos_back()` les remet en place
+en tête des commandes sans Internet.
 """
 
+import json
 import re
 
 VERSION_RE = re.compile(r"^v1\.(?P<minor>\d{2})\.(?P<patch>\d{1,3})\+rke2r(?P<rel>\d{1,2})$")
@@ -44,6 +59,14 @@ CA_FILE = "/etc/rancher/rke2/hops-fetch-ca.crt"
 CNI_WORDS = {"calico": ("calico", "tigera"), "canal": ("calico", "flannel"), "cilium": ("cilium",),
              "flannel": ("flannel",), "none": ()}
 DOWNLOAD = "https://github.com/rancher/rke2/releases/download"
+# 2.8.1 : dépôts et services zypper mis de côté pendant le premier démarrage
+ZYPP_DIRS = ("/etc/zypp/repos.d", "/etc/zypp/services.d")
+ASIDE = ".harvester-ops-offline"
+# Relecture I-2 : `skip` met les dépôts de côté (défaut), `keep` les laisse
+OFFLINE_PACKAGES = ("skip", "keep")
+# Ce que CAPHV v0.10.1 demande à cloud-init (cloudInitBase), que l'image
+# doit porter en mode `skip` (constat offline-node-packages)
+NODE_PACKAGES = ("iptables", "qemu-guest-agent")
 
 
 def finding(code, level="block", **facts):
@@ -97,6 +120,29 @@ def images_for(text, cni="calico"):
         if ref not in out:
             out.append(ref)
     return out
+
+
+# 2.8.1 (banc R11) : images des modules que la console pose dans chaque
+# cluster enfant par ClusterResourceSet (bin/caphv-generate : fournisseur de
+# cloud Harvester, pilote CSI et ses compagnons ; bin/lib/kube-vip.yaml).
+# Sans elles, un cluster sans Internet est disponible mais sans
+# LoadBalancer ni stockage Harvester. Un test les compare à ces sources.
+ADDON_IMAGES = (
+    "docker.io/rancher/harvester-cloud-provider:v0.2.5",
+    "docker.io/rancher/harvester-csi-driver:v0.1.6",
+    "docker.io/longhornio/csi-node-driver-registrar:v2.12.0",
+    "docker.io/longhornio/csi-resizer:v1.12.0",
+    "docker.io/longhornio/csi-provisioner:v5.1.0",
+    "docker.io/longhornio/csi-attacher:v4.7.0",
+    "docker.io/rancher/mirrored-kube-vip-kube-vip-iptables:v1.2.3",
+)
+
+
+def child_images(text, cni="calico"):
+    """Images d'un cluster enfant sans Internet : celles de RKE2 pour la CNI
+    choisie (`images_for`), puis celles des modules de la console."""
+    out = images_for(text, cni)
+    return out + [x for x in ADDON_IMAGES if x not in out]
 
 
 def download_urls(version):
@@ -215,3 +261,40 @@ def template_patch(registry_host, digests, netrc_secret, ca=True):
         files.append({"path": CA_FILE, "owner": "root:root", "permissions": "0644",
                       "contentFrom": {"secret": {"name": netrc_secret, "key": "ca.crt"}}})
     return {"files": files, "preRKE2Commands": pre_commands(registry_host, REPO, digests, CA_FILE if ca else None)}
+
+
+def repos_aside(dirs=ZYPP_DIRS):
+    """Ligne de shell : chaque répertoire de `dirs` renommé en `<rép>` +
+    ASIDE et remplacé par un répertoire vide ; une copie déjà de côté n'est
+    jamais écrasée, un répertoire absent est ignoré."""
+    return (f"for d in {' '.join(dirs)}; do if [ -d \"$d\" ] && [ ! -e \"$d{ASIDE}\" ]; then "
+            f"mv \"$d\" \"$d{ASIDE}\" && mkdir -m 0755 \"$d\"; fi; done")
+
+
+def repos_back(dirs=ZYPP_DIRS):
+    """Ligne de shell : l'inverse de `repos_aside`, seulement si le
+    répertoire mis à la place est resté vide (rien posé entre-temps).
+    Relecture M-2 : une ligne sur stderr pour chaque répertoire (remis,
+    rien de côté, copie laissée de côté), lue dans cloud-init-output.log."""
+    return (f"for d in {' '.join(dirs)}; do if [ -d \"$d{ASIDE}\" ]; then "
+            f"if [ ! -e \"$d\" ] || rmdir \"$d\" 2>/dev/null; then mv \"$d{ASIDE}\" \"$d\" && "
+            f"echo \"harvester-ops: zypper repositories restored in $d\" >&2; "
+            f"else echo \"harvester-ops: $d is not empty, repositories left in $d{ASIDE}\" >&2; fi; "
+            f"else echo \"harvester-ops: nothing set aside for $d\" >&2; fi; done")
+
+
+def user_data(packages="skip"):
+    """`agentConfig.additionalUserData.config` d'un cluster sans Internet :
+    aucune mise à jour de paquets (les deux modes). `skip` : dépôts zypper
+    de côté au premier démarrage (`cloud-init-per instance` : bootcmd tourne
+    à chaque démarrage, la remise en place une seule fois), l'installation
+    de la liste de CAPHV échoue tout de suite. `keep` (relecture I-2) : dépôts
+    laissés en place, pour une image dont les dépôts visent un miroir du
+    réseau local (RMT, MLM) ; cloud-init installe alors la liste de CAPHV."""
+    if packages not in OFFLINE_PACKAGES:
+        raise ValueError(f"offline_packages: {packages!r}, expected skip or keep")
+    text = "package_update: false\npackage_upgrade: false\npackage_reboot_if_required: false\n"
+    if packages == "keep":
+        return text
+    entry = ["cloud-init-per", "instance", "harvester-ops-repos-aside", "sh", "-c", repos_aside()]
+    return text + f"bootcmd:\n- {json.dumps(entry)}\n"

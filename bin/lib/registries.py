@@ -914,6 +914,33 @@ def containerd_merge(value, decl, creds=None, remove=False):
     return json.dumps(doc, separators=(",", ":")), found
 
 
+def self_hosted(decl, cluster, services):
+    """2.8.1 (décision 242) : constat `harvester-nodes-self-hosted` (warn)
+    quand le registre fusionné dans les nœuds de `cluster` est hébergé par
+    ce cluster même : registre d'amorçage déclaré sur lui (`by: bootstrap`),
+    ou adresse du point d'accès (port retiré) égale à celle d'un Service
+    LoadBalancer de `services` (`by: <ns>/<nom>`, adresse annoncée par
+    kube-vip). Vu sur harvlab2 (R10 de 2.8.0) : le nœud qui porte l'adresse
+    n'y joint pas le registre, containerd retombe sur l'origine. Un nom
+    d'hôte n'est pas résolu. None sinon."""
+    host = str(decl.get("endpoint") or "")
+    host = host.rsplit(":", 1)[0] if re.fullmatch(r"[^:]+:\d+", host) else host
+    facts = {"registry": decl.get("name"), "cluster": cluster, "address": host}
+    if decl.get("kind") == "bootstrap" and decl.get("cluster") == cluster:
+        return cc.finding("harvester-nodes-self-hosted", "warn", **dict(facts, by="bootstrap"))
+    for svc in services or []:
+        spec = svc.get("spec") or {}
+        if spec.get("type") != "LoadBalancer":
+            continue
+        ips = {i.get("ip") for i in ((svc.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []}
+        ips.add(spec.get("loadBalancerIP"))
+        if host in ips - {None, ""}:
+            meta = svc.get("metadata") or {}
+            return cc.finding("harvester-nodes-self-hosted", "warn",
+                              **dict(facts, by=f"{meta.get('namespace')}/{meta.get('name')}"))
+    return None
+
+
 def additional_ca_merge(value, pem, remove=False):
     """Réglage `additional-ca` (CA de confiance des nœuds Harvester) : la CA
     du registre ajoutée si absente, ou retirée ; les autres CA intactes."""

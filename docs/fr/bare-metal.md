@@ -1085,7 +1085,15 @@ accepte les options d'accès de la fenêtre de création (voir
   préfixes, `ca_pem`, `admin_group`), contrôlé quand ses valeurs sont
   fixées.
 - `offline: true` et `offline_artifacts` (`fetch` ou `image`) : un cluster
-  enfant amorcé sans Internet.
+  enfant amorcé sans Internet `offline_packages` (`skip`, par
+  défaut, ou `keep`, 2.8.1) : dépôts de l'image mis de côté au premier
+  démarrage, ou gardés pour un miroir du réseau local.
+  Quand la phase Registre du même plan pose le registre (miroir de
+  `docker.io`, `no_fallback` sur le cluster) ou publie l'élément `rke2` de
+  la version, le contrôle au lancement montre `offline-later`
+  (information) au lieu de `offline-needs-no-fallback` ou
+  `offline-rke2-missing`. La phase Clusters les revérifie avant toute
+  création (2.8.1).
 
 ### Défaire un déploiement (2.7.0)
 

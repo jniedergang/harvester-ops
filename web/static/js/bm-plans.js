@@ -204,6 +204,9 @@ const BMPlans = (() => {
     'offline-needs-no-fallback': () => tr('dpw.f.offlineNeedsNoFallback'),
     'offline-rke2-missing': () => tr('dpw.f.offlineRke2Missing'),
     'offline-rke2-version-mismatch': () => tr('dpw.f.offlineRke2VersionMismatch'),
+    'offline-disk-small': () => tr('dpw.f.offlineDiskSmall'),                       // 2.8.1
+    'offline-node-packages': () => tr('dpw.f.offlineNodePackages'),                 // 2.8.1 (relecture I-1)
+    'offline-later': () => tr('dpw.f.offlineLater'),                                // 2.8.1 (banc R12)
   };
   const LEVELS = {
     blocking: () => tr('dpw.lvl.blocking'), warning: () => tr('dpw.lvl.warning'), info: () => tr('dpw.lvl.info'),
