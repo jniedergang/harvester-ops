@@ -1025,6 +1025,12 @@ def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None, query_keys
     def deco(f):
         @wraps(f)
         def wrapped(*args, **kwargs):
+            if scope == KVM_SCOPE:
+                # 2.10.0 (décision 311, revue I1 des tâches 2 à 5) : une vue
+                # KVM partagée est une donnée de la console, lue avec SA clé
+                # (`ssh-kvm` par le service), jamais avec le jeton d'une
+                # personne : sa réponse sert tout le monde
+                g.kvm_shared_read = True
             fresh = request.args.get("fresh") == "1"
             if (not READ_SHARE_ENABLED or request.method != "GET"
                     or (fresh and not fresh_min)):
@@ -10583,7 +10589,8 @@ def _vms_all_kvm():
         return [], []
     state = _state_dir()
     decls = _kd.load_all(state)
-    hosts = [_kvm_virsh(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
+    # part KVM partagée de /api/vms-all : service (décision 311)
+    hosts = [_kvm_virsh(d, state, identity=_sst.SERVICE, timeout=KVM_READ_TIMEOUT) for d in decls]
     entries = _kvm_cli.read_all(hosts, deadline=KVM_READ_DEADLINE, folders=True) if hosts else []
     sources, rows = [], []
     for inv in entries:
@@ -12706,7 +12713,11 @@ def _kvm_virsh(decl, state, identity=None, **kw):
     ICI, dans la requête, et remise à l'objet : les fils d'une lecture
     parallèle ne relisent pas le magasin (ils n'ont pas de contexte de
     requête). Service : lecture paresseuse de la 2.9.x."""
-    idt = identity if identity is not None else _secret_identity("ssh-kvm")
+    if identity is None:
+        # vue KVM partagée (décision 311) : service ; un geste : la personne
+        identity = _sst.SERVICE if has_request_context() and getattr(g, "kvm_shared_read", False) \
+            else _secret_identity("ssh-kvm")
+    idt = identity
     key = None
     if idt.kind == "person" and isinstance(decl, dict) and _sst.is_ref(decl.get("ssh_key")):
         key = _kd.key_path(state, decl["ssh_key"], identity=idt)
@@ -12715,7 +12726,7 @@ def _kvm_virsh(decl, state, identity=None, **kw):
     return _kh.VirshHost(decl, state, **kw)
 
 
-def _kvm_host(state, name):
+def _kvm_host(state, name, identity=None):
     """(VirshHost, None) d'un hôte déclaré, ou (None, réponse d'erreur)."""
     if not _kvm_check_host(name):
         return None, _kvm_err("invalid host name")
@@ -12725,7 +12736,7 @@ def _kvm_host(state, name):
         return None, _kvm_err(f"host {name} is not declared", 404)
     except _kd.DeclError as e:
         return None, _kvm_err(str(e), 500)
-    return _kvm_virsh(decl, state, timeout=KVM_READ_TIMEOUT), None
+    return _kvm_virsh(decl, state, identity=identity, timeout=KVM_READ_TIMEOUT), None
 
 
 def _kvm_read_all(details=False):
@@ -12734,7 +12745,7 @@ def _kvm_read_all(details=False):
     state = _state_dir()
     warnings = []
     decls = _kd.load_all(state, warn=warnings.append)
-    hosts = [_kvm_virsh(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
+    hosts = [_kvm_virsh(d, state, identity=_sst.SERVICE, timeout=KVM_READ_TIMEOUT) for d in decls]
     entries = _kvm_cli.read_all(hosts, details=details, deadline=KVM_READ_DEADLINE) if hosts else []
     public = {d["name"]: _kvm_public(d) for d in decls}
     return [dict(public.get(e["name"], {}), **e) for e in entries], warnings
@@ -12748,7 +12759,7 @@ def _kvm_warm_surveys(names):
     en route, ou si l'hôte a déjà KVM_SURVEYS_PER_HOST relevés en cours."""
     state = _state_dir()
     for name in names:
-        vh, err = _kvm_host(state, name)
+        vh, err = _kvm_host(state, name, identity=_sst.SERVICE)
         if err:
             continue
         try:
