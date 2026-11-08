@@ -3204,7 +3204,19 @@ def cmd_gitops_remove(args):
         if args.dry_run:
             print(json.dumps({"fleet": name, "kind": cur.get("kind"), "rancher": api.server}))
             return EXIT_OK
-        api.call("DELETE", f"{FLEET_PATH}/{plural}/{name}")
+        st_d, _b = api.call("DELETE", f"{FLEET_PATH}/{plural}/{name}")
+        if st_d not in (200, 202, 204, 404):
+            # revue finale m-1 : un refus de Rancher n'est jamais « retiré »
+            step("remove", "error", f"gitops-fleet-remove-failed: Rancher answered {st_d} for {name}")
+            return EXIT_FAIL
+        # banc 2.8.0 (Fleet 0.15.1) : le GitRepo ou le HelmOp parti, son Bundle
+        # restait, et la release avec lui dans le cluster enfant ; les Bundles
+        # de cet objet sont retirés aussi (Fleet désinstalle alors la release)
+        label = cg.FLEET_BUNDLE_LABELS[cur.get("kind")]
+        _stb, bl = api.call("GET", f"{FLEET_PATH}/bundles?labelSelector={label}={name}")
+        for b in (bl or {}).get("items") or []:
+            if ((b.get("metadata") or {}).get("labels") or {}).get(label) == name:
+                api.call("DELETE", f"{FLEET_PATH}/bundles/{b['metadata']['name']}")
         for suffix in ("-auth", "-pull"):
             sname = f"{name}{suffix}"
             st2, s = api.call("GET", f"{FLEET_SECRETS}/{sname}")

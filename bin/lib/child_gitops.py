@@ -65,6 +65,9 @@ VALUES = {"multitenancy": {"enabled": True, "defaultServiceAccount": NAMESPACE, 
           "imageReflectionController": {"create": False},
           "sourceWatcher": {"create": False}}
 L_ENTRY = "harvester-ops.io/gitops-entry"
+# Étiquettes que Fleet 0.15 pose sur les Bundles d'un GitRepo et d'un HelmOp
+# (relevées sur le banc 2.8.0, Rancher 2.14.1)
+FLEET_BUNDLE_LABELS = {"GitRepo": "fleet.cattle.io/repo-name", "HelmOp": "fleet.cattle.io/fleet-helm-name"}
 
 
 def flux_values(user_values=None):

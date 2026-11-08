@@ -392,3 +392,54 @@ def test_fleet_deploy_checks_the_object_before_writing_its_secret(cli, world, ca
     assert world["run"](mgmt, ["gitops-deploy", "--kubeconfig", "/x", "--harvester-name", H], spec, rancher=r) == 2
     assert not [c for c in r.calls if c[0] in ("POST", "PUT")]
     assert ("secrets", f"{FLEET_NAME}-auth") not in r.objs and "KEYDATA" not in json.dumps(list(r.objs.values()))
+
+
+class BundleRancher(Rancher):
+    """Filtre les listes par étiquette (Bundles) et peut refuser un DELETE."""
+    def __init__(self, existing=None, refuse=None):
+        super().__init__(existing)
+        self.refuse = refuse
+
+    def call(self, method, path, body=None):
+        if method == "GET" and "/bundles?labelSelector=" in path:
+            self.calls.append((method, path, body))
+            key, _, val = path.split("labelSelector=", 1)[1].partition("=")
+            return 200, {"items": [o for k, o in self.objs.items() if k[0] == "bundles"
+                                   and (o["metadata"].get("labels") or {}).get(key) == val]}
+        if method == "DELETE" and self.refuse and self.refuse in path:
+            self.calls.append((method, path, body))
+            return 403, {}
+        return super().call(method, path, body)
+
+
+def _bundle(name, label, owner):
+    return {"metadata": {"name": name, "labels": {label: owner}}}
+
+
+@pytest.mark.parametrize("source,plural,label", [
+    ({"type": "git", "url": "https://h/r.git"}, "gitrepos", "fleet.cattle.io/repo-name"),
+    ({"type": "chart", "package": "socle", "version": "2026.11", "item": "podinfo", "registry": "amorcage"},
+     "helmops", "fleet.cattle.io/fleet-helm-name"),
+])
+def test_removing_a_fleet_entry_removes_its_bundles(cli, world, source, plural, label):
+    """Banc 2.8.0 : le GitRepo ou le HelmOp retiré laissait son Bundle, et la
+    release restait dans le cluster enfant. Les Bundles de l'objet partent ;
+    celui d'un autre objet reste."""
+    e = cg.normalize(entry(source=source))
+    obj = cg.fleet_object(e, "f", H, NS, CL, chart=("oci://r/c", "1.0.0"))
+    name = obj["metadata"]["name"]
+    r = BundleRancher({(plural, name): obj, ("bundles", f"{name}-x"): _bundle(f"{name}-x", label, name),
+                       ("bundles", "other"): _bundle("other", label, "someone-else")})
+    argv = ["gitops-remove", "--kubeconfig", "/x", "--harvester-name", H, "--name", f"{NS}/{CL}/demo", "--role", "admin"]
+    assert world["run"](Mgmt({}), argv, rancher=r) == 0
+    assert (plural, name) not in r.objs and ("bundles", f"{name}-x") not in r.objs and ("bundles", "other") in r.objs
+
+
+def test_a_refused_fleet_delete_is_never_reported_removed(cli, world, capsys):
+    """Revue finale m-1 : un 403 de Rancher sur le DELETE est une erreur."""
+    e = cg.normalize(entry(source={"type": "git", "url": "https://h/r.git"}))
+    obj = cg.fleet_object(e, "f", H, NS, CL)
+    r = BundleRancher({("gitrepos", obj["metadata"]["name"]): obj}, refuse="/gitrepos/")
+    argv = ["gitops-remove", "--kubeconfig", "/x", "--harvester-name", H, "--name", f"{NS}/{CL}/demo", "--role", "admin"]
+    assert world["run"](Mgmt({}), argv, rancher=r) == 1
+    assert "gitops-fleet-remove-failed" in capsys.readouterr().err
