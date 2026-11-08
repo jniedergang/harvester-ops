@@ -1032,6 +1032,11 @@ accepts the access options of the creation window (see
   cluster bootstrapped without the Internet. `offline_packages` (`skip`,
   the default, or `keep`, 2.8.1): repositories of the image set aside at
   the first boot, or kept for a mirror of the local network.
+  When the Registry phase of the same plan lays the registry (mirror of
+  `docker.io`, `no_fallback` on the cluster) or publishes the `rke2` item
+  of the version, the launch check shows `offline-later` (information)
+  instead of `offline-needs-no-fallback` or `offline-rke2-missing`. The
+  Clusters phase checks them again before any creation (2.8.1).
 
 ### Undoing a deployment (2.7.0)
 

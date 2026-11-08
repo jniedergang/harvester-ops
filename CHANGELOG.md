@@ -36,6 +36,15 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   RKE2 list). A test compares the list with the images of
   `bin/caphv-generate` and `bin/lib/kube-vip.yaml`. Rebuild an `rke2`
   package made by 2.8.0.
+- **Plan refused for a cluster without Internet whose registry the plan
+  lays** (R12 of the 2.8.1 bench, harv4). The launch check blocked on
+  `offline-needs-no-fallback` and `offline-rke2-missing`, because the
+  bootstrap registry and the `rke2` item come from the Registry phase of
+  the same plan. They are now `offline-later` (information) when that
+  phase lays a registry of the cluster that mirrors `docker.io` with
+  `no_fallback`, or publishes an `rke2` item of the version in a registry
+  of the cluster. The Clusters phase still replays the check before any
+  creation. Five languages.
 - `additionalUserData` of the RKE2 templates is merged, not replaced: an
   existing `strict` or `data` is kept, and another `config` already there
   is refused instead of being overwritten.

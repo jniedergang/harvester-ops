@@ -33311,6 +33311,7 @@ DEPLOY_FINDING_LEVELS = {
     "package-untrusted-strict": "blocking", "registry-var-missing": "blocking",
     "registry-exists": "info", "registry-later": "info", "publish-later": "info",
     "cluster-registry-later": "info",
+    "offline-later": "info",
     # 2.7.0 : phase Artefacts
     "artefact-invalid": "blocking", "artefact-not-published": "blocking", "artefact-taken": "blocking",
     "artefact-check-failed": "blocking", "artefact-var-missing": "blocking", "caaph-missing": "blocking",
@@ -33889,6 +33890,37 @@ def _deploy_registry_prepare(kc, plan, values, install, findings, role=None):
     return out
 
 
+def _deploy_offline_later(code, spec, later, plan, values):
+    """2.8.1 (banc R12) : un constat `offline` que la phase Registre de ce
+    plan satisfera, rejoué par `before()` de la phase Clusters. Repli coupé :
+    un registre du cluster posé par ce plan, qui miroite docker.io, avec
+    `no_fallback`. rke2 : ce plan publie un élément rke2 de la version du
+    cluster dans un de ses registres."""
+    import rke2_offline as _rko
+    regs = spec.get("registries") or []
+    if code == "offline-needs-no-fallback":
+        try:
+            mirrors = {r["name"]: r.get("mirrors") or [] for r in _dpl.render_plan_registries(plan, values)}
+        except _dpl.ProfileError:
+            return False
+        return any(r.get("registry") in set(later) and r.get("no_fallback")
+                   and "docker.io" in mirrors.get(r.get("registry"), []) for r in regs)
+    if code not in ("offline-rke2-missing", "offline-rke2-version-mismatch"):
+        return False
+    used = {r.get("registry") for r in regs}
+    state = _bm_profiles_state()
+    for p in _dpl.plan_publications(plan):
+        if p["registry"] not in used:
+            continue
+        try:
+            pkg = _art.load_package(state, p["package"], p["version"])
+        except _art.ArtefactError:
+            continue
+        if any(_rko.k8s_of(x.get("version")) == spec.get("k8s_version") for x in _rko.published_rke2([pkg])):
+            return True
+    return False
+
+
 def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=()):
     """Constats et contexte des phases capi et clusters (2.5.0), lecture
     seule : paquet actif, version de Harvester et pile (décisions 117,
@@ -34014,6 +34046,9 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=(
             # registre posé par la phase Registre de ce plan : rejoué au
             # début de la phase Clusters (`before`)
             code, level = "cluster-registry-later", "info"
+        elif e and _deploy_offline_later(code, e["spec"], later, plan, values):
+            f = dict(f, facts=dict(f.get("facts") or {}, check=code))
+            code, level = "offline-later", "info"
         if tf_on and e and code in DEPLOY_REF_KEYS and any(
                 _bmp.variables_in(e["raw"].get(k)) for k in DEPLOY_REF_KEYS[code]):
             code, level = "refs-later", "info"
