@@ -1094,11 +1094,17 @@ def default_client_factory(settings):
                 except OSError:
                     raise oc.OpenBaoError("openbao-tls", None, "OpenBao CA file unreadable") from None
                 c = oc.Client(settings["addr"], ca_pem=ca_pem, timeout=oc.clamp_timeout(settings.get("timeout")))
+                def secret_id():
+                    try:
+                        return (d / "secret-id").read_text().strip()
+                    except OSError:
+                        raise oc.OpenBaoError("openbao-login-failed", None,
+                                              "AppRole credentials unreadable") from None
                 try:
                     role_id = (d / "role-id").read_text().strip()
-                    secret_id = (d / "secret-id").read_text().strip()
                 except OSError:
                     raise oc.OpenBaoError("openbao-login-failed", None, "AppRole credentials unreadable") from None
+                # relu à chaque connexion : l'agent le fait tourner tous les 30 jours
                 c.login_approle(role_id, secret_id)
                 base["c"] = c
         return c.with_headers(action, actor)

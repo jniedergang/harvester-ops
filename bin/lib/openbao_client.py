@@ -409,9 +409,12 @@ class Client:
         t.obtained = self._clock()
 
     def _login(self, role_id, secret_id):
+        # `secret_id` peut être une fonction : la valeur est relue à chaque
+        # connexion (secret_id tourné par l'agent de l'hôte, fichier réécrit)
+        sid = secret_id() if callable(secret_id) else secret_id
         try:
             _, body = self._request("POST", "auth/approle/login",
-                                    {"role_id": role_id, "secret_id": secret_id}, token=False)
+                                    {"role_id": role_id, "secret_id": sid}, token=False)
         except OpenBaoError as e:
             if e.code in ("openbao-unreachable", "openbao-tls", "openbao-sealed", "openbao-internal"):
                 raise

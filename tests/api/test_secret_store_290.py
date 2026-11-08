@@ -759,3 +759,23 @@ def test_tool_copies_erased_on_sigterm(tmp_path):
     p.send_signal(signal.SIGTERM)
     p.wait(10)
     assert not path.exists()
+
+
+def test_console_relogs_with_the_rotated_secret_id(bao, tmp_path, monkeypatch):
+    """L'agent fait tourner le secret_id (fichier réécrit, ancien détruit) :
+    la reconnexion suivante de la console lit le fichier, pas sa mémoire."""
+    d = tmp_path / "openbao"
+    d.mkdir()
+    rid, sid = bao.creds
+    (d / "role-id").write_text(rid)
+    (d / "secret-id").write_text(sid)
+    monkeypatch.setenv("HARVESTER_OPS_OPENBAO_DIR", str(d))
+    monkeypatch.delenv(ss.SPAWNED_ENV, raising=False)
+    f = ss.default_client_factory({"addr": bao.addr, "timeout": 5})
+    bao.put_raw("harvester-ops", "a", {"k": "v"})
+    assert f().kv_get("harvester-ops", "a")[0] == {"k": "v"}
+    _r, new = bao.add_role(rid)
+    bao.roles[rid]["secret_ids"].discard(sid)            # ancien détruit
+    (d / "secret-id").write_text(new)
+    bao.tokens.clear()                                   # jeton perdu : reconnexion
+    assert f().kv_get("harvester-ops", "a")[0] == {"k": "v"}
