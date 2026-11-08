@@ -449,3 +449,35 @@ def test_agent_checks_the_bundle_signature_with_the_host_key(env, tmp_path, key,
     assert rc == 1 and st["code"] == code, st
     assert not env["host"].ran("podman", "load")
     assert not p.work.exists()
+
+
+def test_agent_step_messages_are_one_line(env):
+    """Step messages can carry text from OpenBao or the host (journal tail,
+    error detail): one line in status.json and in the log."""
+    a = env["agent"]()
+    a.open_state()
+    a.open_log()
+    try:
+        a.status = {"steps": []}
+        a.step("x", "failed", "detail\nssh-ed25519 AAAAforged\x1b[0m")
+    finally:
+        a.close()
+    msg = last_status(env)["steps"][0]["message"]
+    assert "\n" not in msg and "\x1b" not in msg
+    lines = (env["p"].logs / a.log_path.name).read_text().splitlines()
+    assert not any(line.startswith("ssh-ed25519") for line in lines)
+
+
+def test_agent_log_escapes_every_line_it_writes(env):
+    """log() itself escapes (journal tail of OpenBao goes through it line by
+    line, not through step())."""
+    a = env["agent"]()
+    a.open_state()
+    a.open_log()
+    try:
+        a.log_block("OpenBao log:", "first\r\x1b[31mred\nsecond\x00")
+    finally:
+        a.close()
+    text = (env["p"].logs / a.log_path.name).read_text()
+    assert "\r" not in text and "\x1b" not in text and "\x00" not in text
+    assert len(text.splitlines()) == 4          # splitlines coupe aussi sur CR
