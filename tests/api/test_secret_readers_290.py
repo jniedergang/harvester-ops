@@ -419,3 +419,17 @@ def test_app_identity_copy_from_var_lib_not_served_once_active(wapp, env, local,
     assert Path(wapp._identity_kubeconfig(str(kc), {"user": "alice"})).parent == var_lib
     monkeypatch.setattr(ss, "_STORE", env["store"])
     assert Path(wapp._identity_kubeconfig(str(kc), {"user": "alice"})).parent == env["run"] / "identities"
+
+
+def test_app_identity_refused_without_tmpfs_when_active(wapp, env, tmp_path, monkeypatch):
+    """I7 : OpenBao actif et aucune copie possible : refus, jamais le
+    kubeconfig partagé de la console."""
+    monkeypatch.setattr(wapp, "_identity_cache", {})
+    monkeypatch.setattr(wapp, "_identity_dir", lambda: None)
+    kc = tmp_path / "kc.yaml"
+    kc.write_text("users:\n- name: u\n  user: {token: x}\n")
+    with pytest.raises(wapp.IdentityDelegationError):
+        wapp._identity_kubeconfig(str(kc), {"user": "alice"})
+    with wapp.app.test_request_context("/"):
+        body, code = wapp._identity_delegation_refused(wapp.IdentityDelegationError("x"))
+    assert code == 503 and body.get_json()["code"] == "identity-delegation-unavailable"

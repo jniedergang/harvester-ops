@@ -1510,6 +1510,18 @@ def _identity_dir():
     return None
 
 
+class IdentityDelegationError(RuntimeError):
+    """OpenBao actif et copie usurpée impossible (pas de tmpfs) : l'appel est
+    refusé plutôt que fait avec le kubeconfig partagé de la console (revue
+    I7 de la 2.9.0)."""
+
+
+@app.errorhandler(IdentityDelegationError)
+def _identity_delegation_refused(e):
+    return jsonify({"error": "identity delegation impossible: no private working directory for the copy",
+                    "code": "identity-delegation-unavailable"}), 503
+
+
 def _identity_kubeconfig(src_kc, identity):
     """Copie de `src_kc` portant `as`/`as-groups`. Rend le chemin d'origine
     quand il n'y a rien à usurper, pour que le chemin nominal soit inchangé.
@@ -1520,7 +1532,7 @@ def _identity_kubeconfig(src_kc, identity):
     même bail (une par cluster et par personne, rendue avec la copie dont
     elle dérive, effacée à l'arrêt) ; le répertoire cible fait partie de la
     clé, une copie faite sous /var/lib n'est plus servie quand OpenBao est
-    actif.
+    actif. Revue I7 : OpenBao actif et copie impossible -> refus.
     """
     if not identity or not identity.get("user") or not src_kc:
         return src_kc
@@ -1539,6 +1551,8 @@ def _identity_kubeconfig(src_kc, identity):
         if cached and cached.exists() and (group is None or bao.hold(cached)):
             return str(cached)
         if target_dir is None:
+            if bao is not None:
+                raise IdentityDelegationError("no private directory for the impersonated copy")
             log.warning("délégation d'identité : aucun répertoire inscriptible,"
                         " appel avec le kubeconfig partagé")
             return src_kc
@@ -1562,6 +1576,8 @@ def _identity_kubeconfig(src_kc, identity):
             os.replace(tmp, dst)
             os.chmod(dst, 0o600)
         except Exception as e:
+            if bao is not None:
+                raise IdentityDelegationError(f"impersonated copy failed ({type(e).__name__})") from None
             log.warning("délégation d'identité impossible (%s) : appel avec le"
                         " kubeconfig partagé", e)
             return src_kc
