@@ -99,6 +99,7 @@ sys.path.insert(0, str(HERE / "lib"))
 import capi_cluster as cc  # noqa: E402
 import capi_manifests as mf  # noqa: E402
 import child_access as ca  # noqa: E402
+import child_eso as ce  # noqa: E402
 import child_gitops as cg  # noqa: E402
 import child_policies as cp  # noqa: E402
 import capi_identity as ci  # noqa: E402
@@ -1662,6 +1663,16 @@ def service_source(kube, spec, harvester, read_creds=False):
             ns_, _, child_ = spec["cluster"].partition("/")
             have = kube.get(sv.K_HCP, ns_, cg.SERVICE)
             resolved["namespace"] = ((have or {}).get("spec") or {}).get("namespace") or cg.FLUX_NAMESPACE
+        elif spec["name"] == ce.SERVICE:
+            # 2.10.0 (point 294) : le service `eso` porte toujours les valeurs
+            # imposées (child_eso.VALUES), dans le namespace `external-secrets`
+            # (une release déjà posée garde le sien, comme Flux)
+            import yaml
+            resolved["values"] = yaml.safe_dump(ce.chart_values(yaml.safe_load(resolved["values"] or "") or {}),
+                                                sort_keys=False)
+            ns_, _, child_ = spec["cluster"].partition("/")
+            have = kube.get(sv.K_HCP, ns_, ce.SERVICE)
+            resolved["namespace"] = ((have or {}).get("spec") or {}).get("namespace") or ce.NAMESPACE
     except ValueError as e:
         return spec, found + [sv.finding("invalid-values", "block", message=str(e)[:200])], None
     if not any((p.get("package"), p.get("version")) == (src["package"], src["version"])

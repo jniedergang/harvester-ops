@@ -78,7 +78,8 @@ LIST_FLAGS = {"dns": "--dns", "ip_pool_refs": "--ip-pool-refs"}
 # `offline_packages` (skip ou keep, rke2_offline.user_data).
 CONSOLE_OPTIONS = {"extra_disk_size", "extra_disk_class", "target_namespace",
                    "rancher_import", "extra_networks", "service_cidr", "registries",
-                   "rancher_external", "oidc", "offline", "offline_artifacts", "offline_packages"}
+                   "rancher_external", "oidc", "offline", "offline_artifacts", "offline_packages",
+                   "external_secrets"}
 OFFLINE_ARTIFACTS = ("fetch", "image")
 OFFLINE_PACKAGES = ("skip", "keep")         # même liste que rke2_offline.OFFLINE_PACKAGES
 KNOWN = set(FLAGS) | set(LIST_FLAGS) | CONSOLE_OPTIONS
@@ -139,6 +140,49 @@ def normalize_registry_entries(v):
     return out
 
 
+# 2.10.0 (décision 139, point 293) : External Secrets Operator posé par la
+# console sur le cluster enfant (bin/lib/child_eso.py) : namespaces activés
+# et, hors plan, le chart `eso` d'un paquet publié (un plan l'applique par
+# sa phase Artefacts, l'option passe après elle).
+EXTERNAL_SECRETS_KEYS = {"namespaces", "chart"}
+EXTERNAL_SECRETS_CHART_KEYS = {"registry", "package", "version", "item"}
+
+
+def normalize_external_secrets(v):
+    """`external_secrets` : vrai (aucun namespace encore), faux (absent) ou
+    {namespaces: [...], chart: {registry, package, version[, item]}}.
+    Rend None (option absente) ou {"namespaces": [...][, "chart": {...}]} ;
+    ValueError qui nomme le champ. Les namespaces sont contrôlés par
+    child_eso (système refusé)."""
+    if v in (None, False, "false", "0", 0, "off", ""):
+        return None
+    if v in (True, "true", "1", 1, "on"):
+        return {"namespaces": []}
+    if not isinstance(v, dict):
+        raise ValueError("external_secrets: true, or {namespaces, chart}")
+    for k in sorted(set(v) - EXTERNAL_SECRETS_KEYS):
+        raise ValueError(f"external_secrets.{k}: unknown key")
+    import child_eso
+    try:
+        out = {"namespaces": child_eso.normalize_namespaces(v.get("namespaces"))}
+    except child_eso.EsoError as e:
+        raise ValueError(f"external_secrets.namespaces: {e}") from None
+    chart = v.get("chart")
+    if chart is not None:
+        if not isinstance(chart, dict) or set(chart) - EXTERNAL_SECRETS_CHART_KEYS:
+            raise ValueError("external_secrets.chart: {registry, package, version[, item]}")
+        for k in ("registry", "package", "version"):
+            if not isinstance(chart.get(k), str) or not chart[k] or len(chart[k]) > 128 \
+                    or any(c.isspace() for c in chart[k]):
+                raise ValueError(f"external_secrets.chart.{k}: required")
+        item = chart.get("item") or child_eso.SERVICE
+        if item != child_eso.SERVICE:
+            raise ValueError(f"external_secrets.chart.item: the chart item is named {child_eso.SERVICE}")
+        out["chart"] = {"registry": chart["registry"], "package": chart["package"],
+                        "version": chart["version"], "item": item}
+    return out
+
+
 def normalize(raw):
     """La demande nettoyée, les valeurs par défaut posées. Lève ValueError
     sur une option inconnue (liste blanche)."""
@@ -171,6 +215,10 @@ def normalize(raw):
         spec.pop("offline_packages", None)
     if "oidc" in spec and not isinstance(spec["oidc"], dict):
         raise ValueError("oidc: an object (issuer_url, audience, ...)")
+    if "external_secrets" in spec:
+        es = normalize_external_secrets(spec.pop("external_secrets"))
+        if es is not None:
+            spec["external_secrets"] = es
     regs = normalize_registry_entries(spec.pop("registries", None))
     if regs:
         spec["registries"] = regs
