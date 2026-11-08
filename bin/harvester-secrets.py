@@ -102,6 +102,14 @@ def cosign_key():
     return opt if opt.is_file() else COSIGN_KEY
 
 
+def hcl_template():
+    """Modèle de configuration de B1 : celui qu'install.sh pose dans
+    /opt/harvester-ops/openbao (relecture finale m17 : depuis
+    /usr/local/bin, `HERE.parent/config` n'existe pas), sinon celui du dépôt."""
+    opt = Path(os.environ.get("HARVESTER_OPS_OPT") or "/opt/harvester-ops") / "openbao" / "openbao.hcl.tpl"
+    return opt if opt.is_file() else HERE.parent / "config" / "openbao" / "openbao.hcl.tpl"
+
+
 def step(sid, status, msg=""):
     clean = " ".join(str(msg).split())
     sys.stderr.write(f"STEP_EVENT|{sid}|{status}|{clean}\n")
@@ -1751,8 +1759,7 @@ def cmd_bundle(args):
     src = op.Registry(args.registry, {"username": args.user, "password": password}, plain_http=args.plain_http)
     step("pull", "running", f"{args.registry}/{args.repository}:{args.tag}")
     try:
-        got = ob.build(src, args.registry, args.repository, args.tag, (HERE.parent / "config" / "openbao" /
-                                                                       "openbao.hcl.tpl").read_text(),
+        got = ob.build(src, args.registry, args.repository, args.tag, hcl_template().read_text(),
                        out_dir, cosign=cos, cosign_key=key if key.is_file() else None)
     except ob.BundleError as e:
         return fail(e.code, str(e))

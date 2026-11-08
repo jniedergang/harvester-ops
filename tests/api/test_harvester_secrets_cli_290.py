@@ -712,3 +712,18 @@ def test_check_before_activation_ignores_credentials_left_by_a_previous_server(e
     rc, doc, _ = cli(["check", "--mode", "a", "--addr", env["srv"].addr, "--wrapped-stdin", "--dry-run"],
                      stdin=wrap + "\n", capsys=capsys)
     assert rc == 0 and ids(doc)["login"] is None and "kv2" not in ids(doc)
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_bundle_template_found_when_run_from_usr_local_bin(tmp_path, monkeypatch, installed):
+    """Relecture finale m17 : lancé depuis /usr/local/bin, le modèle du dépôt
+    n'existe pas ; celui qu'install.sh pose dans /opt sert."""
+    opt = tmp_path / "opt"
+    if installed:
+        (opt / "openbao").mkdir(parents=True)
+        (opt / "openbao" / "openbao.hcl.tpl").write_text("tpl")
+    monkeypatch.setenv("HARVESTER_OPS_OPT", str(opt))
+    monkeypatch.setattr(hsc, "HERE", tmp_path / "usr-local-bin")
+    got = hsc.hcl_template()
+    assert got == (opt / "openbao" / "openbao.hcl.tpl" if installed
+                   else tmp_path / "config" / "openbao" / "openbao.hcl.tpl")
