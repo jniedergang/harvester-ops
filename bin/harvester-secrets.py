@@ -718,18 +718,9 @@ def tf_workspaces_dir():
 
 
 def encrypted_states(root=None):
-    """Identifiants des déclarations dont l'état est chiffré (clés de
-    premier niveau seulement, jamais le contenu)."""
-    import tf_encryption as tfe
-    root = Path(root or tf_workspaces_dir())
-    out = set()
-    for f in list(root.glob("*/decls/*/terraform.tfstate")) + list(root.glob(".kvm/*/decls/*/terraform.tfstate")):
-        try:
-            if not f.is_symlink() and tfe.is_encrypted(f.read_text()):
-                out.add(f.parent.name)
-        except OSError:
-            continue
-    return sorted(out)
+    """Identifiants des déclarations dont l'état est chiffré (voir
+    secret_store.encrypted_states)."""
+    return ss.encrypted_states(root or tf_workspaces_dir())
 
 
 def cmd_disable(args):

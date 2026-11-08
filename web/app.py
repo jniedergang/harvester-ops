@@ -2970,6 +2970,21 @@ def _update_hand_over(name, chk, b, kind, steps):
                         "busy": [{"id": a["id"], "action": a["action"], "cluster": a["cluster"]}
                                  for a in busy]}), 409
     older = kind == "rollback" or bool(b.get("allow_older"))
+    # 2.9.0 (relecture finale I1) : une console plus ancienne lirait les
+    # références `openbao:` comme des chemins ou des valeurs, et ne saurait
+    # pas lire un état chiffré ; retour en local exigé d'abord
+    try:
+        below = _su.parse_version(chk["version"])[:3] < _sst.FIRST_OPENBAO_VERSION
+    except _su.UpdateError:
+        below = True
+    if older and below:
+        blockers = _sst.openbao_blockers(_state_dir(), TF_WORKSPACES)
+        if blockers:
+            return jsonify({"error": f"{chk['version']} cannot read secrets kept in OpenBao or encrypted "
+                                     "OpenTofu states: bring everything back to local first",
+                            "code": "secrets-in-openbao", "blockers": blockers,
+                            "steps": list(_sst.BACK_TO_LOCAL_STEPS),
+                            "hint": "; ".join(_sst.BACK_TO_LOCAL_STEPS)}), 409
     with _update_lock:
         if (d / _su.REQUEST).exists():
             return jsonify({"error": "an update is already requested"}), 409

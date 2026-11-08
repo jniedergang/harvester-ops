@@ -262,6 +262,50 @@ def record_console_paths(state_dir, tf_workspaces):
     return True
 
 
+def encrypted_states(root=None, state_dir=None):
+    """Identifiants des déclarations dont l'état OpenTofu est chiffré (clés
+    de premier niveau seulement, jamais le contenu)."""
+    import tf_encryption as tfe
+    root = Path(root or tf_workspaces_dir(state_dir))
+    out = set()
+    for f in list(root.glob("*/decls/*/terraform.tfstate")) + list(root.glob(".kvm/*/decls/*/terraform.tfstate")):
+        try:
+            if not f.is_symlink() and tfe.is_encrypted(f.read_text()):
+                out.add(f.parent.name)
+        except OSError:
+            continue
+    return sorted(out)
+
+
+# Relecture finale I1 : première version qui sait lire les références
+# `openbao:` et les états chiffrés. Revenir plus bas exige d'abord le retour
+# en local (mêmes contrôles que `harvester-secrets disable`).
+FIRST_OPENBAO_VERSION = (2, 9, 0)
+BACK_TO_LOCAL_STEPS = (
+    "bring every class back to local files: Settings > Secret store > Classes, "
+    "or harvester-secrets migrate --to local",
+    "put encrypted OpenTofu states back in clear text: Terraform declaration > Put back in clear "
+    "(POST /api/tf-declarations/<id>/decrypt-state)",
+    "disable the secret store: Settings > Secret store > Disable, or harvester-secrets disable "
+    "[--remove-b1]",
+)
+
+
+def openbao_blockers(state_dir=None, tf_root=None):
+    """Ce qui empêche une console plus ancienne que la 2.9.0 de reprendre
+    l'état : mode actif, classes migrées, états chiffrés ({} si rien)."""
+    s = load_settings(state_dir)
+    out = {}
+    if (s.get("mode") or "local") != "local":
+        out["mode"] = s["mode"]
+    if s.get("migrated"):
+        out["migrated"] = sorted(s["migrated"])
+    enc = encrypted_states(tf_root, state_dir)
+    if enc:
+        out["encrypted"] = enc
+    return out
+
+
 def load_settings(state_dir=None):
     """`<état>/secrets-settings.json` avec les valeurs par défaut ; un
     fichier absent ou illisible vaut le mode local."""
