@@ -34399,6 +34399,16 @@ def _secrets_settings():
     return _sst.load_settings(_state_dir())
 
 
+def _record_console_paths():
+    """Revue m12 : la racine des espaces Terraform réellement employée
+    (TF_WORKSPACES, repli compris) écrite dans l'état, pour qu'un
+    `harvester-secrets` lancé à la main regarde les mêmes états."""
+    try:
+        _sst.record_console_paths(_state_dir(), tf_workspaces=TF_WORKSPACES)
+    except OSError as e:
+        log.warning("console paths not recorded: %s", type(e).__name__)
+
+
 def _secrets_raw():
     """Réglages tels qu'écrits (clés hors DEFAULTS : copie hors ligne)."""
     try:
@@ -40303,6 +40313,7 @@ if __name__ == "__main__":
     except Exception as _e:                      # noqa: BLE001
         log_watch.error("replication follower startup failed: %s", _e)
     _announce_setup()
+    _record_console_paths()                       # 2.9.0 : racine Terraform pour l'outil lancé à la main
     try:
         _start_secret_originals_sweeper()        # 2.9.0 : délai de garde des originaux migrés
         _start_secrets_background()              # 2.9.0 : sonde, instantanés, clés transit, orphelins

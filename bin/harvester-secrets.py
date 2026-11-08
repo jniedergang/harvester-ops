@@ -712,12 +712,9 @@ def _enable_b1(args, doc):
 
 
 def tf_workspaces_dir():
-    """Racine des espaces Terraform de la console (comme web/app.py)."""
-    env = os.environ.get("HARVESTER_OPS_TF_WORKSPACES")
-    if env:
-        return Path(env)
-    p = Path("/var/lib/harvester-ops/terraform")
-    return p if p.is_dir() else Path(tempfile.gettempdir()) / "harvester-ops-terraform"
+    """Racine des espaces Terraform de la console : la variable, sinon celle
+    que la console a écrite au démarrage (revue m12), sinon `<état>/terraform`."""
+    return ss.tf_workspaces_dir()
 
 
 def encrypted_states(root=None):

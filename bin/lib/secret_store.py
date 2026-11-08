@@ -222,6 +222,46 @@ def _state_dir(state_dir=None):
     return cluster_decl.state_dir()
 
 
+# Revue m12 des tâches 9-10 : la racine des espaces Terraform de la console
+# (HARVESTER_OPS_TF_WORKSPACES de son unité, ou son repli) écrite par la
+# console au démarrage, relue par un outil lancé à la main sans la variable.
+CONSOLE_PATHS_FILE = "console-paths.json"
+
+
+def tf_workspaces_dir(state_dir=None):
+    """Racine des espaces Terraform : la variable d'environnement, sinon
+    celle que la console a écrite (chemin absolu d'un répertoire existant),
+    sinon `<état>/terraform`."""
+    env = os.environ.get("HARVESTER_OPS_TF_WORKSPACES")
+    if env:
+        return Path(os.path.abspath(env))
+    state = _state_dir(state_dir)
+    try:
+        rec = json.loads((state / CONSOLE_PATHS_FILE).read_text()).get("tf_workspaces")
+    except (OSError, ValueError, AttributeError):
+        rec = None
+    if isinstance(rec, str) and os.path.isabs(rec) and os.path.isdir(rec):
+        return Path(rec)
+    return state / "terraform"
+
+
+def record_console_paths(state_dir, tf_workspaces):
+    """Écrit `console-paths.json` (0600, sans suivre de lien) s'il change ;
+    rend True quand il a été écrit."""
+    import safe_fs
+    state = _state_dir(state_dir)
+    doc = {"tf_workspaces": os.path.abspath(str(tf_workspaces))}
+    p = state / CONSOLE_PATHS_FILE
+    try:
+        if not p.is_symlink() and json.loads(p.read_text()) == doc:
+            return False
+    except (OSError, ValueError):
+        pass
+    with safe_fs.SafeDir.open_base(state) as d:
+        d.write(CONSOLE_PATHS_FILE, json.dumps(doc).encode(), 0o600)
+    return True
+
+
 def load_settings(state_dir=None):
     """`<état>/secrets-settings.json` avec les valeurs par défaut ; un
     fichier absent ou illisible vaut le mode local."""
@@ -503,8 +543,7 @@ class FileStore:
 
     def __init__(self, state_dir, tf_dir=None, repl_db=None):
         self.state_dir = Path(state_dir)
-        self.tf_dir = Path(tf_dir) if tf_dir else Path(
-            os.environ.get("HARVESTER_OPS_TF_WORKSPACES") or self.state_dir / "terraform")
+        self.tf_dir = Path(tf_dir) if tf_dir else tf_workspaces_dir(self.state_dir)
         self.repl_db = Path(repl_db) if repl_db else Path(
             os.environ.get("HARVESTER_OPS_REPLICATION_DB") or self.state_dir / "replication.db")
 
@@ -1600,7 +1639,10 @@ class MultiStore(LocalStore):
 
     def _refresh(self):
         now = time.monotonic()
-        if now - self._checked < self.SETTINGS_RECHECK_S and self._sig is not None:
+        # relu aussitôt si l'état désigné a changé (HARVESTER_OPS_STATE_DIR) :
+        # sinon, pendant une seconde, les réglages d'un autre état servaient
+        if (now - self._checked < self.SETTINGS_RECHECK_S and self._sig is not None
+                and self._sig[0] == str(self.state_dir / SETTINGS_FILE)):
             return
         with self._cfg_lock:
             self._checked = now
