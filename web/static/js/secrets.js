@@ -502,7 +502,7 @@ const Secrets = (() => {
     return `<p class="form-hint">${esc(tr('sx.snapIntro'))}</p>
       <div class="sx-grid">
         <label class="login-field"><span>${esc(tr('sx.snap.dir'))}</span>
-          <input type="text" data-sx-snapset="snapshot_dir" value="${esc(d.dir || '')}" placeholder="/mnt/backup/openbao" spellcheck="false" class="tip" ${tipAttr(tr('sx.t.snapDir'))}></label>
+          <input type="text" data-sx-snapset="snapshot_dir" value="${esc(d.dir || '')}" placeholder="/var/lib/harvester-ops-snapshots" spellcheck="false" class="tip" ${tipAttr(tr('sx.t.snapDir'))}></label>
         <label class="login-field"><span>${esc(tr('sx.snap.time'))}</span>
           <input type="time" data-sx-snapset="snapshot_time" value="${esc(d.time || '02:30')}" class="tip" ${tipAttr(tr('sx.t.snapTime'))}></label>
         <label class="login-field"><span>${esc(tr('sx.snap.keep'))}</span>

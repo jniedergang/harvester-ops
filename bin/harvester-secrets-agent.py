@@ -40,6 +40,7 @@ Usage : harvester-secrets-agent            (traite la demande, sinon ménage)
 """
 
 import calendar
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -1327,9 +1328,40 @@ class Agent:
             try:
                 with sf.SafeDir.open_base("/") as root:
                     d = root.open_rel(str(path).lstrip("/"))
+                d.as_console = False
+            except PermissionError:
+                # tâche 13 (essai réel) : un NFS en root_squash refuse root ;
+                # le répertoire de la console s'ouvre alors sous son compte
+                if label != "console":
+                    continue
+                try:
+                    with self._as_console(), sf.SafeDir.open_base("/") as root:
+                        d = root.open_rel(str(path).lstrip("/"))
+                except OSError:
+                    continue
+                d.as_console = True
             except OSError:
                 continue
             yield label, d
+
+    @contextlib.contextmanager
+    def _as_console(self):
+        """Identité effective du compte de la console le temps d'une
+        ouverture (un fichier ouvert garde ses droits de lecture ensuite) ;
+        rien à faire hors root."""
+        if os.geteuid() != 0:
+            yield
+            return
+        uid, gid = self.host.uid_of("harvester-ops"), self.host.group_gid("harvester-ops")
+        if uid is None or gid is None:
+            raise PermissionError("no harvester-ops account")
+        os.setegid(gid)
+        os.seteuid(uid)
+        try:
+            yield
+        finally:
+            os.seteuid(0)
+            os.setegid(0)
 
     def _snapshot_file(self, name):
         """Copie de travail de l'instantané `name` (revue M2) : ouvert par le
@@ -1343,8 +1375,9 @@ class Agent:
         for _label, d in self._snapshot_dirs():
             with d:
                 try:
-                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY,
-                                 dir_fd=d.fd)
+                    with (self._as_console() if getattr(d, "as_console", False) else contextlib.nullcontext()):
+                        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+                                     | os.O_NOCTTY, dir_fd=d.fd)
                 except OSError:
                     continue
             with os.fdopen(fd, "rb") as f:

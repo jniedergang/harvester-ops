@@ -32,6 +32,15 @@ ExecStartPre=-/usr/bin/podman rm -f harvester-ops
 ExecStartPre=/bin/sh -c 'chgrp -R harvester-ops /etc/harvester-ops && \
     chmod -R g+rX,g-w,o-rwx /etc/harvester-ops && \
     install -d -m 0750 -o harvester-ops -g harvester-ops /var/lib/harvester-ops /var/log/harvester-ops'
+# 2.9.0: directory of the OpenBao B1 snapshots (Settings > Secret store >
+# Snapshots), outside the state directory. The administrator may mount a
+# share there (NFS: mount option context="system_u:object_r:container_file_t:s0"
+# under SELinux). Created only when missing (a root-squashed share refuses
+# root), labelled for containers when local; no podman relabel below, which
+# fails on a share.
+ExecStartPre=-/bin/sh -c 'd=/var/lib/harvester-ops-snapshots; \
+    [ -d "$$d" ] || install -d -m 0750 -o harvester-ops -g harvester-ops "$$d"; \
+    if command -v selinuxenabled >/dev/null && selinuxenabled; then chcon -t container_file_t -l s0 "$$d" 2>/dev/null; fi; true'
 # Read-only root filesystem; /var/lib/harvester-ops keeps the action history,
 # the notes and the cluster watcher's snapshot across restarts, and is the
 # account's home (kubectl cache, and the ssh known_hosts that must persist
@@ -48,6 +57,7 @@ ExecStart=/bin/sh -c 'u=$$(id -u harvester-ops); g=$$(id -g harvester-ops); \
     -v /etc/harvester-ops:/etc/harvester-ops:ro,Z \
     -v /var/log/harvester-ops:/var/log/harvester-ops:rw,Z \
     -v /var/lib/harvester-ops:/var/lib/harvester-ops:rw,Z \
+    -v /var/lib/harvester-ops-snapshots:/var/lib/harvester-ops-snapshots:rw \
     -e HARVESTER_OPS_CONFIG=/etc/harvester-ops/config.yaml \
     -e HARVESTER_OPS_STATE_DIR=/var/lib/harvester-ops \
     -e HARVESTER_OPS_HTPASSWD=/etc/harvester-ops/htpasswd \

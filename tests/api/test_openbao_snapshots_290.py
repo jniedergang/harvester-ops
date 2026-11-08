@@ -502,3 +502,33 @@ def test_snapshot_keep_is_bounded(b1, capsys, keep):
     rc, doc, _ = cli(["snapshot", "--keep", keep], capsys=capsys)
     assert rc == 2 and doc["code"] == "bad-input"
     assert (b1["dir"] / "openbao-20261010T023000Z-hops-20261001-1.snap").exists()
+
+
+def test_restore_reads_a_root_squashed_console_dir_under_the_console_account(env, tmp_path, monkeypatch):
+    """Tâche 13 (essai réel) : un snapshot_dir sur un NFS en root_squash
+    refuse root ; l'agent ouvre alors ce répertoire et l'instantané sous
+    l'identité effective du compte de la console (jamais celui de l'agent)."""
+    install(env)
+    d = _console_dir(env, tmp_path)
+    f = _snap(d, "openbao-20261108T023000Z-hops-20261108-1.snap")
+    real_open_rel = hsa.sf.SafeDir.open_rel
+    state = {"console": False, "used": 0}
+
+    def open_rel(self, rel, *a, **k):
+        if rel == str(d).lstrip("/") and not state["console"]:
+            raise PermissionError(13, "Permission denied (root squashed)")
+        return real_open_rel(self, rel, *a, **k)
+    monkeypatch.setattr(hsa.sf.SafeDir, "open_rel", open_rel)
+
+    @hsa.contextlib.contextmanager
+    def as_console(self):
+        state["console"] = True
+        state["used"] += 1
+        try:
+            yield
+        finally:
+            state["console"] = False
+    monkeypatch.setattr(hsa.Agent, "_as_console", as_console)
+    rc, st = request(env, op="restore-snapshot", file=f.name)
+    assert rc == 0, st
+    assert state["used"] >= 2                    # répertoire, puis fichier
