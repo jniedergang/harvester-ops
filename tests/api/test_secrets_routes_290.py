@@ -460,7 +460,8 @@ def test_a_failed_snapshot_that_records_nothing_is_not_relaunched_every_tick(wap
 @pytest.mark.parametrize("path,body,clears", [
     ("/api/secrets/rotate", {"what": "ssh-kvm", "target": "node2"}, True),
     ("/api/secrets/rollback", {"ref": "openbao:ssh-kvm/node2#private_key", "version": 1}, True),
-    ("/api/secrets/restore", {"file": "openbao-20261108T023000Z-hops-20261108-1.snap", "confirm": CID}, True),
+    ("/api/secrets/restore", {"file": "openbao-20261108T023000Z-hops-20261108-1.snap", "confirm": CID,
+                              "ack_risks": True, "force": True}, True),
     ("/api/secrets/rotate", {"what": "secret-id"}, False),
 ])
 def test_cache_emptied_after_actions_that_change_secret_values(wapp, sx, monkeypatch, path, body, clears):
