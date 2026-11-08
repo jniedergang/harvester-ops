@@ -277,6 +277,7 @@ def test_disable_refused_with_a_migrated_class(env, capsys):
 
 
 def test_disable(env, capsys):
+    creds(env)
     settings(env)
     rc, doc, _ = cli(["disable", "--dry-run"], capsys=capsys)
     assert rc == 0 and read_settings(env)["mode"] == "a"
@@ -285,6 +286,43 @@ def test_disable(env, capsys):
     assert rc == 0 and s["mode"] == "local" and s["console_id"] == CID
     rc, doc, _ = cli(["disable", "--remove-b1"], capsys=capsys)
     assert rc == 2
+
+
+# Revue I4 des tâches 9-10 : les secrets des déroulés arrêtés ne restent pas
+# dans OpenBao, sans limite de durée, après la désactivation
+def _plan_secrets(env, *runs):
+    for r in runs:
+        env["srv"].put_raw("harvester-ops", f"{PREFIX}/plan-run/{r}/bmc/0", {"bmc_password": "pw-" + r})
+        env["srv"].put_raw("harvester-ops", f"{PREFIX}/plan-run/{r}/install/0", {"token": "tok-" + r})
+
+
+def _plan_paths(env):
+    return sorted(p for (_m, p) in env["srv"].kv if "/plan-run/" in p)
+
+
+def test_disable_erases_the_secrets_of_stopped_runs(env, capsys):
+    creds(env)
+    settings(env)
+    _plan_secrets(env, "a1a1a1a1a1a1", "b2b2b2b2b2b2")
+    rc, doc, _ = cli(["disable", "--dry-run"], capsys=capsys)
+    assert rc == 0 and doc["plan_runs"] == ["a1a1a1a1a1a1", "b2b2b2b2b2b2"] and _plan_paths(env)
+    rc, doc, err = cli(["disable"], capsys=capsys)
+    assert rc == 0 and doc["plan_runs_erased"] == ["a1a1a1a1a1a1", "b2b2b2b2b2b2"]
+    assert _plan_paths(env) == [] and read_settings(env)["mode"] == "local"
+    assert "pw-a1" not in err + json.dumps(doc)
+
+
+def test_disable_refused_when_the_plan_secrets_cannot_be_listed(env, capsys):
+    creds(env)
+    settings(env)
+    _plan_secrets(env, "a1a1a1a1a1a1")
+    env["srv"].sealed = True
+    rc, doc, _ = cli(["disable"], capsys=capsys)
+    assert rc == 2 and doc["code"] == "plan-secrets-unchecked"
+    assert read_settings(env)["mode"] == "a" and _plan_paths(env)
+    # geste explicite : désactivé, les secrets restent, l'administrateur est prévenu
+    rc, doc, err = cli(["disable", "--leave-plan-secrets"], capsys=capsys)
+    assert rc == 0 and read_settings(env)["mode"] == "local" and "left" in err
 
 
 # ---------------------------------------------------------------------------

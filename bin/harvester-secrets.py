@@ -8,7 +8,7 @@
     harvester-secrets enable --mode a --addr URL --role-id ID --wrapped-stdin [--ca FILE]
                              [--mount M] [--prefix P] [--dry-run]
     harvester-secrets enable --mode b1 --bundle FILE [--dry-run]
-    harvester-secrets disable [--remove-b1] [--dry-run]
+    harvester-secrets disable [--remove-b1] [--leave-plan-secrets] [--dry-run]
     harvester-secrets migrate --to openbao|local [--class C ...] [--name N] [--dry-run]
     harvester-secrets confirm --class C [--older-than-days N]
     harvester-secrets outage-test
@@ -740,16 +740,41 @@ def cmd_disable(args):
     was = doc.get("mode") or "local"
     if args.remove_b1 and was != "b1":
         return refuse("bad-input", "--remove-b1 only in mode b1")
+    # revue I4 des tâches 9-10 : les secrets des déroulés arrêtés (gardés
+    # dans OpenBao pour la reprise, décision 262) sont effacés avant : le
+    # balayage ne tourne plus une fois OpenBao désactivé. Leur reprise
+    # redemandera les secrets (comportement 2.4.0).
+    runs, bao = [], None
+    if ss.openbao_active(settings()):
+        try:
+            bao = admin_store()
+            runs = bao.children(ss.PLAN_RUN)
+        except (ss.SecretError, oc.OpenBaoError) as e:
+            if not args.leave_plan_secrets:
+                return refuse("plan-secrets-unchecked", "the secrets of stopped plan runs cannot be listed "
+                              f"({getattr(e, 'code', '?')}): bring OpenBao back, or disable with "
+                              "--leave-plan-secrets and erase them on the server")
+            step("plan-secrets", "warn", "secrets of stopped plan runs left on the server (not listed)")
     if args.dry_run:
-        out({"ok": True, "dry_run": True, "mode": was, "would": ["back to local files"]
+        out({"ok": True, "dry_run": True, "mode": was, "plan_runs": runs,
+             "would": (["erase the secrets of stopped plan runs"] if runs else []) + ["back to local files"]
              + (["remove OpenBao B1 (agent, data kept aside)"] if args.remove_b1 else [])})
         return EXIT_OK
+    erased = []
+    for rid in runs:
+        try:
+            bao.delete_tree(ss.PLAN_RUN, rid, actor=ARGS.actor, action=ARGS.id)
+            erased.append(rid)
+            step(f"plan-run-{rid}", "done", "secrets of the run erased")
+        except ss.SecretError as e:
+            return fail(e.code, f"secrets of the plan run {rid} not erased; OpenBao stays active")
+    doc = raw_settings()
     doc.update(mode="local", addr=None)
     save_settings(doc)
     step("disable", "done", "local files")
     if args.remove_b1:
         agent_ok(run_agent({"op": "b1-remove"}))
-    out({"ok": True, "mode": "local", "was": was})
+    out({"ok": True, "mode": "local", "was": was, "plan_runs_erased": erased})
     return EXIT_OK
 
 
@@ -1575,6 +1600,8 @@ def parser():
     s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("disable")
     s.add_argument("--remove-b1", action="store_true")
+    s.add_argument("--leave-plan-secrets", action="store_true",
+                   help="OpenBao unreachable: disable anyway, the secrets of stopped plan runs stay on the server")
     s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("migrate")
     s.add_argument("--to", choices=("openbao", "local"), required=True)
