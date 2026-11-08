@@ -32979,20 +32979,9 @@ def _repl_hooks_to_refs(hooks, plan_key):
     (`replication-hook/<plan>/<action>#hdr_<nom>`) et la demande remise à
     l'outil porte sa référence. `********` (valeur gardée) et les références
     passent tels quels. Classe locale : inchangé."""
-    import copy
     if not hooks or not _secret_migrated("replication-hook"):
         return hooks
-    out = copy.deepcopy(hooks)
-    for h in out:
-        sh = h.get("secret_headers") if isinstance(h, dict) else None
-        if not isinstance(sh, dict):
-            continue
-        for k, v in list(sh.items()):
-            if isinstance(v, str) and v and v != _rp.MASK and not _sst.is_ref(v):
-                ref = _secret_put("replication-hook", f"{plan_key}/{h.get('name')}", _ssc.header_field(k), v)
-                if ref:
-                    sh[k] = ref
-    return out
+    return _sst.hooks_to_refs(hooks, plan_key, _secret_put, keep=(_rp.MASK,))
 
 
 def _repl_notify_checked(body, stored):

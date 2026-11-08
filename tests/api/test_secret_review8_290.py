@@ -407,3 +407,113 @@ def test_secret_error_status(appenv, code, status):
     with w.app.test_request_context():
         r, st = w._secret_store_refused(ss.SecretError(code, "kubeconfig", "h1"))
     assert st == status and r.get_json()["code"] == code
+
+
+# ---------------------------------------------------------------------------
+# I4 : outils de bin/ lancés seuls, classe migrée -> OpenBao, jamais le disque
+# ---------------------------------------------------------------------------
+import importlib.util  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load(name, file):
+    spec = importlib.util.spec_from_file_location(name, ROOT / "bin" / file)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+@pytest.fixture
+def toolenv(env, monkeypatch):
+    """Classes migrées, magasin du processus de l'outil sur le faux serveur."""
+    from test_secret_migrate_290 import _client
+    doc = settings(env)
+    doc["migrated"] = {c: {"at": 1} for c in CLASSES}
+    (env["state"] / ss.SETTINGS_FILE).write_text(json.dumps(doc))
+    st = ss.MultiStore(env["state"], client_factory=lambda actor=None, action=None: _client(env))
+    monkeypatch.setattr(ss, "_STORE", st)
+    return dict(env, store=st)
+
+
+@pytest.mark.parametrize("outcome", ["added", "refused"])
+def test_kvm_host_add_alone_puts_the_key_in_openbao(toolenv, capsys, monkeypatch, outcome):
+    kvm = _load("hkvm_r8", "harvester-kvm.py")
+    st = toolenv["state"]
+    key = st.parent / "upload.key"
+    key.write_text(KEY)
+    monkeypatch.setattr(kvm, "check_private_key", lambda k, s: None)
+    monkeypatch.setattr(kvm.kh, "control_path", lambda decl, state: None)   # état long sous xdist
+
+    def fake_add(args, state, decl, k):
+        if outcome == "refused":
+            raise kvm.Failure("connection test failed")
+        kvm_decl.write(state, decl)
+        return 0
+    monkeypatch.setattr(kvm, "_add_locked", fake_add)
+    rc = kvm.main(["host", "add", "--name=k9", "--address=10.0.0.9", "--user=root", f"--ssh-key={key}",
+                   "--fingerprint=SHA256:" + "A" * 43])
+    capsys.readouterr()
+    assert not (st / "ssh" / "k9_id").exists()                         # jamais sur le disque
+    if outcome == "added":
+        assert rc == 0 and kvm_decl.load(st, "k9")["ssh_key"] == "openbao:ssh-kvm/k9#private_key"
+        assert bao_value(toolenv, "ssh-kvm", "k9", "private_key") == KEY
+    else:
+        assert rc != 0 and not kvm_decl.decl_path(st, "k9").exists()
+        e = toolenv["srv"].kv.get(("harvester-ops", f"{PREFIX}/ssh-kvm/k9"))
+        assert e is None or not e["versions"].get(e["current"])       # clé retirée avec l'ajout
+
+
+def test_kvm_host_add_launched_by_the_console_never_logs_in(toolenv, monkeypatch):
+    monkeypatch.setenv(ss.SPAWNED_ENV, "1")
+    assert ss.cli_put("ssh-kvm", "k9", "private_key", KEY) is None
+    assert not [k for k in toolenv["srv"].kv if k[1].endswith("/ssh-kvm/k9")]
+
+
+def test_replication_notify_set_alone_stores_references(toolenv, capsys):
+    import replication_db as rdb
+    rep = _load("hrep_r8", "harvester-replication.py")
+    spec = toolenv["state"].parent / "notify.json"
+    spec.write_text(json.dumps({"enabled": True, "min_level": "warn", "codes": None, "channels": [
+        {"id": "mx-1", "name": "", "kind": "matrix", "homeserver": "https://mx.example", "room": "!r:mx",
+         "token": "syt_brand_new"},
+        {"id": "wh", "name": "", "kind": "webhook", "url": "https://hook.example/x", "headers": {},
+         "secret_headers": {"X-Api-Key": "openbao:replication-notify/global#wh__hdr_x"}}]}))
+    rc = rep.main(["notify", "set", f"--db={toolenv['state'] / 'replication.db'}", f"--spec={spec}", "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0 and "syt_brand_new" not in out
+    conn = rdb.connect(toolenv["state"] / "replication.db")
+    try:
+        cfg = rdb.get_setting(conn, "notify")
+    finally:
+        conn.close()
+    assert cfg["channels"][0]["token"] == "openbao:replication-notify/global#mx_1__token"
+    assert cfg["channels"][1]["secret_headers"]["X-Api-Key"] == "openbao:replication-notify/global#wh__hdr_x"
+    assert bao_value(toolenv, "replication-notify", "global", "mx_1__token") == "syt_brand_new"
+
+
+def test_replication_plan_set_alone_stores_hook_headers(toolenv, capsys):
+    import replication_db as rdb
+    rep = _load("hrep_r8b", "harvester-replication.py")
+    conn = rdb.connect(toolenv["state"] / "replication.db")
+    try:
+        conn.execute("UPDATE plans SET vms = ? WHERE id = 'rp-1'", (json.dumps(["default/vm1"]),))
+    finally:
+        conn.close()
+    spec = toolenv["state"].parent / "plan.json"
+    spec.write_text(json.dumps({"recovery": {"hooks": [
+        {"name": "pre", "at": "start", "url": "https://hook.example/pre",
+         "secret_headers": {"Authorization": "Bearer typed"}}]}}))
+    rc = rep.main(["plan", "set", "p1", f"--db={toolenv['state'] / 'replication.db'}", f"--spec={spec}",
+                   "--json"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "Bearer typed" not in out
+    conn = rdb.connect(toolenv["state"] / "replication.db")
+    try:
+        opts = json.loads(conn.execute("SELECT options FROM plans WHERE id = 'rp-1'").fetchone()[0])
+    finally:
+        conn.close()
+    ref = opts["hooks"][0]["secret_headers"]["Authorization"]
+    assert ref == f"openbao:replication-hook/rp-1/pre#{sc.header_field('Authorization')}"
+    assert bao_value(toolenv, "replication-hook", "rp-1/pre", sc.header_field("Authorization")) == "Bearer typed"

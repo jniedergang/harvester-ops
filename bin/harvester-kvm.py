@@ -505,8 +505,40 @@ def cmd_host_add(args):
         # revu sous le verrou : un ajout concurrent a pu finir entre-temps
         if kvm_decl.decl_path(state, name).exists():
             raise UsageError(f"host {name} is already declared (remove it first)")
+        stored_ref = _key_to_store(args, state, decl, name, key)
         step("validate", "done", f"{args.user}@{args.address}:{args.port}")
-        return _add_locked(args, state, decl, key)
+        try:
+            rc = _add_locked(args, state, decl, key)
+        finally:
+            # ajout défait (aucune déclaration ne désigne la clé) : retirée
+            if stored_ref and not kvm_decl.decl_path(state, name).exists():
+                _key_out_of_store(state, stored_ref)
+        return rc
+
+
+def _key_to_store(args, state, decl, name, key):
+    """Revue I4 de la tâche 8 : outil lancé seul sur une console dont la
+    classe ssh-kvm est migrée -> la clé va dans OpenBao, jamais sur le
+    disque (la console, elle, range la clé et passe --key-in-store). Sous le
+    verrou des hôtes, après le contrôle du nom. Rend la référence ou None."""
+    if getattr(args, "key_in_store", False):
+        return None
+    import secret_store as ss
+    try:
+        ref = ss.cli_put("ssh-kvm", name, "private_key", key if key.endswith("\n") else key + "\n",
+                         actor=os.environ.get("USER") or "cli", st=ss.store(str(state)))
+    except ss.SecretError as e:
+        raise UsageError(f"the key cannot be stored in OpenBao ({e.code}): nothing saved") from None
+    if ref:
+        args.key_in_store = True
+        decl["ssh_key"] = kvm_decl.key_ref(name)
+    return ref
+
+
+def _key_out_of_store(state, ref):
+    import secret_store as ss
+    with contextlib.suppress(Exception):
+        ss.store(str(state)).delete(ref)
 
 
 def _add_locked(args, state, decl, key):

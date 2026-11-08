@@ -1789,3 +1789,48 @@ def is_active(st=None):
         return (st or store()).active()
     except Exception:                              # noqa: BLE001 : réglages illisibles = local
         return False
+
+
+# ---------------------------------------------------------------------------
+# Écrivains des outils de bin/ lancés seuls (revue I4 de la tâche 8)
+# ---------------------------------------------------------------------------
+def cli_put(cls, path, field, value, actor=None, action=None, st=None):
+    """Secret nouveau écrit par un outil de bin/ : sa référence quand la
+    classe est migrée et que l'outil est lancé seul (il se connecte avec
+    son propre jeton, comme la console) ; None quand la classe est locale
+    ou la valeur trop grosse (l'outil écrit en local comme avant), et quand
+    l'outil est lancé par la console (elle remet déjà des références : il
+    ne se connecte pas). SecretError si OpenBao refuse."""
+    st = st or store()
+    if spawned() or not st.migrated(cls):
+        return None
+    if isinstance(value, bytes):
+        value = value.decode()
+    try:
+        return st.put(cls, path, field, value, actor=actor, action=action)
+    except SecretError as e:
+        if e.code == "secret-too-big":
+            return None
+        raise
+    except ValueError:                             # nom qui ne fait pas une référence
+        return None
+
+
+def hooks_to_refs(hooks, plan_key, put, keep=()):
+    """En-têtes secrets des actions annexes d'un plan : chaque valeur
+    nouvelle passe par `put` (`replication-hook/<plan>/<action>#hdr_<nom>`)
+    et la copie rendue porte sa référence ; les valeurs de `keep`
+    (`********`) et les références passent telles quelles. Partagé par la
+    console (_secret_put) et harvester-replication lancé seul (cli_put)."""
+    import copy
+    out = copy.deepcopy(hooks)
+    for h in out or []:
+        sh = h.get("secret_headers") if isinstance(h, dict) else None
+        if not isinstance(sh, dict):
+            continue
+        for k, v in list(sh.items()):
+            if isinstance(v, str) and v and v not in keep and not is_ref(v):
+                ref = put("replication-hook", f"{plan_key}/{h.get('name')}", secret_classes.header_field(k), v)
+                if ref:
+                    sh[k] = ref
+    return out
