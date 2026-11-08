@@ -515,11 +515,16 @@ class Client:
         out = Written(int(((resp or {}).get("data") or {}).get("version") or 0))
         if custom_metadata:
             try:
-                self._call("POST", f"{mount}/metadata/{path}",
-                           {"custom_metadata": {str(k): str(v) for k, v in custom_metadata.items()}})
+                self.kv_set_metadata(mount, path, custom_metadata)
             except OpenBaoError as e:
                 out.metadata_error = e.code
         return out
+
+    def kv_set_metadata(self, mount, path, custom_metadata):
+        """`custom_metadata` d'une clé (chemin `metadata`, seul effectif)."""
+        mount, path = self._seg(mount), self._seg(path)
+        self._call("POST", f"{mount}/metadata/{path}",
+                   {"custom_metadata": {str(k): str(v) for k, v in custom_metadata.items()}})
 
     def kv_list(self, mount, prefix):
         mount = self._seg(mount)

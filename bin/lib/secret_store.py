@@ -92,6 +92,22 @@ SHARED_HOLD_MAX_S = 12 * 3600
 DOWN_CODES = ("openbao-unreachable", "openbao-tls", "openbao-sealed", "openbao-internal")
 
 
+VERSIONS_KEPT = 10                # max_versions du montage (B1), recommandé en A
+
+
+def version_metadata(custom, version, cls, actor, action, kept=VERSIONS_KEPT):
+    """`custom_metadata` d'une écriture : auteur et action de la version
+    courante (`hops_actor`, `hops_action`, `hops_class`) et de chaque version
+    gardée (`hops_v<N>_actor`, `hops_v<N>_action`), les plus anciennes
+    retirées au-delà de `kept`. Jamais d'empreinte de la valeur."""
+    out = {k: str(v) for k, v in (custom or {}).items()
+           if not re.match(r"^hops_v(\d+)_(actor|action)$", str(k))
+           or int(re.match(r"^hops_v(\d+)_", str(k)).group(1)) > version - kept}
+    out.update({"hops_action": action or "", "hops_actor": actor or "service", "hops_class": cls,
+                f"hops_v{version}_actor": actor or "service", f"hops_v{version}_action": action or ""})
+    return out
+
+
 class SecretMissing(KeyError):
     """Le secret désigné n'est pas (ou plus) dans le magasin. Le message ne
     porte que la référence : ni valeur, ni chemin de l'état."""
@@ -293,8 +309,12 @@ def write_private_copy(directory, purpose, value):
     name = f"{_PURPOSE_RE.sub('-', str(purpose).lower())[:40] or 'secret'}-{_secrets.token_hex(8)}"
     p = Path(directory) / name
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(value)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(value)
+    except BaseException:
+        _unlink(p)                                 # tmpfs plein : pas de copie partielle (revue M5)
+        raise
     return p
 
 
@@ -738,20 +758,40 @@ class OpenBaoStore:
         if len(value.encode()) > VALUE_MAX:
             raise SecretError("secret-too-big", cls, path, f"over {VALUE_MAX} bytes")
         c = self._client(actor, action)
+        kv = self._kv(cls, path)
         try:
             try:
-                data, meta = c.kv_get(self.mount, self._kv(cls, path))
+                data, meta = c.kv_get(self.mount, kv)
                 cas = int(meta.get("version") or 0)
+                custom = meta.get("custom_metadata") or {}
             except oc.OpenBaoError as e:
                 if e.code != "openbao-missing":
                     raise
                 # Dernière version supprimée (douce) ou détruite : 404 à la
                 # lecture, mais la clé garde sa version courante (revue I5).
-                data, cas = {}, self._current_version(c, cls, path)
+                md = self._metadata(c, kv)
+                data, cas, custom = {}, int(md.get("current_version") or 0), md.get("custom_metadata") or {}
             new = dict(data or {}, **{field: value})
-            written = c.kv_put(self.mount, self._kv(cls, path), new, cas=cas,
-                               custom_metadata={"hops_action": action or "", "hops_actor": actor or "service",
-                                                "hops_class": cls})
+            cm = version_metadata(custom, cas + 1, cls, actor, action)
+            try:
+                written = c.kv_put(self.mount, kv, new, cas=cas, custom_metadata=cm)
+            except oc.OpenBaoError as e:
+                # Revue M1 : écriture appliquée dont la réponse s'est perdue
+                # (délai, 5xx), puis réessai refusé par `cas` : relire et
+                # comparer (essai 5) avant de conclure au conflit.
+                if e.code != "openbao-cas-conflict":
+                    raise
+                try:
+                    again, _m = c.kv_get(self.mount, kv)
+                except oc.OpenBaoError:
+                    raise e from None
+                if again != new:
+                    raise
+                written = oc.Written(cas + 1)
+                try:
+                    c.kv_set_metadata(self.mount, kv, cm)
+                except oc.OpenBaoError as me:
+                    written.metadata_error = me.code
         except oc.OpenBaoError as e:
             raise (self._failed(e, cls, path) or SecretError(e.code, cls, path, e.detail)) from None
         self._ok()
@@ -760,15 +800,14 @@ class OpenBaoStore:
         self.last_metadata_error = getattr(written, "metadata_error", None)
         return ref
 
-    def _current_version(self, c, cls, path):
-        """`current_version` des métadonnées, 0 si la clé n'existe pas."""
+    def _metadata(self, c, kv):
         import openbao_client as oc
         try:
-            return int(c.kv_metadata(self.mount, self._kv(cls, path)).get("current_version") or 0)
+            return c.kv_metadata(self.mount, kv)
         except oc.OpenBaoError as e:
             if e.code != "openbao-missing":
                 raise
-            return 0
+            return {}
 
     def delete(self, ref, actor=None, action=None):
         import openbao_client as oc
@@ -851,8 +890,9 @@ class OpenBaoStore:
 
     def versions(self, ref):
         """[{version, created, actor, action}] : métadonnées seules. Les
-        `custom_metadata` de KV v2 sont celles de la clé : l'auteur n'est
-        connu que pour la version courante."""
+        `custom_metadata` de KV v2 sont celles de la clé : l'auteur de
+        chaque version y est gardé sous `hops_v<N>_actor` et
+        `hops_v<N>_action` (version_metadata)."""
         import openbao_client as oc
         _b, cls, path, _f = parse_ref_full(ref)
         try:
@@ -864,9 +904,10 @@ class OpenBaoStore:
         out = []
         for v, info in sorted((md.get("versions") or {}).items(), key=lambda kv: int(kv[0])):
             v = int(v)
+            actor = cm.get(f"hops_v{v}_actor", cm.get("hops_actor") if v == cur else None)
+            action = cm.get(f"hops_v{v}_action", cm.get("hops_action") if v == cur else None)
             out.append({"version": v, "created": (info or {}).get("created_time"),
-                        "actor": cm.get("hops_actor") if v == cur else None,
-                        "action": cm.get("hops_action") if v == cur else None})
+                        "actor": actor, "action": action or None})
         return out
 
     # -- copies de travail ---------------------------------------------------
@@ -1145,8 +1186,9 @@ class MultiStore(LocalStore):
         if not CLASSES[cls]["persist"]:
             return super().put(cls, path, field, value)
         make_ref(cls, path, field)
-        if self.migrated(cls):
-            return self._bao.put(cls, path, field, value, actor=actor, action=action)
+        bao = self.openbao                          # une seule lecture (revue M9)
+        if bao is not None and cls in (self.settings.get("migrated") or {}):
+            return bao.put(cls, path, field, value, actor=actor, action=action)
         return self.files.put(cls, path, field, value)
 
     def get(self, ref, actor=None):

@@ -268,7 +268,8 @@ def test_put_get_with_metadata(active, bao):
     assert ref == "openbao:kubeconfig/h1#kubeconfig"
     e = bao.kv[("harvester-ops", f"{PREFIX}/kubeconfig/h1")]
     assert e["versions"][1] == {"kubeconfig": VALUE}
-    assert e["custom"] == {"hops_action": "act-1", "hops_actor": "alice", "hops_class": "kubeconfig"}
+    assert e["custom"] == {"hops_action": "act-1", "hops_actor": "alice", "hops_class": "kubeconfig",
+                           "hops_v1_actor": "alice", "hops_v1_action": "act-1"}
     w = [r for r in bao.requests(f"/data/{PREFIX}/kubeconfig/h1") if r["method"] == "POST"][-1]
     assert json.loads(w["raw"])["options"] == {"cas": 0}
     assert w["headers"]["x-hops-actor"] == "alice"
@@ -440,7 +441,8 @@ def test_versions(active, bao):
     b.put("kubeconfig", "h1", "kubeconfig", "v2", actor="bob", action="a2")
     vs = active.versions("openbao:kubeconfig/h1#kubeconfig")
     assert [v["version"] for v in vs] == [1, 2]
-    assert vs[-1]["actor"] == "bob" and vs[-1]["action"] == "a2" and vs[0]["actor"] is None
+    assert vs[-1]["actor"] == "bob" and vs[-1]["action"] == "a2"
+    assert vs[0]["actor"] == "alice" and vs[0]["action"] == "a1"       # auteur par version
     assert all(VALUE not in json.dumps(v) and "v2" != v.get("value") for v in vs)
     assert active.versions("local:kubeconfig/h1#kubeconfig") == []
 
@@ -661,3 +663,59 @@ def test_copies_of_a_dropped_store_wait_for_their_holders(active, bao, state):
     release()
     active._sweep_old()
     assert not p.exists() and active._old_bao == []
+
+
+def test_version_authors_pruned_to_kept_versions(active, bao):
+    """Auteur de chaque version gardé dans custom_metadata, borné aux
+    versions que garde le montage (max_versions = 10)."""
+    b = active.openbao
+    for i in range(1, 13):
+        b.put("kubeconfig", "h1", "kubeconfig", f"v{i}", actor=f"u{i}", action=f"a{i}")
+    custom = bao.kv[("harvester-ops", f"{PREFIX}/kubeconfig/h1")]["custom"]
+    kept = sorted(int(k[6:].split("_")[0]) for k in custom if k.startswith("hops_v") and k.endswith("_actor"))
+    assert kept == list(range(3, 13))
+    vs = active.versions("openbao:kubeconfig/h1#kubeconfig")
+    assert [(v["version"], v["actor"]) for v in vs] == [(n, f"u{n}") for n in range(3, 13)]
+
+
+def test_put_lost_reply_then_cas_conflict_is_a_success(bao, tmp_path):
+    """M1 : écriture appliquée mais réponse perdue (délai), réessai refusé
+    par cas : relue et comparée, ce n'est pas un conflit."""
+    c = oc.Client(bao.addr, timeout=0.3, retry_delays=(1.0,))
+    c.login_approle(*bao.creds)
+    b = ss.OpenBaoStore({"mount": "harvester-ops", "prefix": PREFIX}, lambda a=None, x=None: c,
+                        files_dir=lambda: tmp_path)
+    bao.lose_reply, bao.lose_sleep = 1, 0.8
+    ref = b.put("kubeconfig", "h1", "kubeconfig", VALUE, actor="alice", action="act-9")
+    e = bao.kv[("harvester-ops", f"{PREFIX}/kubeconfig/h1")]
+    assert e["current"] == 1 and e["versions"][1] == {"kubeconfig": VALUE}
+    assert e["custom"]["hops_v1_actor"] == "alice"
+    b.clear_cache()
+    assert b.get(ref) == VALUE
+
+
+def test_put_real_cas_conflict_still_refused(active, bao):
+    b = active.openbao
+    b.put("kubeconfig", "h1", "kubeconfig", "mine")
+    real = bao.put_raw
+
+    class Racer:                    # une autre écriture arrive entre la lecture et l'écriture
+        done = False
+    orig = bao._kv
+
+    def racing(h, m, mount, rest, body, rec):
+        if m == "POST" and rest.startswith("data/") and not Racer.done:
+            Racer.done = True
+            real(mount, rest[5:], {"kubeconfig": "theirs"})
+        return orig(h, m, mount, rest, body, rec)
+    bao._kv = racing
+    with pytest.raises(ss.SecretError) as e:
+        b.put("kubeconfig", "h1", "kubeconfig", "again")
+    assert e.value.code == "openbao-cas-conflict"
+
+
+def test_write_private_copy_leaves_nothing_on_failure(tmp_path):
+    """M5 : une écriture qui échoue ne laisse pas de copie partielle."""
+    with pytest.raises(UnicodeEncodeError):
+        ss.write_private_copy(tmp_path, "x", "ok\udcff")
+    assert list(tmp_path.iterdir()) == []
