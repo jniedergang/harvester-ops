@@ -24,6 +24,7 @@ import pytest  # noqa: E402
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_presence: keep the real bare-metal system presence check")
+    config.addinivalue_line("markers", "live: needs a real backend and the --live flag")
 
 
 @pytest.fixture(autouse=True)
