@@ -394,3 +394,19 @@ def test_b1_uses_the_account_group(env):
 def test_agent_unit_hardening():
     unit = (ROOT / "config" / "systemd" / "harvester-secrets-agent.service").read_text()
     assert "ProtectHome=read-only" in unit and "PrivateTmp=yes" in unit
+
+
+# -- I2 : signature vérifiée à la pose avec la clé de /opt ------------------------
+@pytest.mark.parametrize("key,code", [("absent", "bundle-unsigned"), ("other", "bundle-signature-bad")])
+def test_agent_checks_the_bundle_signature_with_the_host_key(env, tmp_path, key, code):
+    p = env["p"]
+    if key == "absent":
+        p.cosign_key.unlink()
+    else:
+        subprocess.run(["openssl", "genrsa", "-out", str(tmp_path / "k"), "2048"], check=True, capture_output=True)
+        subprocess.run(["openssl", "rsa", "-in", str(tmp_path / "k"), "-pubout", "-out", str(p.cosign_key)],
+                       check=True, capture_output=True)
+    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name)
+    assert rc == 1 and st["code"] == code, st
+    assert not env["host"].ran("podman", "load")
+    assert not p.work.exists()

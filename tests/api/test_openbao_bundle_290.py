@@ -19,9 +19,13 @@ sys.path.insert(0, str(ROOT / "bin" / "lib"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oci_push as op  # noqa: E402
 import openbao_bundle as ob  # noqa: E402
-from fake_openbao_b1 import make_bundle, make_registry  # noqa: E402
+from fake_openbao_b1 import (make_bundle, make_registry, cosign_test_key, add_signature,  # noqa: E402
+                             cosign_payload, cosign_sign)
+import base64  # noqa: E402
 
 TPL = (ROOT / "config" / "openbao" / "openbao.hcl.tpl").read_text()
+KEY = cosign_test_key()[1]
+APPCO_KEY = ROOT / "config" / "openbao" / ob.COSIGN_KEY_NAME
 
 
 @pytest.fixture(scope="module")
@@ -33,12 +37,13 @@ def test_build_and_verify(built, tmp_path):
     path, got = built
     assert path.name == "harvester-ops-openbao-9.9.9-9.9.9-1.tar.gz" and got["version"] == "9.9.9"
     assert Path(str(path) + ".sha256").read_text().split()[0] == hashlib.sha256(path.read_bytes()).hexdigest()
-    info = ob.verify(path, tmp_path)
+    info = ob.verify(path, tmp_path, cosign_key=KEY)
     assert info["tag"] == "9.9.9-1" and info["manifest_digest"] == got["manifest_digest"]
+    assert info["trust"] == "signature"
     assert info["provenance"]["cosign"]["state"] == "not-run" and info["template"] == TPL
     assert info["provenance"]["platform"] == "linux/amd64"
     with tarfile.open(path) as t:
-        assert sorted(m.name.split("/")[-1] for m in t if m.isfile()) == sorted(ob.FILES + (ob.SUMS,))
+        assert sorted(m.name.split("/")[-1] for m in t if m.isfile()) == sorted(ob.FILES + (ob.SIGNATURE, ob.SUMS))
         for m in t:
             if m.isfile():
                 assert b"Pw-AppCo-777" not in t.extractfile(m).read()
@@ -67,7 +72,7 @@ def test_build_cosign(tmp_path, state, ok):
             seen.append(ref)
             return (state, "detail")
         if ok:
-            got = ob.build(src, reg.host, ob.DEFAULT_REPOSITORY, "9.9.9-1", TPL, tmp_path, cosign=cos)
+            got = ob.build(src, reg.host, ob.DEFAULT_REPOSITORY, "9.9.9-1", TPL, tmp_path, cosign=cos, cosign_key=KEY)
             assert got["cosign"] == "verified"
         else:
             with pytest.raises(ob.BundleError) as e:
@@ -102,7 +107,8 @@ def repack(root, out, extra=None):
 
 
 def resum(root):
-    lines = [f"{hashlib.sha256((root / f).read_bytes()).hexdigest()}  {f}" for f in ob.FILES]
+    files = ob.FILES + tuple(f for f in ob.OPTIONAL if (root / f).exists())
+    lines = [f"{hashlib.sha256((root / f).read_bytes()).hexdigest()}  {f}" for f in files]
     (root / ob.SUMS).write_text("\n".join(lines) + "\n")
 
 
@@ -177,7 +183,7 @@ def test_verify_refuses_an_altered_bundle(built, tmp_path, name, change, extra, 
     change(root)
     out = repack(root, tmp_path / path.name, [(n.format(top=root.name), d, k) for n, d, k in extra or ()])
     with pytest.raises(ob.BundleError) as e:
-        ob.verify(out, tmp_path / "check")
+        ob.verify(out, tmp_path / "check", cosign_key=KEY)
     assert e.value.code == code, str(e.value)
 
 
@@ -209,3 +215,149 @@ def test_bad_names(tmp_path, name):
 def test_bundle_name_refuses_a_dash_in_the_version():
     with pytest.raises(ob.BundleError):
         ob.bundle_name("2.7.2-rc1", "x")
+
+
+# ---------------------------------------------------------------------------
+# Revue I2 (tâches 5-7) : rien de ce que le paquet déclare n'est cru
+# ---------------------------------------------------------------------------
+def rebuilt(built, tmp_path, change, tag=None, version=None):
+    """Le paquet de test modifié par change(root), renommé pour un autre tag."""
+    path, _ = built
+    root = unpack(path, tmp_path / "x")
+    if tag:
+        prov = json.loads((root / ob.PROVENANCE).read_text())
+        prov.update(tag=tag, version=version)
+        (root / ob.PROVENANCE).write_text(json.dumps(prov))
+    change(root)
+    resum(root)
+    name = ob.bundle_name(version, tag) if tag else path.name
+    top = tmp_path / name[: -len(".tar.gz")]
+    root.rename(top)
+    return repack(top, tmp_path / name)
+
+
+def set_sigs(root, entries):
+    (root / ob.SIGNATURE).write_text(json.dumps({"signatures": entries}))
+
+
+def entry(digest, reference="dp.example/containers/openbao", key=None, payload=None):
+    payload = payload or cosign_payload(digest, reference)
+    return {"payload": base64.b64encode(payload).decode(), "signature": cosign_sign(payload, key)}
+
+
+def other_key(tmp_path):
+    import subprocess
+    k = tmp_path / "other.key"
+    subprocess.run(["openssl", "genrsa", "-out", str(k), "2048"], check=True, capture_output=True)
+    return k
+
+
+def index_of(built, tmp_path):
+    return ob.verify(built[0], tmp_path / "idx", cosign_key=KEY)["index_digest"]
+
+
+@pytest.mark.parametrize("case,code", [
+    ("no-signature", "bundle-unsigned"),
+    ("self-declared-cosign", "bundle-unsigned"),
+    ("other-digest", "bundle-signature-bad"),
+    ("other-repository", "bundle-signature-bad"),
+    ("other-key", "bundle-signature-bad"),
+    ("payload-altered", "bundle-signature-bad"),
+    ("not-cosign-type", "bundle-signature-bad"),
+    ("garbage", "bundle-signature-bad"),
+])
+def test_unpinned_tag_needs_a_collection_signature(built, tmp_path, case, code):
+    idx = index_of(built, tmp_path)
+
+    def change(root):
+        if case == "no-signature":
+            (root / ob.SIGNATURE).unlink()
+        elif case == "self-declared-cosign":
+            (root / ob.SIGNATURE).unlink()
+            prov = json.loads((root / ob.PROVENANCE).read_text())
+            prov["cosign"] = {"state": "verified", "detail": "trust me"}
+            (root / ob.PROVENANCE).write_text(json.dumps(prov))
+        elif case == "other-digest":
+            set_sigs(root, [entry("sha256:" + "2" * 64)])
+        elif case == "other-repository":
+            set_sigs(root, [entry(idx, reference="dp.example/containers/redis")])
+        elif case == "other-key":
+            set_sigs(root, [entry(idx, key=other_key(tmp_path))])
+        elif case == "payload-altered":
+            e = entry(idx)
+            e["payload"] = base64.b64encode(cosign_payload(idx, "dp.example/containers/openbao") + b" ").decode()
+            set_sigs(root, [e])
+        elif case == "not-cosign-type":
+            p = json.dumps({"critical": {"identity": {"docker-reference": "x/containers/openbao"},
+                                         "image": {"docker-manifest-digest": idx}, "type": "other"}}).encode()
+            set_sigs(root, [entry(idx, payload=p)])
+        else:
+            (root / ob.SIGNATURE).write_text("not json")
+    out = rebuilt(built, tmp_path, change)
+    with pytest.raises(ob.BundleError) as e:
+        ob.verify(out, tmp_path / "check", cosign_key=KEY)
+    assert e.value.code == code, str(e.value)
+
+
+def test_a_good_signature_among_bad_ones_is_enough(built, tmp_path):
+    idx = index_of(built, tmp_path)
+    out = rebuilt(built, tmp_path, lambda r: set_sigs(r, [entry("sha256:" + "3" * 64), entry(idx)]))
+    assert ob.verify(out, tmp_path / "check", cosign_key=KEY)["trust"] == "signature"
+
+
+@pytest.mark.parametrize("key", [None, "absent"])
+def test_unpinned_tag_refused_without_the_collection_key(built, tmp_path, key):
+    with pytest.raises(ob.BundleError) as e:
+        ob.verify(built[0], tmp_path / "check", cosign_key=None if key is None else tmp_path / "absent.pub")
+    assert e.value.code == "bundle-unsigned"
+
+
+def test_known_tag_pin_holds_for_any_image_name(built, tmp_path):
+    """Before, the pin was skipped when the image was not named
+    .../containers/openbao (a mirror name chosen by whoever built it)."""
+    def change(root):
+        prov = json.loads((root / ob.PROVENANCE).read_text())
+        prov["image"] = "mirror.example/openbao"
+        (root / ob.PROVENANCE).write_text(json.dumps(prov))
+    out = rebuilt(built, tmp_path, change, tag="2.7.2-5.4", version="2.7.2")
+    with pytest.raises(ob.BundleError) as e:
+        ob.verify(out, tmp_path / "check", cosign_key=KEY)
+    assert e.value.code == "bundle-pin-mismatch"
+
+
+def test_real_application_collection_signature_verifies_with_the_shipped_key(tmp_path):
+    """Signature of dp.apps.rancher.io/containers/openbao:2.7.2-5.4 as the
+    registry serves it (read on 08/11/2026), checked with
+    config/openbao/application-collection-cosign.pub by openssl."""
+    doc = json.loads((Path(__file__).parent / "fixtures" / "appco-openbao-2.7.2-5.4-cosign.json").read_text())
+    sig = tmp_path / ob.SIGNATURE
+    sig.write_text(json.dumps({"signatures": doc["signatures"]}))
+    assert doc["index_digest"] == ob.KNOWN["2.7.2-5.4"]
+    assert ob.check_signature(sig, doc["index_digest"], APPCO_KEY, tmp_path)
+    with pytest.raises(ob.BundleError):
+        ob.check_signature(sig, "sha256:" + "4" * 64, APPCO_KEY, tmp_path)
+    with pytest.raises(ob.BundleError):
+        ob.check_signature(sig, doc["index_digest"], KEY, tmp_path)
+
+
+def test_build_refuses_an_unpinned_unsigned_tag(tmp_path):
+    reg = make_registry(signed=False)
+    try:
+        src = op.Registry(reg.host, {"username": "svc", "password": "Pw-AppCo-777"}, plain_http=True)
+        with pytest.raises(ob.BundleError) as e:
+            ob.build(src, reg.host, ob.DEFAULT_REPOSITORY, "9.9.9-1", TPL, tmp_path, cosign_key=KEY)
+        assert e.value.code == "bundle-unsigned" and not list(tmp_path.glob("*.tar.gz"))
+    finally:
+        reg.close()
+
+
+def test_build_refuses_a_signature_that_would_not_install(tmp_path):
+    reg = make_registry(signed=False)
+    add_signature(reg, ob.DEFAULT_REPOSITORY, reg.index_digest, signature=cosign_sign(b"something else"))
+    try:
+        src = op.Registry(reg.host, {"username": "svc", "password": "Pw-AppCo-777"}, plain_http=True)
+        with pytest.raises(ob.BundleError) as e:
+            ob.build(src, reg.host, ob.DEFAULT_REPOSITORY, "9.9.9-1", TPL, tmp_path, cosign_key=KEY)
+        assert e.value.code == "bundle-signature-bad" and not list(tmp_path.glob("*.tar.gz"))
+    finally:
+        reg.close()

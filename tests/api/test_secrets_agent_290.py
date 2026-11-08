@@ -30,7 +30,7 @@ spec.loader.exec_module(hsa)
 
 import openbao_policy as pol  # noqa: E402
 import openbao_client as oc  # noqa: E402
-from fake_openbao_b1 import FakeB1, FakeHost, TOKEN_ACCESSOR, make_bundle  # noqa: E402
+from fake_openbao_b1 import FakeB1, FakeHost, TOKEN_ACCESSOR, make_bundle, cosign_test_key  # noqa: E402
 
 CID = "abc123def456"
 
@@ -53,6 +53,7 @@ def env(tmp_path, bundle):
     (p.state / "staged" / path.name).write_bytes(path.read_bytes())
     p.unit_src.parent.mkdir(parents=True)
     p.unit_src.write_text((ROOT / "config" / "systemd" / hsa.UNIT).read_text())
+    p.cosign_key.write_bytes(cosign_test_key()[1].read_bytes())     # posée par install.sh dans /opt
     srv = FakeB1(CID).start()
     host = FakeHost(p, digest=info["manifest_digest"])
     host.on_start = lambda: srv.initialize(p.boot) if p.boot.exists() else None

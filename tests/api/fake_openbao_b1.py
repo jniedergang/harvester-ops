@@ -3,9 +3,12 @@ AppRole, `secret_id` emballés et accesseurs, politiques, `sys/rotate/root`),
 un faux hôte pour l'agent des secrets, et un paquet OpenBao construit contre
 le faux registre de test_oci_push_175."""
 
+import base64
+import functools
 import json
 import secrets
 import subprocess
+import tempfile
 from pathlib import Path
 
 import oci_push as op
@@ -219,8 +222,50 @@ class FakeHost:
         return [c for c in self.cmds if c[:len(prefix)] == list(prefix)]
 
 
-def make_registry(tag="9.9.9-1", version="9.9.9", repo="containers/openbao"):
-    """Faux registre qui porte une image OpenBao (index amd64 + arm64)."""
+@functools.lru_cache(maxsize=None)
+def cosign_test_key():
+    """Paire RSA de test (une par processus) : (clé privée, clé publique),
+    qui tient le rôle de la clé de l'Application Collection."""
+    d = Path(tempfile.mkdtemp(prefix="hops-test-cosign-"))
+    priv, pub = d / "cosign.key", d / "cosign.pub"
+    subprocess.run(["openssl", "genrsa", "-out", str(priv), "2048"], check=True, capture_output=True)
+    subprocess.run(["openssl", "rsa", "-in", str(priv), "-pubout", "-out", str(pub)], check=True, capture_output=True)
+    return priv, pub
+
+
+def cosign_sign(payload, key=None):
+    """Signature cosign d'une charge utile (base64), comme `cosign sign`
+    avec une clé RSA : PKCS#1 v1.5 sur SHA-256."""
+    key = key or cosign_test_key()[0]
+    r = subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(key)], input=payload, check=True,
+                       capture_output=True)
+    return base64.b64encode(r.stdout).decode()
+
+
+def cosign_payload(digest, reference):
+    return json.dumps({"critical": {"identity": {"docker-reference": reference},
+                                    "image": {"docker-manifest-digest": digest},
+                                    "type": "cosign container image signature"},
+                       "optional": {"creator": "test"}}, separators=(",", ":")).encode()
+
+
+def add_signature(reg, repo, digest, reference=None, payload=None, signature=None):
+    """Étiquette sha256-<hex>.sig du faux registre, telle que cosign la pose."""
+    payload = payload if payload is not None else cosign_payload(digest, reference or f"{reg.host}/{repo}")
+    reg.blobs[t175.sha(payload)] = payload
+    cfg = b"{}"
+    reg.blobs[t175.sha(cfg)] = cfg
+    man = json.dumps({"schemaVersion": 2, "mediaType": op.M_OCI,
+                      "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": t175.sha(cfg),
+                                 "size": len(cfg)},
+                      "layers": [{"mediaType": ob.SIMPLESIGNING, "digest": t175.sha(payload), "size": len(payload),
+                                  "annotations": {ob.SIG_ANNOTATION: signature or cosign_sign(payload)}}]}).encode()
+    reg.manifests[(repo, f"sha256-{digest[7:]}.sig")] = (man, op.M_OCI)
+
+
+def make_registry(tag="9.9.9-1", version="9.9.9", repo="containers/openbao", signed=True):
+    """Faux registre qui porte une image OpenBao (index amd64 + arm64),
+    signée par la clé de test (`signed`)."""
     reg = t175.FakeRegistry(user="svc", password="Pw-AppCo-777")
     digs = {}
     for arch in ("amd64", "arm64"):
@@ -242,6 +287,8 @@ def make_registry(tag="9.9.9-1", version="9.9.9", repo="containers/openbao"):
     reg.manifests[(repo, t175.sha(idx))] = (idx, op.M_OCI_INDEX)
     reg.index_digest = t175.sha(idx)
     reg.amd64 = digs["amd64"][0]
+    if signed:
+        add_signature(reg, repo, reg.index_digest)
     return reg
 
 
@@ -252,7 +299,7 @@ def make_bundle(out_dir, tag="9.9.9-1", version="9.9.9"):
     try:
         src = op.Registry(reg.host, {"username": "svc", "password": "Pw-AppCo-777"}, plain_http=True)
         tpl = (root / "config" / "openbao" / "openbao.hcl.tpl").read_text()
-        got = ob.build(src, reg.host, "containers/openbao", tag, tpl, out_dir)
+        got = ob.build(src, reg.host, "containers/openbao", tag, tpl, out_dir, cosign_key=cosign_test_key()[1])
     finally:
         reg.close()
     return Path(got["path"]), got

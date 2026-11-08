@@ -123,6 +123,10 @@ class Paths:
         self.boot = g("HARVESTER_OPS_OPENBAO_BOOT", pol.BOOT_DIR)
         self.units = g("HARVESTER_OPS_UNIT_DIR", "/etc/systemd/system")
         self.unit_src = g("HARVESTER_OPS_OPT", "/opt/harvester-ops") / "openbao" / UNIT
+        # clé publique de l'Application Collection posée par install.sh
+        # (root) : la signature cosign d'un paquet B1 est vérifiée avec elle,
+        # jamais avec une clé ou une provenance venues du paquet
+        self.cosign_key = g("HARVESTER_OPS_OPT", "/opt/harvester-ops") / "openbao" / ob.COSIGN_KEY_NAME
         self.logrotate = g("HARVESTER_OPS_LOGROTATE_DIR", "/etc/logrotate.d") / "harvester-ops-openbao"
         self.work = g("HARVESTER_SECRETS_AGENT_WORK", "/var/lib/harvester-secrets-agent")
         self.logs = g("HARVESTER_OPS_LOG_DIR", "/var/log/harvester-ops")
@@ -597,7 +601,7 @@ class Agent:
                     left -= len(b)
             if left != 0 or src.read(1):
                 raise AgentError("bundle-changed", "the staged bundle changed while it was copied")
-        return ob.verify(dst, self.p.work)
+        return ob.verify(dst, self.p.work, cosign_key=self.p.cosign_key)
 
     def load_image(self, info):
         r = self.host.run(["podman", "load", "-i", str(info["image_tar"])])

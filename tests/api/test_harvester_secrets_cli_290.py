@@ -38,7 +38,7 @@ import openbao_client as oc  # noqa: E402
 import openbao_policy as pol  # noqa: E402
 import secret_classes as sc  # noqa: E402
 import secret_store as ss  # noqa: E402
-from fake_openbao_b1 import FakeB1, FakeHost, make_registry  # noqa: E402
+from fake_openbao_b1 import FakeB1, FakeHost, make_registry, cosign_test_key  # noqa: E402
 
 CID = "abc123def456"
 PREFIX = f"consoles/{CID}"
@@ -543,7 +543,8 @@ def test_agent_request_written_private_and_followed(env, capsys, monkeypatch):
 # bundle, file
 # ---------------------------------------------------------------------------
 def test_bundle_password_only_on_stdin(env, capsys, tmp_path, monkeypatch):
-    monkeypatch.setattr(hsc, "COSIGN_KEY", tmp_path / "absent.pub")
+    monkeypatch.setattr(hsc, "COSIGN_KEY", cosign_test_key()[1])
+    monkeypatch.setattr(hsc, "_cosign_runner", lambda *a: None)          # pas d'outil cosign
     reg = make_registry()
     try:
         argv = ["bundle", "--registry", reg.host, "--user", "svc", "--password-stdin", "--tag", "9.9.9-1",

@@ -10,12 +10,20 @@ miroir : l'éditeur ne redistribue pas l'image (point 251). Contenu :
         openbao.hcl.tpl     modèle de configuration (config/openbao/)
         provenance.json     image, tag, empreintes de l'index et du
                             manifeste, version, date, vérification cosign
+                            (déclarative : jamais crue à la pose)
+        cosign-signature.json  signature cosign de l'index, telle que le
+                            registre la sert (étiquette sha256-<hex>.sig) :
+                            charge utile et signature
         SHA256SUMS          somme de chaque fichier
 
-L'image est ÉPINGLÉE par l'empreinte de son index (celle que cosign signe) :
-un tag connu (`KNOWN`) doit donner l'empreinte relevée par les essais
-préalables ; un autre tag garde l'empreinte lue à la construction, écrite
-dans la provenance. `verify` relit tout : sommes, provenance, index OCI,
+Confiance (revue I2 des tâches 5-7) : rien de ce que le paquet déclare n'est
+cru. Un tag connu (`KNOWN`) doit donner l'empreinte d'index épinglée ici,
+quel que soit le nom de l'image (un miroir garde l'empreinte). Un autre tag
+n'est accepté que si la signature cosign embarquée se vérifie avec la clé
+publique de l'Application Collection fournie par l'appelant (celle de
+/opt/harvester-ops pour l'agent), signe CETTE empreinte d'index et désigne le
+dépôt `containers/openbao` (la même clé signe toutes les images de la
+collection). `verify` relit ensuite tout : sommes, provenance, index OCI,
 chaque blob (empreinte recalculée), et le manifeste listé par l'index pour
 linux/amd64.
 
@@ -24,10 +32,12 @@ de l'image : la construction SUSE n'estampille pas `bao version` (2.0.0-HEAD,
 essai 1).
 """
 
+import base64
 import hashlib
 import io
 import json
 import re
+import subprocess
 import tarfile
 import time
 from pathlib import Path
@@ -43,7 +53,13 @@ IMAGE_TAR = "openbao-image.tar"
 TEMPLATE = "openbao.hcl.tpl"
 PROVENANCE = "provenance.json"
 SUMS = "SHA256SUMS"
+SIGNATURE = "cosign-signature.json"
 FILES = (IMAGE_TAR, TEMPLATE, PROVENANCE)
+OPTIONAL = (SIGNATURE,)
+COSIGN_KEY_NAME = "application-collection-cosign.pub"
+SIMPLESIGNING = "application/vnd.dev.cosign.simplesigning.v1+json"
+SIG_ANNOTATION = "dev.cosignproject.cosign/signature"
+SIGNATURE_MAX = 64 << 10
 NAME_RE = re.compile(r"^harvester-ops-openbao-(?P<version>[0-9][0-9A-Za-z.+]{0,30})-(?P<tag>[A-Za-z0-9._-]{1,64})"
                      r"\.tar\.gz$")
 TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
@@ -166,13 +182,15 @@ def check_image_tar(path, prov):
 # ---------------------------------------------------------------------------
 # Vérification d'un paquet
 # ---------------------------------------------------------------------------
-def verify(path, workdir):
+def verify(path, workdir, cosign_key=None):
     """Extrait le paquet `path` dans `workdir` (vide, privé) et le vérifie.
-    Rend {"name", "version", "tag", "image", "index_digest",
-    "manifest_digest", "root", "image_tar", "template", "provenance"}.
-    BundleError sinon (`bundle-bad-name`, `bundle-unsafe`, `bundle-sums`,
-    `bundle-provenance`, `bundle-pin-mismatch`, `bundle-digest-mismatch`,
-    `bundle-image-bad`)."""
+    `cosign_key` : clé publique de la collection (fichier PEM), exigée pour
+    un tag hors de `KNOWN`. Rend {"name", "version", "tag", "image",
+    "index_digest", "manifest_digest", "root", "image_tar", "template",
+    "provenance", "trust"} (`trust` : "pinned" ou "signature"). BundleError
+    sinon (`bundle-bad-name`, `bundle-unsafe`, `bundle-sums`,
+    `bundle-provenance`, `bundle-pin-mismatch`, `bundle-unsigned`,
+    `bundle-signature-bad`, `bundle-digest-mismatch`, `bundle-image-bad`)."""
     path, workdir = Path(path), Path(workdir)
     m = NAME_RE.match(path.name)
     if not m:
@@ -188,7 +206,7 @@ def verify(path, workdir):
             parts = mem.name.split("/")
             if mem.name.startswith("/") or ".." in parts or parts[0] != top or not (mem.isfile() or mem.isdir()):
                 raise BundleError("bundle-unsafe", f"unexpected member in the bundle: {mem.name[:80]}")
-            if mem.isfile() and (len(parts) != 2 or parts[1] not in FILES + (SUMS,)):
+            if mem.isfile() and (len(parts) != 2 or parts[1] not in FILES + OPTIONAL + (SUMS,)):
                 raise BundleError("bundle-unsafe", f"unexpected file in the bundle: {mem.name[:80]}")
             total += mem.size
             if total > MAX_BUNDLE:
@@ -209,7 +227,8 @@ def verify(path, workdir):
                 sums[name] = h
     except OSError:
         raise BundleError("bundle-sums", "SHA256SUMS missing") from None
-    if set(sums) != set(FILES):
+    present = set(FILES) | {f for f in OPTIONAL if (root / f).is_file()}
+    if set(sums) != present:
         raise BundleError("bundle-sums", "SHA256SUMS does not list exactly the bundle files")
     for name, h in sums.items():
         try:
@@ -232,21 +251,104 @@ def verify(path, workdir):
     if prov["tag"] != m["tag"] or prov["version"] != m["version"]:
         raise BundleError("bundle-provenance", "the bundle name does not match its provenance")
     pin = KNOWN.get(prov["tag"])
-    if pin and prov["index_digest"] != pin and prov["image"].endswith("/" + DEFAULT_REPOSITORY):
-        raise BundleError("bundle-pin-mismatch", f"tag {prov['tag']} is pinned to {pin[:19]}, "
-                          f"the bundle holds {prov['index_digest'][:19]}")
+    if pin:
+        # quel que soit le nom de l'image : un miroir garde l'empreinte
+        if prov["index_digest"] != pin:
+            raise BundleError("bundle-pin-mismatch", f"tag {prov['tag']} is pinned to {pin[:19]}, "
+                              f"the bundle holds {prov['index_digest'][:19]}")
+        trust = "pinned"
+    else:
+        check_signature(root / SIGNATURE, prov["index_digest"], cosign_key, workdir)
+        trust = "signature"
     label = check_image_tar(root / IMAGE_TAR, prov)
     if label and label != prov["version"]:
         raise BundleError("bundle-provenance", "the image version label does not match the provenance")
     return {"name": path.name, "version": prov["version"], "tag": prov["tag"], "image": prov["image"],
             "index_digest": prov["index_digest"], "manifest_digest": prov["manifest_digest"], "root": root,
-            "image_tar": root / IMAGE_TAR, "template": (root / TEMPLATE).read_text(), "provenance": prov}
+            "image_tar": root / IMAGE_TAR, "template": (root / TEMPLATE).read_text(), "provenance": prov,
+            "trust": trust}
+
+
+# ---------------------------------------------------------------------------
+# Signature cosign (clé de la collection), sans l'outil cosign
+# ---------------------------------------------------------------------------
+def _reference_repo(ref):
+    """Le dépôt d'une référence d'image, sans l'hôte : `h/containers/x` ->
+    `containers/x`."""
+    parts = str(ref).split("/")
+    if len(parts) > 1 and ("." in parts[0] or ":" in parts[0] or parts[0] == "localhost"):
+        parts = parts[1:]
+    return "/".join(parts)
+
+
+def signature_entries(sig_manifest, fetch_blob):
+    """Entrées {payload, signature} (base64) des couches d'une signature
+    cosign (manifeste de l'étiquette sha256-<hex>.sig)."""
+    out = []
+    for layer in (sig_manifest or {}).get("layers") or []:
+        sig = (layer.get("annotations") or {}).get(SIG_ANNOTATION)
+        if layer.get("mediaType") != SIMPLESIGNING or not sig or int(layer.get("size") or 0) > SIGNATURE_MAX:
+            continue
+        payload = fetch_blob(layer["digest"])
+        out.append({"payload": base64.b64encode(payload).decode(), "signature": sig})
+    return out
+
+
+def check_signature(path, index_digest, key, workdir, openssl="openssl"):
+    """Une des signatures de `path` (cosign-signature.json) se vérifie avec
+    `key` (RSA ou ECDSA, PEM), signe `index_digest` et désigne le dépôt
+    containers/openbao. openssl fait la vérification (déjà exigé par
+    l'agent pour la CA de B1) ; la charge utile est celle que cosign signe."""
+    if not key or not Path(key).is_file():
+        raise BundleError("bundle-unsigned", "this tag is not pinned and the collection key is not available: "
+                          "only a pinned tag or a signed image can be installed")
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        raise BundleError("bundle-unsigned", "this tag is not pinned and the bundle holds no cosign signature "
+                          "(rebuild it with harvester-secrets bundle)") from None
+    try:
+        if len(raw) > SIGNATURE_MAX:
+            raise ValueError
+        entries = json.loads(raw)["signatures"]
+        if not isinstance(entries, list):
+            raise ValueError
+    except (ValueError, KeyError, TypeError):
+        raise BundleError("bundle-signature-bad", "unreadable cosign signature") from None
+    work = Path(workdir)
+    for i, e in enumerate(entries[:8]):
+        try:
+            payload = base64.b64decode(e["payload"], validate=True)
+            sig = base64.b64decode(e["signature"], validate=True)
+            crit = json.loads(payload)["critical"]
+            if crit.get("type") != "cosign container image signature" \
+                    or crit["image"]["docker-manifest-digest"] != index_digest \
+                    or _reference_repo(crit["identity"]["docker-reference"]) != DEFAULT_REPOSITORY:
+                continue
+        except (ValueError, KeyError, TypeError):
+            continue
+        pf, sf = work / f".sig-payload-{i}", work / f".sig-{i}"
+        pf.write_bytes(payload)
+        sf.write_bytes(sig)
+        try:
+            r = subprocess.run([openssl, "dgst", "-sha256", "-verify", str(key), "-signature", str(sf), str(pf)],
+                               capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            raise BundleError("bundle-signature-bad", "openssl is needed to check the cosign signature") from None
+        finally:
+            pf.unlink(missing_ok=True)
+            sf.unlink(missing_ok=True)
+        if r.returncode == 0:
+            return True
+    raise BundleError("bundle-signature-bad", f"no cosign signature of index {index_digest[:19]} "
+                      "for containers/openbao verifies with the collection key")
 
 
 # ---------------------------------------------------------------------------
 # Construction (harvester-secrets bundle, tâche 7)
 # ---------------------------------------------------------------------------
-def build(src, registry, repository, tag, template_text, out_dir, cosign=None, now=time.time, progress=None):
+def build(src, registry, repository, tag, template_text, out_dir, cosign=None, now=time.time, progress=None,
+          cosign_key=None):
     """Tire `<registry>/<repository>:<tag>` par `src` (oci_push.Registry
     avec les identifiants du client), une plateforme, octets inchangés
     (oci_layout.copy_image), et écrit le paquet dans `out_dir`. `cosign
@@ -265,11 +367,21 @@ def build(src, registry, repository, tag, template_text, out_dir, cosign=None, n
     if mt not in M_INDEX:
         raise BundleError("bundle-image-bad", f"{image}:{tag} is not a multi-platform index ({mt})")
     pin = KNOWN.get(tag)
-    if pin and repository == DEFAULT_REPOSITORY and index_digest != pin:
+    if pin and index_digest != pin:
         raise BundleError("bundle-pin-mismatch", f"{image}:{tag} has index {index_digest[:19]}, pinned {pin[:19]}")
     cos = cosign(f"{image}@{index_digest}") if cosign else ("not-run", "cosign not found on this machine")
     if cos[0] == "failed":
         raise BundleError("bundle-cosign-failed", f"cosign refused the signature of {image}@{index_digest[:19]}")
+    # la signature telle que le registre la sert (miroir Hauler compris) :
+    # embarquée, elle est revérifiée à la pose avec la clé de l'hôte
+    try:
+        sig_body, _ = src.manifest(repository, f"sha256-{index_digest[7:]}.sig")
+        sigs = signature_entries(json.loads(sig_body), lambda d: src.blob(repository, d))
+    except (op.RegistryError, ValueError):
+        sigs = []
+    if not pin and not sigs:
+        raise BundleError("bundle-unsigned", f"{image}:{tag} is not a pinned tag and the registry serves no cosign "
+                          "signature for it: it could not be installed")
     work = Path(tempfile.mkdtemp(prefix=".openbao-bundle-", dir=str(out_dir)))
     try:
         layout = ol.Layout(work / "layout")
@@ -284,20 +396,27 @@ def build(src, registry, repository, tag, template_text, out_dir, cosign=None, n
         top.mkdir()
         write_image_tar(layout, entry, body, top / IMAGE_TAR)
         (top / TEMPLATE).write_text(template_text)
+        files = FILES
+        if sigs:
+            (top / SIGNATURE).write_text(json.dumps({"signatures": sigs}, indent=2) + "\n")
+            files = FILES + (SIGNATURE,)
+            if not pin:
+                # même contrôle qu'à la pose : un paquet qui ne s'installerait pas n'est pas rendu
+                check_signature(top / SIGNATURE, index_digest, cosign_key, work)
         prov = {"image": image, "tag": tag, "index_digest": index_digest, "manifest_digest": got["digest"],
                 "platform": PLATFORM, "version": version, "created": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                                                      time.gmtime(now())),
                 "cosign": {"state": cos[0], "detail": cos[1]}, "size": got["size"]}
         (top / PROVENANCE).write_text(json.dumps(prov, indent=2) + "\n")
         lines = []
-        for f in FILES:
+        for f in files:
             with open(top / f, "rb") as fh:
                 lines.append(f"{_sha_file(fh)[7:]}  {f}")
         (top / SUMS).write_text("\n".join(lines) + "\n")
         dest = Path(out_dir) / name
         part = dest.with_name(dest.name + ".part")
         with tarfile.open(part, "w:gz") as t:
-            for f in (top, *[top / x for x in FILES + (SUMS,)]):
+            for f in (top, *[top / x for x in files + (SUMS,)]):
                 ti = t.gettarinfo(str(f), arcname=str(f.relative_to(work)))
                 ti.uid = ti.gid = 0
                 ti.uname = ti.gname = ""

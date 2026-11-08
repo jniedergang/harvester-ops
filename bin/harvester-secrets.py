@@ -473,7 +473,7 @@ def _enable_b1(args, doc):
     step("bundle", "running", "checking the OpenBao bundle")
     with tempfile.TemporaryDirectory(prefix="openbao-bundle-") as tmp:
         try:
-            info = ob.verify(src, tmp)
+            info = ob.verify(src, tmp, cosign_key=COSIGN_KEY)
         except ob.BundleError as e:
             return refuse(e.code, str(e))
     step("bundle", "done", f"OpenBao {info['version']} ({info['tag']}, {info['index_digest'][:19]})")
@@ -1112,7 +1112,7 @@ def cmd_bundle(args):
     try:
         got = ob.build(src, args.registry, args.repository, args.tag, (HERE.parent / "config" / "openbao" /
                                                                        "openbao.hcl.tpl").read_text(),
-                       out_dir, cosign=cos)
+                       out_dir, cosign=cos, cosign_key=key if key.is_file() else None)
     except ob.BundleError as e:
         return fail(e.code, str(e))
     except op.RegistryError as e:
