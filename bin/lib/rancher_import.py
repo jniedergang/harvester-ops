@@ -335,6 +335,10 @@ def mark_of(capi_cluster):
 # `clusterName: <cluster>`) ; au-delà de 63 caractères Fleet raccourcit le
 # nom, qui n'est alors plus reconnu exactement.
 BUNDLE_API = "/v1/fleet.cattle.io.bundles"
+# relecture 2.8.2 I-3 : cluster Fleet du même nom (posé par Rancher, qui en
+# est propriétaire, ou enregistré à part) ; tant qu'il est là, son agent est
+# vivant ou recréé par Fleet
+FLEET_CLUSTER_API = "/v1/fleet.cattle.io.clusters"
 AGENT_BUNDLE_PREFIX = "fleet-agent-"
 
 

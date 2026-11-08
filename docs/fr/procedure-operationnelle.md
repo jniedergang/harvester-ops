@@ -694,9 +694,12 @@ visé par ce chemin.
    la suppression ou au Défaire d'un cluster enfant importé. Seulement si
    son nom est exact, que chacune de ses cibles ne nomme que ce cluster,
    qu'il porte une marque de Rancher ou de Fleet et aucune étiquette de la
-   console. Sinon il est gardé et nommé dans les étapes
-   (`kept-not-rancher` ; `kept-not-matched` au-delà de 63 caractères, que
-   Fleet raccourcit). Un refus de Rancher sur le Bundle est dit et ne
+   console, et une fois parti le cluster Fleet de ce nom (attendu jusqu'à
+   60 s : Rancher le retire après son propre cluster ; tant qu'il est là,
+   Fleet recréerait le Bundle, ou c'est l'agent d'un cluster Fleet
+   vivant). Sinon il est gardé et nommé dans les étapes
+   (`kept-not-rancher` ; `kept-fleet-cluster` ; `kept-not-matched`
+   au-delà de 63 caractères, que Fleet raccourcit). Un refus de Rancher sur le Bundle est dit et ne
    défait pas le retrait. Vérifié par les tests seulement pour l'instant.
 7. **Supprimer un cluster enfant importé.** Le cluster est d'abord retiré
    de Rancher, sans rien lire dans le cluster enfant (un enfant mort reste

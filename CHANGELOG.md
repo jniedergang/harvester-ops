@@ -43,9 +43,12 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   undoing an imported child cluster, now delete it once the cluster is
   gone from Rancher. Only when its name is exactly `fleet-agent-<name in
   Rancher>`, each target names that cluster alone, it carries a mark of
-  Rancher or Fleet (`cattle.io` domain) and no label of the console.
-  Otherwise it is kept and named in the steps (`kept-not-rancher`, or
-  `kept-not-matched` for a name over 63 characters, which Fleet shortens).
+  Rancher or Fleet (`cattle.io` domain) and no label of the console, and
+  once the Fleet cluster of that name is gone (waited for up to 60 s;
+  while it is there Fleet would recreate the Bundle, or it belongs to a
+  live Fleet cluster). Otherwise it is kept and named in the steps
+  (`kept-not-rancher`, `kept-fleet-cluster`, or `kept-not-matched` for a
+  name over 63 characters, which Fleet shortens).
   A refusal or an unreadable Bundle is said in the steps and does not
   undo the removal. The dry run reports it (`agent_bundle`). Without a
   Rancher session the existing rules apply. Verified by tests only; to be
@@ -65,7 +68,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   on both paths (unimport, delete), each kept case (other or second
   target, no target, no mark, label of the console, other namespace, long
   name), each error path (absent, unreadable, read or delete refused,
-  Rancher unreachable), dry runs, no session, cluster left in Rancher.
+  Rancher unreachable), dry runs, no session, cluster left in Rancher,
+  and the Fleet cluster (still there, gone during the wait, unreadable,
+  Rancher cluster already absent, dry runs).
 
 ## [2.8.1] - 2026-11-08 - Offline child clusters skip the package update, self-hosted registry warning
 

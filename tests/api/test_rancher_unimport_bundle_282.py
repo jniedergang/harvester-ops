@@ -52,12 +52,31 @@ def bundle(name=BNAME, ns="fleet-default", targets=None, labels=None, annotation
 class Rancher(t0.Rancher):
     """Faux Rancher 2.14 : le Bundle de l'agent reste après le retrait."""
 
-    def __init__(self, bundles=None, bundle_status=None, bundle_delete=200, **kw):
+    def __init__(self, bundles=None, bundle_status=None, bundle_delete=200, fleet=None, fleet_status=None,
+                 fleet_gone_after=None, **kw):
         super().__init__(**kw)
         self.bundles = dict(bundles or {})
         self.bundle_status, self.bundle_delete = bundle_status, bundle_delete
+        # relecture I-3 : clusters Fleet de `fleet-default` (nom -> lectures
+        # avant disparition, None = jamais)
+        self.fleet = dict(fleet or {})
+        self.fleet_status = fleet_status
 
     def call(self, method, path, body=None):
+        if path.startswith(ri.FLEET_CLUSTER_API + "/"):
+            self.calls.append((method, path))
+            name = path.rsplit("/", 1)[1]
+            if self.fleet_status:
+                return self.fleet_status, {}
+            if name in self.fleet:
+                left = self.fleet[name]
+                if left is not None:
+                    if left <= 0:
+                        del self.fleet[name]
+                        return 404, {"code": "NotFound"}
+                    self.fleet[name] = left - 1
+                return 200, {"metadata": {"name": name, "namespace": "fleet-default"}}
+            return 404, {"code": "NotFound"}
         if path.startswith(ri.BUNDLE_API + "/"):
             self.calls.append((method, path))
             name = path.rsplit("/", 1)[1]
@@ -207,3 +226,71 @@ def test_a_cluster_left_in_rancher_keeps_its_bundle(cli, world, capsys):
 ])
 def test_agent_bundle_ours(case, b, name, want):
     assert ri.agent_bundle_ours(b, name) is want
+
+
+FPATH = f"/v1/fleet.cattle.io.clusters/fleet-default/{NAME}"
+
+
+@pytest.mark.parametrize("argv", [t0.UNIMPORT, DELETE], ids=["unimport", "delete"])
+def test_a_fleet_cluster_still_there_keeps_the_bundle(cli, world, capsys, monkeypatch, argv):
+    """Relecture 2.8.2 I-3 : le cluster Fleet du même nom est encore là
+    (retard du ramasse-miettes, ou cluster Fleet enregistré à part) : son
+    agent le recréerait, ou c'est l'agent d'un autre cluster vivant. Gardé
+    et dit après une attente bornée ; le retrait de l'import se termine."""
+    monkeypatch.setattr(cli, "AGENT_FLEET_WAIT", 0)
+    monkeypatch.setattr(cli, "remove_cluster", lambda *a, **k: 0)
+    mgmt, r = imported(bundles={BNAME: bundle()}, fleet={NAME: None})
+    assert world["run"](mgmt, r, t0.Child(), argv) == 0
+    err = steps(capsys)
+    assert BNAME in r.bundles and ("DELETE", BPATH) not in r.calls and ("GET", FPATH) in r.calls
+    assert f"kept-fleet-cluster: the Fleet cluster fleet-default/{NAME} is still there, Bundle {BNAME} " \
+           "left in place" in err
+    assert ri.A_MARK not in mgmt.objs[(cs.K_CLUSTER, NS, CL)]["metadata"]["annotations"]
+
+
+def test_the_bundle_goes_once_the_fleet_cluster_is_gone(cli, world, capsys, monkeypatch):
+    """Le cluster Fleet part pendant l'attente bornée : le Bundle part après."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(cli.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(cli.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    mgmt, r = imported(bundles={BNAME: bundle()}, fleet={NAME: 2})
+    assert world["run"](mgmt, r, t0.Child(), t0.UNIMPORT) == 0
+    assert BNAME not in r.bundles
+    reads = [c for c in r.calls if c == ("GET", FPATH)]
+    assert len(reads) == 3 and r.calls.index(reads[-1]) < r.calls.index(("DELETE", BPATH))
+
+
+def test_an_unreadable_fleet_cluster_keeps_the_bundle(cli, world, capsys):
+    mgmt, r = imported(bundles={BNAME: bundle()}, fleet_status=403)
+    assert world["run"](mgmt, r, t0.Child(), t0.UNIMPORT) == 0
+    assert BNAME in r.bundles and ("DELETE", BPATH) not in r.calls
+    assert f"the Fleet cluster fleet-default/{NAME} is unreadable (Rancher answered 403), Bundle {BNAME} " \
+           "left in place" in steps(capsys)
+
+
+def test_rancher_cluster_already_gone_still_checks_the_fleet_cluster(cli, world, capsys, monkeypatch):
+    """Relecture m-4 : cluster déjà absent de Rancher (404). Un cluster Fleet
+    vivant de ce nom garde son Bundle ; sans lui, le Bundle part."""
+    monkeypatch.setattr(cli, "AGENT_FLEET_WAIT", 0)
+    for fleet, kept in (({NAME: None}, True), ({}, False)):
+        mgmt, r = imported(bundles={BNAME: bundle()}, fleet=fleet)
+        r.prov.clear()
+        assert world["run"](mgmt, r, t0.Child(), t0.UNIMPORT) == 0
+        assert (BNAME in r.bundles) is kept
+        assert not [c for c in r.calls if c == ("DELETE", f"{ri.API_V1}/fleet-default/{NAME}")]
+        capsys.readouterr()
+
+
+@pytest.mark.parametrize("case,present,fleet,delete", [
+    ("cluster-still-in-rancher", True, {NAME: None}, True),     # le cluster Fleet part avec lui
+    ("cluster-gone-fleet-alive", False, {NAME: None}, False),
+    ("cluster-gone-fleet-gone", False, {}, True),
+])
+def test_dry_run_and_the_fleet_cluster(cli, world, capsys, case, present, fleet, delete):
+    mgmt, r = imported(bundles={BNAME: bundle()}, fleet=fleet)
+    if not present:
+        r.prov.clear()
+    assert world["run"](mgmt, r, t0.Child(), t0.UNIMPORT + ["--dry-run"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["agent_bundle"]["delete"] is delete
+    assert not [c for c in r.calls if c[0] == "DELETE"]

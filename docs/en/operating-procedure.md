@@ -651,9 +651,12 @@ never aimed at by this path.
    `fleet-default` is deleted too, here and when an imported child cluster
    is deleted or undone. Only when its name is exact, each of its targets
    names this cluster alone, it carries a mark of Rancher or Fleet and no
-   label of the console. Otherwise it is kept and named in the steps
-   (`kept-not-rancher`; `kept-not-matched` when the name is over 63
-   characters, since Fleet shortens it). A refusal of Rancher on the
+   label of the console, and once the Fleet cluster of that name is gone
+   (waited for up to 60 s: Rancher removes it after its own cluster; while
+   it is there Fleet would recreate the Bundle, or it is the agent of a
+   live Fleet cluster). Otherwise it is kept and named in the steps
+   (`kept-not-rancher`; `kept-fleet-cluster`; `kept-not-matched` when the
+   name is over 63 characters, since Fleet shortens it). A refusal of Rancher on the
    Bundle is said and does not undo the removal. Verified by tests only
    so far.
 7. **Delete an imported child cluster.** The cluster is removed from
