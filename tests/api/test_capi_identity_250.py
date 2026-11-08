@@ -374,7 +374,7 @@ class Kube:
 
 def _args(**kw):
     a = dict(spec="-", components=None, json=False, dry_run=False, timeout=60, no_wait=True,
-             identity="restricted", origin="", cluster=None, kubeconfig=None)
+             identity="restricted", origin="", cluster=None, kubeconfig=None, by="")
     a.update(kw)
     return argparse.Namespace(**a)
 

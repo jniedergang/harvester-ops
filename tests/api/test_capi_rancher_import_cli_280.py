@@ -397,3 +397,33 @@ def test_create_refuses_rancher_external_without_session(cli, world):
     f = cli._session_findings(mgmt, spec)
     assert f == [{"code": "rancher-session-needed", "level": "block", "facts": {}}]
     assert cli._session_findings(mgmt, c2.normalize({"name": "x"})) == []
+
+
+def test_create_takes_the_person_who_creates(cli, monkeypatch):
+    """Banc 2.8.0 : `applied-by` restait vide dans Rancher pour un cluster
+    importé à sa création (la personne n'atteignait jamais `create`).
+    `--by` est lu, contrôlé, puis passé à l'import ; la console le donne."""
+    seen = {}
+
+    def stop(kube, spec, *a, **k):
+        seen["by"] = spec.get("by")
+        raise SystemExit(0)
+    monkeypatch.setattr(cli, "kube_from", lambda a: (object(), "/kc", None))
+    monkeypatch.setattr(cli, "components_from", lambda c: {})
+    monkeypatch.setattr(cli, "_check", stop)
+    import json as _j
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+        _j.dump({"name": "web", "namespace": "web"}, f)
+    with pytest.raises(SystemExit):
+        cli.main(["create", "--kubeconfig", "/kc", "--spec", f.name, "--by", "alice"])
+    assert seen["by"] == "alice"
+    seen.clear()
+    assert cli.main(["create", "--kubeconfig", "/kc", "--spec", f.name, "--by", "a|b"]) != 0
+    assert seen == {}                                                   # refusé avant tout contrôle
+    import os
+    os.unlink(f.name)
+    src = (ROOT / "web" / "app.py").read_text()
+    route = src[src.index("def api_capi_cluster_create("):]
+    assert 'cmd += ["--by", current_user() or ""]' in route[:route.index("\ndef ")]
+    assert '"--timeout", str(timeout_s), "--by", (run.result or {}).get("by") or ""]' in src

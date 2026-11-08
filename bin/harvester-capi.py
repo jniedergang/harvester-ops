@@ -1131,6 +1131,10 @@ def cmd_create(args):
     origin = cc.parse_origin(args.origin)
     restricted = args.identity == "restricted"
     spec = ci.force_target_namespace(spec_from(args.spec), args.identity)
+    # banc 2.8.0 : la personne qui crée est écrite dans Rancher quand le
+    # cluster y est importé (`applied-by`) ; elle restait vide
+    _check_by(args.by)
+    spec["by"] = args.by
     desc = components_from(args.components)
     out = _check(kube, spec, desc, args.identity, _harvester(args))
     blockers = cc.blocking(out["findings"])
@@ -3689,7 +3693,7 @@ def main(argv=None):
             ("inventory", cmd_inventory, ("components", "json")),
             ("check", cmd_check, ("spec", "components", "json", "identity")),
             ("render", cmd_render, ("spec", "secrets", "identity")),
-            ("create", cmd_create, ("spec", "components", "json", "dry", "timeout", "identity")),
+            ("create", cmd_create, ("spec", "components", "json", "dry", "timeout", "identity", "createby")),
             ("delete", cmd_delete, ("name", "timeout", "dry")),
             ("state", cmd_state, ("name", "json")),
             ("services", cmd_services, ("json",)),
@@ -3772,6 +3776,8 @@ def main(argv=None):
                             help=f"seconds to wait for the cluster to be active ({ri.WAIT_MIN} to {ri.WAIT_MAX})")
             sp.add_argument("--by", default="", help="person who imports (annotation in Rancher)")
             sp.add_argument("--run", default="", metavar="ID", help="plan run written in Rancher (undo of a plan)")
+        if "createby" in extra:
+            sp.add_argument("--by", default="", help="person who creates (written in Rancher when imported)")
         if "runimport" in extra:
             sp.add_argument("--timeout", type=int, default=ri.UNIMPORT_WAIT,
                             help="seconds to wait for the cluster to leave Rancher")

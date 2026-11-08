@@ -22658,6 +22658,7 @@ def api_capi_cluster_create(cluster):
     comp = _capi_components_dir()
     if comp:
         cmd += ["--components", str(comp)]
+    cmd += ["--by", current_user() or ""]
     run, err = _capi_action(cluster, f"capi-cluster-create:{spec['namespace']}/{spec['name']}",
                             cmd, spec=spec)
     if err:
@@ -34536,7 +34537,7 @@ def _deploy_clusters_phase(run, cluster, kc_ref, dctx):
             data["namespace_created"] = not b.get("namespace_present", False)
         args = _deploy_capi_args() + ["--identity", "restricted", "--origin",
                                       f"plan={plan['name']},template={e['template']},run={run.id}",
-                                      "--timeout", str(timeout_s)]
+                                      "--timeout", str(timeout_s), "--by", (run.result or {}).get("by") or ""]
         if dry:
             args.append("--dry-run")
         child, err = _capi_launch(cluster, kc, "create", args, spec=e["spec"], parent=run.id,
