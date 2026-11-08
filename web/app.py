@@ -423,13 +423,16 @@ def _stage_kubeconfig(src_kc, ws):
     if _sst.is_active():
         # 2.9.0 (point 263) : OpenBao actif, la copie vit sur tmpfs et
         # l'espace n'en garde qu'un lien : jamais d'identifiants sur disque.
-        tmp = _sst.write_private_copy(_sst.secret_files_dir(_sst.store().settings), "tf-kubeconfig",
-                                      Path(src_kc).read_text())
-        _TF_TMPFS_COPIES.append(tmp)
+        # Revue I3 : une copie par espace, tenue par l'action (fil) qui l'a
+        # préparée et effacée quand elle se termine.
+        tmp = _tf_tmpfs_copy("tf-kubeconfig", Path(src_kc).read_text(), ("tf-ws", str(ws)))
         if dst.is_symlink() or dst.exists():
             dst.unlink()
         dst.symlink_to(tmp)
         return dst
+    if dst.is_symlink():
+        # lien laissé par OpenBao (désactivé depuis) : jamais suivi (revue I3)
+        dst.unlink()
     _shutil.copyfile(src_kc, dst)
     try:
         os.chmod(dst, 0o600)
@@ -438,16 +441,13 @@ def _stage_kubeconfig(src_kc, ws):
     return dst
 
 
-_TF_TMPFS_COPIES = []           # copies tmpfs des kubeconfigs d'espaces Terraform (2.9.0)
-
-
-@atexit.register
-def _tf_tmpfs_cleanup():
-    for p in _TF_TMPFS_COPIES:
-        try:
-            os.unlink(p)
-        except OSError:
-            pass
+def _tf_tmpfs_copy(purpose, value, group):
+    """Copie tmpfs d'un espace Terraform (OpenBao actif), tenue par le fil
+    courant (l'action) et effacée à sa fin, au plus tard à l'arrêt."""
+    st = _sst.store()
+    tmp = _sst.write_private_copy(_sst.secret_files_dir(st.settings), purpose, value)
+    st.openbao.adopt(tmp, group, ephemeral=True)
+    return tmp
 
 
 # Path-param keys we validate as RFC 1123 labels. URL paths that carry

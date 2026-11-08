@@ -433,3 +433,49 @@ def test_app_identity_refused_without_tmpfs_when_active(wapp, env, tmp_path, mon
     with wapp.app.test_request_context("/"):
         body, code = wapp._identity_delegation_refused(wapp.IdentityDelegationError("x"))
     assert code == 503 and body.get_json()["code"] == "identity-delegation-unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Revue des tâches 2 à 4 : espaces Terraform (I3, I4)
+# ---------------------------------------------------------------------------
+def test_app_stage_kubeconfig_copy_erased_when_its_action_ends(wapp, env, tmp_path):
+    """I3 (a) : la copie tmpfs d'un espace vit le temps de l'action (fil),
+    une seule par espace, au lieu de s'accumuler jusqu'à l'arrêt."""
+    import threading
+    kc = tmp_path / "kc.yaml"
+    kc.write_text(VALUE)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    seen = []
+
+    def action():
+        d = wapp._stage_kubeconfig(kc, ws)
+        first = Path(os.readlink(d))
+        d = wapp._stage_kubeconfig(kc, ws)                 # même action, second passage
+        seen.extend([first, Path(os.readlink(d))])
+        assert not first.exists() and seen[1].exists()
+    t = threading.Thread(target=action)
+    t.start()
+    t.join()
+    assert len(seen) == 2
+    env["store"].openbao.sweep()
+    assert not seen[1].exists()
+    assert not any(env["run"].glob("tf-kubeconfig-*"))
+
+
+def test_app_stage_kubeconfig_local_after_openbao_replaces_the_link(wapp, env, local, tmp_path, monkeypatch):
+    """I3 (b) : après une désactivation, le lien laissé dans l'espace (cible
+    effacée ou non) est remplacé par une vraie copie locale."""
+    kc = tmp_path / "kc.yaml"
+    kc.write_text(VALUE)
+    for gone in (True, False):
+        ws = tmp_path / f"ws-{gone}"
+        ws.mkdir()
+        monkeypatch.setattr(ss, "_STORE", env["store"])
+        target = Path(os.readlink(wapp._stage_kubeconfig(kc, ws)))
+        if gone:
+            target.unlink()
+        monkeypatch.setattr(ss, "_STORE", local)
+        d = wapp._stage_kubeconfig(kc, ws)
+        assert d.is_file() and not d.is_symlink() and d.read_text() == VALUE
+        assert gone or target.read_text() == VALUE              # la cible n'a pas été réécrite

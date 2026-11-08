@@ -923,17 +923,24 @@ class OpenBaoStore:
             c = self._copies.get(str(path))
             return c["ref"] if c is not None and c["retired"] is None else None
 
-    def adopt(self, path, group):
+    def adopt(self, path, group, ephemeral=False):
         """Copie dérivée d'une copie partagée (kubeconfig usurpé, revue I2) :
         une seule en service par groupe, tenue par le fil qui l'a demandée,
-        effacée comme les copies partagées (fils terminés, arrêt)."""
+        effacée comme les copies partagées (fils terminés, arrêt).
+        `ephemeral` (copie d'un espace Terraform, revue I3) : effacée dès que
+        les fils qui la tiennent sont terminés, même en service."""
         with self._lock:
             old = self._derived.get(group)
             if old is not None and old != str(path):
                 self._retire_derived(group)
             self._derived[group] = str(path)
-            self._copies.setdefault(str(path), {"ref": group, "holders": [], "retired": None})
+            self._copies.setdefault(str(path), {"ref": group, "holders": [], "retired": None,
+                                                "ephemeral": ephemeral})
             self._hold(path, group)
+            self._sweep()
+
+    def sweep(self):
+        with self._lock:
             self._sweep()
 
     def hold(self, path):
@@ -958,13 +965,15 @@ class OpenBaoStore:
     def _sweep(self):
         now = self._clock()
         for path, c in list(self._copies.items()):
-            if c["retired"] is None:
+            if c["retired"] is None and not c.get("ephemeral"):
                 continue
             alive = [w for w in c["holders"] if w() is not None and w().is_alive()]
             c["holders"] = alive
-            if not alive or now - c["retired"] > SHARED_HOLD_MAX_S:
+            if not alive or (c["retired"] is not None and now - c["retired"] > SHARED_HOLD_MAX_S):
                 _unlink(path)
                 del self._copies[path]
+                if self._derived.get(c["ref"]) == path:
+                    del self._derived[c["ref"]]
 
 
 # ---------------------------------------------------------------------------
