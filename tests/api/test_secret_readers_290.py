@@ -384,3 +384,38 @@ def test_console_drops_vault_and_bao_environment():
                        env=dict(os.environ, BAO_ADDR="z"), cwd=str(ROOT))
     assert r.returncode == 0, r.stderr[-500:]
     assert r.stdout.strip().splitlines()[-1] == "[]"
+
+
+# ---------------------------------------------------------------------------
+# Revue des tâches 2 à 4 : copies d'identité (I2, I7)
+# ---------------------------------------------------------------------------
+def test_app_identity_copies_follow_their_shared_copy(wapp, env, tmp_path, monkeypatch):
+    """I2 : une copie usurpée tirée d'une copie partagée est rendue avec
+    elle ; une seule par cluster et par personne, effacée à l'arrêt."""
+    monkeypatch.setattr(wapp, "IDENTITY_DIR", tmp_path / "var-lib-identities")
+    monkeypatch.setattr(wapp, "_identity_cache", {})
+    ref = env["put"]("kubeconfig", "h1", "kubeconfig", "users:\n- name: u\n  user: {token: " + VALUE + "}\n")
+    entry = {"name": "h1", "kubeconfig": ref}
+    p1 = wapp._cluster_kubeconfig_path(entry)
+    d1 = wapp._identity_kubeconfig(p1, {"user": "alice", "groups": []})
+    env["store"].clear_cache()
+    p2 = wapp._cluster_kubeconfig_path(entry)
+    d2 = wapp._identity_kubeconfig(p2, {"user": "alice", "groups": []})
+    assert p2 != p1 and d2 != d1
+    assert not Path(d1).exists() and not Path(p1).exists() and Path(d2).exists()
+    assert len(wapp._identity_cache) == 1
+    env["store"].purge()
+    assert not Path(d2).exists()
+
+
+def test_app_identity_copy_from_var_lib_not_served_once_active(wapp, env, local, tmp_path, monkeypatch):
+    """Point 263 : une copie faite en mode local (sous /var/lib) n'est plus
+    servie quand OpenBao devient actif."""
+    var_lib = tmp_path / "var-lib-identities"
+    monkeypatch.setattr(wapp, "IDENTITY_DIR", var_lib)
+    monkeypatch.setattr(wapp, "_identity_cache", {})
+    kc = tmp_path / "kc.yaml"
+    kc.write_text("users:\n- name: u\n  user: {token: x}\n")
+    assert Path(wapp._identity_kubeconfig(str(kc), {"user": "alice"})).parent == var_lib
+    monkeypatch.setattr(ss, "_STORE", env["store"])
+    assert Path(wapp._identity_kubeconfig(str(kc), {"user": "alice"})).parent == env["run"] / "identities"

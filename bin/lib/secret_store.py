@@ -598,6 +598,7 @@ class OpenBaoStore:
         self._cache = {}          # référence -> (valeur, instant)
         self._shared = {}         # référence -> (chemin, échéance) : copie en service
         self._copies = {}         # chemin -> {ref, holders (fils), retired} (revue I1)
+        self._derived = {}        # groupe -> chemin d'une copie dérivée en service (revue I2)
         self.down_since = None
         self.last_error = None
 
@@ -669,6 +670,8 @@ class OpenBaoStore:
             self._cache.clear()
             for r in list(self._shared):
                 self._retire(r)
+            for g in list(self._derived):
+                self._retire_derived(g)
             self._sweep()
 
     def purge(self):
@@ -676,6 +679,7 @@ class OpenBaoStore:
         with self._lock:
             self._cache.clear()
             self._shared.clear()
+            self._derived.clear()
             for p in list(self._copies):
                 _unlink(p)
             self._copies.clear()
@@ -906,6 +910,41 @@ class OpenBaoStore:
         c = self._copies.get(str(p))
         if c is not None and c["retired"] is None:
             c["retired"] = self._clock()
+
+    def _retire_derived(self, group):
+        c = self._copies.get(self._derived.pop(group))
+        if c is not None and c["retired"] is None:
+            c["retired"] = self._clock()
+
+    def group_of(self, path):
+        """Référence d'une copie partagée en service (ou groupe d'une copie
+        dérivée), None pour tout autre chemin."""
+        with self._lock:
+            c = self._copies.get(str(path))
+            return c["ref"] if c is not None and c["retired"] is None else None
+
+    def adopt(self, path, group):
+        """Copie dérivée d'une copie partagée (kubeconfig usurpé, revue I2) :
+        une seule en service par groupe, tenue par le fil qui l'a demandée,
+        effacée comme les copies partagées (fils terminés, arrêt)."""
+        with self._lock:
+            old = self._derived.get(group)
+            if old is not None and old != str(path):
+                self._retire_derived(group)
+            self._derived[group] = str(path)
+            self._copies.setdefault(str(path), {"ref": group, "holders": [], "retired": None})
+            self._hold(path, group)
+            self._sweep()
+
+    def hold(self, path):
+        """Le fil courant tient une copie déjà servie ; False si elle n'est
+        plus en service."""
+        with self._lock:
+            c = self._copies.get(str(path))
+            if c is None or c["retired"] is not None:
+                return False
+            self._hold(path, c["ref"])
+            return True
 
     def _hold(self, p, ref):
         me = threading.current_thread()

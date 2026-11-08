@@ -1516,6 +1516,11 @@ def _identity_kubeconfig(src_kc, identity):
 
     La copie contient les identifiants du cluster : répertoire 0700,
     fichier 0600, et jamais de chemin ni de secret dans une réponse.
+    2.9.0 (revue I2) : tirée d'une copie partagée d'OpenBao, elle suit le
+    même bail (une par cluster et par personne, rendue avec la copie dont
+    elle dérive, effacée à l'arrêt) ; le répertoire cible fait partie de la
+    clé, une copie faite sous /var/lib n'est plus servie quand OpenBao est
+    actif.
     """
     if not identity or not identity.get("user") or not src_kc:
         return src_kc
@@ -1524,12 +1529,15 @@ def _identity_kubeconfig(src_kc, identity):
     except OSError:
         return src_kc
     groups = tuple(identity.get("groups") or ())
-    key = (str(src_kc), mtime, identity["user"], groups)
+    bao = _sst.store().openbao if _sst.is_active() else None
+    source = bao.group_of(src_kc) if bao is not None else None
+    group = ("identity", source, identity["user"], groups) if source else None
     with _identity_lock:
-        cached = _identity_cache.get(key)
-        if cached and cached.exists():
-            return str(cached)
         target_dir = _identity_dir()
+        key = (str(src_kc), mtime, identity["user"], groups, str(target_dir))
+        cached = _identity_cache.get(key)
+        if cached and cached.exists() and (group is None or bao.hold(cached)):
+            return str(cached)
         if target_dir is None:
             log.warning("délégation d'identité : aucun répertoire inscriptible,"
                         " appel avec le kubeconfig partagé")
@@ -1557,6 +1565,10 @@ def _identity_kubeconfig(src_kc, identity):
             log.warning("délégation d'identité impossible (%s) : appel avec le"
                         " kubeconfig partagé", e)
             return src_kc
+        if group is not None:
+            bao.adopt(dst, group)
+            for k in [k for k, v in _identity_cache.items() if not v.exists()]:
+                del _identity_cache[k]
         _identity_cache[key] = dst
         return str(dst)
 
