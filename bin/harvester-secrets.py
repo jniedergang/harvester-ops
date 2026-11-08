@@ -723,15 +723,29 @@ def cmd_migrate(args):
             return refuse("kubeconfig-gate", why)
     bao = admin_store(s)
     fs = ss.FileStore(state())
+    if args.to == "openbao" and not args.dry_run:
+        # marque posée AVANT le premier secret : un écrivain de la console
+        # qui écrit pendant la migration range sa valeur dans OpenBao au lieu
+        # de réécrire le fichier local que la migration remplace (revue I2) ;
+        # recalculée en fin d'action
+        doc = raw_settings()
+        mig = doc.setdefault("migrated", {})
+        if c not in mig:
+            mig[c] = {"at": int(time.time()), "by": ARGS.actor or "cli", "action": ARGS.id or "",
+                      "complete": False}
+            save_settings(doc)
     fn = migrate_class if args.to == "openbao" else restore_class
     done, errors = fn(bao, fs, c, args.name, args.dry_run, ARGS.actor, ARGS.id)
     if not args.dry_run:
         # une classe dont un secret est une référence est migrée (même en
         # partie) : `disable` refusé, les nouveaux secrets vont dans OpenBao
+        # aller sans erreur : la classe est marquée même sans aucun secret
+        # local (une classe vide migrée range ses secrets nouveaux dans
+        # OpenBao) ; seul le retour en local (ou `disable`) retire la marque
         left = _refs_left(fs, c)
         doc = raw_settings()
         mig = doc.setdefault("migrated", {})
-        if left:
+        if left or (args.to == "openbao" and not errors):
             prev = mig.get(c) or {}
             mig[c] = {"at": prev.get("at") or int(time.time()), "by": prev.get("by") or ARGS.actor or "cli",
                       "action": prev.get("action") or ARGS.id or "", "complete": not errors}
@@ -766,7 +780,18 @@ def cmd_confirm(args):
     for o in due:
         label = f"{args.cls}/{o['path']}#{o['field']}"
         local = ad.read_local(fs, o["path"], o["field"])
-        if ss.is_openbao_ref(local):
+        expected = ss.make_ref(args.cls, o["path"], o["field"], "openbao")
+        if local != expected:
+            # la valeur locale n'est plus la référence de cet original
+            # (déclaration réécrite, fichier remplacé) : l'original n'est
+            # effacé que s'il porte la valeur locale actuelle (revue I1)
+            same = local is not None and not ss.is_ref(local) and ad.original_value is not None \
+                and ad.original_value(fs, o["path"], o["field"]) == local
+            if not same:
+                errors.append({"secret": label, "code": "original-kept-local-changed"})
+                step("confirm", "error", f"{label}: local value is not its reference, original kept")
+                continue
+        else:
             try:
                 bao.get(local, ARGS.actor)
             except ss.SecretMissing:
@@ -779,7 +804,13 @@ def cmd_confirm(args):
                 if e.code in ss.DOWN_CODES:
                     break
                 continue
-        if ad.erase_original(fs, o["path"], o["field"]):
+        try:
+            gone = ad.erase_original(fs, o["path"], o["field"])
+        except ValueError:
+            errors.append({"secret": label, "code": "originals-registry-unsafe"})
+            step("confirm", "error", f"{label}: unsafe path in the originals registry, nothing erased")
+            continue
+        if gone:
             erased += 1
             step("confirm", "running", f"{label}: original erased")
     doc = raw_settings()

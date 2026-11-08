@@ -653,31 +653,58 @@ class FileStore:
         import kvm_decl
         kvm_decl.write_private(self.state_dir / ORIGINALS_FILE, json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
-    def _set_decl(self, cls, path, decl, key, value):
-        """Champ de la déclaration (cluster ou hôte KVM) qui désigne le
-        secret : sa référence après migration, son chemin après retour."""
+    def _decl_lock(self, cls):
+        """Verrou de la déclaration qui désigne le secret : celui des hôtes
+        KVM (`kvm.d/.lock`, pris par harvester-kvm et harvester-folders) pour
+        ssh-kvm, celui des clusters (`clusters.d/.lock`, pris par CONFIG_LOCK
+        de la console) sinon."""
         if cls == "ssh-kvm":
             import kvm_decl
+            return kvm_decl.decl_lock(self.state_dir, wait=30.0)
+        import cluster_decl
+        return cluster_decl.decl_lock(self.state_dir, wait=30.0)
+
+    def _set_decl(self, cls, path, decl, key, value):
+        with self._decl_lock(cls):
+            self._set_decl_locked(cls, path, decl, key, value)
+
+    def _set_decl_locked(self, cls, path, decl, key, value):
+        """Champ de la déclaration (cluster ou hôte KVM) qui désigne le
+        secret : sa référence après migration, son chemin après retour.
+        Appelé sous `_decl_lock(cls)` : la déclaration est relue ici."""
+        import kvm_decl
+        if cls == "ssh-kvm":
             doc = kvm_decl.load(self.state_dir, path)
             doc["ssh_key"] = value
             kvm_decl.write(self.state_dir, doc)
             return
-        import cluster_decl
-        import kvm_decl
-        with cluster_decl.decl_lock(self.state_dir, wait=30.0):
-            doc = _read_yaml(decl)
-            if not isinstance(doc, dict):
-                raise ValueError("cluster declaration unreadable")
-            if key == "kubeconfig":
-                doc["kubeconfig"] = value
-            else:
-                doc["ssh"] = dict(doc.get("ssh") or {}, key=value)
-            try:
-                import yaml
-                text = yaml.safe_dump(doc, default_flow_style=False, sort_keys=False)
-            except ImportError:                     # pragma: no cover  (JSON est du YAML)
-                text = json.dumps(doc, indent=2)
-            kvm_decl.write_private(decl, text)
+        doc = _read_yaml(decl)
+        if not isinstance(doc, dict):
+            raise ValueError("cluster declaration unreadable")
+        if key == "kubeconfig":
+            doc["kubeconfig"] = value
+        else:
+            doc["ssh"] = dict(doc.get("ssh") or {}, key=value)
+        try:
+            import yaml
+            text = yaml.safe_dump(doc, default_flow_style=False, sort_keys=False)
+        except ImportError:                     # pragma: no cover  (JSON est du YAML)
+            text = json.dumps(doc, indent=2)
+        kvm_decl.write_private(decl, text)
+
+    def _inside(self, cls, rel):
+        """Chemin d'une entrée de secrets-originals.json : relatif et dans
+        la base de la classe (revue M8) ; ValueError sinon."""
+        base = self._base(cls)
+        if not isinstance(rel, str) or not rel or os.path.isabs(rel):
+            raise ValueError("originals registry entry with an unsafe path")
+        p = base / rel
+        b = os.path.realpath(str(base))
+        if not os.path.realpath(str(p.parent)).startswith(b + os.sep) and os.path.realpath(str(p.parent)) != b:
+            raise ValueError("originals registry entry with an unsafe path")
+        if ".." in Path(rel).parts or os.path.islink(p):
+            raise ValueError("originals registry entry with an unsafe path")
+        return p
 
     def eligible(self, cls, path, field):
         """None si le secret peut migrer, sinon le code de ce qui le garde en
@@ -716,27 +743,42 @@ class FileStore:
                 conn.close()
             return
         import kvm_decl
-        f = self.local_file(cls, path, field)
-        if not isinstance(f, Path):
-            raise ValueError("no local file for this secret")
-        data = f.read_bytes()
-        if value is not None and self._norm(cls, data) != value:
-            raise ValueError("local value changed during the migration")
-        base = self._base(cls)
-        mig = f.with_name(f.name + MIGRATED_SUFFIX)
-        with self._originals_lock():
-            kvm_decl.write_private(mig, data)
-            doc = self._originals_doc()
-            doc[f"{cls}/{path}#{field}"] = {
-                "cls": cls, "path": path, "field": field, "at": time.time(), "action": action or "",
-                "file": Path(os.path.relpath(mig, base)).as_posix(),
-                "dest": Path(os.path.relpath(f, base)).as_posix()}
-            self._originals_save(doc)
-        if kind == "file":
-            kvm_decl.write_private(f, ref + "\n")
-        else:
-            self._set_decl(cls, path, extra[0], extra[1], ref)
-            _unlink(f)
+        lock = self._decl_lock(cls) if kind == "decl-file" else contextlib.nullcontext()
+        # lecture, comparaison, original gardé, référence posée et fichier
+        # retiré dans un seul bloc sous le verrou de la déclaration : une
+        # écriture de la console intercalée n'est jamais perdue (revue I2)
+        with lock:
+            f = self.local_file(cls, path, field)
+            if not isinstance(f, Path):
+                raise ValueError("no local file for this secret")
+            data = f.read_bytes()
+            if value is not None and self._norm(cls, data) != value:
+                raise ValueError("local value changed during the migration")
+            base = self._base(cls)
+            mig = f.with_name(f.name + MIGRATED_SUFFIX)
+            with self._originals_lock():
+                kvm_decl.write_private(mig, data)
+                doc = self._originals_doc()
+                doc[f"{cls}/{path}#{field}"] = {
+                    "cls": cls, "path": path, "field": field, "at": time.time(), "action": action or "",
+                    "file": Path(os.path.relpath(mig, base)).as_posix(),
+                    "dest": Path(os.path.relpath(f, base)).as_posix()}
+                self._originals_save(doc)
+            if kind == "file":
+                # classes sans verrou partagé avec leurs écrivains (la classe
+                # est déjà marquée migrée : ils écrivent dans OpenBao) :
+                # comparée encore juste avant le remplacement atomique
+                if self._norm(cls, f.read_bytes()) != self._norm(cls, data):
+                    with self._originals_lock():
+                        doc = self._originals_doc()
+                        doc.pop(f"{cls}/{path}#{field}", None)
+                        self._originals_save(doc)
+                    _unlink(mig)
+                    raise ValueError("local value changed during the migration")
+                kvm_decl.write_private(f, ref + "\n")
+            else:
+                self._set_decl_locked(cls, path, extra[0], extra[1], ref)
+                _unlink(f)
 
     def restore_local(self, cls, path, field, value):
         """Retour en local : la valeur relue dans OpenBao réécrite à son
@@ -756,8 +798,8 @@ class FileStore:
         key = f"{cls}/{path}#{field}"
         with self._originals_lock():
             ent = self._originals_doc().get(key) or {}
-        dest = base / ent["dest"] if ent.get("dest") else p
-        mig = base / ent["file"] if ent.get("file") else None
+        dest = self._inside(cls, ent["dest"]) if ent.get("dest") else p
+        mig = self._inside(cls, ent["file"]) if ent.get("file") else None
         data = None
         if mig is not None and mig.is_file():
             raw = mig.read_bytes()
@@ -767,10 +809,13 @@ class FileStore:
             data = value.encode()
             if cls in ("rancher-oidc", "tf-kvm") and not data.endswith(b"\n"):
                 data += b"\n"
-        kvm_decl.write_private(dest, data)
         if kind == "decl-file":
             rel = kvm_decl.key_rel(path) if cls == "ssh-kvm" else Path(os.path.relpath(dest, base)).as_posix()
-            self._set_decl(cls, path, extra[0], extra[1], rel)
+            with self._decl_lock(cls):
+                kvm_decl.write_private(dest, data)
+                self._set_decl_locked(cls, path, extra[0], extra[1], rel)
+        else:
+            kvm_decl.write_private(dest, data)
         with self._originals_lock():
             doc = self._originals_doc()
             if doc.pop(key, None) is not None:
@@ -814,13 +859,38 @@ class FileStore:
             ent = doc.pop(f"{cls}/{path}#{field}", None)
             if not ent:
                 return False
-            _unlink(base / ent["file"])
+            _unlink(self._inside(cls, ent["file"]))
             # reste d'une migration coupée entre la référence et le retrait
             # du fichier : effacé seulement si la déclaration porte la référence
             if kind == "decl-file" and is_openbao_ref(self.read_local(cls, path, field)):
-                _unlink(base / ent["dest"])
+                _unlink(self._inside(cls, ent["dest"]))
             self._originals_save(doc)
         return True
+
+    def original_value(self, cls, path, field):
+        """Valeur de l'original gardé (telle que `read_local` la rendrait),
+        None s'il n'y en a pas : la confirmation n'efface un original dont
+        la valeur locale n'est pas la référence que s'il porte cette valeur
+        (revue I1)."""
+        if cls in ("replication-notify", "replication-hook"):
+            if not self.repl_db.is_file():
+                return None
+            import replication_db
+            conn = replication_db.connect(self.repl_db)
+            try:
+                r = conn.execute("SELECT value FROM secret_rollback WHERE cls = ? AND path = ? AND field = ?",
+                                 (cls, path, field)).fetchone()
+            finally:
+                conn.close()
+            return r[0] if r else None
+        with self._originals_lock():
+            ent = self._originals_doc().get(f"{cls}/{path}#{field}")
+        if not ent:
+            return None
+        try:
+            return self._norm(cls, self._inside(cls, ent["file"]).read_bytes())
+        except (OSError, ValueError, UnicodeDecodeError, KeyError):
+            return None
 
 
 def _notify_secret(cfg, cid, secret):

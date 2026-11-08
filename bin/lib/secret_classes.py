@@ -34,7 +34,7 @@ ClassSpec = collections.namedtuple("ClassSpec", "local_paths bao_path migratable
 # `erase_original` (confirmation ou délai de garde) ; facultatifs pour un
 # adaptateur simulé.
 Adapter = collections.namedtuple("Adapter", "list_local read_local write_ref restore_local eligible originals "
-                                 "erase_original", defaults=(None, None, None))
+                                 "erase_original original_value", defaults=(None, None, None, None))
 
 # Emplacements locaux (descriptifs), chemin dans OpenBao (sous le préfixe de
 # la console), lecteurs autorisés (`fichier:fonction`, relus par le test de
@@ -204,7 +204,8 @@ def adapter(cls):
                    lambda fs, path, field, value: fs.restore_local(cls, path, field, value),
                    lambda fs, path, field: fs.eligible(cls, path, field),
                    lambda fs: fs.originals(cls),
-                   lambda fs, path, field: fs.erase_original(cls, path, field))
+                   lambda fs, path, field: fs.erase_original(cls, path, field),
+                   lambda fs, path, field: fs.original_value(cls, path, field))
 
 
 def _nothing(*_a, **_k):

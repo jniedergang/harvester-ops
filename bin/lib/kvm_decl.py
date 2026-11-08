@@ -21,11 +21,14 @@ l'exploitant : on ne fait jamais confiance à la première connexion
 (pas d'`accept-new` pour un hôte qui porte des VMs clientes).
 """
 
+import contextlib
+import fcntl
 import json
 import os
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 DECL_DIR = "kvm.d"
@@ -252,6 +255,30 @@ def write_private(path, data):
             pass
         raise
     return path
+
+
+@contextlib.contextmanager
+def decl_lock(state, wait=10.0):
+    """Verrou des déclarations d'hôtes KVM entre processus
+    (`<état>/kvm.d/.lock`, flock), le même que celui de harvester-kvm
+    (host_lock) et de harvester-folders : relire puis réécrire une
+    déclaration sous ce verrou. TimeoutError au-delà de `wait` secondes."""
+    d = decl_dir(state)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(d / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        end = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > end:
+                    raise TimeoutError("another KVM host declaration change is in progress: try again") from None
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
 
 
 def write(state, decl):
