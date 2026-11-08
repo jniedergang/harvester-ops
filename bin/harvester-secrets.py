@@ -22,7 +22,8 @@
                              [--cosign-key FILE] -o DIR|FILE
     harvester-secrets file REF
     harvester-secrets tf-encryption status | ack-vault
-    harvester-secrets tf-entity-remove DECL [--done]
+    harvester-secrets tf-entity-remove DECL [--done] [--trial]
+    harvester-secrets tf-keys list | delete DECL --confirm DECL | sweep
 
 Options communes : `--id` (action de la console, en-tête X-Hops-Action),
 `--actor` (personne, en-tête X-Hops-Actor).
@@ -1413,10 +1414,42 @@ def cmd_tf_encryption(args):
     return EXIT_OK
 
 
+TF_KEY_KEEP_DAYS = 30           # décision 278 : un état sauvegardé peut encore demander la clé
+
+
+def _retire_tf_key(doc, decl, trial):
+    """Clé transit d'une déclaration supprimée (décision 278) : gardée 30
+    jours (un état dans une sauvegarde peut en avoir besoin), puis retirée
+    par le balayage. Clé d'un essai (aucun état durable, revue I2 des
+    tâches 9-10) : retirée tout de suite. Rend une ligne d'étape."""
+    s = settings()
+    key = pol.tf_key(s["console_id"], decl)
+    retired = dict(doc.get("tf_keys_retired") or {})
+    if trial:
+        try:
+            gone = admin_client(s=s).transit_delete(key)
+        except oc.OpenBaoError as e:
+            retired[decl] = {"at": int(time.time()), "trial": True, "error": e.code}
+            doc["tf_keys_retired"] = retired
+            save_settings(doc)
+            return f"transit key {key} kept for the sweep ({e.code})"
+        retired.pop(decl, None)
+        doc["tf_keys_retired"] = retired
+        save_settings(doc)
+        return f"transit key {key} " + ("removed" if gone else "already absent")
+    if decl not in retired:
+        retired[decl] = {"at": int(time.time()), "trial": False}
+        doc["tf_keys_retired"] = retired
+        save_settings(doc)
+    return f"transit key {key} kept {TF_KEY_KEEP_DAYS} days, then removed"
+
+
 def cmd_tf_entity_remove(args):
     """Entité d'identité `tf-<décl>` d'une déclaration supprimée : retirée
     par l'agent en B1 ; en mode A, notée à retirer par l'administrateur
-    (commandes `bao` rendues), `--done` la retire de la liste."""
+    (commandes `bao` rendues), `--done` la retire de la liste. Idempotent
+    (déclaration jamais chiffrée : « already absent »). La clé transit de la
+    déclaration suit la décision 278 (`--trial` : retirée tout de suite)."""
     try:
         alias = pol.tf_alias(args.decl)
     except ValueError as e:
@@ -1430,21 +1463,88 @@ def cmd_tf_entity_remove(args):
         save_settings(doc)
         out({"ok": True, "pending": doc["tf_entities_pending"]})
         return EXIT_OK
+    key_msg = _retire_tf_key(doc, args.decl, args.trial)
+    step("transit-key", "done", key_msg)
     if s.get("mode") == "b1":
         st = agent_ok(run_agent({"op": "tf-entity-remove", "decl": args.decl}))
-        out({"ok": True, "mode": "b1", "alias": alias, "agent": st.get("message")})
+        out({"ok": True, "mode": "b1", "alias": alias, "agent": st.get("message"), "transit_key": key_msg})
         return EXIT_OK
+    doc = raw_settings()
     if args.decl not in pending:
         doc["tf_entities_pending"] = pending + [args.decl]
         save_settings(doc)
     step("pending", "done", f"identity entity {alias} to be removed by the administrator of {s['addr']}")
     out({"ok": True, "mode": "a", "alias": alias, "pending": doc.get("tf_entities_pending", pending),
-         "commands": [f"ACCESSOR=$(bao auth list -format=json | jq -r '.\"token/\".accessor')",
-                      f"ID=$(bao write -field=id identity/lookup/entity alias_name={alias} "
-                      "alias_mount_accessor=$ACCESSOR)",
-                      "bao delete identity/entity/id/$ID",
-                      f"harvester-secrets tf-entity-remove {args.decl} --done"]})
+         "transit_key": key_msg, "commands": tf_entity_commands(args.decl)})
     return EXIT_OK
+
+
+def tf_entity_commands(decl):
+    alias = pol.tf_alias(decl)
+    return [f"ACCESSOR=$(bao auth list -format=json | jq -r '.\"token/\".accessor')",
+            f"ID=$(bao write -field=id identity/lookup/entity alias_name={alias} alias_mount_accessor=$ACCESSOR)",
+            "bao delete identity/entity/id/$ID",
+            f"harvester-secrets tf-entity-remove {decl} --done"]
+
+
+def tf_keys_view(doc=None, now=None):
+    """Clés transit gardées des déclarations supprimées, avec leur date de
+    retrait (décision 278) ; jamais de valeur."""
+    doc = raw_settings() if doc is None else doc
+    now = time.time() if now is None else now
+    cid = doc.get("console_id") or ""
+    rows = []
+    for decl, e in sorted((doc.get("tf_keys_retired") or {}).items()):
+        if not isinstance(e, dict):
+            continue
+        at = int(e.get("at") or 0)
+        due = at if e.get("trial") else at + TF_KEY_KEEP_DAYS * 86400
+        try:
+            key = pol.tf_key(cid, decl)
+        except ValueError:
+            continue
+        rows.append({"decl": decl, "key": key, "retired_at": at, "delete_after": due,
+                     "due": now >= due, "trial": bool(e.get("trial")), "error": e.get("error")})
+    return rows
+
+
+def cmd_tf_keys(args):
+    """`list` : clés gardées et leur date de retrait ; `delete DECL --confirm
+    DECL` : retrait avant le délai (l'administrateur tape l'identifiant) ;
+    `sweep` : retrait des clés dont le délai est passé (tâche de fond)."""
+    s, doc = settings(), raw_settings()
+    if args.what == "list":
+        out({"ok": True, "keep_days": TF_KEY_KEEP_DAYS, "keys": tf_keys_view(doc)})
+        return EXIT_OK
+    if not ss.openbao_active(s):
+        return refuse("openbao-inactive", "OpenBao is not active")
+    rows = tf_keys_view(doc)
+    if args.what == "delete":
+        if not args.decl or args.confirm != args.decl:
+            return refuse("confirmation-required", "type the declaration identifier again (--confirm)")
+        targets = [r for r in rows if r["decl"] == args.decl]
+        if not targets:
+            return refuse("tf-key-not-retired", "no kept transit key for this declaration")
+    else:
+        targets = [r for r in rows if r["due"]]
+    c = admin_client(s=s) if targets else None
+    done, failed = [], []
+    for r in targets:
+        try:
+            gone = c.transit_delete(r["key"])
+            done.append(r["decl"])
+            step(f"key-{r['decl']}", "done", f"{r['key']} " + ("removed" if gone else "already absent"))
+        except oc.OpenBaoError as e:
+            failed.append(r["decl"])
+            step(f"key-{r['decl']}", "error", f"{r['key']}: {e.code}")
+    doc = raw_settings()
+    kept = dict(doc.get("tf_keys_retired") or {})
+    for d in done:
+        kept.pop(d, None)
+    doc["tf_keys_retired"] = kept
+    save_settings(doc)
+    out({"ok": not failed, "removed": done, "failed": failed})
+    return EXIT_OK if not failed else EXIT_FAIL
 
 
 # ---------------------------------------------------------------------------
@@ -1523,6 +1623,11 @@ def parser():
     s = sub.add_parser("tf-entity-remove", help="identity entity of a removed encrypted declaration")
     s.add_argument("decl")
     s.add_argument("--done", action="store_true", help="mode a: the administrator removed it")
+    s.add_argument("--trial", action="store_true", help="declaration of a dry run: its transit key goes now")
+    s = sub.add_parser("tf-keys", help="transit keys of removed declarations (kept 30 days)")
+    s.add_argument("what", choices=("list", "delete", "sweep"))
+    s.add_argument("decl", nargs="?")
+    s.add_argument("--confirm", help="delete: the declaration identifier typed again")
     return p
 
 
@@ -1530,7 +1635,8 @@ COMMANDS = {"status": cmd_status, "assistant": cmd_assistant, "check": cmd_check
             "disable": cmd_disable, "migrate": cmd_migrate, "confirm": cmd_confirm, "versions": cmd_versions,
             "rollback": cmd_rollback, "outage-test": cmd_outage_test, "rotate": cmd_rotate, "snapshot": cmd_snapshot, "restore": cmd_restore,
             "bundle": cmd_bundle, "file": cmd_file, "offline-copy": cmd_offline_copy,
-            "tf-encryption": cmd_tf_encryption, "tf-entity-remove": cmd_tf_entity_remove}
+            "tf-encryption": cmd_tf_encryption, "tf-entity-remove": cmd_tf_entity_remove,
+            "tf-keys": cmd_tf_keys}
 
 
 def main(argv=None):

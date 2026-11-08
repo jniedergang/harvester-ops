@@ -147,3 +147,82 @@ def test_agent_entity_removal_refusals(agent_env, req, code):
 def test_agent_entity_removal_needs_b1(agent_env):
     rc, st = tagent.request(agent_env, op="tf-entity-remove", decl="d1")
     assert rc == 1 and st["code"] == "b1-not-installed"
+
+
+# ---------------------------------------------------------------------------
+# Décision 278 et revue I2 des tâches 9-10 : clés transit des déclarations
+# supprimées gardées 30 jours (essai : retirée tout de suite)
+# ---------------------------------------------------------------------------
+D1 = "d1d1d1d1d1d1"
+
+
+def test_removed_declaration_keeps_its_transit_key_30_days(env, capsys, monkeypatch):
+    creds(env)
+    settings(env)
+    key = pol.tf_key(CID, D1)
+    env["srv"].transit[key] = 1
+    rc, doc, err = cli(["tf-entity-remove", D1], capsys=capsys)
+    assert rc == 0 and "kept 30 days" in doc["transit_key"]
+    assert key in env["srv"].transit
+    rc, doc, _ = cli(["tf-keys", "list"], capsys=capsys)
+    row = doc["keys"][0]
+    assert row["decl"] == D1 and row["key"] == key and row["delete_after"] - row["retired_at"] == 30 * 86400
+    assert row["due"] is False
+    # le balayage avant le délai ne retire rien
+    rc, doc, _ = cli(["tf-keys", "sweep"], capsys=capsys)
+    assert rc == 0 and doc["removed"] == [] and key in env["srv"].transit
+    # 31 jours plus tard
+    real = tcli.hsc.time.time
+    monkeypatch.setattr(tcli.hsc.time, "time", lambda: real() + 31 * 86400)
+    rc, doc, err = cli(["tf-keys", "sweep"], capsys=capsys)
+    assert rc == 0 and doc["removed"] == [D1] and key not in env["srv"].transit
+    assert read_settings(env)["tf_keys_retired"] == {}
+
+
+def test_trial_declaration_key_removed_now(env, capsys):
+    creds(env)
+    settings(env)
+    key = pol.tf_key(CID, D1)
+    env["srv"].transit[key] = 1
+    rc, doc, _ = cli(["tf-entity-remove", D1, "--trial"], capsys=capsys)
+    assert rc == 0 and "removed" in doc["transit_key"] and key not in env["srv"].transit
+    assert read_settings(env).get("tf_keys_retired") == {}
+    # jamais chiffrée : clé absente, rien d'anormal
+    rc, doc, _ = cli(["tf-entity-remove", "e2e2e2e2e2e2", "--trial"], capsys=capsys)
+    assert rc == 0 and "already absent" in doc["transit_key"]
+
+
+@pytest.mark.parametrize("confirm,code", [(None, "confirmation-required"), ("other", "confirmation-required")])
+def test_early_key_deletion_needs_the_typed_identifier(env, capsys, confirm, code):
+    creds(env)
+    settings(env)
+    key = pol.tf_key(CID, D1)
+    env["srv"].transit[key] = 1
+    cli(["tf-entity-remove", D1], capsys=capsys)
+    argv = ["tf-keys", "delete", D1] + (["--confirm", confirm] if confirm else [])
+    rc, doc, _ = cli(argv, capsys=capsys)
+    assert rc == 2 and doc["code"] == code and key in env["srv"].transit
+
+
+def test_early_key_deletion(env, capsys):
+    creds(env)
+    settings(env)
+    key = pol.tf_key(CID, D1)
+    env["srv"].transit[key] = 1
+    cli(["tf-entity-remove", D1], capsys=capsys)
+    rc, doc, _ = cli(["tf-keys", "delete", D1, "--confirm", D1], capsys=capsys)
+    assert rc == 0 and doc["removed"] == [D1] and key not in env["srv"].transit
+    rc, doc, _ = cli(["tf-keys", "delete", D1, "--confirm", D1], capsys=capsys)
+    assert rc == 2 and doc["code"] == "tf-key-not-retired"
+
+
+def test_key_deletion_failure_keeps_the_key_listed(env, capsys, monkeypatch):
+    creds(env)
+    settings(env)
+    key = pol.tf_key(CID, D1)
+    env["srv"].transit[key] = 1
+    cli(["tf-entity-remove", D1], capsys=capsys)
+    env["srv"].denied.append("transit/keys/")
+    rc, doc, err = cli(["tf-keys", "delete", D1, "--confirm", D1], capsys=capsys)
+    assert rc == 1 and doc["failed"] == [D1] and "openbao-denied" in err
+    assert D1 in read_settings(env)["tf_keys_retired"]

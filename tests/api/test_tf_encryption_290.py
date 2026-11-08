@@ -534,11 +534,35 @@ def test_removing_an_encrypted_declaration_asks_for_its_entity(wapp, tfx):
     assert tfx.removed == [DECL]
 
 
-def test_removing_a_plain_declaration_asks_nothing(wapp, tfx, monkeypatch):
-    monkeypatch.setattr(wapp, "TF_FLAVOR", "terraform")
+def test_removing_a_plain_declaration_still_asks_for_its_entity(wapp, tfx):
+    """Revue I2 des tâches 9-10 : une déclaration remise en clair, ou dont
+    une vue a créé le jeton, a laissé une entité et une clé : le retrait
+    (idempotent) est demandé dès qu'OpenBao est actif."""
     d = decl(tfx)
     assert wapp._tf_decl_remove(d["id"]) == (True, None)
-    assert tfx.removed == []
+    assert tfx.removed == [DECL]
+
+
+def test_trial_declarations_ask_for_an_immediate_key_removal(wapp, tfx, monkeypatch):
+    asked = []
+    monkeypatch.setattr(wapp, "_tf_entity_remove_start", lambda d, trial=False: asked.append((d, trial)))
+    d = decl(tfx)
+    wapp._deploy_cleanup_dry([d["id"]])
+    assert asked == [(DECL, True)] and tfx.store.get(DECL) is None
+
+
+@pytest.mark.parametrize("flavor,active,expected", [("opentofu", True, True), ("terraform", True, False),
+                                                    ("opentofu", False, False)])
+def test_entity_removal_starts_only_when_a_block_was_possible(wapp, tmp_path, monkeypatch, flavor, active, expected):
+    started = []
+    monkeypatch.setattr(wapp, "TF_FLAVOR", flavor)
+    monkeypatch.setattr(wapp._sst, "is_active", lambda st=None: active)
+    monkeypatch.setattr(wapp, "_cli_action", lambda *a, **kw: (started.append(a[2]) or object(), None))
+    with wapp.app.test_request_context():
+        wapp._tf_entity_remove_start("d1d1d1d1d1d1", trial=True)
+    assert bool(started) is expected
+    if expected:
+        assert started[0][-3:] == ["tf-entity-remove", "d1d1d1d1d1d1", "--trial"]
 
 
 def test_declaration_view_tells_the_encryption(wapp, tfx):

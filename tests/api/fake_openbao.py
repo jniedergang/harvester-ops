@@ -66,6 +66,7 @@ class FakeOpenBao:
         self.tokens = {}                     # jeton -> {"ttl", "policies", "created"}
         self.wraps = {}                      # jeton d'enveloppe -> {"creation_path", "data", "expires"}
         self.transit = {}                    # clé -> version
+        self.transit_deletable = set()
         self.snapshot = b"SNAPSHOT-" + secrets.token_bytes(32)
         self.snapshot_key_ok = True
         self.restored = []
@@ -279,13 +280,26 @@ class FakeOpenBao:
                 op, _, key = rest.partition("/")
                 if op not in ("datakey", "decrypt") or not key.split("/")[-1].endswith("-" + alias):
                     return h._err(403, MSG_DENIED)
-            return self._transit(h, rest, body)
+            return self._transit(h, rest, body, m)
         if top in self.mounts:
             return self._kv(h, m, top, rest, body, rec)
         return h._err(404)
 
-    def _transit(self, h, rest, body):
+    def _transit(self, h, rest, body, method="POST"):
         op, _, key = rest.partition("/")
+        if op == "keys" and key.endswith("/config"):
+            k = key[: -len("/config")]
+            if k not in self.transit:
+                return h._err(400, "key not found")
+            if body.get("deletion_allowed"):
+                self.transit_deletable.add(k)
+            return h._send(204)
+        if op == "keys" and method == "DELETE":
+            if key not in self.transit_deletable:
+                return h._err(400, "deletion is not allowed for this key")
+            self.transit.pop(key, None)
+            self.transit_deletable.discard(key)
+            return h._send(204)
         if op == "keys":
             if key.endswith("/rotate"):
                 k = key[: -len("/rotate")]

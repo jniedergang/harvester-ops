@@ -30397,15 +30397,13 @@ def _tf_decl_remove(decl_id):
             return False, "state-unreadable"
         if deployed:
             return False, deployed
-        encrypted = ws.exists() and ((ws / _tfe.ENCRYPTION_FILE).exists() or _tfst.state_encrypted(ws))
         TF_DECLS.delete(decl_id)
         if ws.exists():
             import shutil as _shutil
             _shutil.rmtree(ws, ignore_errors=True)
     finally:
         _flock_release(fd)
-    if encrypted:
-        _tf_entity_remove_start(decl_id)
+    _tf_entity_remove_start(decl_id)
     return True, None
 
 
@@ -34285,20 +34283,27 @@ def api_secrets_tf_encryption_ack():
     return jsonify({"action_id": run.id}), 202
 
 
-def _tf_entity_remove_start(decl_id):
-    """Déclaration chiffrée supprimée : son entité d'identité `tf-<décl>`
-    est retirée par l'agent en B1, ou notée à retirer dans la fiche du mode
-    A (action suivie `harvester-secrets tf-entity-remove`). Rend l'action ou
-    None (OpenBao inactif, outil absent)."""
+def _tf_entity_remove_start(decl_id, trial=False):
+    """Déclaration supprimée, OpenBao actif : son entité d'identité
+    `tf-<décl>` est retirée par l'agent en B1, ou notée à retirer dans la
+    fiche du mode A, et sa clé transit gardée 30 jours (décision 278 ;
+    `trial` : déclaration d'un essai, clé retirée tout de suite). Action
+    suivie `harvester-secrets tf-entity-remove`, idempotente (revue I2 des
+    tâches 9-10 : lancée même pour un état jamais chiffré, une vue ou un
+    plan a pu créer l'entité). Rend l'action ou None (OpenBao inactif,
+    outil absent)."""
     script = BIN_DIR / SECRETS_TOOL
     if not script.is_file() or not _sst.is_active() or not _tfs.ID_RE.match(str(decl_id or "")):
         return None
+    if TF_FLAVOR != "opentofu":
+        return None                     # Terraform : jamais de bloc, ni clé ni entité
     from flask import has_request_context
     user = (current_user() or "console") if has_request_context() else "service"
     ctx = app.app_context() if not has_request_context() else contextlib.nullcontext()
     with ctx:
         run, _err = _cli_action("", f"secrets:tf-entity-remove:{decl_id}",
-                                [sys.executable, str(script), "--actor", user, "tf-entity-remove", decl_id],
+                                [sys.executable, str(script), "--actor", user, "tf-entity-remove", decl_id,
+                                 *(["--trial"] if trial else [])],
                                 "harvester-secrets", check_busy=False, capture=True, cluster_user=None)
     return run
 
@@ -36952,6 +36957,9 @@ def _deploy_cleanup_dry(created):
             continue                            # jamais : un essai n'applique rien
         TF_DECLS.delete(decl_id)
         _shutil.rmtree(ws, ignore_errors=True)
+        # revue I2 des tâches 9-10 : le plan de l'essai a tourné sous le bloc
+        # de chiffrement (clé transit et entité créées) ; aucun état durable
+        _tf_entity_remove_start(decl_id, trial=True)
 
 
 def _deploy_runner(run, cluster, kc, dctx, user, cluster_user, previous, install, store, lock_fd=None):

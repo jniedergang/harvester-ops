@@ -608,6 +608,19 @@ class Client:
     def transit_rotate(self, key, mount="transit"):
         self._call("POST", f"{self._seg(mount)}/keys/{self._seg(key)}/rotate", {})
 
+    def transit_delete(self, key, mount="transit"):
+        """Retire une clé transit (décision 278) : `deletion_allowed` posé
+        par `.../config`, puis DELETE. Rend False si elle n'existait pas."""
+        mount, key = self._seg(mount), self._seg(key)
+        try:
+            self._call("POST", f"{mount}/keys/{key}/config", {"deletion_allowed": True})
+        except OpenBaoError as e:
+            if e.http_status in (400, 404) and "not found" in str(e.detail or "").lower():
+                return False
+            raise
+        self._call("DELETE", f"{mount}/keys/{key}")
+        return True
+
     def transit_roundtrip(self, key, mount="transit"):
         """Chiffre puis déchiffre un aléa : vrai si l'aléa revient."""
         mount, key = self._seg(mount), self._seg(key)
