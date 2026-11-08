@@ -72,6 +72,7 @@ DEFAULTS = {
     "cache_ttl_min": 15,
     "timeout": 10,
     "migrated": {},               # classe -> {"at", "by"}
+    "ca_file": None,              # CA d'OpenBao ailleurs que <openbao>/ca.pem (revue M7)
     "secret_files_dir": None,     # développement seulement, avec dev_disk_secret_files
     "dev_disk_secret_files": False,
 }
@@ -1072,7 +1073,10 @@ def default_client_factory(settings):
             if c is None:
                 d = openbao_dir()
                 ca = settings.get("ca_file") or d / "ca.pem"
-                ca_pem = Path(ca).read_text() if Path(ca).is_file() else None
+                try:
+                    ca_pem = Path(ca).read_text() if Path(ca).is_file() else None
+                except OSError:
+                    raise oc.OpenBaoError("openbao-tls", None, "OpenBao CA file unreadable") from None
                 c = oc.Client(settings["addr"], ca_pem=ca_pem, timeout=oc.clamp_timeout(settings.get("timeout")))
                 try:
                     role_id = (d / "role-id").read_text().strip()

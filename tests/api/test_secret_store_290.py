@@ -719,3 +719,18 @@ def test_write_private_copy_leaves_nothing_on_failure(tmp_path):
     with pytest.raises(UnicodeEncodeError):
         ss.write_private_copy(tmp_path, "x", "ok\udcff")
     assert list(tmp_path.iterdir()) == []
+
+
+def test_ca_file_setting_is_loaded_and_unreadable_ca_is_a_client_error(tmp_path, monkeypatch):
+    """M7 : `ca_file` est gardé par load_settings ; une CA illisible donne
+    un code du client, pas une OSError brute."""
+    _w(tmp_path / ss.SETTINGS_FILE, json.dumps({"mode": "a", "addr": "https://127.0.0.1:1",
+                                                 "console_id": CID, "ca_file": str(tmp_path / "ca.pem")}))
+    s = ss.load_settings(tmp_path)
+    assert s["ca_file"] == str(tmp_path / "ca.pem")
+    d = tmp_path / "ca.pem"
+    d.mkdir()                                   # illisible comme fichier : IsADirectoryError
+    monkeypatch.setattr(ss.Path, "is_file", lambda self: True)
+    with pytest.raises(oc.OpenBaoError) as e:
+        ss.default_client_factory(s)()
+    assert e.value.code == "openbao-tls"

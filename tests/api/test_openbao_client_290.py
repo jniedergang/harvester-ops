@@ -517,3 +517,95 @@ def test_bad_address(addr):
 def test_health_sealed_is_not_an_error(srv):
     srv.sealed = True
     assert client(srv).health()["sealed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Revue des tâches 2 à 4
+# ---------------------------------------------------------------------------
+class _Redirector:
+    """Serveur qui renvoie 302 vers `location` et note les en-têtes reçus."""
+
+    def __init__(self, location=None):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        self.seen, self.location = [], location
+        me = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                me.seen.append(dict(self.headers))
+                if me.location:
+                    self.send_response(302)
+                    self.send_header("Location", me.location.format(port=self.server.server_address[1]))
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    body = b'{"data": {"data": {"k": "v"}, "metadata": {"version": 1}}}'
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.addr = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def test_redirect_to_another_origin_never_carries_the_token():
+    """M2 : 302 vers un autre hôte en http : refusé, le jeton n'y va pas."""
+    other = _Redirector()
+    front = _Redirector(location=other.addr + "/v1/sys/health")
+    try:
+        c = oc.Client(front.addr, timeout=2, retry_delays=())
+        c.set_token("s." + "T" * 24)
+        c._kv2["harvester-ops"] = True
+        with pytest.raises(oc.OpenBaoError) as e:
+            c.kv_get("harvester-ops", "a")
+        assert e.value.code == "openbao-unreachable" and e.value.http_status == 302
+        assert "standby" in e.value.detail
+        assert other.seen == []
+    finally:
+        front.close()
+        other.close()
+
+
+def test_redirect_same_origin_is_followed():
+    front = _Redirector(location="http://127.0.0.1:{port}/v1/harvester-ops/data/b")
+    try:
+        c = oc.Client(front.addr, timeout=2, retry_delays=())
+        c.set_token("s." + "T" * 24)
+        c._kv2["harvester-ops"] = True
+        with pytest.raises(oc.OpenBaoError):
+            c.kv_get("harvester-ops", "a")          # boucle même origine bornée par urllib
+        assert len(front.seen) > 1
+    finally:
+        front.close()
+
+
+def test_relogin_once_after_token_revoked_elsewhere(srv):
+    """M3 : jeton révoqué côté serveur (ou effacé par une restauration) :
+    une reconnexion AppRole, la requête rejouée une fois."""
+    c = logged(srv)
+    srv.put_raw("harvester-ops", "a", {"k": "v"})
+    assert c.kv_get("harvester-ops", "a")[0] == {"k": "v"}
+    srv.tokens.clear()
+    logins = len(srv.requests("auth/approle/login"))
+    assert c.kv_get("harvester-ops", "a")[0] == {"k": "v"}
+    assert len(srv.requests("auth/approle/login")) == logins + 1
+
+
+def test_real_denial_does_not_relogin(srv):
+    c = logged(srv)
+    srv.denied.append("harvester-ops/data/secret")
+    srv.put_raw("harvester-ops", "secret", {"k": "v"})
+    logins = len(srv.requests("auth/approle/login"))
+    with pytest.raises(oc.OpenBaoError) as e:
+        c.kv_get("harvester-ops", "secret")
+    assert e.value.code == "openbao-denied"
+    assert len(srv.requests("auth/approle/login")) == logins

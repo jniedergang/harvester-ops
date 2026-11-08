@@ -152,6 +152,19 @@ class _Token:
         self.__init__()
 
 
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    """Redirection refusée (le code 3xx remonte) si elle quitte https ou,
+    en http, l'origine de la requête : le jeton ne part jamais en clair
+    ni vers un autre hôte sans TLS vérifié par la CA de la console."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urllib.parse.urlparse(req.full_url), urllib.parse.urlparse(newurl)
+        if not (new.scheme == "https" and old.scheme == "https"
+                or (new.scheme, new.netloc) == (old.scheme, old.netloc)):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _errors_of(raw):
     try:
         body = json.loads(raw.decode("utf-8", "replace")) if raw else {}
@@ -185,8 +198,11 @@ class Client:
         self._ctx = None
         if u.scheme == "https":
             self._ctx = ssl.create_default_context(cadata=ca_pem) if ca_pem else ssl.create_default_context()
-        # Aucun proxy : ni celui de l'environnement, ni un autre.
-        handlers = [urllib.request.ProxyHandler({})]
+        # Aucun proxy : ni celui de l'environnement, ni un autre. Redirection
+        # suivie seulement vers https (CA épinglée) ou la même origine : un
+        # nœud de veille qui renvoie vers un api_addr en http ne reçoit
+        # jamais le jeton en clair (revue M2).
+        handlers = [urllib.request.ProxyHandler({}), _SafeRedirect()]
         if self._ctx is not None:
             handlers.append(urllib.request.HTTPSHandler(context=self._ctx))
         self._opener = urllib.request.build_opener(*handlers)
@@ -307,7 +323,9 @@ class Client:
             return OpenBaoError("openbao-sealed", status, detail)
         if status == 500:
             return OpenBaoError("openbao-internal", status, detail)
-        if status >= 500:
+        if status >= 500 or 300 <= status < 400:
+            if 300 <= status < 400:
+                detail += " (redirect refused or not followed: standby node?)"
             return OpenBaoError("openbao-unreachable", status, detail)
         if status == 403:
             return OpenBaoError("openbao-denied", status, detail)
@@ -330,13 +348,33 @@ class Client:
         return OpenBaoError("openbao-denied", err.http_status,
                             f"{err.detail} (capabilities: {','.join(caps) or 'none'})")
 
-    def _call(self, method, path, body=None, **kw):
+    def _call(self, method, path, body=None, _relogged=False, **kw):
         try:
             return self._request(method, path, body, **kw)
         except OpenBaoError as e:
             if e.code == "openbao-denied" and kw.get("token", True) is True and self._tok.value:
+                # Revue M3 : jeton révoqué ailleurs ou effacé par une
+                # restauration d'instantané : une seule reconnexion AppRole,
+                # puis la requête rejouée une fois.
+                if not _relogged and self._token_invalid():
+                    t = self._tok
+                    with t.lock:
+                        creds = (t.role_id, t.secret_id)
+                        if creds[0] and creds[1]:
+                            t.value = None
+                            self._login(*creds)
+                    if creds[0] and creds[1]:
+                        return self._call(method, path, body, _relogged=True, **kw)
                 raise self._denied(e, path) from None
             raise
+
+    def _token_invalid(self):
+        """Le jeton courant est-il refusé partout (lookup-self en 403) ?"""
+        try:
+            self._request("GET", "auth/token/lookup-self", retry=False)
+        except OpenBaoError as e:
+            return e.code == "openbao-denied"
+        return False
 
     # -- jeton -----------------------------------------------------------
     def _token(self):
@@ -463,7 +501,8 @@ class Client:
     def kv_mount_version(self, mount):
         """Version du montage : `sys/internal/ui/mounts/<montage>` (ce que fait
         la CLI), sinon `<montage>/config` (lisible par la politique de la
-        console, propre à KV v2). 0 si le montage est absent."""
+        console, propre à KV v2). 0 pour un montage d'un autre type ; un
+        montage absent ou KV v1 rend 1 (dans les deux cas : pas KV v2)."""
         mount = self._seg(mount)
         try:
             _, body = self._request("GET", f"sys/internal/ui/mounts/{mount}")
