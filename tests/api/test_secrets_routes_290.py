@@ -62,6 +62,9 @@ def sx(tmp_path, monkeypatch, wapp):
     st.SETTINGS_RECHECK_S = 0
     monkeypatch.setattr(ss, "_STORE", st)
     monkeypatch.setattr(wapp, "TF_WORKSPACES", tmp_path / "ws")
+    # aucune action d'un autre test (même processus xdist) ne compte comme en
+    # cours pour le contrôle avant restauration
+    monkeypatch.setattr(wapp, "ACTIONS", {})
     monkeypatch.setenv("HARVESTER_OPS_REPLICATION_DB", str(tmp_path / "replication.db"))
     launched = []
 
