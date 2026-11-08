@@ -156,6 +156,13 @@ else
     rm -rf "$rb_work"
     ok "Bootstrap registry images embedded ($(python3 -c 'import json,sys; print(", ".join(json.load(open(sys.argv[1]))["images"].values()))' "$WORK_DIR/bundles/registry/registry-images.json"))"
 fi
+# 2.9.0 : rien d'OpenBao dans le paquet principal. Le paquet OpenBao du mode
+# B1 (image de la SUSE Application Collection, sous abonnement) est construit
+# par le CLIENT avec son compte de service ou son registre miroir :
+#   harvester-secrets bundle --registry dp.apps.rancher.io --user <compte> \
+#       --password-stdin -o <répertoire>
+# puis posé dans bundles/openbao/ avant install.sh, ou téléversé depuis la
+# console. L'éditeur ne redistribue pas l'image (point 251).
 # web/ above already carries web/vendor (wheels). A second
 # `cp -r web/vendor "$WORK_DIR/web/vendor"` used to nest a duplicate
 # vendor/vendor/ (~35 MB of dead weight) because the target existed.

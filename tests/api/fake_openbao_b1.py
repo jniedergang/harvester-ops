@@ -91,6 +91,11 @@ class FakeB1(FakeOpenBao):
                     self.roles[r_s[0]]["secret_ids"].discard(r_s[1])
                 self.events.append(("destroy-accessor", acc))
                 return h._send(204)
+        if path == "sys/capabilities-self" and tok:
+            # comme la politique de la console : patch en plus sur metadata
+            out = {p: (["deny"] if any(p.startswith(d) for d in self.denied)
+                       else ["create", "read", "update", "patch", "delete", "list"]) for p in body.get("paths", [])}
+            return h._send(200, dict(out, data=dict(out)))
         if path == "sys/auth" and tok:
             return h._send(200, {"data": {"token/": {"accessor": TOKEN_ACCESSOR, "type": "token"},
                                           "approle/": {"accessor": "auth_approle_x", "type": "approle"}}})

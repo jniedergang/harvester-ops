@@ -65,7 +65,8 @@ class BundleError(Exception):
 
 def bundle_name(version, tag):
     name = f"harvester-ops-openbao-{version}-{tag}.tar.gz"
-    if not NAME_RE.match(name):
+    m = NAME_RE.match(name)
+    if not m or (m["version"], m["tag"]) != (version, tag):       # nom relu à l'identique
         raise BundleError("bundle-bad-name", f"cannot name a bundle for version {version!r}, tag {tag!r}")
     return name
 
