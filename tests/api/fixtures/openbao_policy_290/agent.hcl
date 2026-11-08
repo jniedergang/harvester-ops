@@ -8,3 +8,5 @@ path "harvester-ops/config" { capabilities = ["read", "update"] }
 path "sys/storage/raft/snapshot" { capabilities = ["read"] }
 path "auth/approle/role/harvester-ops-abc123def456/custom-secret-id" { capabilities = ["update"] }
 path "auth/approle/role/harvester-ops-abc123def456/secret-id/lookup" { capabilities = ["update"] }
+path "auth/token/accessors" { capabilities = ["list", "sudo"] }
+path "auth/token/lookup-accessor" { capabilities = ["update"] }

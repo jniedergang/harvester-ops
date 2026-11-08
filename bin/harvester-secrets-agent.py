@@ -85,6 +85,13 @@ ADDR_MAX = 512
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 REQ_ID_RE = re.compile(r"^[a-f0-9]{8,32}$")
 SNAP_RE = re.compile(r"^openbao-[0-9A-Za-z_.-]{1,80}\.snap$")
+# 2.9.0 tâche 11 (revue M2 de la seconde passe) : l'identifiant de la clé de
+# descellement est dans le nom de l'instantané (`openbao-<date>-<clé>[-<motif>].snap`),
+# la date du fichier ne décide plus rien ; un instantané est borné en taille
+SNAP_KEY_RE = re.compile(r"-(hops-[0-9]{8}-[0-9]{1,4})(?:-([a-z][a-z-]{0,30}))?\.snap$")
+SNAP_MAX = int(os.environ.get("HARVESTER_SECRETS_SNAP_MAX", str(8 << 30)))
+AGENT_SNAP_KEEP_DAYS = 14
+HEALTH = "health.json"
 WITNESS_RE = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+){0,6}$")
 UNIT = "harvester-ops-openbao.service"
 CONSOLE_UNIT = "harvester-ops.service"
@@ -402,6 +409,8 @@ class Agent:
         try:
             return self._process(request)
         finally:
+            if self.state_dir is not None:
+                self.save_health(self.state_dir)
             self.close()
             shutil.rmtree(self.p.work, ignore_errors=True)    # copie du paquet, PKI, instantané
 
@@ -995,6 +1004,12 @@ class Agent:
             raise AgentError("bundle-downgrade", f"OpenBao {info['version']} is older than the installed "
                                                  f"{st.get('version')}: refused")
         self.step("bundle", "done", f"OpenBao {info['version']} ({info['tag']})")
+        # décision 277 A : pas de retour à une version plus ancienne ; le
+        # chemin de retour après une mise à jour est cet instantané, pris
+        # avant de toucher à l'image et restaurable dans la version posée
+        self.step("snapshot", "running", "snapshot before the upgrade")
+        pre = self.agent_snapshot(st, "pre-upgrade")
+        self.step("snapshot", "done", pre)
         self.step("image", "running")
         ref = self.load_image(info)
         self.host.run(["podman", "tag", f"{IMAGE}:current", f"{IMAGE}:previous"])
@@ -1209,13 +1224,10 @@ class Agent:
         a = self.agent_client()
         a._call("POST", "sys/rotate/root", {})
         self.step("rotate-root", "done")
-        self.step("snapshot", "running")
-        snaps = self.p.b1_data / "snapshots"
-        snaps.mkdir(mode=0o700, exist_ok=True)
-        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(self.now()))
-        n = a.raft_snapshot(str(snaps / f"openbao-{stamp}-{new}.snap"))
         a.revoke_self()
-        self.step("snapshot", "done", f"{n} bytes")
+        self.step("snapshot", "running")
+        name = self.agent_snapshot(st2, "rotation")
+        self.step("snapshot", "done", name)
         self.undo = []                               # la clé racine est rechiffrée : plus de retour
         self.step("retire-old", "running")
         self.render(st2, tpl)
@@ -1237,36 +1249,116 @@ class Agent:
         self.step("retire-old", "done", f"{old} kept {KEY_KEEP_DAYS} days for older snapshots")
         return f"unseal key rotated to {new}"
 
-    def _snapshot_file(self, name):
-        if not SNAP_RE.match(str(name or "")):
-            raise AgentError("snapshot-bad-name", "bad snapshot file name")
-        dirs = [self.p.b1_data / "snapshots"]
+    def _snapshot_dirs(self):
+        """(étiquette, répertoire tenu par descripteur) : celui de l'agent,
+        puis le `snapshot_dir` réglé par l'administrateur dans la console,
+        ouvert composant par composant sans suivre de lien (safe_fs)."""
+        own = self.p.b1_data / "snapshots"
         sd = self.console_settings().get("snapshot_dir")
-        if isinstance(sd, str) and os.path.isabs(sd):
-            dirs.append(Path(sd))
-        for d in dirs:
-            p = d / name
+        for label, path in (("agent", own), ("console", sd)):
+            if not isinstance(path, (str, Path)) or not os.path.isabs(str(path)):
+                continue
             try:
-                fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                with sf.SafeDir.open_base("/") as root:
+                    d = root.open_rel(str(path).lstrip("/"))
             except OSError:
                 continue
+            yield label, d
+
+    def _snapshot_file(self, name):
+        """Copie de travail de l'instantané `name` (revue M2) : ouvert par le
+        descripteur de son répertoire, sans suivre de lien, sans bloquer
+        (O_NONBLOCK : un tube nommé n'arrête pas l'agent), fichier ordinaire
+        à un seul lien physique, taille bornée et relue sur le MÊME
+        descripteur (fstat), copie arrêtée si le fichier grandit. Rend
+        (copie, identifiant de clé tiré du nom ou None, date fstat)."""
+        if not SNAP_RE.match(str(name or "")):
+            raise AgentError("snapshot-bad-name", "bad snapshot file name")
+        for _label, d in self._snapshot_dirs():
+            with d:
+                try:
+                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY,
+                                 dir_fd=d.fd)
+                except OSError:
+                    continue
             with os.fdopen(fd, "rb") as f:
+                st = os.fstat(f.fileno())
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                    raise AgentError("snapshot-not-plain", "the snapshot is not a plain file with one link")
+                if st.st_size > SNAP_MAX:
+                    raise AgentError("snapshot-too-big", f"snapshot larger than {SNAP_MAX} bytes")
                 self.p.work.mkdir(mode=0o700, parents=True, exist_ok=True)
                 dst = self.p.work / name
+                n = 0
                 with open(dst, "wb") as out:
-                    shutil.copyfileobj(f, out)
-            if dst.stat().st_size == 0:
-                raise AgentError("snapshot-empty", "empty snapshot file")
-            return dst, os.stat(p).st_mtime
+                    while True:
+                        chunk = f.read(1 << 20)
+                        if not chunk:
+                            break
+                        n += len(chunk)
+                        if n > st.st_size or n > SNAP_MAX:
+                            raise AgentError("snapshot-changing", "the snapshot grew while it was copied")
+                        out.write(chunk)
+                if n == 0:
+                    raise AgentError("snapshot-empty", "empty snapshot file")
+            m = SNAP_KEY_RE.search(name)
+            return dst, (m.group(1) if m else None), st.st_mtime
         raise AgentError("snapshot-missing", "snapshot not found in the snapshot directories")
 
-    def _key_for(self, st, when):
-        """La clé active quand l'instantané a été pris (historique des clés)."""
+    def _key_for(self, st, when, named=None):
+        """La clé de l'instantané : celle que porte son nom si l'agent la
+        garde encore ; sinon (instantané d'avant la 2.9.0, nom sans clé) la
+        clé active à sa date. Un nom faux ne fait que désigner une autre clé
+        de l'agent : OpenBao refuse alors l'instantané (« could not verify
+        hash file ») et tout est remis en place."""
+        if named:
+            return named
         best = None
         for k in sorted(st["keys"], key=lambda k: k["created"]):
             if k["created"] <= when + 60 and (k["retired"] is None or k["retired"] >= when - 60):
                 best = k["id"]
         return best or st["current_key"]
+
+    # -- revue d'un instantané restauré (revue M2 de la seconde passe) ----------
+    # La console reçoit la copie hors ligne de la clé de descellement
+    # (décision 275) : avec elle et un vrai instantané, elle peut en
+    # fabriquer un autre (déchiffrer la barrière, ajouter un jeton ou une
+    # politique, rechiffrer). Après une restauration, l'agent remet ses
+    # propres politiques au texte de sa version, puis refuse l'instantané
+    # (et remet l'ancien volume) si un jeton porte une politique hors de la
+    # liste de cette console, ou si le jeton de la console obtient un droit
+    # d'administration.
+    def _console_forbidden_paths(self, cid):
+        return ["sys/policies/acl/hops-probe", "sys/rotate/root", "sys/auth/hops-probe",
+                "sys/mounts/hops-probe", "sys/audit/hops-probe", "sys/raw/hops-probe",
+                "identity/entity/id/hops-probe", "auth/token/create", "auth/token/create-orphan",
+                "auth/token/accessors", f"auth/approle/role/{pol.console_role(cid)}",
+                f"auth/approle/role/{pol.agent_role(cid)}/secret-id"]
+
+    def review_restored(self, st, console):
+        cid = st["console_id"]
+        self.op_b1_policies()
+        allowed = {"default", pol.console_role(cid), pol.agent_role(cid), pol.tf_role(cid),
+                   pol.boot_policy_name(cid)}
+        a = self.agent_client()
+        try:
+            _, lst = a._call("LIST", "auth/token/accessors")
+            accessors = ((lst or {}).get("data") or {}).get("keys") or []
+            if len(accessors) > 10000:
+                raise AgentError("snapshot-untrusted", "too many tokens in the restored snapshot")
+            for acc in accessors:
+                _, info = a._call("POST", "auth/token/lookup-accessor", {"accessor": acc})
+                pols = set(((info or {}).get("data") or {}).get("policies") or [])
+                if pols - allowed:
+                    raise AgentError("snapshot-untrusted", "a token of the restored snapshot carries the "
+                                     f"policies {sf.clean_line(', '.join(sorted(pols - allowed)), 200)}")
+        finally:
+            a.revoke_self()
+        caps = console.capabilities(self._console_forbidden_paths(cid))
+        granted = sorted(p for p, c in caps.items() if set(c or []) - {"deny"})
+        if granted:
+            raise AgentError("snapshot-untrusted", "the console token of the restored snapshot is allowed on "
+                             + sf.clean_line(", ".join(granted), 300))
 
     def op_restore_snapshot(self, req):
         """Essai 6 : instance neuve, même clé statique (ou l'ancienne en
@@ -1278,8 +1370,10 @@ class Agent:
         witness = req.get("witness")
         if witness is not None and not WITNESS_RE.match(str(witness)):
             raise AgentError("bad-request", "bad witness path")
-        snap, when = self._snapshot_file(req.get("file"))
-        key = self._key_for(st, when)
+        snap, named, when = self._snapshot_file(req.get("file"))
+        if named and named not in {k["id"] for k in st["keys"]}:
+            raise AgentError("snapshot-key-unknown", f"the key {named} of this snapshot is no longer kept")
+        key = self._key_for(st, when, named)
         keys = self.p.b1_etc / "keys"
         if not (keys / f"{key}.key").exists():
             raise AgentError("snapshot-key-unknown", f"the key {key} of this snapshot is no longer kept")
@@ -1349,6 +1443,13 @@ class Agent:
             self.own(self.p.b1_etc / "openbao.hcl", uid)
         self.step("witness", "running", "console identity and a witness secret")
         c = self._console_identity_back(st)
+        self.step("review", "running", "tokens and console rights of the restored snapshot")
+        try:
+            self.review_restored(st, c)
+        except BaseException:
+            c.revoke_self()
+            raise
+        self.step("review", "done", "no foreign policy, no administration right for the console")
         if witness:
             c.kv_metadata(st["mount"], f"consoles/{st['console_id']}/{witness}")
         else:
@@ -1392,6 +1493,77 @@ class Agent:
             _w(self.p.etc / "secret-id-accessor", acc + "\n", 0o600)
         return c
 
+    def agent_snapshot(self, st, why):
+        """Instantané pris par l'agent dans son propre répertoire (root), la
+        clé en service dans le nom : `openbao-<date>-<clé>-<why>.snap`."""
+        snaps = self.p.b1_data / "snapshots"
+        snaps.mkdir(mode=0o700, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(self.now()))
+        name = f"openbao-{stamp}-{st['current_key']}-{why}.snap"
+        a = self.agent_client()
+        try:
+            a.raft_snapshot(str(snaps / name))
+        finally:
+            a.revoke_self()
+        return name
+
+    def prune_agent_snapshots(self):
+        d = self.p.b1_data / "snapshots"
+        snaps = []
+        for f in d.glob("openbao-*.snap"):
+            try:
+                lst = f.lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(lst.st_mode):
+                snaps.append((f.name, lst.st_mtime))
+        for name in _agent_snapshot_prune(snaps, self.now()):
+            (d / name).unlink(missing_ok=True)
+
+    def health(self):
+        """État lisible par la console, sans valeur (`health.json` de
+        <état>/secrets-agent, root 0644, groupe de la console) : clés et leurs
+        dates, instantanés de l'agent, âge du secret_id, place du volume
+        d'audit (OpenBao refuse toute requête qu'il ne peut pas journaliser).
+        Écrit après chaque passage de l'agent."""
+        st = self.agent_state()
+        sid = self.p.etc / "secret-id"
+        out = {"at": int(self.now()), "agent_version": _version(), "b1_installed": bool(st),
+               "secret_id_age_s": int(self.now() - sid.stat().st_mtime) if sid.exists() else None}
+        if st:
+            out.update(current_key=st.get("current_key"), version=st.get("version"),
+                       keys=[{k: e.get(k) for k in ("id", "created", "retired")} for e in st.get("keys", [])],
+                       offline_copy={k: (st.get("offline_copy") or {}).get(k)
+                                     for k in ("key_id", "exported_at", "downloaded_at", "acked_at")})
+            snaps = []
+            for f in sorted((self.p.b1_data / "snapshots").glob("openbao-*.snap")):
+                try:
+                    lst = f.lstat()
+                except OSError:
+                    continue
+                if stat.S_ISREG(lst.st_mode) and SNAP_RE.match(f.name):
+                    snaps.append({"file": f.name, "bytes": lst.st_size, "at": int(lst.st_mtime)})
+            out["snapshots"] = snaps[-50:]
+            audit = self.p.b1_data / "audit"
+            try:
+                v = os.statvfs(audit if audit.exists() else self.p.b1_data)
+                out["audit"] = {"free": v.f_bavail * v.f_frsize, "total": v.f_blocks * v.f_frsize}
+            except OSError:
+                out["audit"] = None
+        return out
+
+    def save_health(self, d=None):
+        try:
+            data = json.dumps(self.health(), indent=2).encode()
+            if d is not None:
+                d.write(HEALTH, data, 0o644, self._console_group())
+                return
+            with sf.SafeDir.open_base(self.p.console_state) as base, \
+                    base.subdir(self.p.state.name) as sd:
+                sd.write(HEALTH, data, 0o644, self._console_group())
+        except OSError as e:
+            print(f"health not written: {e}", file=sys.stderr, flush=True)
+
     # -- ménage (minuterie, sans demande) -----------------------------------------
     def housekeeping(self):
         out = 0
@@ -1410,6 +1582,7 @@ class Agent:
         for old in self.p.b1_data.parent.glob(f"{self.p.b1_data.name}.old-*"):
             if self.now() - old.stat().st_mtime > OLD_VOLUME_DAYS * 86400:
                 shutil.rmtree(old, ignore_errors=True)
+        self.prune_agent_snapshots()
         st = self.agent_state()
         if st:
             keep = []
@@ -1421,6 +1594,20 @@ class Agent:
             if keep != st.get("keys"):
                 self.save_agent_state(dict(st, keys=keep))
         return out
+
+
+def _agent_snapshot_prune(snaps, now, days=AGENT_SNAP_KEEP_DAYS):
+    """Instantanés de l'agent à effacer : plus vieux que `days`, sauf le plus
+    récent de chaque motif (le dernier `pre-upgrade` reste le chemin de
+    retour d'une mise à jour, décision 277 A). `snaps` : [(nom, date)]."""
+    newest = {}
+    for name, at in snaps:
+        m = SNAP_KEY_RE.search(name)
+        why = (m.group(2) or "") if m else ""
+        if why not in newest or at > newest[why][1]:
+            newest[why] = (name, at)
+    keep = {v[0] for v in newest.values()}
+    return [n for n, at in snaps if n not in keep and now - at > days * 86400]
 
 
 def _version():

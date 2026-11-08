@@ -6,6 +6,7 @@ le faux registre de test_oci_push_175."""
 import base64
 import functools
 import json
+import re
 import secrets
 import subprocess
 import tempfile
@@ -18,6 +19,22 @@ import test_oci_push_175 as t175
 from fake_openbao import MSG_WRAP, FakeOpenBao, new_token
 
 TOKEN_ACCESSOR = "auth_token_1a2b3c4d"
+
+
+ADMIN_PREFIXES = ("sys/policies/", "sys/rotate/", "sys/auth/", "sys/mounts/", "sys/audit/", "sys/raw/",
+                  "identity/", "auth/token/accessors")
+
+
+def admin_path(p):
+    """Chemins d'administration que la politique de la console ne donne pas."""
+    return (p.startswith(ADMIN_PREFIXES) or p in ("auth/token/create", "auth/token/create-orphan")
+            or re.fullmatch(r"auth/approle/role/[^/]+", p) is not None
+            or re.fullmatch(r"auth/approle/role/hops-agent-[^/]+/secret-id", p) is not None)
+
+
+def token_accessor(tok):
+    import hashlib
+    return "tacc-" + hashlib.sha256(tok.encode()).hexdigest()[:16]
 
 
 class FakeB1(FakeOpenBao):
@@ -34,6 +51,9 @@ class FakeB1(FakeOpenBao):
         self.fail_paths = {}                 # chemin -> (code, message) une fois
         self.unseals = 0
         self.entities = {}                   # id -> {"name": "entity_<id>", "aliases": {(accesseur, nom)}}
+        # tâche 11 : un instantané fabriqué (jetons aux politiques étrangères,
+        # droits d'administration donnés à la console) ; faux = comme OpenBao
+        self.crafted_admin = False           # la console obtient les chemins d'administration
 
     # -- amorce, comme `initialize` -------------------------------------------
     def initialize(self, boot_dir):
@@ -49,6 +69,10 @@ class FakeB1(FakeOpenBao):
 
     def role_of(self, name):
         return self.role_ids.get(name)
+
+    def login_policies(self, role_id):
+        # comme `initialize` : token_policies = nom du rôle
+        return [next((n for n, r in self.role_ids.items() if r == role_id), "default")]
 
     def _route(self, h, rec, path, body, raw):
         m = rec["method"]
@@ -100,10 +124,24 @@ class FakeB1(FakeOpenBao):
                 self.events.append(("destroy-accessor", acc))
                 return h._send(204)
         if path == "sys/capabilities-self" and tok:
-            # comme la politique de la console : patch en plus sur metadata
-            out = {p: (["deny"] if any(p.startswith(d) for d in self.denied)
-                       else ["create", "read", "update", "patch", "delete", "list"]) for p in body.get("paths", [])}
+            # comme la politique de la console : patch en plus sur metadata ;
+            # les chemins d'administration lui sont refusés (sauf instantané
+            # fabriqué, tâche 11)
+            def caps(p):
+                if any(p.startswith(d) for d in self.denied):
+                    return ["deny"]
+                if admin_path(p) and not self.crafted_admin:
+                    return ["deny"]
+                return ["create", "read", "update", "patch", "delete", "list"]
+            out = {p: caps(p) for p in body.get("paths", [])}
             return h._send(200, dict(out, data=dict(out)))
+        if path == "auth/token/accessors" and tok and m == "LIST":
+            return h._send(200, {"data": {"keys": [token_accessor(t) for t in self.tokens]}})
+        if path == "auth/token/lookup-accessor" and tok:
+            t = next((t for t in self.tokens if token_accessor(t) == body.get("accessor")), None)
+            if t is None:
+                return h._err(400, "invalid accessor")
+            return h._send(200, {"data": {"accessor": body["accessor"], "policies": self.tokens[t]["policies"]}})
         if path == "sys/auth" and tok:
             return h._send(200, {"data": {"token/": {"accessor": TOKEN_ACCESSOR, "type": "token"},
                                           "approle/": {"accessor": "auth_approle_x", "type": "approle"}}})

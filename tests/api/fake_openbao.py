@@ -111,6 +111,9 @@ class FakeOpenBao:
         self.tokens[t] = {"ttl": ttl or self.token_ttl, "policies": list(policies), "created": time.time()}
         return t
 
+    def login_policies(self, role_id):
+        return ["harvester-ops"]
+
     def wrap(self, data, creation_path, ttl=300):
         t = new_token()
         self.wraps[t] = {"creation_path": creation_path, "data": data, "expires": time.time() + ttl}
@@ -203,7 +206,8 @@ class FakeOpenBao:
             if body.get("secret_id") not in role["secret_ids"]:
                 return h._err(400, MSG_BAD_SECRET_ID)
             t = new_token()
-            self.tokens[t] = {"ttl": role["ttl"], "policies": ["harvester-ops"], "created": time.time()}
+            self.tokens[t] = {"ttl": role["ttl"], "policies": self.login_policies(body.get("role_id")),
+                              "created": time.time()}
             return h._send(200, {"auth": {"client_token": t, "lease_duration": role["ttl"], "renewable": True,
                                           "accessor": "acc-" + secrets.token_hex(4)}})
         if path == "sys/wrapping/lookup":

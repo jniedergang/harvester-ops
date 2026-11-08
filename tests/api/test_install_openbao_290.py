@@ -128,7 +128,7 @@ def test_agent_units():
     assert "Type=oneshot" in s and "ExecStart=/usr/bin/python3 /usr/local/bin/harvester-secrets-agent.py" in s
     assert "UMask=0077" in s
     t = unit("harvester-secrets-rotate.timer")
-    assert "OnCalendar=daily" in t and "Persistent=true" in t and "Unit=harvester-secrets-agent.service" in t
+    assert "OnCalendar=hourly" in t and "Persistent=true" in t and "Unit=harvester-secrets-agent.service" in t
 
 
 def exec_start(text):

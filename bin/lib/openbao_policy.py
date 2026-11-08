@@ -131,7 +131,9 @@ def console_rules(mount, prefix, cid, b1=False):
         (f"{m}/metadata/{p}/*", ["create", "read", "update", "patch", "list", "delete"]),
         (f"{m}/destroy/{p}/*", ["update"]),
         (f"{m}/config", ["read"]),
-        (f"{TRANSIT}/keys/hops-{cid}-*", ["create", "update"]),
+        # 2.9.0, décision 278 : `delete` pour retirer la clé d'une déclaration
+        # supprimée au bout de 30 jours (`deletion_allowed` posé par `.../config`)
+        (f"{TRANSIT}/keys/hops-{cid}-*", ["create", "update", "delete"]),
         (f"{TRANSIT}/encrypt/hops-{cid}-*", ["update"]),
         (f"{TRANSIT}/decrypt/hops-{cid}-*", ["update"]),
         (f"auth/token/create/{tf_role(cid)}", ["update"]),
@@ -196,6 +198,12 @@ def agent_rules(cid, mount=DEFAULT_MOUNT):
         (f"auth/approle/role/{console_role(cid)}/custom-secret-id", ["update"]),
         # accesseur du secret_id de la console relu après une restauration
         (f"auth/approle/role/{console_role(cid)}/secret-id/lookup", ["update"]),
+        # 2.9.0 tâche 11 (revue M2 de la seconde passe) : après une
+        # restauration, l'agent passe en revue les jetons de l'instantané
+        # (politiques seulement, jamais leur valeur) ; un instantané fabriqué
+        # avec la clé de descellement exportée ne glisse pas un jeton racine
+        ("auth/token/accessors", ["list", "sudo"]),
+        ("auth/token/lookup-accessor", ["update"]),
     ]
 
 

@@ -61,9 +61,15 @@ def test_console_and_child_policies_never_administer(text):
     assert "sudo" not in text and "sys/polic" not in text and 'path "*"' not in text
 
 
-def test_agent_sudo_only_on_root_rotation():
-    sudo = [p for p, caps in rules_of(pol.agent_policy(CID)) if "sudo" in caps]
-    assert sudo == ["sys/rotate/root"]
+def test_agent_sudo_only_on_root_rotation_and_the_token_review():
+    """sudo : rotation de la clé racine, et (tâche 11) la liste des
+    accesseurs de jetons relue après une restauration ; lecture des
+    politiques d'un jeton par son accesseur, jamais sa valeur."""
+    rules = dict(pol.agent_rules(CID))
+    sudo = sorted(p for p, caps in rules_of(pol.agent_policy(CID)) if "sudo" in caps)
+    assert sudo == ["auth/token/accessors", "sys/rotate/root"]
+    assert rules["auth/token/accessors"] == ["list", "sudo"]
+    assert rules["auth/token/lookup-accessor"] == ["update"]
 
 
 def test_agent_amends_only_its_hops_policies():
