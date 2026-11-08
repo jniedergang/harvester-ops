@@ -11,9 +11,19 @@ chemin, en-têtes, corps).
 Pannes injectables : `fail_next` (liste de (code, corps)), `sealed`,
 `audit_full` (500 « internal error » sur toute requête journalisée),
 `hang` (le serveur ne répond pas), `denied` (préfixes refusés).
+
+2.10.0 : méthode `jwt` (`add_jwt_mount`) qui rend les réponses relevées à la
+tâche 1 du plan 2.10.0 (messages exacts, marge d'expiration, entité stable
+par `sub`, plage d'adresses refusée dès la connexion, jeton d'accès accepté
+comme le jeton d'identité puisqu'il porte la même audience). La signature
+d'un faux JWT est un HMAC-SHA256 par clé (`fake_jwt`) : seule la mécanique
+d'OpenBao est reproduite. Un jeton de personne ne voit que les chemins de sa
+politique (`allow`).
 """
 
 import base64
+import hashlib
+import hmac
 import json
 import secrets
 import ssl
@@ -31,6 +41,19 @@ MSG_ALIAS = "invalid 'entity_alias' value"
 MSG_SNAP_KEY = ("could not verify hash file, possibly the snapshot is using a different autoseal key; "
                 "use the snapshot-force API to bypass this check")
 MSG_BAD_SECRET_ID = "invalid secret id"
+# 2.10.0, méthode jwt d'OpenBao 2.7.2 (tâche 1 du plan 2.10.0, essais 2 à 4)
+MSG_JWT_AUD = ("error validating token: invalid audience (aud) claim: audience claim does not match any "
+               "expected audience")
+MSG_JWT_ISS = "error validating token: invalid issuer (iss) claim"
+MSG_JWT_EXP = "error validating token: invalid expiration time (exp) claim: token is expired"
+MSG_JWT_KEY = ("error validating token: error verifying token signature: no known key successfully validated "
+               "the token signature")
+MSG_JWT_SIG = "error validating token: error verifying token signature: failed to verify id token signature"
+MSG_JWT_GROUPS = 'failed to fetch groups: "groups" claim not found in token'
+# vu en réel (tâches 2 à 5) : un JWT sans `iat` est refusé ainsi ; Rancher l'émet toujours
+MSG_JWT_NBF = "error validating token: invalid not before (nbf) claim: token not yet valid"
+# exp + 30 s accepté, exp + 140 s refusé (essai 4) : marge du faux entre les deux
+JWT_LEEWAY = 60
 # Sans jeton ou sans audit : sys/health, seal-status, wrapping/lookup.
 _UNAUTH = ("sys/health", "sys/seal-status", "sys/wrapping/lookup", "auth/approle/login", "sys/wrapping/unwrap")
 
@@ -48,6 +71,29 @@ def _ttl_s(v, default):
 
 def new_token(prefix="s."):
     return prefix + secrets.token_urlsafe(18)[:24]
+
+
+def _b64u(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def fake_jwt(claims, kid="key", key=b"rancher-key"):
+    """Faux JWT au format de Rancher (en-tête RS256 + `kid`), signé par un
+    HMAC-SHA256 de `key` : le faux serveur vérifie la même chose."""
+    head = _b64u(json.dumps({"alg": "RS256", "kid": kid, "typ": "JWT"}).encode())
+    body = _b64u(json.dumps(claims).encode())
+    sig = _b64u(hmac.new(key, f"{head}.{body}".encode(), hashlib.sha256).digest())
+    return f"{head}.{body}.{sig}"
+
+
+def _jwt_parts(jwt):
+    try:
+        head, body, sig = str(jwt).split(".")
+        pad = lambda x: x + "=" * (-len(x) % 4)      # noqa: E731
+        return (json.loads(base64.urlsafe_b64decode(pad(head))), json.loads(base64.urlsafe_b64decode(pad(body))),
+                f"{head}.{body}", sig)
+    except (ValueError, TypeError):
+        return None
 
 
 class FakeOpenBao:
@@ -77,6 +123,10 @@ class FakeOpenBao:
         self.child_ttl = None                # durée imposée aux jetons enfants (essais d'expiration)
         self.datakeys = []                   # clés transit dont une clé de données a été tirée
         self.seal_version = "2.0.0-HEAD"     # `version` de sys/seal-status (Vault : 1.x)
+        self.jwt = {}                        # montage -> réglages de la méthode jwt (add_jwt_mount)
+        self.entities = {}                   # (montage, sub) -> {"id", "name", "metadata"}
+        self.jwt_logins = []                 # (montage, jwt) de chaque connexion jwt reçue
+        self.clock_offset = 0.0              # décalage d'horloge des essais d'expiration
         self.httpd = None
 
     # -- vie du serveur ----------------------------------------------------
@@ -111,6 +161,71 @@ class FakeOpenBao:
         t = new_token()
         self.tokens[t] = {"ttl": ttl or self.token_ttl, "policies": list(policies), "created": time.time()}
         return t
+
+    def add_jwt_mount(self, mount, issuer="https://rancher.example/oidc", audience="client-abc",
+                      keys=None, policies=("default", "hops-person-abc123def456"), ttl=900, allow=(),
+                      groups_claim=None, cidr_ok=True):
+        """Méthode `jwt` d'une personne : émetteur, audience, clés (kid ->
+        secret HMAC), politiques du rôle `person`, `allow` : [(préfixe,
+        capacités)] que voit un jeton de personne."""
+        self.jwt[mount] = {"issuer": issuer, "audience": audience, "keys": dict(keys or {"key": b"rancher-key"}),
+                           "policies": list(policies), "ttl": ttl,
+                           "allow": [(p, set(c)) for p, c in allow], "groups_claim": groups_claim,
+                           "cidr_ok": cidr_ok, "accessor": "auth_jwt_" + secrets.token_hex(4)}
+        return self.jwt[mount]
+
+    def now(self):
+        return time.time() + self.clock_offset
+
+    def _jwt_login(self, h, mount, body):
+        cfg = self.jwt[mount]
+        self.jwt_logins.append((mount, body.get("jwt")))
+        if body.get("role") not in (None, "", "person"):
+            return h._err(400, f'role "{body.get("role")}" could not be found')
+        if not cfg["cidr_ok"]:
+            return h._err(403, MSG_DENIED)          # token_bound_cidrs : refus dès la connexion
+        parts = _jwt_parts(body.get("jwt"))
+        if parts is None:
+            return h._err(400, "error validating token: square/go-jose: compact JWS format must have three parts")
+        head, claims, signed, sig = parts
+        key = cfg["keys"].get(head.get("kid"))
+        if key is None:
+            return h._err(400, MSG_JWT_KEY)
+        if not hmac.compare_digest(sig, _b64u(hmac.new(key, signed.encode(), hashlib.sha256).digest())):
+            return h._err(400, MSG_JWT_SIG)
+        if claims.get("iss") != cfg["issuer"]:
+            return h._err(400, MSG_JWT_ISS)
+        aud = claims.get("aud")
+        if cfg["audience"] not in (aud if isinstance(aud, list) else [aud]):
+            return h._err(400, MSG_JWT_AUD)
+        if not isinstance(claims.get("exp"), (int, float)) or claims["exp"] + JWT_LEEWAY < self.now():
+            return h._err(400, MSG_JWT_EXP)
+        if not isinstance(claims.get("iat"), (int, float)) or claims["iat"] - JWT_LEEWAY > self.now():
+            return h._err(400, MSG_JWT_NBF)
+        if cfg["groups_claim"] and cfg["groups_claim"] not in claims:
+            return h._err(400, MSG_JWT_GROUPS)
+        sub = claims.get("sub")
+        meta = {"role": "person"}
+        if "name" in claims:
+            meta["name"] = claims["name"]
+        if "auth_provider" in claims:
+            meta["provider"] = claims["auth_provider"]
+        ent = self.entities.setdefault((mount, sub), {"id": secrets.token_hex(8) + "-ent", "metadata": {}})
+        ent["name"] = f"entity_{ent['id'][:8]}.root"
+        ent["metadata"] = meta
+        t = new_token()
+        self.tokens[t] = {"ttl": cfg["ttl"], "policies": list(cfg["policies"]), "created": self.now(),
+                          "kind": "person", "entity_id": ent["id"], "display_name": f"{mount}-{sub}",
+                          "meta": meta, "allow": cfg["allow"], "path": f"auth/{mount}/login"}
+        return h._send(200, {"auth": {"client_token": t, "accessor": "acc-" + secrets.token_hex(4),
+                                      "policies": list(cfg["policies"]),
+                                      "token_policies": list(cfg["policies"]), "metadata": meta,
+                                      "lease_duration": cfg["ttl"], "renewable": True,
+                                      "entity_id": ent["id"], "token_type": "service", "orphan": True}})
+
+    @staticmethod
+    def _allowed(info, path, cap):
+        return any(path.startswith(p) and cap in caps for p, caps in info.get("allow") or ())
 
     def login_policies(self, role_id):
         return ["harvester-ops"]
@@ -183,7 +298,7 @@ class FakeOpenBao:
         info = self.tokens.get(tok)
         if not info:
             return None
-        if time.time() - info["created"] > info["ttl"]:
+        if self.now() - info["created"] > info["ttl"]:
             return None
         return tok
 
@@ -211,6 +326,8 @@ class FakeOpenBao:
                               "created": time.time()}
             return h._send(200, {"auth": {"client_token": t, "lease_duration": role["ttl"], "renewable": True,
                                           "accessor": "acc-" + secrets.token_hex(4)}})
+        if path.startswith("auth/") and path.endswith("/login") and path[5:-6] in self.jwt and m in ("POST", "PUT"):
+            return self._jwt_login(h, path[5:-6], body)
         if path == "sys/wrapping/lookup":
             w = self.wraps.get(body.get("token"))
             if not w or w["expires"] < time.time():
@@ -224,9 +341,14 @@ class FakeOpenBao:
         tok = self._auth(rec)
         if not tok:
             return h._err(403, MSG_DENIED)
+        person = self.tokens[tok].get("kind") == "person"
         if path == "sys/capabilities-self":
             out = {}
             for p in body.get("paths", []):
+                if person:
+                    caps = sorted({c for pre, cs in self.tokens[tok]["allow"] if p.startswith(pre) for c in cs})
+                    out[p] = caps or ["deny"]
+                    continue
                 out[p] = ["deny"] if any(p.startswith(d) for d in self.denied) else ["create", "read", "update", "delete", "list"]
             res = dict(out)
             if len(out) == 1:
@@ -243,10 +365,25 @@ class FakeOpenBao:
             return h._send(200, {"auth": {"client_token": tok, "lease_duration": info["ttl"], "renewable": True}})
         if path == "auth/token/lookup-self":
             info = self.tokens[tok]
+            if person:
+                left = int(info["ttl"] - (self.now() - info["created"]))
+                return h._send(200, {"data": {"ttl": left, "policies": info["policies"], "identity_policies": [],
+                                              "entity_id": info["entity_id"], "display_name": info["display_name"],
+                                              "meta": info["meta"], "path": info["path"],
+                                              "bound_cidrs": ["127.0.0.1"], "renewable": True,
+                                              "expire_time": "2026-11-08T21:00:00Z"}})
             return h._send(200, {"data": {"ttl": info["ttl"], "policies": info["policies"], "period": info["ttl"]}})
         if path == "auth/token/revoke-self":
             self.tokens.pop(tok, None)
             return h._send(204)
+        if person:
+            # politique de la personne : défaut (jeton) + chemins `allow`
+            cap = {"GET": "read", "LIST": "list", "DELETE": "delete"}.get(m, "update")
+            if path.startswith("sys/internal/ui/mounts/"):
+                pass
+            elif not (self._allowed(self.tokens[tok], path, cap)
+                      or (cap == "update" and self._allowed(self.tokens[tok], path, "create"))):
+                return h._err(403, MSG_DENIED)
         if path.startswith("auth/token/create/"):
             alias = body.get("entity_alias")
             if alias is not None and not str(alias).startswith("tf-"):

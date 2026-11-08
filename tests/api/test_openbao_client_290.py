@@ -609,3 +609,22 @@ def test_real_denial_does_not_relogin(srv):
         c.kv_get("harvester-ops", "secret")
     assert e.value.code == "openbao-denied"
     assert len(srv.requests("auth/approle/login")) == logins
+
+
+# ---------------------------------------------------------------------------
+# 2.10.0 tâche 2 : codes du jeton par personne, client de service inchangé
+# ---------------------------------------------------------------------------
+def test_codes_2100_and_service_kind(srv):
+    assert {"openbao-person-login-failed", "openbao-person-expired"} <= set(oc.CODES)
+    c = logged(srv)
+    assert c.kind == "service" and "service" in repr(c)
+    assert c.with_headers("a", "b").kind == "service"
+
+
+def test_service_still_relogs_after_revocation_2100(srv):
+    """La reconnexion AppRole de la 2.9.0 (revue M3) reste celle du service."""
+    c = logged(srv)
+    srv.put_raw(MOUNT, "kubeconfig/a", {"kubeconfig": "x"})
+    srv.tokens.pop(c._tok.value)
+    assert c.kv_get(MOUNT, "kubeconfig/a")[0] == {"kubeconfig": "x"}
+    assert len(srv.requests("auth/approle/login")) == 2
