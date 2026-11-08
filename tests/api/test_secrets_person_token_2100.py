@@ -337,24 +337,41 @@ def test_keys_discovery_has_nothing_to_do(env, capsys, rancher):
     assert rc == 0 and doc["keys"] == "discovery" and doc["changed"] is False
 
 
-def test_keys_rotation_old_and_new_together_then_confirm(env, capsys, rancher):
+def test_keys_rotation_takes_the_published_keys_only(env, capsys, rancher):
+    """Revue 6-7 I-1 : `--refresh` ne prend que les clés publiées par Rancher
+    (pendant une rotation, son JWKS porte l'ancienne et la nouvelle) ; jamais
+    une clé lue dans les réglages, que la console écrit."""
     _static(env, capsys, rancher)
     rc, doc, _ = cli(["person-token", "keys", "--rancher", "rmgr"], capsys=capsys)
     assert rc == 0 and doc["changed"] is False
     rancher["jwks"] = JWKS2                               # Rancher ajoute la nouvelle clé publique
     rc, doc, _ = cli(["person-token", "keys", "--rancher", "rmgr"], capsys=capsys)
     assert doc["changed"] is True and doc["code"] == "openbao-jwt-keys-changed"
+    forged = "-----BEGIN PUBLIC KEY-----\nRk9SR0VE\n-----END PUBLIC KEY-----"
+    doc_ = read_settings(env)
+    doc_["person_token"]["servers"]["rmgr"]["pubkeys"].append(forged)
+    settings(env, person_token=doc_["person_token"])
     rc, doc, _ = cli(["person-token", "keys", "--rancher", "rmgr", "--refresh"], capsys=capsys)
     assert rc == 0 and doc["count"] == 2
+    assert forged not in json.dumps(doc) and "RK9SR0VE" not in json.dumps(doc)
     e = read_settings(env)["person_token"]["servers"]["rmgr"]
-    assert e["keys_sha256"] == oj.keys_sha256(JWKS2) and len(e["pubkeys"]) == 2
+    assert e["keys_sha256"] == oj.keys_sha256(JWKS2) and e["pubkeys"] == oj.pubkeys_of(JWKS2)
+    assert oj.keys_sha256(JWKS2) in "\n".join(doc["commands"])          # revue 6-7 M-5 : empreinte à comparer
     rancher["jwks"] = JWKS3                               # l'ancienne clé retirée chez Rancher
     rc, doc, _ = cli(["person-token", "keys", "--rancher", "rmgr", "--refresh"], capsys=capsys)
-    assert doc["count"] == 2 and doc["pending_confirm"] is True      # ancienne gardée jusqu'à confirmation
-    rc, doc, _ = cli(["person-token", "keys", "--rancher", "rmgr", "--confirm"], capsys=capsys)
-    assert rc == 0 and doc["count"] == 1 and doc["pending_confirm"] is False
+    assert rc == 0 and doc["count"] == 1
     assert read_settings(env)["person_token"]["servers"]["rmgr"]["pubkeys"] == oj.pubkeys_of(JWKS3)
     assert "jwt_validation_pubkeys" in "\n".join(doc["commands"])
+
+
+def test_static_keys_refused_in_b1(env, capsys, rancher, monkeypatch):
+    """Revue 6-7 I-1 (décision 313 B) : en B1, découverte seulement."""
+    creds(env)
+    settings(env, mode="b1")
+    sent = []
+    monkeypatch.setattr(hsc, "run_agent", lambda req, timeout=None: sent.append(req) or {"state": "done"})
+    rc, doc, _ = assistant(env, capsys, keys="static")
+    assert rc == 2 and doc["code"] == "person-token-static-mode-a" and sent == []
 
 
 def test_keys_unreadable_jwks(env, capsys, rancher):

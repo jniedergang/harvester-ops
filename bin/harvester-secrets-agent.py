@@ -30,9 +30,10 @@ Liste FERMÉE d'opérations (toute autre : refus) :
                        jeton d'amorce, relecture, bascule (ancien volume
                        gardé 7 jours)
     b1-jwt             2.10.0 : méthode `jwt` d'un Rancher (montage, politique
-                       commune des personnes, configuration, rôle `person`),
-                       relue ; même opération pour remplacer des clés
-                       statiques (rotation de la clé de Rancher)
+                       commune des personnes, configuration par découverte,
+                       rôle `person`), relue ; émetteur, client et CA
+                       épinglés à la première pose (seul le canal root les
+                       change, revue 6-7 I-1)
     b1-jwt-remove      montage d'un Rancher retiré (politique commune avec
                        le dernier) ; les entités restent (point 289)
     b1-groups          groupe interne `hops-<id>-<nom>` et sa politique
@@ -131,6 +132,12 @@ WAIT_S = int(os.environ.get("HARVESTER_SECRETS_AGENT_WAIT", "120"))
 # root des identifiants de la console, monté en lecture seule dans le
 # conteneur), effacé après le téléchargement ou au bout de 10 minutes.
 EXPORT_NAME = "unseal-export.key"
+# Revue 6-7 M-2 : l'écriture d'un rôle `jwt` fusionne avec le rôle existant ;
+# les marges et options qu'un rôle `person` ne porte jamais sont remises à
+# zéro par l'agent à chaque pose (une marge d'expiration laissée par un
+# instantané ou un administrateur accepterait des jetons d'identité échus).
+ROLE_RESET = {"expiration_leeway": 0, "not_before_leeway": 0, "clock_skew_leeway": 0, "max_age": 0,
+              "user_claim_json_pointer": False}
 # 2.10.0 : CA et clés publiques de Rancher dans une demande (rien de secret)
 PEM_MAX = 16 << 10
 PUBKEYS_MAX = 8
@@ -270,6 +277,10 @@ class Agent:
         self.log_fd = None
         self.state_dir = None        # <état>/secrets-agent, tenu par descripteur
         self.undo = []
+        # revue 6-7 I-1 : demande passée en processus par `sudo
+        # harvester-secrets` (canal root), jamais lue dans le fichier que la
+        # console écrit ; seule elle change l'ancre de confiance d'un Rancher
+        self.root_channel = False
 
     # -- journal et état ----------------------------------------------------
     # Revue C1 des tâches 5-7 (même famille que la 2.8.3) : <état>/secrets-agent
@@ -441,6 +452,7 @@ class Agent:
         agent à la fois (relecture finale I4) : le ménage ne tourne jamais
         pendant une restauration qui garde l'ancien volume pour son retour."""
         pending = request is not None or (self.p.state / REQUEST).exists()
+        self.root_channel = request is not None
         lock = self._take_lock(wait=pending)
         if lock is None:
             print("harvester-secrets-agent: another agent is running"
@@ -1296,23 +1308,44 @@ class Agent:
     def _jwt_spec(self, st, req):
         """Demande `b1-jwt` contrôlée : nom de montage dérivé (jamais lu dans
         la demande), configuration et rôle rendus par openbao_jwt ; plage de
-        la console = 127.0.0.1/32 (B1, `--network host`)."""
+        la console = 127.0.0.1/32 (B1, `--network host`). Revue 6-7 I-1
+        (décision 313 B) : découverte par l'émetteur seulement, jamais de
+        clés statiques en B1 (une clé posée par la console lui ferait signer
+        le jeton d'identité de n'importe qui)."""
         cid = st["console_id"]
-        pubkeys, ca = req.get("pubkeys"), req.get("ca_pem")
+        if req.get("pubkeys") is not None:
+            raise AgentError("jwt-static-keys-mode-a", "in B1 a person mount reads the keys of Rancher by "
+                             "discovery only; static keys belong to mode A")
+        ca = req.get("ca_pem")
         try:
             mount = oj.person_mount(cid, req.get("rancher"))
-            if pubkeys is not None and (not isinstance(pubkeys, list) or not 1 <= len(pubkeys) <= PUBKEYS_MAX
-                                        or any(not isinstance(k, str) or len(k) > PEM_MAX for k in pubkeys)):
-                raise ValueError(f"pubkeys: 1 to {PUBKEYS_MAX} PEM public keys")
             if ca is not None and (not isinstance(ca, str) or len(ca) > PEM_MAX * 4
                                    or "-----BEGIN CERTIFICATE-----" not in ca):
                 raise ValueError("ca_pem: PEM certificate expected")
-            config = oj.mount_config(req.get("issuer"), ca_pem=ca, pubkeys=pubkeys)
+            config = oj.mount_config(req.get("issuer"), ca_pem=ca)
             role = oj.person_role_params(req.get("client_id"), pol.B1_CIDR, cid)
         except ValueError as e:
             raise AgentError("bad-request", str(e)) from None
         self._person_mount_only(cid, mount)
         return mount, config, role
+
+    @staticmethod
+    def _pin_of(config, client_id):
+        return {"issuer": config["bound_issuer"], "client_id": str(client_id),
+                "ca_pem": (config.get("oidc_discovery_ca_pem") or "").strip() or None}
+
+    def _pin_check(self, st, rancher, pin):
+        """Revue 6-7 I-1 : émetteur, client et CA d'un Rancher épinglés dans
+        l'état de root à la première pose (gardés après le retrait du
+        montage) ; une demande déposée par la console qui les change est
+        refusée, le canal root les remplace."""
+        have = (st.get("person_pins") or {}).get(rancher)
+        if not have or self.root_channel:
+            return
+        if any((have.get(k) or None) != (pin.get(k) or None) for k in ("issuer", "client_id", "ca_pem")):
+            raise AgentError("jwt-pin-mismatch", f"the issuer, client or CA of the Rancher {rancher} are pinned "
+                             "since its first set-up; change them with `sudo harvester-secrets person-token "
+                             "assistant` on the host")
 
     @staticmethod
     def _person_mount_only(cid, mount):
@@ -1354,7 +1387,7 @@ class Agent:
                 bad.append(k)
         for k in ("groups_claim", "bound_claims", "bound_subject", "bound_cidrs", "token_period",
                   "token_explicit_max_ttl", "token_num_uses", "token_no_default_policy",
-                  "token_policies_template_claims", "verbose_oidc_logging"):
+                  "token_policies_template_claims", "verbose_oidc_logging") + tuple(ROLE_RESET):
             if d.get(k):
                 bad.append(k)
         return bad
@@ -1387,10 +1420,11 @@ class Agent:
 
     def op_b1_jwt(self, req):
         """Méthode `jwt` d'un Rancher posée sans redémarrer OpenBao (essai 6) :
-        montage (s'il manque), politique commune, configuration, rôle
-        `person` ; rôles du montage relus (un rôle étranger est retiré),
-        configuration et rôle comparés au rendu d'openbao_jwt. Rejouée pour
-        remplacer les clés statiques (tâche 7)."""
+        montage (s'il manque), politique commune, configuration (découverte),
+        rôle `person` ; rôles du montage relus (un rôle étranger est retiré),
+        configuration et rôle comparés au rendu d'openbao_jwt. Émetteur,
+        client et CA épinglés (revue 6-7 I-1) ; sur un montage existant, un
+        échec repose l'ancienne configuration et l'ancien rôle (M-4)."""
         st = self.agent_state()
         if not st:
             raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
@@ -1400,9 +1434,8 @@ class Agent:
             groups_only = bool(st.get("person_groups_only"))
         cid, kv, prefix = self._person_layout(st)
         rancher = str(req["rancher"])
-        static = "jwt_validation_pubkeys" in config
-        prev = (st.get("person_jwt") or {}).get(rancher) or {}
-        seen = oj.merge_pubkeys(prev.get("pubkeys_seen"), config.get("jwt_validation_pubkeys"))
+        pin = self._pin_of(config, req["client_id"])
+        self._pin_check(st, rancher, pin)
         self.step("mount", "running", mount)
 
         def apply(a):
@@ -1415,21 +1448,23 @@ class Agent:
                                                       "description": f"harvester-ops {cid} Rancher {rancher}"})
                 self.undo.append(("jwt mount removed",
                                   lambda: self._with_agent(lambda b: b._call("DELETE", f"sys/auth/{mount}"))))
+            else:
+                self._keep_old_jwt(a, mount, list(role) + list(ROLE_RESET))
             self.step("mount", "done", mount + ("/ kept" if cur else "/ created"))
             self.step("policy", "running", pol.person_policy_name(cid))
             a._call("POST", f"sys/policies/acl/{pol.person_policy_name(cid)}",
                     {"policy": pol.person_policy(kv, prefix, cid, groups_only)})
             self.step("policy", "done", pol.person_policy_name(cid) + (" (groups only)" if groups_only else ""))
-            self.step("config", "running", "static keys" if static else "discovery")
+            self.step("config", "running", "discovery")
             a._call("POST", f"auth/{mount}/config", config)
-            a._call("POST", f"auth/{mount}/role/{oj.PERSON_ROLE}", role)
+            a._call("POST", f"auth/{mount}/role/{oj.PERSON_ROLE}", dict(role, **ROLE_RESET))
             for other in self._list(a, f"auth/{mount}/role"):
                 if other != oj.PERSON_ROLE:
                     a._call("DELETE", f"auth/{mount}/role/{other}")
                     self.log(f"role {sf.clean_line(other, 64)} of {mount} removed (not set by the console)")
             _, doc = a._call("GET", f"auth/{mount}/config")
             bad = self._jwt_config_diff(self._data(doc) or {}, config["bound_issuer"], config.get(
-                "oidc_discovery_ca_pem"), config.get("jwt_validation_pubkeys") or [], static)
+                "oidc_discovery_ca_pem"), [], False)
             _, doc = a._call("GET", f"auth/{mount}/role/{oj.PERSON_ROLE}")
             bad += self._jwt_role_diff(self._data(doc) or {}, req["client_id"], cid)
             if bad:
@@ -1437,16 +1472,43 @@ class Agent:
             self.step("config", "done", f"{mount}: configuration and role read back")
         self._with_agent(apply)
         entry = {"mount": mount, "client_id": str(req["client_id"]), "issuer": config["bound_issuer"],
-                 "keys": "static" if static else "discovery", "pubkeys": config.get("jwt_validation_pubkeys"),
-                 "pubkeys_seen": seen, "ca_pem": config.get("oidc_discovery_ca_pem"),
+                 "keys": "discovery", "ca_pem": config.get("oidc_discovery_ca_pem"),
                  "at": self.now(), "by": self.status.get("requested_by")}
         st = self.agent_state()
         st["person_jwt"] = dict(st.get("person_jwt") or {}, **{rancher: entry})
+        st["person_pins"] = dict(st.get("person_pins") or {}, **{rancher: dict(
+            pin, at=self.now(), by=self.status.get("requested_by"), root=self.root_channel)})
         st["person_groups_only"] = groups_only
         self.save_agent_state(st)
         self.undo = []
         self.status["info"] = {"mount": mount, "keys": entry["keys"]}
         return f"jwt auth method {mount} set"
+
+    # champs de configuration qu'un retour arrière repose (ceux que b1-jwt écrit)
+    CONFIG_KEYS = ("bound_issuer", "jwt_supported_algs", "default_role", "oidc_discovery_url",
+                   "oidc_discovery_ca_pem", "jwt_validation_pubkeys")
+
+    def _keep_old_jwt(self, a, mount, role_keys):
+        """Revue 6-7 M-4 : configuration et rôle d'un montage existant relus
+        avant d'être réécrits ; un échec de la suite les repose."""
+        try:
+            _, doc = a._call("GET", f"auth/{mount}/config")
+            old_conf = {k: v for k, v in (self._data(doc) or {}).items() if k in self.CONFIG_KEYS and v}
+        except oc.OpenBaoError:
+            old_conf = None
+        try:
+            _, doc = a._call("GET", f"auth/{mount}/role/{oj.PERSON_ROLE}")
+            d = self._data(doc) or {}
+            old_role = {k: d[k] for k in role_keys if k in d}
+        except oc.OpenBaoError:
+            old_role = None
+
+        def back(b):
+            if old_conf:
+                b._call("POST", f"auth/{mount}/config", old_conf)
+            if old_role is not None:
+                b._call("POST", f"auth/{mount}/role/{oj.PERSON_ROLE}", old_role)
+        self.undo.append(("jwt configuration and role put back", lambda: self._with_agent(back)))
 
     def op_b1_jwt_remove(self, req):
         st = self.agent_state()
@@ -1802,8 +1864,11 @@ class Agent:
                 self._untrusted(f"auth methods {sorted(auths)}")
             token_acc = ((self._data(auth_doc) or {}).get("token/") or {}).get("accessor")
             jwt_accs = {((self._data(auth_doc) or {}).get(m + "/") or {}).get("accessor") for m in jwt_present}
+            pins = st.get("person_pins") or {}
             for m in sorted(jwt_present):
-                self._review_jwt_mount(a, m, person[m], cid)
+                r = next((k for k, e in (st.get("person_jwt") or {}).items() if (e or {}).get("mount") == m), None)
+                self._review_jwt_mount(a, m, dict(person[m], **{k: v for k, v in (pins.get(r) or {}).items()
+                                                              if k in ("issuer", "client_id", "ca_pem")}), cid)
             # montages : les quatre du système, le KV de la console et transit
             _, mounts = a._call("GET", "sys/mounts")
             mounts = {k: (v or {}).get("type") for k, v in (self._data(mounts) or {}).items() if isinstance(v, dict)}
@@ -1922,10 +1987,9 @@ class Agent:
             bad = self._jwt_role_diff(self._data(doc) or {}, entry.get("client_id"), cid)
             _, doc = a._call("GET", f"auth/{m}/config")
             conf = self._data(doc) or {}
-            # clés statiques : parmi celles que l'agent a posées pour ce
-            # montage (un instantané pris pendant une rotation en porte deux)
-            bad += self._jwt_config_diff(conf, entry.get("issuer"), entry.get("ca_pem"),
-                                         entry.get("pubkeys_seen") or [], bool(conf.get("jwt_validation_pubkeys")))
+            # revue 6-7 I-1 : découverte seulement en B1, avec l'émetteur et la
+            # CA épinglés (clés statiques refusées)
+            bad += self._jwt_config_diff(conf, entry.get("issuer"), entry.get("ca_pem"), [], False)
         except ValueError:
             bad = ["unreadable"]
         if bad:

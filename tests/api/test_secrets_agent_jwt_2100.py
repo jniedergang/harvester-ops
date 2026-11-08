@@ -55,7 +55,8 @@ def test_b1_jwt_sets_everything_without_restart(b1):
     assert rc == 0, st
     assert srv.auth_mounts[MOUNT + "/"]["type"] == "jwt"
     assert srv.jwt_config[MOUNT] == oj.mount_config(ISS, ca_pem=CA)
-    assert srv.jwt_roles[MOUNT] == {"person": oj.person_role_params(CLIENT, pol.B1_CIDR, CID)}
+    assert srv.jwt_roles[MOUNT] == {"person": dict(oj.person_role_params(CLIENT, pol.B1_CIDR, CID),
+                                                   **hsa.ROLE_RESET)}
     assert srv.policies[pol.person_policy_name(CID)] == pol.person_policy("harvester-ops", f"consoles/{CID}", CID)
     assert host.cmds[cmds:] == []                                 # ni systemctl ni podman : à chaud
     assert srv.agent_denied == []                                 # tout permis par agent_rules
@@ -64,18 +65,94 @@ def test_b1_jwt_sets_everything_without_restart(b1):
     no_secret_in(b1, st)
 
 
-def test_b1_jwt_again_keeps_the_mount_and_updates_static_keys(b1):
+def root_jwt_op(env, **kw):
+    """Même demande par le canal root (`sudo harvester-secrets`) : passée en
+    processus, jamais lue dans un fichier que la console peut écrire."""
+    req = {"op": "b1-jwt", "rancher": "rmgr", "client_id": CLIENT, "issuer": ISS, "id": "0123abce"}
+    req.update(kw)
+    agent = env["agent"]()
+    rc = agent.process(request={k: v for k, v in req.items() if v is not None})
+    return rc, agent.status
+
+
+@pytest.mark.parametrize("pubkeys", [[PEM_A], [PEM_A, PEM_B], ["not a pem"]])
+def test_b1_jwt_refuses_static_keys(b1, pubkeys):
+    """Revue 6-7 I-1 (décision 313 B) : en B1, le montage d'une personne se
+    règle par la découverte seule ; une clé posée par la console lui
+    permettrait de signer le jeton de n'importe qui."""
+    rc, st = jwt_op(b1, pubkeys=pubkeys)
+    assert rc == 1 and st["code"] == "jwt-static-keys-mode-a", st
+    assert MOUNT + "/" not in b1["srv"].auth_mounts
+    rc, st = root_jwt_op(b1, pubkeys=pubkeys)
+    assert rc == 1 and st["code"] == "jwt-static-keys-mode-a", st
+
+
+@pytest.mark.parametrize("change", [
+    {"issuer": "https://evil.example/oidc"},
+    {"client_id": "client-evil"},
+    {"ca_pem": CA.replace("MIIB", "MIIC")},
+    {"ca_pem": None},
+])
+def test_b1_jwt_pin_refuses_a_file_request_that_changes_the_trust(b1, change):
+    """Revue 6-7 I-1 : émetteur, client et CA épinglés dans l'état de root à
+    la première pose ; une demande déposée par la console ne les change
+    plus, le canal root si."""
     srv = b1["srv"]
-    assert jwt_op(b1, pubkeys=[PEM_A])[0] == 0
-    enables = [e for e in srv.events if e[0] == "auth-enable"]
-    rc, st = jwt_op(b1, pubkeys=[PEM_A, PEM_B])               # rotation : les deux ensemble
+    assert jwt_op(b1, ca_pem=CA)[0] == 0
+    conf, role = dict(srv.jwt_config[MOUNT]), dict(srv.jwt_roles[MOUNT]["person"])
+    req = dict({"ca_pem": CA}, **change)
+    rc, st = jwt_op(b1, **req)
+    assert rc == 1 and st["code"] == "jwt-pin-mismatch", st
+    assert srv.jwt_config[MOUNT] == conf and srv.jwt_roles[MOUNT]["person"] == role
+    rc, st = root_jwt_op(b1, **req)
     assert rc == 0, st
-    assert [e for e in srv.events if e[0] == "auth-enable"] == enables
-    assert srv.jwt_config[MOUNT]["jwt_validation_pubkeys"] == [PEM_A, PEM_B]
-    st_ = b1["agent"]().agent_state()["person_jwt"]["rmgr"]
-    assert st_["keys"] == "static" and st_["pubkeys_seen"] == [PEM_A, PEM_B]
-    assert jwt_op(b1, pubkeys=[PEM_B])[0] == 0                 # confirmation : la nouvelle seule
-    assert b1["agent"]().agent_state()["person_jwt"]["rmgr"]["pubkeys_seen"] == [PEM_B, PEM_A]
+    pin = b1["agent"]().agent_state()["person_pins"]["rmgr"]
+    assert (pin["issuer"], pin["client_id"], pin["ca_pem"]) == (req.get("issuer", ISS), req.get("client_id", CLIENT),
+                                                                req.get("ca_pem"))
+    assert jwt_op(b1, **req)[0] == 0                          # la nouvelle ancre vaut désormais
+
+
+def test_b1_jwt_pin_survives_the_removal(b1):
+    assert jwt_op(b1, ca_pem=CA)[0] == 0
+    assert request(b1, op="b1-jwt-remove", rancher="rmgr")[0] == 0
+    rc, st = jwt_op(b1, issuer="https://evil.example/oidc")
+    assert rc == 1 and st["code"] == "jwt-pin-mismatch"
+    assert MOUNT + "/" not in b1["srv"].auth_mounts
+    assert jwt_op(b1, ca_pem=CA)[0] == 0
+
+
+def test_b1_jwt_resets_leeway_fields_left_on_the_role(b1):
+    """Revue 6-7 M-2 : une écriture de rôle fusionne avec l'existant ; une
+    marge d'expiration posée avant (instantané, administrateur) est remise à
+    zéro par l'agent et relue."""
+    srv = b1["srv"]
+    assert jwt_op(b1)[0] == 0
+    srv.jwt_roles[MOUNT]["person"].update(expiration_leeway=86400, user_claim_json_pointer=True)
+    assert jwt_op(b1)[0] == 0
+    r = srv.jwt_roles[MOUNT]["person"]
+    assert not r.get("expiration_leeway") and not r.get("user_claim_json_pointer")
+
+
+def test_b1_jwt_failure_on_an_existing_mount_puts_the_old_settings_back(b1, monkeypatch):
+    """Revue 6-7 M-4 : relecture en échec sur un montage déjà posé : son
+    ancienne configuration et son ancien rôle sont reposés."""
+    srv = b1["srv"]
+    assert jwt_op(b1, ca_pem=CA)[0] == 0
+    conf, role = dict(srv.jwt_config[MOUNT]), dict(srv.jwt_roles[MOUNT]["person"])
+    real = srv._route_jwt_and_groups
+
+    def widen(h, rec, path, body):
+        if path == f"auth/{MOUNT}/role/person" and rec["method"] in ("POST", "PUT") and "evil" not in str(body):
+            body = dict(body, token_policies=body["token_policies"] + ["evil"])
+            monkeypatch.setattr(srv, "_route_jwt_and_groups", real)
+        return real(h, rec, path, body)
+    monkeypatch.setattr(srv, "_route_jwt_and_groups", widen)
+    rc, st = root_jwt_op(b1, ca_pem=None)
+    assert rc == 1 and st["code"] == "jwt-readback", st
+    assert srv.jwt_config[MOUNT] == conf
+    back = srv.jwt_roles[MOUNT]["person"]
+    assert "evil" not in back["token_policies"]
+    assert b1["agent"]()._jwt_role_diff(back, CLIENT, CID) == []
 
 
 @pytest.mark.parametrize("kw,code", [
@@ -84,9 +161,8 @@ def test_b1_jwt_again_keeps_the_mount_and_updates_static_keys(b1):
     ({"issuer": "http://rancher.example/oidc"}, "bad-request"),
     ({"issuer": "https://rancher.example"}, "bad-request"),
     ({"client_id": "a b"}, "bad-request"),
-    ({"pubkeys": ["not a pem"]}, "bad-request"),
-    ({"pubkeys": [PEM_A] * 9}, "bad-request"),
-    ({"pubkeys": [PEM_A], "ca_pem": CA}, "bad-request"),
+    ({"pubkeys": [PEM_A] * 9}, "jwt-static-keys-mode-a"),
+    ({"pubkeys": [PEM_A], "ca_pem": CA}, "jwt-static-keys-mode-a"),
     ({"ca_pem": "nope"}, "bad-request"),
     ({"groups_only": "yes"}, "bad-request"),
     ({"mount": "jwt-other"}, "bad-request"),
@@ -342,6 +418,10 @@ CRAFTS = {
                                                               oidc_discovery_url="https://evil/oidc"),
     "jwt-config-ca": lambda s: s.jwt_config[MOUNT].update(oidc_discovery_ca_pem="-----BEGIN CERTIFICATE-----\nX"),
     "jwt-config-keys": lambda s: s.jwt_config[MOUNT].update(oidc_discovery_url="", jwt_validation_pubkeys=[PEM_B]),
+    "jwt-config-keys-only": lambda s: s.jwt_config[MOUNT].update(oidc_discovery_url="", oidc_discovery_ca_pem="",
+                                                                 jwt_validation_pubkeys=[PEM_A]),
+    "jwt-role-leeway": lambda s: _role(s).__setitem__("expiration_leeway", 86400),
+    "jwt-role-client-unpinned": lambda s: _role(s).__setitem__("bound_audiences", ["client-evil"]),
     "jwt-config-jwks-url": lambda s: s.jwt_config[MOUNT].update(jwks_url="https://evil/jwks"),
     "group-policy-widened": lambda s: s.policies.__setitem__(f"hops-group-{CID}-ops", 'path "*" { capabilities = ["sudo"] }\n'),
     "person-policy-widened": lambda s: s.policies.__setitem__(pol.person_policy_name(CID),

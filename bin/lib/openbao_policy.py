@@ -521,7 +521,7 @@ def _addr_line(addr):
 
 
 def person_token_commands(addr, cid, rancher, client_id, issuer, ca_pem, console_cidr, keys,
-                          mount=DEFAULT_MOUNT, prefix=None, groups_only=False):
+                          mount=DEFAULT_MOUNT, prefix=None, groups_only=False, jwks_sha256=None):
     """Mode A (décision 287) : commandes `bao` qui posent la méthode `jwt`
     d'un Rancher pour cette console (montage, politique commune,
     configuration, rôle `person`). `keys` : None (découverte par l'émetteur,
@@ -537,6 +537,7 @@ def person_token_commands(addr, cid, rancher, client_id, issuer, ca_pem, console
         f"# Méthode jwt du Rancher {rancher} (sautez la ligne suivante si le montage {pm}/ existe déjà)",
         f"bao auth enable -path={pm} jwt",
         f"bao policy write {person_policy_name(cid)} - <<'EOF'\n{person_policy(mount, prefix, cid, groups_only)}EOF",
+        *(jwks_check_lines(issuer, jwks_sha256) if keys else []),
         _heredoc_json(f"bao write auth/{pm}/config", config),
         _heredoc_json(f"bao write auth/{pm}/role/{oj.PERSON_ROLE}", role),
         f"bao list auth/{pm}/role",
@@ -550,14 +551,28 @@ def person_policy_commands(addr, mount, prefix, cid, groups_only=False):
                               f"{person_policy(mount, prefix, cid, groups_only)}EOF"]
 
 
-def person_keys_commands(addr, cid, rancher, issuer, keys):
-    """Mode A, tâche 7 : clés statiques remplacées (ancienne et nouvelle
-    ensemble pendant une rotation, puis la seule nouvelle à la
-    confirmation)."""
+def jwks_check_lines(issuer, jwks_sha256):
+    """Revue 6-7 M-5 : en mode A, l'administrateur d'OpenBao reconnaît les
+    clés qu'il colle (la confiance dans les clés lui appartient) : empreinte
+    du JWKS publié et commande qui la recalcule depuis Rancher lui-même."""
+    if not jwks_sha256:
+        return []
+    if not re.match(r"^[0-9a-f]{64}$", str(jwks_sha256)):
+        raise ValueError("invalid JWKS fingerprint")
+    url = oj.jwks_url(oj.mount_config(issuer)["bound_issuer"])
+    return [f"# Clés tirées du JWKS publié par Rancher, empreinte {jwks_sha256} (kid, kty, n, e triés) ;",
+            f"# vérifiez-la avant de coller : curl -s {url} (comparer kid et n aux clés ci-dessous)"]
+
+
+def person_keys_commands(addr, cid, rancher, issuer, keys, jwks_sha256=None):
+    """Mode A, tâche 7 : clés statiques remplacées par celles que Rancher
+    publie (pendant une rotation, son JWKS porte l'ancienne et la nouvelle ;
+    revue 6-7 I-1 : jamais une clé lue dans les réglages de la console)."""
     pm = oj.person_mount(_check(ID_RE, cid, "console id"), rancher)
     if not keys:
         raise ValueError("static keys expected")
-    return [_addr_line(addr), _heredoc_json(f"bao write auth/{pm}/config", oj.mount_config(issuer, pubkeys=keys))]
+    return [_addr_line(addr), *jwks_check_lines(issuer, jwks_sha256),
+            _heredoc_json(f"bao write auth/{pm}/config", oj.mount_config(issuer, pubkeys=keys))]
 
 
 def person_remove_commands(addr, cid, rancher, last=False):

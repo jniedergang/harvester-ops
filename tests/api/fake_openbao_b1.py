@@ -237,7 +237,9 @@ class FakeB1(FakeOpenBao):
                 return h._err(405)
             name = rest[len("role/"):]
             if m in ("POST", "PUT"):
-                roles[name] = dict(body)
+                # comme OpenBao : l'écriture d'un rôle existant fusionne (un
+                # champ absent de la demande garde sa valeur, revue 6-7 M-2)
+                roles[name] = dict(roles.get(name) or {}, **body)
                 self.events.append(("jwt-role", f"{mount}/{name}"))
                 return h._send(204)
             if m == "DELETE":
@@ -251,7 +253,8 @@ class FakeB1(FakeOpenBao):
             d = {"bound_claims": None, "bound_claims_type": "string", "bound_subject": "", "groups_claim": "",
                  "token_period": 0, "token_explicit_max_ttl": 0, "token_num_uses": 0, "bound_cidrs": [],
                  "token_policies_template_claims": False, "user_claim_json_pointer": False,
-                 "token_strictly_bind_ip": False, "verbose_oidc_logging": False}
+                 "token_strictly_bind_ip": False, "verbose_oidc_logging": False,
+                 "expiration_leeway": 0, "not_before_leeway": 0, "clock_skew_leeway": 0, "max_age": 0}
             d.update(r)
             d["policies"] = list(r.get("token_policies") or [])
             for k in ("token_ttl", "token_max_ttl"):

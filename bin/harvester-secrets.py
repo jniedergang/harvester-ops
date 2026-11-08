@@ -2148,17 +2148,18 @@ def _pt_apply_jwt(s, cid, rancher, entry, pubkeys, groups_only):
     commandes rendues en mode A (décision 287)."""
     addr, _ca, kv, prefix = _pt_target(s)
     if s["mode"] == "b1":
+        if pubkeys:
+            raise CliError("person-token-static-mode-a", "in mode b1 the keys of Rancher are read by discovery",
+                           EXIT_REFUSED)
         req = {"op": "b1-jwt", "rancher": rancher, "client_id": entry["client_id"], "issuer": entry["issuer"],
                "groups_only": bool(groups_only)}
-        if pubkeys:
-            req["pubkeys"] = list(pubkeys)
-        elif entry.get("ca_pem"):
+        if entry.get("ca_pem"):
             req["ca_pem"] = entry["ca_pem"]
         agent_ok(run_agent(req))
         return None
     return pol.person_token_commands(addr, cid, rancher, entry["client_id"], entry["issuer"], entry.get("ca_pem"),
                                      entry["console_cidr"], pubkeys or None, mount=kv, prefix=prefix,
-                                     groups_only=groups_only)
+                                     groups_only=groups_only, jwks_sha256=entry.get("keys_sha256"))
 
 
 def cmd_person_token(args):
@@ -2184,6 +2185,12 @@ def _pt_assistant(args):
     _pt_target(s)
     if not args.rancher or not args.issuer or not args.client_id:
         return refuse("bad-input", "--rancher, --issuer and --client-id are needed")
+    if s["mode"] == "b1" and args.keys == "static":
+        # revue 6-7 I-1 (décision 313 B) : en B1, découverte seulement ; la
+        # confiance dans des clés statiques appartient à l'administrateur
+        # d'OpenBao du mode A
+        return refuse("person-token-static-mode-a", "in mode b1 the keys of Rancher are read by discovery; "
+                      "static keys are for mode a")
     cidr = pol.B1_CIDR if s["mode"] == "b1" else args.console_cidr
     if s["mode"] != "b1" and not cidr:
         return refuse("bad-input", "mode a needs --console-cidr (the address OpenBao sees for the console)")
@@ -2384,14 +2391,15 @@ def _pt_keys(args):
     if not changed and not args.confirm:
         out({"ok": True, "keys": "static", "changed": False, "commands": None})
         return EXIT_OK
-    keys = now_keys if args.confirm else oj.merge_pubkeys(entry.get("pubkeys"), now_keys)
+    # revue 6-7 I-1 : seulement les clés que Rancher publie (pendant une
+    # rotation, son JWKS porte l'ancienne et la nouvelle) ; jamais une clé lue
+    # dans les réglages, que la console écrit. `--confirm` reste accepté.
+    keys = now_keys
     cid = s["console_id"]
     if s["mode"] == "b1":
-        _pt_apply_jwt(s, cid, args.rancher, entry, keys, pt["groups_only"])
-        cmds = None
-    else:
-        addr, _ca, _kv, _prefix = _pt_target(s)
-        cmds = pol.person_keys_commands(addr, cid, args.rancher, entry["issuer"], keys)
+        return refuse("person-token-static-mode-a", "in mode b1 the keys of Rancher are read by discovery")
+    addr, _ca, _kv, _prefix = _pt_target(s)
+    cmds = pol.person_keys_commands(addr, cid, args.rancher, entry["issuer"], keys, jwks_sha256=sha)
     doc = raw_settings()
     pt = _pt_doc(doc)
     for k in ("servers", "pending"):
