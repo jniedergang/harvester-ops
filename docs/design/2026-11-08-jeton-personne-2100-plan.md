@@ -1199,3 +1199,13 @@ conditions réelles (simulée en R6).
   https://docs.rke2.io/security/cis_self_assessment110 ; découverte de
   l'émetteur des comptes de service :
   https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/
+
+## Décisions (08/11/2026)
+
+Points 280 à 302 : recommandations retenues (consigne de ju : « on fait tes
+recommandations »). Point 279 retenu sans la VM `idp` : brancher Keycloak ou
+OpenLDAP comme fournisseur d'authentification de Rancher modifierait la
+configuration de connexion du Rancher de ju, ce qui reste sa décision. En
+attendant, l'essai du claim `groups` se limite à ce que donne un compte local
+de Rancher, et le repli par groupes internes (point 285) est la voie
+vérifiée.
