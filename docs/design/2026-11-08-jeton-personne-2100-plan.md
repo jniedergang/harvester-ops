@@ -156,22 +156,23 @@ service n'existe que pour les sessions qui n'ont pas de jeton OIDC du tout
   avec un `kid` ; `iss` = `<url de Rancher>/oidc`, `sub` = identifiant Rancher
   de la personne (`user-xxxxx` ou `u-xxxxx`), `aud` = [identifiant du client
   OIDC de la console], `exp`, `iat`, `name` (portée `profile`), `nonce`,
-  `config_name` (`auth_provider`, déprécié, encore émis), `groups` selon la
-  portée (plus bas). `check_id_token` vérifie déjà émetteur, audience, `exp`,
-  nonce et `sub`.
+  `auth_provider` (essai 1 : c'est le nom émis par Rancher 2.14.1, pas
+  `config_name`), `groups` selon la portée (plus bas). `check_id_token`
+  vérifie déjà émetteur, audience, `exp`, nonce et `sub`.
 - **Le jeton d'accès porte la même audience** (`aud` = [client], plus
-  `scope`, `token`, `token_kind`) : `bound_audiences` ne distingue donc pas
+  `scope` et `token` ; essai 1) : `bound_audiences` ne distingue donc pas
   les deux jetons, OpenBao accepterait l'un comme l'autre. La garantie vient
   de la console, seule détentrice des deux (aucun ne quitte le serveur), et
   d'un test qui refuse tout envoi du jeton d'accès vers OpenBao. Un rôle CEL
-  d'OpenBao (`auth/<montage>/cel/roles`, absent de Vault) pourrait refuser un
-  jeton qui porte `token` : essayé en tâche 1 (essai 2), retenu seulement s'il
-  marche aussi simplement qu'un rôle ordinaire, jamais en mode A où le client
-  peut avoir un Vault.
+  d'OpenBao (`auth/<montage>/cel/role/<nom>` en 2.7.2, absent de Vault)
+  pourrait refuser un jeton qui porte `token` : essayé en tâche 1 (essai 2)
+  et **non retenu** : il refuse bien le jeton d'accès mais rend un jeton sans
+  entité, sans métadonnées et de 32 jours.
 - Le jeton d'identité est gardé dans la `Session` (mémoire seulement, jamais
   écrit, absent de `public()`, de `repr` et des journaux), remplacé à chaque
-  rafraîchissement si Rancher en rend un nouveau (essai 1 de la tâche 1 : non
-  établi par la lecture de la source).
+  rafraîchissement : Rancher en rend un nouveau à chaque rafraîchissement
+  (essai 1). L'ancien jeton de rafraîchissement reste accepté par Rancher
+  (aucune rotation) : la console l'oublie dès qu'elle reçoit le nouveau.
 - **Groupes dans le jeton** : sur la branche principale de Rancher (PR
   rancher#55473, fusionnée le 18/06/2026, probablement en 2.15.0), `groups`
   n'est émis que si le client demande la portée `groups`, et cette portée doit
@@ -181,7 +182,11 @@ service n'existe que pour les sessions qui n'ont pas de jeton OIDC du tout
   groupe de la connexion qui a émis le jeton (par exemple
   `keycloakoidc_group://rancher-admins`). La console demande `groups` quand
   le document de découverte l'annonce (`scopes_supported`) et l'ajoute à
-  `spec.scopes` quand elle enregistre elle-même le client (1.79.0).
+  `spec.scopes` quand elle enregistre elle-même le client (1.79.0). Essai 1 :
+  Rancher 2.14.1 n'annonce pas `groups` et refuse la portée
+  (`invalid_scope`), ce qui fait échouer toute la connexion : la condition
+  sur la découverte est indispensable. En 2.10.0 le claim n'alimente aucun
+  groupe d'OpenBao (point 303).
 
 ### Méthode `jwt` d'une personne (une par Rancher)
 
@@ -207,18 +212,20 @@ service n'existe que pour les sessions qui n'ont pas de jeton OIDC du tout
 - Rôle `person` :
   - `role_type = "jwt"`, `user_claim = "sub"`,
     `bound_audiences = ["<client_id>"]` ;
-  - `claim_mappings = {"name": "name", "config_name": "provider"}`
-    (correspondances simples, donc facultatives : un claim absent ne fait pas
-    échouer la connexion, contrairement à une correspondance en pointeur
-    JSON) ; métadonnées du jeton et de l'alias, visibles dans l'audit ;
-    `groups_claim = "groups"` seulement si l'essai 3 montre ce claim ;
+  - `claim_mappings = {"name": "name", "auth_provider": "provider"}`
+    (un claim absent ne fait pas échouer la connexion, vrai aussi en
+    pointeur JSON : essai 5) ; métadonnées du jeton et de l'alias, visibles
+    dans l'audit (`{name, provider, role}`, essai 2) ;
+    **jamais de `groups_claim`** : un rôle qui en porte un refuse toute
+    personne dont le jeton n'a pas ce claim (essai 3, point 303) ;
   - `token_policies = ["hops-person-<id>"]`, `token_type = "service"`,
     `token_ttl = "15m"`, `token_max_ttl = "15m"`, `token_num_uses = 0`,
     `token_no_default_policy = false` (la politique `default` donne
     `revoke-self` et `lookup-self`) ;
   - `token_bound_cidrs` = adresse de la console (127.0.0.1/32 en B1, la plage
-    du rôle AppRole en A) : un jeton de personne n'est utilisable que depuis
-    la console ;
+    du rôle AppRole en A) : la connexion et le jeton de personne ne sont
+    acceptés que depuis la console (essai 2 : connexion d'ailleurs refusée en
+    403) ;
   - `verbose_oidc_logging = false`.
 - Un jeton obtenu par la méthode `jwt` est renouvelable jusqu'à
   `token_max_ttl` ; l'appartenance aux groupes externes est relue à la
@@ -255,16 +262,16 @@ service n'existe que pour les sessions qui n'ont pas de jeton OIDC du tout
   `read` sur `<montage>/metadata/<préfixe>/{ssh-cluster,ssh-kvm,tf-kvm}/*`
   (versions) ; `update` sur `sys/capabilities-self`. Rien sur `kubeconfig`,
   `rancher-oidc`, `replication-*`, `plan-run`, transit, AppRole.
-- Groupes (point 284, 285) : politiques `hops-group-<id>-<nom>` rendues par
-  `openbao_policy.group_rules(nom, classes, clusters)` (lecture limitée à
+- Groupes (point 284, 285, 303) : politiques `hops-group-<id>-<nom>` rendues
+  par `openbao_policy.group_rules(nom, classes, clusters)` (lecture limitée à
   `<classe>/<cluster>` pour une liste de clusters) et rattachées à des groupes
-  d'identité OpenBao :
-  - **externes** (`type = "external"`, alias de groupe = nom du groupe dans le
-    claim `groups` sur le montage de ce Rancher) si l'essai 3 montre ce
-    claim ;
-  - sinon **internes**, dont l'administrateur d'OpenBao tient les membres
-    (entités) ; la console liste les entités qu'elle a vues (alias, `name`,
-    dernière connexion) et rend les commandes `bao` d'ajout et de retrait.
+  d'identité OpenBao **internes**, dont l'administrateur d'OpenBao tient les
+  membres (entités) ; la console liste les entités qu'elle a vues (alias,
+  `name`, dernière connexion) et rend les commandes `bao` d'ajout et de
+  retrait. Un membre ajouté ou retiré vaut dès la requête suivante, sur le
+  jeton déjà émis (essai 3). Les groupes externes (claim `groups`) sont
+  reportés : Rancher 2.14.1 ne l'émet pas pour un compte local et aucun
+  fournisseur de groupes n'a été essayé (point 303).
   Avec des groupes, `hops-person-<id>` peut être réduite à `capabilities-self`
   par un réglage (« lecture seulement par groupe »), pour un client qui veut
   tout décider par groupe.
@@ -316,19 +323,29 @@ service n'existe que pour les sessions qui n'ont pas de jeton OIDC du tout
   statiques (point 286).
 - **B1** : l'agent pose tout par l'opération `b1-jwt`, sans redémarrer
   OpenBao. Sa politique (`openbao_policy.agent_rules`) gagne, par
-  `b1-policies` lancée par `install.sh` à la mise à jour : `create, update,
-  read, delete, sudo` sur `sys/auth/jwt-hops-<id>-*` (montages des
-  personnes et des clusters enfants) ; `create, update, read, delete` sur
-  `auth/jwt-hops-<id>-*` ; `create, update, read, delete` sur
+  `b1-policies` lancée par `install.sh` à la mise à jour (essai 6 : la
+  nouvelle politique vaut sur le jeton déjà ouvert, sans redémarrage) :
+  `create, update, read, delete, sudo` sur `sys/auth/jwt-hops-<id>-*`
+  (montages des personnes et des clusters enfants) ; `create, update, read,
+  delete, list` sur `auth/jwt-hops-<id>-*` (`list` pour relire les rôles) ;
+  `create, update, read, delete` sur
   `sys/policies/acl/hops-person-<id>`, `sys/policies/acl/hops-group-<id>-*`,
-  `sys/policies/acl/hops-eso-<id>-*` ; `create, update, read, delete, list`
-  sur `identity/group/name/hops-<id>-*`, `identity/group/id/*` et
-  `identity/group-alias/id/*`. Les chemins par identifiant ne se restreignent
-  pas par nom : l'agent n'y vise que les identifiants des groupes
-  `hops-<id>-*` qu'il vient de lire par nom, et en B1 seule la console crée
-  des groupes (la revue de restauration refuse tout autre groupe). L'agent
-  est déjà root sur l'hôte et détient la clé de descellement (même raison que
-  la décision 271).
+  `sys/policies/acl/hops-eso-<id>-*` ; `create, update, read, delete` sur
+  `identity/group/name/hops-<id>-*` (création d'un groupe par son nom :
+  `POST identity/group` avec le nom dans le corps n'est pas couvert) ;
+  `update, read, delete` sur `identity/group/id/*` ; la liste des groupes
+  passe par `identity/group/id` (`list`, déjà en 2.9.0), pas par
+  `identity/group/name`. Si des groupes externes reviennent (point 303) :
+  `create, update` sur `identity/group-alias` (seule façon de créer un
+  alias) et `read, update, delete` sur `identity/group-alias/id/*`. Les
+  chemins par identifiant ne se restreignent pas par nom : l'agent n'y vise
+  que les identifiants des groupes `hops-<id>-*` qu'il vient de lire par nom,
+  et en B1 seule la console crée des groupes (la revue de restauration
+  refuse tout autre groupe). L'agent peut poser n'importe quelle politique
+  sur ces groupes (essai 6) ; `allowed_parameters` ne l'empêche pas (une
+  chaîne à virgules contourne le motif) : l'agent est déjà root sur l'hôte
+  et détient la clé de descellement (même raison que la décision 271, point
+  306).
 - **Revue d'un instantané restauré** (B1) : la liste blanche de la 2.9.0
   (« méthodes `token` et `approle` seulement, aucun groupe d'identité »)
   s'élargit aux montages `jwt-hops-<id>-*` et `jwt-hops-<id>-eso-*`, à leurs
@@ -363,9 +380,14 @@ service n'existe que pour les sessions qui n'ont pas de jeton OIDC du tout
   `last-applied-configuration`), Helm les crée sans cette annotation ;
   l'installation par CAAPH est vérifiée en tâche 1 (essai 7). Valeurs
   imposées par `child_eso.VALUES` (noms relevés dans le chart en tâche 1) :
-  webhook et contrôleur de certificats actifs, `processClusterStore: false`
-  (aucun magasin de portée cluster, point 296), `processPushSecret: false`,
-  `bitwarden-sdk-server.enabled: false`, sans `ServiceMonitor` par défaut.
+  `installCRDs: true`, `webhook.create: true`, `certController.create:
+  true`, `processClusterStore: false` (aucun magasin de portée cluster,
+  points 296 et 305), `processClusterExternalSecret: false`,
+  `processPushSecret: false`, `processClusterPushSecret: false`,
+  `bitwarden-sdk-server.enabled: false`, `serviceMonitor.enabled: false`,
+  `vault.enableTokenCache: false` (point 307). Noms relevés dans le chart
+  2.14.0 (essai 7) ; installé par CAAPH en ~45 s, CRD sans annotation
+  `last-applied-configuration`.
 - **Fournisseur** : `vault` (stable, documenté par ESO pour OpenBao, essayé
   avec OpenBao 2.2.0). Le fournisseur `openBao` propre d'ESO est alpha,
   lecture seule et sans authentification `jwt` (projet de PR seulement) :
@@ -377,10 +399,11 @@ service n'existe que pour les sessions qui n'ont pas de jeton OIDC du tout
   `path` = montage `jwt` du cluster, `role: eso`,
   `kubernetesServiceAccountToken: {serviceAccountRef: {name: hops-eso},
   audiences: ["hops-openbao-<id>"], expirationSeconds: 600}` (défaut d'ESO :
-  audience `vault`, 10 min). Un `ClusterSecretStore` exige un namespace dans
-  sa référence de compte (documentation du fournisseur `vault`) : il ne
-  donnerait qu'un compte pour tout le cluster, d'où un magasin par
-  namespace. Un namespace système (`hv_containers.SYSTEM_NAMESPACES`,
+  audience `vault`, 10 min). Essai 7 : un `ClusterSecretStore` sans
+  namespace dans sa référence de compte prend le compte `hops-eso` du
+  namespace de chaque `ExternalSecret` (isolement gardé) ; le magasin par
+  namespace est gardé pour laisser éteint le réconciliateur des magasins de
+  portée cluster (point 305). Un namespace système (`hv_containers.SYSTEM_NAMESPACES`,
   `*-system`) est refusé (`eso-system-namespace`).
 - **Compte `hops-eso`** : posé par la console dans chaque namespace activé
   (bouton « Activer les secrets externes » d'un namespace d'équipe, étiquette
@@ -403,12 +426,17 @@ service n'existe que pour les sessions qui n'ont pas de jeton OIDC du tout
   Limite connue : un jeton de compte de service révoqué dans Kubernetes reste
   accepté par OpenBao jusqu'à son expiration (10 min). Rôle `eso` : `role_type =
   "jwt"`, `user_claim = "sub"`, `bound_audiences = ["hops-openbao-<id>"]`,
-  `bound_claims = {"/kubernetes.io/serviceaccount/name": "hops-eso"}`,
-  `claim_mappings = {"/kubernetes.io/namespace": "namespace"}` (pointeur
-  JSON, donc obligatoire : un jeton sans ce claim est refusé),
+  `bound_claims_type = "glob"`,
+  `bound_claims = {"/kubernetes.io/serviceaccount/name": "hops-eso",
+  "/kubernetes.io/namespace": [<namespaces activés>]}` (point 304 ; le
+  pointeur de `claim_mappings` n'exige rien, essai 5 : c'est `bound_claims`
+  qui refuse un jeton sans namespace ; `hops-eso` sans joker reste une
+  égalité),
+  `claim_mappings = {"/kubernetes.io/namespace": "namespace"}`,
   `token_policies = ["hops-eso-<id>-<clé>"]`, `token_ttl = "10m"`,
   `token_max_ttl = "10m"`, `token_bound_cidrs` = plage du réseau des nœuds du
-  cluster enfant quand elle est connue.
+  cluster enfant quand elle est connue (essai 7 : OpenBao voit l'adresse du
+  nœud, 172.16.2.201, les pods sortant par SNAT).
 - **Politique ESO d'un cluster** (une seule, à gabarit) :
   `path "<montage>/data/<préfixe>/eso/<clé>/{{identity.entity.aliases.<accesseur>.metadata.namespace}}/*"
   { capabilities = ["read"] }` et la même ligne en `metadata` (`read, list`).
@@ -436,19 +464,30 @@ service n'existe que pour les sessions qui n'ont pas de jeton OIDC du tout
   2.8.0, ou leurs outils). La console montre leur état (`Ready`,
   `SecretSynced`, dernière synchronisation, sans valeur) et rend un exemple.
   Le rôle `edit` agrégé par le chart permet à une équipe d'en créer dans son
-  namespace (relevé en tâche 1).
+  namespace, ainsi que des `SecretStore` (essai 7) ; le rôle `edit` de
+  Kubernetes donne aussi `serviceaccounts/token` : une équipe peut se
+  connecter à OpenBao avec `hops-eso` et ne lit que son chemin.
 - **Retrait** (point 300) : la console retire d'abord les `ownerReferences`
   qui lient les Secrets synchronisés à leurs `ExternalSecret`
   (`creationPolicy: Owner` les ferait supprimer par le ramasse-miettes avec
-  les CRD), puis le ClusterResourceSet, puis le chart, puis le montage, le
+  les CRD, vu à l'essai 7), puis supprime les `ExternalSecret` **tant
+  qu'ESO tourne** (leur finalizer
+  `externalsecrets.external-secrets.io/externalsecret-cleanup` n'est retiré
+  que par le contrôleur ; essai 7 : un `helm uninstall` direct supprime
+  contrôleur et CRD ensemble, la CRD reste en suppression, la release
+  « uninstalling » et le `HelmChartProxy` bloqués plus de 10 min ; repli :
+  retirer ces finalizers, code `eso-remove-stuck` si l'attente dépasse son
+  délai), puis le ClusterResourceSet, puis le chart, puis le montage, le
   rôle et la politique dans OpenBao (agent en B1, commandes en A). Les
   Secrets restent, figés à leur dernière valeur, et l'interface le dit.
 - **Clés du cluster enfant** : empreinte du JWKS gardée dans les réglages ;
   relue à chaque passage de la tâche de fond des clusters enfants (1 h) ;
   changement : `eso-keys-changed` et action « Mettre à jour les clés » (agent
   ou commande). Une clé de compte de service RKE2 ne tourne pas seule
-  (`/var/lib/rancher/rke2/server/tls/service.key`), mais un renouvellement des
-  machines peut la changer (essai 7).
+  (`/var/lib/rancher/rke2/server/tls/service.key`) ; essai 7 : un
+  renouvellement des machines (plan de contrôle remplacé) garde le même JWKS
+  et ESO continue de se synchroniser. La surveillance horaire reste pour une
+  réinstallation ou une rotation faite à la main.
 
 ### Réglages (`secrets-settings.json`, à chaud)
 
@@ -1209,3 +1248,288 @@ configuration de connexion du Rancher de ju, ce qui reste sa décision. En
 attendant, l'essai du claim `groups` se limite à ce que donne un compte local
 de Rancher, et le repli par groupes internes (point 285) est la voie
 vérifiée.
+
+Après les essais de la tâche 1 : options A des points 283, 296 et 301
+confirmées ; points nouveaux 303 à 307 ci-dessous, à trancher.
+
+## Essais préalables (tâche 1)
+
+Faits le 08/11/2026 sur node1. OpenBao de la collection
+(`dp.apps.rancher.io/containers/openbao:2.7.2-5.4`, image locale déjà
+vérifiée en 2.9.0, même ID `eabca65d7c47`, rien à retirer) en rootless,
+`--network host`, écoute TLS `127.0.0.1:8210` (CA de banc), raft et audit dans
+des volumes nommés, descellement `static`, `--memory 512m`, `--read-only`.
+Seconde instance pour l'essai 6 sur `127.0.0.1:8214` (configuration B1 de la
+2.9.0 posée par le banc rejouable `live290lf`). Vault 1.14.2 dev jetable sur
+`127.0.0.1:8220` (`--memory 256m`). Scripts de banc en bibliothèque standard
+qui refusent le port 8200, vident `VAULT_*` et `BAO_*` et masquent jetons et
+JWT (`eyJ...`) ; jetons, clés et `id_token` en fichiers 0600, effacés à la
+fin. Le Vault du homelab n'a servi qu'à lire les identifiants de Rancher et
+des iLO. Rancher : VM `rancher-manager` démarrée par `start`, client OIDC
+`harvester-ops-dev` (`client-7zjw5jtpx6`, `tokenExpirationSeconds` 600,
+`refreshTokenExpirationSeconds` 43 200) non modifié, compte local d'essai
+`hops-membre` créé puis supprimé. VM `idp` non accordée : ni démarrée ni
+touchée. Cluster enfant `c210` (1 plan de contrôle, 1 worker, RKE2
+v1.34.11) créé sur harvlab2 par `harvester-capi create` depuis ce worktree,
+adresses du banc 172.16.2.200-201. Identifiant de console `abc123def456`,
+montage de personne `jwt-hops-abc123def456-rmgr`.
+
+**Critère de passage (1, 2, 4 et 6) : atteint.** L'essai 1 garde l'option A du
+point 283 (le rafraîchissement rend un nouvel `id_token`). L'essai 3 est
+limité au compte local (pas de `groups`) : groupes internes retenus (point
+285, décision du 08/11). L'essai 5 confirme le gabarit (option A du point
+296). L'essai 7 réussit (option A du point 301). Sept constats changent le
+plan : le nom du claim `auth_provider`, la portée `groups` refusée par
+Rancher 2.14.1, `groups_claim` qui refuse les comptes sans groupe, le
+namespace absent qui n'est pas refusé par `claim_mappings`, les droits de
+l'agent sur les alias de groupe, le `ClusterSecretStore` qui prend le compte
+du namespace de l'`ExternalSecret`, et un namespace non activé qui s'inscrit
+seul.
+
+1. **Jetons du fournisseur OIDC de Rancher** (v2.14.1) : document de
+   découverte : `issuer` `https://rancher.home.zypp.fr/oidc`, `jwks_uri`
+   `.../oidc/.well-known/jwks.json`, `RS256` seul, `scopes_supported`
+   `[openid, profile, offline_access]` (**pas `groups`**), types
+   `authorization_code` et `refresh_token`, PKCE `S256`. JWKS anonyme : 200,
+   **une** clé RSA 2048, `kid` `key` (nom du fichier du Secret), `use` `sig`,
+   sans champ `alg`. Secret `cattle-system/oidc-signing-key` : `key.pem` et
+   `key.pub`, créé le 02/01/2026. `id_token` (flux code de l'administrateur
+   local) : en-tête `{alg RS256, kid key, typ JWT}`, claims `aud`
+   `[client-7zjw5jtpx6]`, `auth_provider` `local`, `exp`, `iat`, `iss`,
+   `name` (portée `profile`), `nonce`, `sub` `user-kk67j`. **Le claim
+   s'appelle `auth_provider`, pas `config_name`** (source v2.14.1,
+   `pkg/oidc/provider/token.go` l. 397). Durée 600 s =
+   `tokenExpirationSeconds`. Jeton d'accès : mêmes `aud`, `iss`, `sub`,
+   `auth_provider`, plus `scope` et `token` (`token-...`) ; pas de
+   `token_kind`. Jeton de rafraîchissement : JWT RS256 (`aud`,
+   `auth_provider`, `rancher_token_hash`, `scope`, `sub`, sans `iss`), 12 h.
+   **Le rafraîchissement rend un nouvel `id_token`** (sans `nonce`, `exp` +600
+   s), un nouveau jeton d'accès et un nouveau jeton de rafraîchissement dont
+   l'échéance glisse (maintenant + 12 h) ; l'ancien jeton de rafraîchissement
+   reste utilisable (aucune rotation). `expires_in` reste en nanosecondes. Un
+   jeton Rancher fermé (`/v3/tokens?action=logout`) fait refuser tout
+   rafraîchissement : `400 access_denied "Rancher token no longer present."`.
+   Portée `groups` demandée : `302 error=invalid_scope "invalid scope:
+   groups"`, **la connexion entière échoue**. Portée `openid` seule : pas de
+   `name`, pas de jeton de rafraîchissement. Source v2.14.1 : `groups` vient
+   de `UserAttribute.GroupPrincipals` (préfixe `local://` retiré), émis dès
+   qu'il y en a, recalculé à chaque réponse (code et rafraîchissement).
+   Conséquences : `claim_mappings` sur `auth_provider` (contraintes
+   communes corrigées) ; la console ne demande `groups` que si la découverte
+   l'annonce (déjà écrit, désormais prouvé nécessaire) ; option A du point
+   283 tenue ; un ancien jeton de rafraîchissement est oublié dès qu'un
+   nouveau arrive (tâche 4).
+2. **Méthode `jwt` d'OpenBao 2.7.2 contre Rancher** : `oidc_discovery_url`
+   sans CA : 204 (certificat public de Traefik) ; avec la chaîne Let's
+   Encrypt : 204 ; avec une CA étrangère : `400 error checking oidc discovery
+   URL: ... x509: certificate signed by unknown authority` (la découverte est
+   vérifiée à l'écriture). Rôle `person` du plan relu :
+   `token_bound_cidrs ["127.0.0.1"]` (le /32 tombe, comme en 2.9.0), champs
+   propres à OpenBao `token_strictly_bind_ip`, `token_policies_template_claims`,
+   `user_claim_json_pointer` à false. Connexion avec l'`id_token` : 200,
+   politiques `[default, hops-person-abc123def456]`, métadonnées `{name
+   "Default Admin", provider local, role person}`, `renewable` true, 900 s.
+   Deuxième connexion : **même `entity_id`**. `lookup-self` : `display_name`
+   `jwt-hops-abc123def456-rmgr-user-kk67j` (`<montage>-<sub>`, comme Vault).
+   **Le jeton d'accès est accepté** (même audience, même entité, sans
+   `name`) : la garantie reste celle de la console (point 280). Sans `role`,
+   `default_role` s'applique. `capabilities-self` : `ssh-kvm` `[read]`,
+   `tf-kvm` `[create read update]`, `eso` `[create update]`, `kubeconfig`,
+   `rancher-oidc` et une autre console `[deny]`. Refus, messages exacts :
+   mauvaise audience `400 error validating token: invalid audience (aud)
+   claim: audience claim does not match any expected audience` ; autre
+   émetteur `400 error validating token: invalid issuer (iss) claim` ;
+   signature altérée `... error verifying token signature: failed to verify
+   id token signature` ; id_token expiré `... invalid expiration time (exp)
+   claim: token is expired` (encore accepté 30 s après `exp`, refusé à 140 s :
+   marge interne par défaut). Clés statiques tirées du JWKS : connexion 200 ;
+   deux clés : 200 ; clé de Rancher retirée : `400 ... no known key
+   successfully validated the token signature`. Deux sources : `400 exactly
+   one of 'jwt_validation_pubkeys', 'jwks_url', 'jwks_pairs',
+   'oidc_discovery_url', or 'provider_config' must be set` ; `jwks_pairs`
+   seul donne le même refus (cité par le message, absent de
+   `path_config.go` v2.7.2) ; `jwks_url` seul marche (troisième source,
+   sans document de découverte). `token_bound_cidrs` 10.1.2.3/32 : **la
+   connexion elle-même** est refusée (`403 permission denied`). Rôle CEL :
+   chemin `auth/<montage>/cel/role/<nom>` en 2.7.2 (`cel/roles` de la doc de
+   `main` : `404 unsupported path`), seul `pb.Auth` est déclaré (`pb.Alias` :
+   « undeclared reference ») ; un programme minimal refuse bien le jeton
+   d'accès (`CEL role 'person-cel' blocked authorization with message:
+   access token refused`) mais rend un jeton **sans entité**, sans
+   métadonnées, de 32 jours, non renouvelable. Audit : réponse de connexion
+   avec `auth.display_name`, `entity_id`, `metadata {name, provider, role}`,
+   `jwt` en `hmac-sha256` ; requêtes suivantes avec les mêmes champs et
+   `remote_address` 127.0.0.1 ; aucune occurrence `eyJ...`. Conséquences :
+   rôle CEL non retenu (pas aussi simple qu'un rôle ordinaire) ;
+   `oidc_discovery_ca_pem` facultatif quand Rancher a un certificat public ;
+   la console renouvelle le jeton OpenBao avant l'échéance de l'`id_token`
+   qu'elle a présenté, jamais après.
+3. **Groupes** (compte local seulement, `idp` non accordée) : `id_token` de
+   `hops-membre` (`u-lwpz9`) : `aud`, `auth_provider` `local`, `exp`, `iat`,
+   `iss`, `name`, `nonce`, `sub` ; **pas de `groups`**. Rancher porte un
+   fournisseur `keycloakoidc` actif (VM `idp` éteinte), non touché. Rôle avec
+   `groups_claim = "groups"` et un jeton sans ce claim : `400 failed to fetch
+   groups: "groups" claim not found in token` : **un rôle à `groups_claim`
+   refuse toute personne sans groupe** (l'administrateur local d'un Rancher
+   relié à Keycloak, par exemple). Groupe interne `hops-abc123def456-g1`
+   (politique `hops-group-abc123def456-g1`, membre = entité de
+   `hops-membre`) : `kubeconfig/harv1` passe de `[deny]` à `[read]` **sur le
+   même jeton** dès l'ajout (`identity_policies` dans `lookup-self`), revient
+   à `[deny]` au retrait. Groupe externe, éprouvé avec un JWT **synthétique**
+   signé par une clé de banc (mécanique d'OpenBao seule, aucun jeton de
+   Rancher) : alias `keycloakoidc_group://rancher-admins` ; connexion avec ce
+   groupe et un autre : politique de groupe appliquée, groupe inconnu ignoré
+   (aucun groupe créé) ; reconnexion sans le groupe : l'**ancien** jeton perd
+   aussi la capacité ; claim chaîne au lieu de liste : accepté. Conséquences :
+   groupes internes seulement en 2.10.0, `groups_claim` jamais posé
+   (point 303).
+4. **Durée et révocation** : `revoke-self` : 204, puis `lookup-self` et
+   lecture `403 permission denied`. Rôle court (20 s) : `renew-self` plafonné
+   à 20 s, jeton refusé après 25 s. Jeton `person` : `renew-self` d'une heure
+   rend 900 s et l'avertissement `TTL of "1h" exceeded the effective max_ttl
+   of "15m"; TTL value is capped accordingly`. Dix reconnexions avec
+   révocation du jeton précédent : 1,6 s, entités et alias inchangés (une
+   entité par `sub` et par montage ; celles d'un montage supprimé restent).
+   Trois `id_token` obtenus par rafraîchissements successifs : même entité.
+   Conséquence : option A du point 283 confirmée ; charge négligeable.
+5. **Gabarits** (JWT synthétiques au format des comptes de service, puis
+   réels à l'essai 7) : montage `jwt-hops-abc123def456-eso-0badc0de`, rôle et
+   politique du plan. `team-a` lit `eso/<clé>/team-a/db` (valeur témoin) et
+   liste son dossier ; sur `team-b` et sur `ssh-kvm` : 403 ; compte `default`
+   : `400 error validating claims: claim "/kubernetes.io/serviceaccount/name"
+   does not match any associated bound claim values` ; audience `vault` :
+   refus d'audience. **Jeton sans `kubernetes.io.namespace` : connexion
+   acceptée** (métadonnées `{role}` seulement) : le plan se trompait
+   (« pointeur JSON, donc obligatoire »). Le gabarit ne se résout pas et ne
+   donne rien (403 sur `team-a/db`, `eso/<clé>//db`, `eso/<clé>/db`).
+   `bound_claims_type = "glob"` avec `"/kubernetes.io/namespace": "*"` :
+   `400 error validating claims: claim "/kubernetes.io/namespace" is
+   missing`, et le nom `hops-eso` reste une égalité (pas de joker). Une
+   entité par `sub` (`system:serviceaccount:<ns>:hops-eso`), métadonnées de
+   l'alias réécrites à chaque connexion. Conséquences : option A du point 296
+   tenue ; présence du namespace exigée par `bound_claims` en glob (contraintes
+   ESO corrigées).
+6. **B1 en service** (seconde instance, configuration 2.9.0) : avant
+   élargissement, l'agent n'a rien sur `sys/auth/jwt-hops-*` ni
+   `identity/group/name/hops-*`. `b1-policies` : l'agent réécrit sa propre
+   politique (204), les capacités nouvelles valent **sur le même jeton**.
+   Sans redémarrer OpenBao (PID et heure de démarrage inchangés) : montage,
+   configuration (découverte de Rancher), politiques `hops-person` et
+   `hops-group`, rôle, groupes interne et externe par
+   `identity/group/name/<nom>` : tous 204/200. **Manques du plan** :
+   `LIST auth/<montage>/role` exige `list` ; `POST identity/group` (nom dans
+   le corps) : 403, passer par `identity/group/name/<nom>` ; la création d'un
+   alias de groupe est `POST identity/group-alias` (403 avec la politique du
+   plan), un identifiant inventé sur `identity/group-alias/id/<id>` rend
+   `400 invalid group alias ID` ; `LIST identity/group/name` : 403 (lister
+   par `identity/group/id`, permis depuis la 2.9.0). Refus attendus :
+   `sys/auth/userpass`, la politique de la console, un groupe hors préfixe
+   (`identity/group/name/evil`) : 403. **Escalade relevée** : l'agent pose
+   n'importe quelle politique sur un groupe `hops-*` (`identity/group/id/<id>`
+   avec `hops-agent-abc123def456` : 204 ; `root` seule refusée, « policies
+   cannot contain root »). `allowed_parameters` ne la ferme pas : avec
+   `policies = ["hops-group-abc123def456-*"]`, une liste JSON conforme est
+   refusée (403) et la chaîne `"hops-group-abc123def456-g1,hops-agent-abc123def456"`
+   passe (204, groupe relu avec les deux politiques). Personne sur le montage
+   posé par l'agent : connexion 200, lecture par le groupe après ajout comme
+   membre. Instantané pris après l'activation, relu par la revue de la 2.9.0
+   (code du dépôt) : `REFUSED snapshot-untrusted: the restored snapshot does
+   not match this console: auth methods ['approle/',
+   'jwt-hops-abc123def456-rmgr/', 'token/']` ; contrôle : instantané d'avant
+   `PASSED`. Conséquences : règles de l'agent corrigées (mode B1) ; l'agent
+   reste l'équivalent d'un administrateur (point 306), la revue
+   d'instantané et la liste fermée des opérations sont les gardes ; cas du
+   point 291 confirmé.
+7. **ESO sur le cluster enfant `c210` de harvlab2** : chart du jour 2.14.0
+   (`helm-chart-2.14.0`, 23/10/2026, archive sha256 `0a6d9e91...ee5e34`).
+   Noms des valeurs relevés : `installCRDs`, `crds.create*`,
+   `processClusterStore`, `processClusterExternalSecret`, `processPushSecret`,
+   `processClusterPushSecret`, `bitwarden-sdk-server.enabled` (false par
+   défaut), `serviceMonitor.enabled` (false), `webhook.create`,
+   `certController.create`, `rbac.aggregateToView` et `aggregateToEdit`
+   (true), `vault.enableTokenCache` (false). Rendu : 25 CRD, 3 déploiements,
+   **une seule image** `ghcr.io/external-secrets/external-secrets:v2.14.0` ;
+   CRD les plus grosses : `secretstores` et `clustersecretstores` (~720 Ko de
+   YAML). **Installation par CAAPH** (`HelmChartProxy`, release `eso`,
+   namespace `external-secrets`) : prête en ~45 s, trois pods en service,
+   25 CRD posées sans annotation `last-applied-configuration`, `v1` servie et
+   `v1beta1` non servie, deux webhooks de validation, réconciliateurs des
+   magasins de portée cluster et des `PushSecret` éteints par les arguments.
+   Un changement de valeurs est un `helm upgrade` (révisions 2 puis 3), CRD
+   non recréées. Émetteur et JWKS par `kubectl get --raw` avec le kubeconfig
+   de Cluster API : émetteur `https://kubernetes.default.svc.cluster.local`,
+   une clé RS256 ; accès anonyme : `401 Unauthorized` (constaté), liaison
+   `system:service-account-issuer-discovery` sur `system:serviceaccounts`.
+   Écouteur de banc `172.16.1.11:8212` (pare-feu ouvert à chaud) : joint
+   depuis un pod de `c210` (200), 8210 non joignable. Montage
+   `jwt-hops-abc123def456-eso-1d905023` (clés du JWKS), rôle et politique du
+   plan. `team-a` et `team-b` : compte `hops-eso`, `SecretStore`
+   `hops-openbao` du plan `Valid`, `ExternalSecret` `SecretSynced`, Secrets
+   égaux aux valeurs témoins (empreintes). Audit : `display_name`
+   `jwt-hops-abc123def456-eso-1d905023-system:serviceaccount:team-a:hops-eso`,
+   métadonnées `{namespace, role}`, adresse source = nœud worker
+   (172.16.2.201) ; **une connexion par réconciliation**, jeton révoqué
+   ensuite. Isolement : `ExternalSecret` de `team-a` sur le chemin de
+   `team-b` : 403 de l'OpenBao (journal d'ESO) ; `SecretStore` de `team-a`
+   qui vise le compte de `team-b` : refusé par le webhook d'ESO (« namespace
+   should either be empty or match the namespace of the SecretStore for a
+   namespaced SecretStore »). Rotation : nouvelle valeur suivie dans le
+   Secret en 16 s (`refreshInterval` 15 s). Rôle `edit` agrégé : une équipe
+   crée `ExternalSecret`, `SecretStore` et générateurs dans son namespace,
+   pas de `PushSecret` (retiré avec `processPushSecret: false`) ; le rôle
+   `edit` de Kubernetes lui donne aussi `serviceaccounts/token` et la
+   création de comptes. **Namespace non activé** (`team-c`) : une équipe en
+   `edit` crée elle-même `hops-eso` et un `SecretStore` : `Valid`, elle
+   n'atteint que `eso/<clé>/team-c/*` (vide). **`ClusterSecretStore` sans
+   namespace** dans la référence de compte : accepté par le webhook ; avec
+   `processClusterStore: true`, `Valid`, et chaque `ExternalSecret` s'y
+   authentifie avec le compte `hops-eso` de **son** namespace (`team-b` lit
+   le sien, `team-a` sur `team-b` : 403) : le plan se trompait (« un seul
+   compte pour tout le cluster »). Option B du point 304 essayée : rôle
+   `eso` avec `bound_claims_type = "glob"` et `"/kubernetes.io/namespace":
+   ["team-a", "team-b"]` : `team-a` reste `Valid` et synchronisé, `team-c`
+   passe en `InvalidProviderConfig` (journal d'ESO : `error validating
+   claims: claim "/kubernetes.io/namespace" does not match any associated
+   bound claim values`). Renouvellement des machines (`harvester-capi renew
+   --what oidc`, plan de contrôle remplacé, .200 -> .202) : JWKS identique
+   avant et après (même empreinte, même `kid`), `ExternalSecret` toujours
+   synchronisés. **Retrait** : `ownerReferences` retirées du Secret de
+   `team-a` seulement, puis `HelmChartProxy` supprimé (CAAPH lance `helm
+   uninstall`) : **blocage**, Helm supprime contrôleur et CRD ensemble, les
+   `ExternalSecret` gardent le finalizer
+   `externalsecrets.external-secrets.io/externalsecret-cleanup` que plus
+   personne ne retire ; la CRD reste en suppression (« CustomResource
+   deletion is in progress »), la release « uninstalling », CAAPH attend
+   (« The release has not been deleted yet ») plus de 10 min. Finalizers
+   retirés à la main : tout part ; le Secret de `team-b` (`ownerReferences`
+   gardées) est **supprimé** par le ramasse-miettes, celui de `team-a` est
+   **gardé** avec sa dernière valeur.
+   Conséquences : option A du point 301 (tout en 2.10.0) ; valeurs imposées
+   relevées ; plage des nœuds du cluster enfant pour `token_bound_cidrs`
+   vérifiée ; ordre de retrait complété (contraintes ESO : `ExternalSecret`
+   supprimés tant qu'ESO tourne) ; JWKS stable au renouvellement ; points
+   304, 305 et 307.
+8. **Vault 1.14.2** (essais 2 à 5 rejoués par les mêmes scripts) : même
+   comportement pour la connexion, l'entité, le `display_name`, les
+   métadonnées, les refus, `token_bound_cidrs` à la connexion,
+   `groups_claim` sans claim, les groupes, `revoke-self`, le plafond de
+   15 min, le gabarit, `bound_claims` et le glob. Écarts : CA de découverte
+   fausse `400 error checking oidc discovery URL` (sans le détail x509) ;
+   message des sources sans `jwks_pairs` ni `provider_config` ; rôles CEL
+   404 (propres à OpenBao) ; jetons `hvs.` ; nom d'entité `entity_<8hex>`
+   (OpenBao : `entity_<8hex>.root`) ; métadonnées de l'alias sans `role`.
+   Conséquence : aucune, le mode A reste valable avec Vault.
+
+Non vérifié sur nos bancs : un `id_token` portant `groups` émis par Rancher
+(VM `idp` non accordée) ; la rotation réelle de la clé de signature de
+Rancher.
+
+### Décisions nouvelles (tâche 1)
+
+| # | Sujet | Options | Ma recommandation |
+|---|---|---|---|
+| 303 | Groupes du jeton (`groups_claim`) | A groupes internes seulement en 2.10.0, `groups_claim` jamais posé ; B deux rôles (`person` sans `groups_claim`, `person-groups` avec), choisis par la console selon la présence de `groups` dans l'`id_token` ; C un seul rôle avec `groups_claim` | A : seul chemin vérifié (pas de `groups` sans la VM `idp`) ; C refuserait toute personne sans groupe (essai 3) ; B à reprendre quand un Rancher à fournisseur de groupes sera essayé |
+| 304 | Namespace non activé qui s'inscrit seul (essai 7) | A accepter : OpenBao isole par namespace, la console n'écrit de valeurs que pour les namespaces activés ; B le rôle `eso` porte la liste des namespaces activés (`bound_claims` glob sur `/kubernetes.io/namespace`), réécrite par l'agent ou par une commande à chaque activation ; C magasin de portée cluster avec `conditions` sur l'étiquette `harvester-ops.io/eso` | B : OpenBao refuse lui-même (même principe que le jeton personnel), coût d'une réécriture de rôle par activation ; A documentée en repli si le client ne veut pas de geste OpenBao par activation |
+| 305 | Forme du magasin après l'essai 7 (`ClusterSecretStore` isolé par namespace) | A un `SecretStore` par namespace activé (plan) ; B un `ClusterSecretStore` avec `conditions.namespaceSelector` sur `harvester-ops.io/eso: "on"`, compte `hops-eso` par namespace, `processClusterStore: true` | A : réconciliateur des magasins de portée cluster éteint, règle des manifestes inchangée (aucune sorte de portée cluster depuis un paquet) ; le motif du plan est corrigé, pas le choix |
+| 306 | Droits de l'agent sur les groupes (escalade de l'essai 6) | A accepter : l'agent est déjà root sur l'hôte et détient la clé de descellement (décision 271), garde par la revue d'instantané et la liste fermée d'opérations ; B l'agent ne gère jamais les groupes, l'administrateur d'OpenBao les pose par les commandes rendues même en B1 | A, en écrivant dans la doc que `allowed_parameters` ne restreint pas les politiques d'un groupe |
+| 307 | Connexion d'ESO à chaque réconciliation | A défaut d'ESO (connexion puis révocation à chaque passage), exemple d'`ExternalSecret` à `refreshInterval: 1h` ; B `vault.enableTokenCache: true` (jetons gardés en mémoire d'ESO jusqu'à 10 min, plus de révocation) | A : un jeton ne survit pas à son usage, volume d'audit maîtrisé par l'intervalle |
