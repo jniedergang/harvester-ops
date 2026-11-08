@@ -1652,8 +1652,12 @@ def service_source(kube, spec, harvester, read_creds=False):
             resolved["values"] = yaml.safe_dump(cg.flux_values(yaml.safe_load(resolved["values"] or "") or {}),
                                                 sort_keys=False)
             # banc 2.8.0 : la release allait dans `default` (namespace par
-            # défaut d'un service) ; Flux vit dans `flux-system`
-            resolved["namespace"] = cg.FLUX_NAMESPACE
+            # défaut d'un service) ; Flux vit dans `flux-system`. Une release
+            # déjà posée garde son namespace : CAAPH ne déplace pas une
+            # release, la mise à jour restait bloquée (vu sur harvlab2)
+            ns_, _, child_ = spec["cluster"].partition("/")
+            have = kube.get(sv.K_HCP, ns_, cg.SERVICE)
+            resolved["namespace"] = ((have or {}).get("spec") or {}).get("namespace") or cg.FLUX_NAMESPACE
     except ValueError as e:
         return spec, found + [sv.finding("invalid-values", "block", message=str(e)[:200])], None
     if not any((p.get("package"), p.get("version")) == (src["package"], src["version"])
