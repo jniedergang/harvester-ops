@@ -164,6 +164,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - **Empty the cache** applies to the console process; each tool run logs in
   and leaves its token to expire (1 h period).
 - Restoring by hand does not check the console's running actions.
+- The restore review compares `default` only once its hash is recorded
+  (install or first policy refresh; a failed read is logged and retried at
+  the next refresh).
 - `snapshot_time` is UTC; the screens show local times.
 - Two consoles with the same identifier on a shared mode A server sweep each
   other's keys and orphans.

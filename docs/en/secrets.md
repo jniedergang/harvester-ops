@@ -220,7 +220,9 @@ aside for 7 days (`/var/lib/harvester-ops-openbao.old-<UTC stamp>`), starts a
 fresh instance with the key of the snapshot, restores it, and reviews the
 restored configuration against an **allowlist** of what this console
 expects: exact policy names and texts (the `default` policy compared with
-the hash recorded at install), auth methods `token` and `approle` only, the
+the hash recorded at install or at the first policy refresh; if that read
+failed, the agent log says so and `default` is not compared until the next
+refresh), auth methods `token` and `approle` only, the
 two AppRole roles with their policies, address ranges and single
 `secret_id`, the OpenTofu token role, no identity group, identity entities
 without policies whose aliases are the two AppRole roles or `tf-<declaration>`

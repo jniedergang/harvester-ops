@@ -231,7 +231,10 @@ pour 7 jours (`/var/lib/harvester-ops-openbao.old-<UTC stamp>`), démarre
 une instance neuve avec la clé de l'instantané et le restaure. Puis il
 relit la configuration restaurée face à une **liste permise** de ce que
 cette console attend : noms et textes exacts des politiques (la politique
-`default` comparée à l'empreinte notée à l'installation), méthodes
+`default` comparée à l'empreinte notée à l'installation ou à la première
+remise à niveau des politiques ; si cette lecture a échoué, le journal de
+l'agent le dit et `default` n'est pas comparée avant la remise à niveau
+suivante), méthodes
 d'authentification `token` et `approle` seulement, les deux rôles AppRole
 avec leurs politiques, plages d'adresses et `secret_id` unique, le rôle de
 jeton d'OpenTofu, aucun groupe d'identité, des entités d'identité sans
