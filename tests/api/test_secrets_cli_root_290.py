@@ -171,7 +171,8 @@ def test_drop_privileges_refused_without_the_account(monkeypatch):
 def test_forked_child_reaches_the_agent_only_through_the_parent(monkeypatch, capfd):
     """Real fork, drop recorded: the child's request goes through the pipe,
     the root parent answers with the agent's state and sets the requester."""
-    monkeypatch.setattr(hsc, "_drop_privileges", lambda: None)
+    monkeypatch.setattr(hsc, "_drop_privileges", lambda: os.environ.__setitem__("HOPS_TEST_DROPPED", "1"))
+    monkeypatch.delenv("HOPS_TEST_DROPPED", raising=False)
     seen = []
 
     def handler(req):
@@ -180,13 +181,14 @@ def test_forked_child_reaches_the_agent_only_through_the_parent(monkeypatch, cap
 
     def child():
         st = hsc.AGENT_CHANNEL({"op": "status", "id": "0123abcd", "requested_by": "forged"})
-        print(json.dumps({"child": st["state"]}))
+        print(json.dumps({"child": st["state"], "dropped": os.environ.get("HOPS_TEST_DROPPED")}))
         return 3
     monkeypatch.setenv("SUDO_USER", "alice")
     rc = hsc._spawn_unprivileged(child, handler)
     assert rc == 3
     assert seen == [{"op": "status", "id": "0123abcd", "requested_by": "alice"}]
-    assert '{"child": "done"}' in capfd.readouterr().out
+    assert '{"child": "done", "dropped": "1"}' in capfd.readouterr().out     # droits quittés avant fn
+    assert "HOPS_TEST_DROPPED" not in os.environ                               # dans le fils seulement
 
 
 # ---------------------------------------------------------------------------

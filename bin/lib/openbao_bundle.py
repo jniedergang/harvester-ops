@@ -339,9 +339,6 @@ def check_signature(path, index_digest, key, workdir, openssl="openssl"):
             payload = base64.b64decode(e["payload"], validate=True)
             sig = base64.b64decode(e["signature"], validate=True)
             crit = json.loads(payload)["critical"]
-            if not isinstance(crit, dict) or not isinstance(crit.get("image"), dict) \
-                    or not isinstance(crit.get("identity"), dict):
-                continue
             if crit.get("type") != "cosign container image signature" \
                     or crit["image"]["docker-manifest-digest"] != index_digest \
                     or _reference_repo(crit["identity"]["docker-reference"]) != DEFAULT_REPOSITORY:
