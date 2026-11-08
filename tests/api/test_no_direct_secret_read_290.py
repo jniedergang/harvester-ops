@@ -43,6 +43,7 @@ ALLOWED = {
         ("web/app.py", "_baremetal_install_steps"),          # kubeconfig neuf d'une installation (écrivain)
         ("web/app.py", "api_clusters_create"), ("web/app.py", "api_clusters_update"),
         ("web/app.py", "api_clusters_delete"),               # gestion de la déclaration
+        ("web/app.py", "_cluster_secrets_rename"),           # référence déplacée au renommage (revue C1)
         ("bin/lib/cluster_decl.py", "_map_paths"), ("bin/lib/cluster_decl.py", "materialize"),
         ("bin/lib/kube_rest.py", "run"),                     # option --kubeconfig de kubectl
     },
@@ -54,6 +55,7 @@ ALLOWED = {
         ("web/app.py", "_bm_join_pubkey"),                   # drapeau `generated`, puis le lecteur
         ("web/app.py", "_validate_cluster_payload"), ("web/app.py", "api_clusters_create"),
         ("web/app.py", "api_clusters_update"), ("web/app.py", "api_clusters_delete"),
+        ("web/app.py", "_cluster_secrets_rename"),           # référence déplacée au renommage (revue C1)
         ("bin/lib/cluster_decl.py", "_map_paths"), ("bin/lib/cluster_decl.py", "materialize"),
         ("bin/lib/node_images.py", "ssh_options"),           # par secret_store.path_of
     },
@@ -62,6 +64,7 @@ ALLOWED = {
         ("web/app.py", "_kvm_add_request"),                  # chemin dérivé du nom (écrivains)
         ("web/app.py", "_bm_cluster_files"), ("web/app.py", "api_clusters_create"),
         ("web/app.py", "api_clusters_update"), ("web/app.py", "api_clusters_upload_sshkey"),
+        ("web/app.py", "_bm_declare_cluster"),               # repli persistant d'une copie tmpfs (revue M6)
         ("bin/lib/secret_classes.py", "local_location"),
         ("bin/lib/secret_store.py", "restore_local"),        # chemin dérivé du nom (retour en local)
     },

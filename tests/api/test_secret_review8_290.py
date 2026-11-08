@@ -223,3 +223,187 @@ def test_originals_registry_paths_stay_in_the_state(env, capsys, tmp_path, bad):
     with pytest.raises(ValueError):
         fs(env).erase_original("ssh-kvm", "k1", "private_key")
     assert victim.read_text() == "keep"
+
+
+# ---------------------------------------------------------------------------
+# C1 : secrets rangés par nom, renommage et propriété du chemin
+# ---------------------------------------------------------------------------
+import io  # noqa: E402
+
+import yaml  # noqa: E402
+
+KC2 = "apiVersion: v1\nkind: Config\nclusters: []\n# kc-other-cluster\n"
+
+
+def _decl(st, name):
+    return yaml.safe_load((st / "clusters.d" / f"{name}.yaml").read_text())
+
+
+def _set_decl(st, decl_name, **kw):
+    name = decl_name
+    doc = _decl(st, name) if (st / "clusters.d" / f"{name}.yaml").exists() else {"name": name, "nodes": []}
+    for k, v in kw.items():
+        if k == "key":
+            doc.setdefault("ssh", {})["key"] = v
+        else:
+            doc[k] = v
+    kvm_decl.write_private(st / "clusters.d" / f"{name}.yaml", yaml.safe_dump(doc, sort_keys=False))
+
+
+def _migrated_h1(appenv):
+    """h1 avec kubeconfig et clé dans OpenBao (références dans la déclaration)."""
+    st, s = appenv["state"], appenv["store"]
+    kc = s.put("kubeconfig", "h1", "kubeconfig", KC)
+    key = s.put("ssh-cluster", "h1", "private_key", KEY)
+    _set_decl(st, "h1", kubeconfig=kc, key=key)
+    (st / "kubeconfigs" / "h1.yaml").unlink()
+    (st / "ssh" / "h1_id").unlink()
+
+
+def _rename(c, old, new):
+    return c.put(f"/api/clusters/{old}", json={
+        "name": new, "nodes": [{"hostname": "n1", "ip": "10.0.0.1", "role": "control-plane"}],
+        "ssh": {"user": "rancher"}})
+
+
+def _gone(appenv, cls, path):
+    e = appenv["srv"].kv.get(("harvester-ops", f"{PREFIX}/{cls}/{path}"))
+    return e is None or not e["versions"].get(e["current"])
+
+
+def test_rename_moves_openbao_secrets_and_the_old_name_is_free(appenv):
+    w, st = appenv["wapp"], appenv["state"]
+    _migrated_h1(appenv)
+    with w.app.test_client() as c:
+        r = _rename(c, "h1", "hb")
+        assert r.status_code == 200, r.get_json()
+        d = _decl(st, "hb")
+        assert d["kubeconfig"] == "openbao:kubeconfig/hb#kubeconfig"
+        assert d["ssh"]["key"] == "openbao:ssh-cluster/hb#private_key"
+        assert bao_value(appenv, "kubeconfig", "hb", "kubeconfig") == KC
+        assert bao_value(appenv, "ssh-cluster", "hb", "private_key") == KEY
+        assert _gone(appenv, "kubeconfig", "h1") and _gone(appenv, "ssh-cluster", "h1")
+        assert (st / "ssh" / "hb_id.pub").is_file() and not (st / "ssh" / "h1_id.pub").exists()
+        # le nom libéré est repris : hb garde ses identifiants
+        payload = {"name": "h1", "nodes": [{"hostname": "n1", "ip": "10.0.0.9", "role": "control-plane"}],
+                   "ssh": {"user": "rancher"}}
+        r = c.post("/api/clusters", data={"payload": json.dumps(payload),
+                                          "kubeconfig": (io.BytesIO(KC2.encode()), "kc.yaml")},
+                   content_type="multipart/form-data")
+        assert r.status_code == 201, r.get_json()
+        assert c.delete("/api/clusters/h1").status_code == 200
+    assert bao_value(appenv, "kubeconfig", "hb", "kubeconfig") == KC
+
+
+def test_rename_after_migration_moves_the_kept_original_and_restores(appenv, capsys):
+    w, st = appenv["wapp"], appenv["state"]
+    doc = settings(appenv)
+    doc["migrated"] = {"rancher-oidc": {"at": 1}}
+    (st / ss.SETTINGS_FILE).write_text(json.dumps(doc))
+    assert migrate("kubeconfig", capsys)[0] == 0
+    appenv["store"]._sig = None
+    with w.app.test_client() as c:
+        assert _rename(c, "h1", "hb").status_code == 200
+    reg = json.loads((st / ss.ORIGINALS_FILE).read_text())
+    assert "kubeconfig/h1#kubeconfig" not in reg
+    assert reg["kubeconfig/hb#kubeconfig"]["file"] == "kubeconfigs/hb.yaml.migrated"
+    assert (st / "kubeconfigs" / "hb.yaml.migrated").is_file() and not (st / "kubeconfigs" / "h1.yaml.migrated").exists()
+    # retour en local : hb reprend SES octets, à son emplacement
+    assert migrate("kubeconfig", capsys, "local")[0] == 0
+    assert (st / "kubeconfigs" / "hb.yaml").read_text() == CLASSES["kubeconfig"][0][2]
+    assert _decl(st, "hb")["kubeconfig"] == "kubeconfigs/hb.yaml"
+
+
+def test_rename_refused_when_the_new_name_holds_another_secret(appenv):
+    w, st = appenv["wapp"], appenv["state"]
+    _migrated_h1(appenv)
+    appenv["srv"].put_raw("harvester-ops", f"{PREFIX}/kubeconfig/hb", {"kubeconfig": "orphan"})
+    with w.app.test_client() as c:
+        r = _rename(c, "h1", "hb")
+    assert r.status_code == 409 and r.get_json()["code"] == "openbao-cas-conflict"
+    assert _decl(st, "h1")["kubeconfig"] == "openbao:kubeconfig/h1#kubeconfig"   # rien changé
+    assert bao_value(appenv, "kubeconfig", "h1", "kubeconfig") == KC
+    assert bao_value(appenv, "kubeconfig", "hb", "kubeconfig") == "orphan"
+
+
+def test_path_of_another_declaration_is_never_written_or_removed(appenv):
+    """Déclaration d'avant la correction : hb désigne encore kubeconfig/h1.
+    Créer h1 ou supprimer un autre cluster qui désigne ce chemin ne touche
+    jamais au secret de hb."""
+    w, st = appenv["wapp"], appenv["state"]
+    _migrated_h1(appenv)
+    os.rename(st / "clusters.d" / "h1.yaml", st / "clusters.d" / "hb.yaml")
+    _set_decl(st, "hb", name="hb")
+    with w.app.test_client() as c:
+        payload = {"name": "h1", "nodes": [{"hostname": "n1", "ip": "10.0.0.9", "role": "control-plane"}],
+                   "ssh": {"user": "rancher"}}
+        r = c.post("/api/clusters", data={"payload": json.dumps(payload),
+                                          "kubeconfig": (io.BytesIO(KC2.encode()), "kc.yaml")},
+                   content_type="multipart/form-data")
+        assert r.status_code == 409 and r.get_json()["code"] == "secret-path-owned"
+        assert "kc-other" not in json.dumps(r.get_json())
+        # une seconde déclaration qui désigne le même chemin, supprimée
+        _set_decl(st, "hc", kubeconfig="openbao:kubeconfig/h1#kubeconfig")
+        assert c.delete("/api/clusters/hc").status_code == 200
+    assert bao_value(appenv, "kubeconfig", "h1", "kubeconfig") == KC
+
+
+def test_hook_header_path_of_a_renamed_action_is_not_overwritten(appenv):
+    w = appenv["wapp"]
+    s = appenv["store"]
+    import replication_db as rdb
+    ref = s.put("replication-hook", "rp-1/pre", sc.header_field("Authorization"), "Bearer old")
+    conn = rdb.connect(appenv["state"] / "replication.db")
+    try:
+        conn.execute("UPDATE plans SET options = ? WHERE id = 'rp-1'", (json.dumps(
+            {"hooks": [{"name": "post", "url": "https://h", "secret_headers": {"Authorization": ref}}]}),))
+    finally:
+        conn.close()
+    with pytest.raises(ss.SecretError) as e:
+        w._repl_hooks_to_refs([{"name": "pre", "url": "https://h",
+                                "secret_headers": {"Authorization": "Bearer new"}}], "rp-1")
+    assert e.value.code == "secret-path-owned"
+    assert bao_value(appenv, "replication-hook", "rp-1/pre", sc.header_field("Authorization")) == "Bearer old"
+
+
+def test_bare_metal_name_taken_during_the_install(appenv, monkeypatch):
+    w, st = appenv["wapp"], appenv["state"]
+    run = appenv["run"]
+    monkeypatch.setattr(ss, "secret_files_dir", lambda settings=None, mountinfo=None, env=None: run)
+    kc = run / "bm-h1-kubeconfig"
+    kc.write_text(KC2)
+    key = run / "bm-h1-key"
+    key.write_text(KEY)
+    with pytest.raises(ValueError, match="already exists"):
+        w._bm_declare_cluster("h1", kc, key, "n1", "10.0.0.5")
+    assert not [k for k in appenv["srv"].kv if k[1].endswith("/kubeconfig/h1")]
+    assert (st / "kubeconfigs" / "h1.yaml").read_text() == CLASSES["kubeconfig"][0][2]
+
+
+def test_bare_metal_copy_not_taken_by_openbao_goes_to_the_persistent_place(appenv, monkeypatch):
+    """Revue M6 : classe rendue au local pendant l'installation -> la copie
+    tmpfs est écrite à l'emplacement persistant, jamais laissée sur tmpfs."""
+    w, st = appenv["wapp"], appenv["state"]
+    run = appenv["run"]
+    kc = run / "bm-bm2-kubeconfig"
+    kc.write_text(KC2)
+    key = run / "bm-bm2-key"
+    key.write_text(KEY)
+    doc = settings(appenv)
+    doc["migrated"] = {}
+    (st / ss.SETTINGS_FILE).write_text(json.dumps(doc))
+    appenv["store"]._sig = None
+    w._bm_declare_cluster("bm2", kc, key, "n1", "10.0.0.5")
+    d = _decl(st, "bm2")
+    assert (st / d["kubeconfig"]).read_text() == KC2 and (st / d["ssh"]["key"]).read_text() == KEY
+    assert d["kubeconfig"] == "kubeconfigs/bm2.yaml" and d["ssh"]["key"] == "ssh/bm2_id"
+    assert not kc.exists() and not key.exists()
+
+
+@pytest.mark.parametrize("code,status", [("secret-too-big", 413), ("class-not-migratable", 400),
+                                         ("secret-path-owned", 409), ("openbao-unreachable", 503)])
+def test_secret_error_status(appenv, code, status):
+    w = appenv["wapp"]
+    with w.app.test_request_context():
+        r, st = w._secret_store_refused(ss.SecretError(code, "kubeconfig", "h1"))
+    assert st == status and r.get_json()["code"] == code

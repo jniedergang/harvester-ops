@@ -1531,8 +1531,14 @@ def _identity_delegation_refused(e):
 @app.errorhandler(_sst.SecretError)
 def _secret_store_refused(e):
     """2.9.0 : un secret illisible ou une écriture refusée par OpenBao ; le
-    message porte la classe, le nom et le code, jamais une valeur."""
-    return jsonify({"error": str(e)[:300], "code": e.code}), 503
+    message porte la classe, le nom et le code, jamais une valeur. Erreurs
+    du client (valeur trop grosse, classe non migrable, chemin désigné par
+    une autre déclaration) : 413, 400, 409 (revue M9 de la tâche 8)."""
+    status = _SECRET_ERROR_STATUS.get(e.code, 503)
+    return jsonify({"error": str(e)[:300], "code": e.code}), status
+
+
+_SECRET_ERROR_STATUS = {"secret-too-big": 413, "class-not-migratable": 400, "secret-path-owned": 409}
 
 
 def _secret_migrated(cls):
@@ -6816,19 +6822,29 @@ def _bm_declare_cluster(name, kubeconfig, key, hostname, ip):
     # clé créée par la console : un nœud qui rejoint reçoit la même
     cluster["ssh"]["generated"] = True
     # 2.9.0 tâche 8 : classes migrées -> la déclaration porte les références
-    # (copies de travail tmpfs effacées une fois la déclaration écrite)
+    # (copies de travail tmpfs effacées une fois la déclaration écrite).
+    # Revue C1 : le nom est vérifié AVANT d'écrire dans OpenBao, sous le
+    # verrou des déclarations (un cluster du même nom créé pendant les ~20
+    # min de l'installation garde son secret) ; revue M6 : une copie tmpfs
+    # que OpenBao n'a pas prise (classe rendue au local, valeur refusée)
+    # est écrite à l'emplacement persistant d'avant, jamais laissée sur tmpfs
     moved = []
-    for cls, field, src, setter in (
-            ("kubeconfig", "kubeconfig", Path(kubeconfig), lambda r: cluster.__setitem__("kubeconfig", r)),
-            ("ssh-cluster", "private_key", Path(key), lambda r: cluster["ssh"].__setitem__("key", r))):
-        if _secret_migrated(cls):
-            ref = _secret_put(cls, name, field, src.read_text())
-            if ref:
-                setter(ref)
-                moved.append(src)
     with CONFIG_LOCK:
         if any(c.get("name") == name for c in load_config().get("clusters", [])):
             raise ValueError(f"cluster '{name}' already exists")
+        for cls, field, src, setter, keep in (
+                ("kubeconfig", "kubeconfig", Path(kubeconfig), lambda r: cluster.__setitem__("kubeconfig", r),
+                 _state_kubeconfigs_dir() / f"{name}.yaml"),
+                ("ssh-cluster", "private_key", Path(key), lambda r: cluster["ssh"].__setitem__("key", r),
+                 _state_ssh_dir() / f"{name}_id")):
+            ref = _secret_put(cls, name, field, src.read_text()) if _secret_migrated(cls) else None
+            if ref:
+                setter(ref)
+                moved.append(src)
+            elif src.name.startswith("bm-") and src != keep:
+                _bm_write_private(keep, src.read_bytes())
+                setter(str(keep))
+                moved.append(src)
         _write_console_cluster(cluster)
     for src in moved:
         src.unlink(missing_ok=True)
@@ -13281,9 +13297,20 @@ def api_clusters_update(name):
         if original.get("folder") is not None:
             cluster["folder"] = original["folder"]
         # Rename handling: if cluster name changed, move kubeconfig/sshkey files
+        moved_refs = []
         if cluster["name"] != name:
             if any(c.get("name") == cluster["name"] for c in load_config().get("clusters", [])):
                 return jsonify({"error": f"cluster '{cluster['name']}' already exists"}), 409
+            # 2.9.0 (revue C1 de la tâche 8) : un secret rangé dans OpenBao
+            # sous l'ancien nom suit le cluster comme ses fichiers locaux
+            # (copie vérifiée sous le nouveau nom, original gardé déplacé,
+            # ancien chemin retiré après l'écriture de la déclaration)
+            try:
+                moved_refs = _cluster_secrets_rename(name, cluster)
+            except (_sst.SecretError, _sst.SecretMissing) as e:
+                return jsonify({"error": f"cluster secrets not moved to the new name: "
+                                         f"{getattr(e, 'code', 'openbao-missing')}",
+                                "code": getattr(e, "code", "openbao-missing")}), 409
             old_kc = Path(cluster["kubeconfig"])
             if old_kc.exists() and old_kc.is_relative_to(kc_dir):
                 new_kc = kc_dir / f"{cluster['name']}.yaml"
@@ -13293,7 +13320,13 @@ def api_clusters_update(name):
                 except OSError:
                     pass
             old_key = Path(cluster["ssh"].get("key") or "")
-            if old_key.exists() and old_key.is_relative_to(ssh_dir):
+            if any(cls == "ssh-cluster" for cls, _old, _new in moved_refs):
+                # clé dans OpenBao : sa publique et les clés d'hôte vues suivent
+                for old_sib, new_sib in ((f"{name}_id.pub", f"{cluster['name']}_id.pub"),
+                                         (f"{name}_known_hosts", f"{cluster['name']}_known_hosts")):
+                    with contextlib.suppress(OSError):
+                        (ssh_dir / old_sib).rename(ssh_dir / new_sib)
+            elif old_key.exists() and old_key.is_relative_to(ssh_dir):
                 new_key = ssh_dir / f"{cluster['name']}_id"
                 try:
                     old_key.rename(new_key)
@@ -13308,8 +13341,44 @@ def api_clusters_update(name):
                             (ssh_dir / old_sib).rename(ssh_dir / new_sib)
                         except OSError:
                             pass
-        _save_cluster(origin, cluster, raw, idx, old_name=name)
+        try:
+            _save_cluster(origin, cluster, raw, idx, old_name=name)
+        except BaseException:
+            for _cls, _old, new_ref in moved_refs:   # copies sous le nouveau nom retirées
+                _secret_forget(new_ref)
+            raise
+    for cls, old_ref, _new in moved_refs:
+        _secret_forget(old_ref)
+        with contextlib.suppress(Exception):
+            _sst.FileStore(_state_dir()).rename_original(cls, name, cluster["name"], _ssc.FIELDS[cls])
     return jsonify({"cluster": dict(cluster, origin=origin)})
+
+
+def _cluster_secrets_rename(old_name, cluster):
+    """Secrets d'un cluster renommé rangés dans OpenBao sous l'ancien nom :
+    copiés sous le nouveau (`cas=0`, relus), la déclaration `cluster` porte
+    les nouvelles références. Rend [(classe, ancienne, nouvelle)]. Un échec
+    défait les copies déjà faites et remonte (SecretError)."""
+    done = []
+    slots = (("kubeconfig", lambda: cluster.get("kubeconfig"), lambda r: cluster.__setitem__("kubeconfig", r)),
+             ("ssh-cluster", lambda: (cluster.get("ssh") or {}).get("key"),
+              lambda r: cluster.setdefault("ssh", {}).__setitem__("key", r)))
+    try:
+        for cls, get, put in slots:
+            ref = get()
+            if not (isinstance(ref, str) and _sst.is_openbao_ref(ref)):
+                continue
+            _c, path, _f = _sst.parse_ref(ref)
+            if path != old_name:
+                continue
+            new_ref = _sst.store().move(ref, cluster["name"], actor=_secret_actor())
+            put(new_ref)
+            done.append((cls, ref, new_ref))
+    except BaseException:
+        for _cls, _old, new_ref in done:
+            _secret_forget(new_ref)
+        raise
+    return done
 
 
 @app.route("/api/clusters/<name>", methods=["DELETE"])
@@ -13345,12 +13414,16 @@ def api_clusters_delete(name):
             _atomic_write_config(raw)
         else:
             _delete_console_cluster(name)
-            # 2.9.0 : secrets migrés de ce cluster retirés d'OpenBao, originaux gardés effacés
-            for cls, field, value in (("kubeconfig", "kubeconfig", removed.get("kubeconfig")),
-                                      ("ssh-cluster", "private_key", (removed.get("ssh") or {}).get("key"))):
-                _secret_forget(value)
-                with contextlib.suppress(Exception):
-                    _sst.FileStore(_state_dir()).erase_original(cls, name, field)
+    if origin != "config":
+        # 2.9.0 : secrets migrés de ce cluster retirés d'OpenBao (hors du
+        # verrou des déclarations : OpenBao coupé ne bloque pas les autres
+        # écritures, revue M10), originaux gardés effacés ; un chemin qu'une
+        # autre déclaration désigne n'est jamais retiré (revue C1)
+        for cls, field, value in (("kubeconfig", "kubeconfig", removed.get("kubeconfig")),
+                                  ("ssh-cluster", "private_key", (removed.get("ssh") or {}).get("key"))):
+            _secret_forget(value)
+            with contextlib.suppress(Exception):
+                _sst.FileStore(_state_dir()).erase_original(cls, name, field)
     return jsonify({"removed": name})
 
 

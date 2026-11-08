@@ -867,6 +867,41 @@ class FileStore:
             self._originals_save(doc)
         return True
 
+    def ref_users(self, ref):
+        """Noms (chemins) dont la valeur locale est exactement `ref` :
+        déclarations de clusters ou d'hôtes, actions annexes, etc."""
+        try:
+            _b, cls, _path, _field = parse_ref_full(ref)
+        except ValueError:
+            return []
+        return [p for p, f in self.list_local(cls) if self.read_local(cls, p, f) == ref]
+
+    def rename_original(self, cls, old, new, field):
+        """L'original gardé d'un secret suit le renommage de son cluster :
+        entrée du registre et `<fichier>.migrated` à l'emplacement du
+        nouveau nom quand il était à l'emplacement de l'ancien."""
+        import kvm_decl
+        base = self._base(cls)
+        with self._originals_lock():
+            doc = self._originals_doc()
+            ent = doc.pop(f"{cls}/{old}#{field}", None)
+            if not ent:
+                return False
+            old_default = Path(os.path.relpath(self.location(cls, old, field)[1], base)).as_posix()
+            if ent.get("dest") == old_default:
+                new_dest = self.location(cls, new, field)[1]
+                new_mig = new_dest.with_name(new_dest.name + MIGRATED_SUFFIX)
+                src = self._inside(cls, ent["file"])
+                if src.is_file():
+                    kvm_decl.write_private(new_mig, src.read_bytes())
+                    _unlink(src)
+                ent["dest"] = Path(os.path.relpath(new_dest, base)).as_posix()
+                ent["file"] = Path(os.path.relpath(new_mig, base)).as_posix()
+            ent["path"] = new
+            doc[f"{cls}/{new}#{field}"] = ent
+            self._originals_save(doc)
+        return True
+
     def original_value(self, cls, path, field):
         """Valeur de l'original gardé (telle que `read_local` la rendrait),
         None s'il n'y en a pas : la confirmation n'efface un original dont
@@ -1099,6 +1134,41 @@ class OpenBaoStore:
             self._cache[ref] = (value, self._clock())
         self.last_metadata_error = getattr(written, "metadata_error", None)
         return ref
+
+    def copy_new(self, ref, new_path, actor=None, action=None):
+        """Copie le secret `ref` vers `new_path` (même classe, même champ),
+        écrit avec `cas=0` : jamais par-dessus une autre valeur ; relu hors
+        cache et comparé par SHA-256 avant de rendre la nouvelle référence
+        (renommage d'un cluster, revue C1 de la tâche 8). La source n'est
+        pas touchée : l'appelant la retire une fois la déclaration réécrite."""
+        import hashlib
+        import openbao_client as oc
+        _b, cls, path, field = parse_ref_full(ref)
+        new_ref = make_ref(cls, new_path, field, "openbao")
+        data, _m = self._read(cls, path, actor, action)
+        if not data or field not in data:
+            raise SecretMissing(ref)
+        value = data[field]
+        c = self._client(actor, action)
+        kv = self._kv(cls, new_path)
+        try:
+            try:
+                c.kv_put(self.mount, kv, {field: value}, cas=0,
+                         custom_metadata=version_metadata({}, 1, cls, actor, action))
+            except oc.OpenBaoError as e:
+                if e.code != "openbao-cas-conflict":
+                    raise
+        except oc.OpenBaoError as e:
+            raise (self._failed(e, cls, new_path) or SecretError(e.code, cls, new_path, e.detail)) from None
+        with self._lock:
+            self._cache.pop(new_ref, None)
+        back, _m = self._read(cls, new_path, actor, action)
+        sha = lambda v: hashlib.sha256(str(v).encode()).hexdigest()   # noqa: E731
+        if not back or field not in back or sha(back[field]) != sha(value):
+            raise SecretError("openbao-cas-conflict", cls, new_path,
+                              "another value is already stored under the new name")
+        self._ok()
+        return new_ref
 
     def _metadata(self, c, kv):
         import openbao_client as oc
@@ -1497,6 +1567,7 @@ class MultiStore(LocalStore):
         make_ref(cls, path, field)
         bao = self.openbao                          # une seule lecture (revue M9)
         if bao is not None and cls in (self.settings.get("migrated") or {}):
+            self._refuse_owned(make_ref(cls, path, field, "openbao"), "written")
             return bao.put(cls, path, field, value, actor=actor, action=action)
         return self.files.put(cls, path, field, value)
 
@@ -1518,9 +1589,31 @@ class MultiStore(LocalStore):
             return self.get(v, actor)
         return v
 
+    def _refuse_owned(self, ref, what):
+        """Revue C1 de la tâche 8 : un secret rangé par NOM (cluster, hôte,
+        action annexe) n'est jamais écrit ni retiré quand une AUTRE
+        déclaration désigne ce chemin (cluster renommé dont le secret n'a
+        pas suivi, nom repris entre-temps) : ce serait un croisement
+        d'identifiants ou une perte."""
+        _b, cls, path, _f = parse_ref_full(ref)
+        if not CLASSES.get(cls, {}).get("persist"):
+            return
+        others = [u for u in self.files.ref_users(ref) if u != path]
+        if others:
+            raise SecretError("secret-path-owned", cls, path,
+                              f"not {what}: the declaration of {others[0]} uses this secret")
+
+    def move(self, ref, new_path, actor=None, action=None):
+        """Copie vérifiée du secret `ref` sous `new_path` (renommage) ; rend
+        la nouvelle référence. La source reste jusqu'à `delete`."""
+        _b, cls, _p, _f = parse_ref_full(ref)
+        self._refuse_owned(make_ref(cls, new_path, _f, "openbao"), "written")
+        return self._need_bao(cls).copy_new(ref, new_path, actor=actor, action=action)
+
     def delete(self, ref, actor=None, action=None):
         backend, cls, _path, _f = parse_ref_full(ref)
         if backend == "openbao":
+            self._refuse_owned(ref, "removed")
             return self._need_bao(cls).delete(ref, actor=actor, action=action)
         if not CLASSES[cls]["persist"]:
             return super().delete(ref)
