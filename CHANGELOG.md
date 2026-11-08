@@ -65,8 +65,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - **Restore review by allowlist**: exact names and texts of the policies
   (`default` compared with the hash recorded at install), auth methods,
   AppRole roles with their policies, address ranges and single
-  `secret_id`, token roles, no identity group, mounts and audit device;
-  then every token of the snapshot is revoked.
+  `secret_id`, token roles, no identity group, identity entities without
+  policies and with aliases on `approle/` (the two roles) or `token/`
+  (`tf-<declaration>`) only, no namespace, mounts and audit device; then
+  every token of the snapshot is revoked.
 - **OpenTofu states encrypted by transit**: one key per declaration, child
   token limited to that key by an entity alias template, migration of a
   clear state, `state pull` / `state push -` for moves, **Put back in
@@ -169,8 +171,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 
 ### Tests
 - API: client, store, classes, policies, agent, CLI and root drop, routes,
-  migration, rotation, snapshots and allowlist review (16 crafted snapshots
-  refused), preflight, rollback guard, admin-only actions, encrypted
+  migration, rotation, snapshots and allowlist review (23 crafted snapshots
+  refused, entity policies and aliases among them), preflight, rollback guard, admin-only actions, encrypted
   states, plan secrets; fake OpenBao servers updated with the real messages
   seen on OpenBao 2.7.2. E2E: secret store tabs, assistant with the real
   check output, banner, restore preflight, plan resume.
@@ -186,6 +188,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   cache warm then cold, sealed, console tokens revoked (login again),
   policy narrowed to one class, audit log full (`openbao-internal`, back at
   once); audit entries found by `X-Hops-Action`.
+- Restore review against a real OpenBao 2.7.2 (rootless, raft): a genuine
+  snapshot with the entities created by real AppRole logins and a `tf-d1`
+  child token passes; a snapshot giving the agent policy to the console
+  AppRole entity, and one with a `tf-x` entity alias carrying a policy, are
+  both refused (the review before this fix let both through).
 - Mode A on Vault 1.14.2: same checks, activation, migration and return;
   Vault 1.17.6: activation and the acknowledgement screen.
 - OpenTofu states encrypted on harvlab2 (plan and apply of real resources,

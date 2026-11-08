@@ -20,6 +20,8 @@ path "auth/approle/role/hops-agent-abc123def456/secret-id/lookup" { capabilities
 path "auth/token/roles" { capabilities = ["list"] }
 path "auth/token/roles/*" { capabilities = ["read"] }
 path "identity/group/id" { capabilities = ["list"] }
+path "identity/entity/id" { capabilities = ["list"] }
+path "sys/namespaces" { capabilities = ["list"] }
 path "sys/mounts" { capabilities = ["read"] }
 path "sys/audit" { capabilities = ["read", "sudo"] }
 path "auth/token/revoke-accessor" { capabilities = ["update"] }

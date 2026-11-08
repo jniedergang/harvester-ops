@@ -600,7 +600,10 @@ def test_tf_entity_removed_by_its_alias(env):
     t = a.agent_client()
     with pytest.raises(oc.OpenBaoError):
         t._call("GET", "identity/entity/name/tf-d1")
-    assert a.remove_tf_entity("d1") is True and not srv.entities
+    # (les connexions AppRole créent aussi les entités de la console et de
+    # l'agent, comme OpenBao)
+    assert a.remove_tf_entity("d1") is True
+    assert not [e for e in srv.entities.values() if any(n.startswith("tf-") for _a, n in e["aliases"])]
     assert a.remove_tf_entity("d1") is False
     with pytest.raises(ValueError):
         a.remove_tf_entity("../d1")

@@ -791,7 +791,8 @@ Wait for running actions, or acknowledge the list.
 ### A restore ends with "snapshot-untrusted"
 The restored configuration does not match what this console expects (the
 message names the item: a policy, an auth method, a role, a `secret_id`, a
-token role, a group, a mount, an audit device, a token policy). The previous
+token role, a group, an identity entity with policies or an unexpected alias,
+a namespace, a mount, an audit device, a token policy). The previous
 volume is back and nothing changed. A snapshot of another console, or one
 modified outside harvops, is refused on purpose.
 

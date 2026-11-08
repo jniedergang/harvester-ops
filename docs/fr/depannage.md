@@ -826,7 +826,8 @@ liste.
 La configuration restaurée ne correspond pas à ce qu'attend cette console
 (le message nomme l'élément : une politique, une méthode
 d'authentification, un rôle, un `secret_id`, un rôle de jeton, un groupe,
-un montage, un périphérique d'audit, une politique de jeton). Le volume
+une entité d'identité avec des politiques ou un alias inattendu, un espace
+de noms, un montage, un périphérique d'audit, une politique de jeton). Le volume
 précédent est remis et rien n'a changé. Un instantané d'une autre console,
 ou modifié hors de harvops, est refusé exprès.
 

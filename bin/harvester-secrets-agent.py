@@ -1529,6 +1529,13 @@ class Agent:
             # aucun groupe d'identité (il porterait des politiques)
             if self._list(a, "identity/group/id"):
                 self._untrusted("identity groups")
+            # relecture des corrections finales IMP-1 : entités d'identité sans
+            # politique, alias sur approle/ (role_id des deux rôles) ou sur
+            # token/ (`tf-<déclaration>`) seulement
+            self._review_entities(a, roles, token_acc)
+            # m4 : aucun espace de noms (révocation faite dans la racine)
+            if self._list(a, "sys/namespaces"):
+                self._untrusted("namespaces")
             # jetons : politiques permises, puis tous révoqués sauf les deux
             # de cette revue (révoqués ensuite)
             allowed = {"default", *roles, pol.tf_role(cid), pol.boot_policy_name(cid)}
@@ -1546,6 +1553,31 @@ class Agent:
             self.step("review", "running", f"{revoked} token(s) of the snapshot revoked")
         finally:
             a.revoke_self()
+
+    def _review_entities(self, a, roles, token_acc):
+        """Les politiques d'une entité valent pour chaque jeton de l'entité,
+        y compris ceux émis après la révocation (prochain login AppRole de la
+        console, jeton enfant `auth/token/create/<rôle>` avec un alias
+        `tf-*`). Les entités attendues n'en portent aucune : la console,
+        l'agent et les jetons d'OpenTofu tiennent leurs droits de leur rôle."""
+        _, auth_doc = a._call("GET", "sys/auth")
+        approle_acc = ((self._data(auth_doc) or {}).get("approle/") or {}).get("accessor")
+        role_ids = set()
+        for role in roles:
+            _, doc = a._call("GET", f"auth/approle/role/{role}/role-id")
+            role_ids.add(str((self._data(doc) or {}).get("role_id") or ""))
+        for eid in self._list(a, "identity/entity/id"):
+            _, doc = a._call("GET", f"identity/entity/id/{eid}")
+            d = self._data(doc) or {}
+            if d.get("policies"):
+                self._untrusted(f"identity entity {eid} carries policies")
+            for al in d.get("aliases") or []:
+                acc, name = (al or {}).get("mount_accessor"), str((al or {}).get("name") or "")
+                if acc and acc == approle_acc and name in role_ids:
+                    continue
+                if acc and acc == token_acc and name.startswith("tf-") and pol.DECL_RE.match(name[3:]):
+                    continue
+                self._untrusted(f"identity entity {eid} alias on an unexpected mount or name")
 
     def op_restore_snapshot(self, req):
         """Essai 6 : instance neuve, même clé statique (ou l'ancienne en

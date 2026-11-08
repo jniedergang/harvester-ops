@@ -219,6 +219,12 @@ def agent_rules(cid, mount=DEFAULT_MOUNT):
         ("auth/token/roles", ["list"]),
         ("auth/token/roles/*", ["read"]),
         ("identity/group/id", ["list"]),
+        # relecture des corrections finales IMP-1 : les entités d'identité
+        # (leurs politiques s'appliquent à tout jeton émis après la
+        # révocation) et leurs alias, lus par `identity/entity/id/*` ; m4 :
+        # aucun espace de noms (ses jetons échapperaient à la révocation)
+        ("identity/entity/id", ["list"]),
+        ("sys/namespaces", ["list"]),
         ("sys/mounts", ["read"]),
         ("sys/audit", ["read", "sudo"]),
         ("auth/token/revoke-accessor", ["update"]),

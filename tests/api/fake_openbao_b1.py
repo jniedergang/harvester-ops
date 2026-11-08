@@ -51,6 +51,10 @@ class FakeB1(FakeOpenBao):
         self.fail_paths = {}                 # chemin -> (code, message) une fois
         self.unseals = 0
         self.entities = {}                   # id -> {"name": "entity_<id>", "aliases": {(accesseur, nom)}}
+        # IMP-1 : politiques portées par une entité (id -> liste), espaces de
+        # noms d'OpenBao 2.x ; un instantané fabriqué les remplit
+        self.entity_policies = {}
+        self.namespaces = []
         # tâche 11 : un instantané fabriqué (jetons aux politiques étrangères,
         # droits d'administration donnés à la console) ; faux = comme OpenBao
         self.crafted_admin = False           # la console obtient les chemins d'administration
@@ -122,12 +126,22 @@ class FakeB1(FakeOpenBao):
                                  "version": self.seal_version})
         tok = self._auth(rec)
         parts = path.split("/")
+        if path == "auth/approle/login" and body.get("role_id") in self.role_ids.values() \
+                and body.get("secret_id") in (self.roles.get(body.get("role_id")) or {}).get("secret_ids", ()):
+            # comme OpenBao : la connexion AppRole crée (une fois) l'entité de
+            # l'alias, nommé par le role_id sur le montage approle/
+            key = (self.auth_mounts["approle/"]["accessor"], body["role_id"])
+            if not any(key in e["aliases"] for e in self.entities.values()):
+                eid = secrets.token_hex(8)
+                self.entities[eid] = {"name": f"entity_{eid}", "aliases": {key}}
         if tok and m == "LIST" and path in ("auth/approle/role", "sys/policies/acl", "auth/token/roles",
-                                            "identity/group/id"):
+                                            "identity/group/id", "identity/entity/id", "sys/namespaces"):
             keys = {"auth/approle/role": lambda: sorted(self.role_ids),
                     "sys/policies/acl": lambda: sorted(set(self.policies) | {"default", "root"}),
                     "auth/token/roles": lambda: sorted(self.token_roles),
-                    "identity/group/id": lambda: list(self.groups)}[path]()
+                    "identity/group/id": lambda: list(self.groups),
+                    "identity/entity/id": lambda: sorted(self.entities),
+                    "sys/namespaces": lambda: [n + "/" for n in self.namespaces]}[path]()
             return h._send(200, {"data": {"keys": keys}}) if keys else h._err(404)
         if tok and m == "GET" and path == "sys/mounts":
             return h._send(200, {"data": dict(self.secret_mounts)})
@@ -254,7 +268,17 @@ class FakeB1(FakeOpenBao):
                 self.entities.pop(eid, None)
                 self.events.append(("entity-delete", eid))
                 return h._send(204)
-            return h._send(200, {"data": {"id": eid}}) if eid in self.entities else h._err(404)
+            if eid not in self.entities:
+                return h._err(404)
+            # comme `vault read identity/entity/id/<id>` : politiques et alias
+            # (accesseur et chemin du montage, nom)
+            paths = {v["accessor"]: k for k, v in self.auth_mounts.items()}
+            e = self.entities[eid]
+            return h._send(200, {"data": {"id": eid, "name": e["name"],
+                                          "policies": list(self.entity_policies.get(eid) or []),
+                                          "aliases": [{"mount_accessor": acc, "mount_path": "auth/" + paths.get(acc, "?"),
+                                                       "name": n, "canonical_id": eid}
+                                                      for acc, n in sorted(e["aliases"])]}})
         if path == "sys/rotate/root" and tok:
             self.events.append(("rotate-root", None))
             return h._send(204)

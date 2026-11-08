@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_secrets_agent_290 import CID, bundle, env, hsa, install, request, settings  # noqa: E402,F401
 
 import openbao_policy as pol  # noqa: E402
+from fake_openbao_b1 import TOKEN_ACCESSOR  # noqa: E402
 
 
 def _snap(dirpath, name, data=b"SNAP" * 8):
@@ -189,12 +190,36 @@ def _craft(srv, craft):
         srv.secret_mounts["evil/"] = {"type": "kv"}
     elif craft == "extra-audit":
         srv.audit_devices["sock/"] = {"type": "socket"}
+    # IMP-1 : les politiques d'une entité s'appliquent à tout jeton émis
+    # après la révocation (prochain login AppRole, jeton enfant par alias)
+    elif craft == "entity-policies-console":
+        key = ("auth_approle_x", srv.role_ids[pol.console_role(cid)])
+        eid = next((i for i, e in srv.entities.items() if key in e["aliases"]), None)
+        if eid is None:
+            eid = "ent-console"
+            srv.entities[eid] = {"name": f"entity_{eid}", "aliases": {key}}
+        srv.entity_policies[eid] = [pol.agent_role(cid)]
+    elif craft == "entity-policies-tf-alias":
+        srv.entities["ent-tfx"] = {"name": "entity_ent-tfx", "aliases": {(TOKEN_ACCESSOR, "tf-x")}}
+        srv.entity_policies["ent-tfx"] = [pol.agent_role(cid)]
+    elif craft == "entity-alias-foreign-mount":
+        srv.entities["ent-up"] = {"name": "entity_ent-up", "aliases": {("auth_userpass_x", "admin")}}
+    elif craft == "entity-alias-unknown-approle":
+        srv.entities["ent-ar"] = {"name": "entity_ent-ar", "aliases": {("auth_approle_x", "rid-evil")}}
+    elif craft == "entity-alias-not-tf":
+        srv.entities["ent-tk"] = {"name": "entity_ent-tk", "aliases": {(TOKEN_ACCESSOR, "admin")}}
+    elif craft == "entity-tf-alias-on-approle":
+        srv.entities["ent-ta"] = {"name": "entity_ent-ta", "aliases": {("auth_approle_x", "tf-x")}}
+    elif craft == "namespace":
+        srv.namespaces.append("evil")
 
 
 CRAFTS = ["foreign-token", "root-token", "console-policy-widened", "boot-policy-widened", "extra-policy",
           "default-policy-changed", "extra-auth-method", "extra-approle-role", "role-policies-widened",
           "role-cidr-opened", "agent-secret-id-planted", "token-role-widened", "extra-token-role", "identity-group",
-          "extra-mount", "extra-audit"]
+          "extra-mount", "extra-audit", "entity-policies-console", "entity-policies-tf-alias",
+          "entity-alias-foreign-mount", "entity-alias-unknown-approle", "entity-alias-not-tf",
+          "entity-tf-alias-on-approle", "namespace"]
 
 
 @pytest.mark.parametrize("craft", CRAFTS)
@@ -251,6 +276,31 @@ def test_a_genuine_snapshot_passes_the_review(env):
     # lui retire ses droits de lecture passerait la revue sans rien voir)
     names = [e for e in srv.events if e[0] == "policy-post"]
     assert (("policy-post", pol.agent_role(CID)) in names)
+
+
+def test_a_genuine_snapshot_with_entities_passes_the_review(env):
+    """IMP-1 : les entités attendues (alias AppRole de la console et de
+    l'agent, alias `tf-<déclaration>` sans politique) passent."""
+    install(env)
+    p, srv = env["p"], env["srv"]
+    snap = _snap(p.b1_data / "snapshots", "openbao-20261108T020000Z.snap")
+
+    class Genuine(list):
+        def append(self, raw):
+            super().append(raw)
+            srv.entities["ent-tf"] = {"name": "entity_ent-tf", "aliases": {(TOKEN_ACCESSOR, "tf-decl-1")}}
+            srv.entities["ent-c"] = {"name": "entity_ent-c",
+                                     "aliases": {("auth_approle_x", srv.role_ids[pol.console_role(CID)])}}
+    srv.restored = Genuine()
+    rc, st = request(env, op="restore-snapshot", file=snap.name)
+    assert rc == 0, st
+    assert srv.requests("identity/entity/id")
+
+
+def test_the_agent_policy_lists_entities_and_namespaces():
+    rules = dict(pol.agent_rules(CID))
+    assert rules["identity/entity/id"] == ["list"]
+    assert rules["sys/namespaces"] == ["list"]
 
 
 def test_the_review_reads_policies_never_token_values(env):

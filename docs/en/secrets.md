@@ -218,12 +218,21 @@ restored configuration against an **allowlist** of what this console
 expects: exact policy names and texts (the `default` policy compared with
 the hash recorded at install), auth methods `token` and `approle` only, the
 two AppRole roles with their policies, address ranges and single
-`secret_id`, the OpenTofu token role, no identity group, the expected
-mounts and audit device. Any difference refuses the snapshot and puts the
+`secret_id`, the OpenTofu token role, no identity group, identity entities
+without policies whose aliases are the two AppRole roles or `tf-<declaration>`
+on `token/`, no namespace, the expected mounts and audit device. Any
+difference refuses the snapshot and puts the
 previous volume back. Then every token of the snapshot is revoked; the
 console and the agent log in again. The agent and the OpenTofu token
 policies are rewritten before the review, so a snapshot that only widens
 them is repaired, not refused.
+
+An entity alias `tf-<declaration>` is accepted for any well-formed name, not
+only for live declarations: a snapshot taken before a declaration was
+removed still holds its entity, and the token role accepts `tf-*` because
+the console creates the alias of a new declaration on its first action.
+Such an entity carries no policy, so it gives nothing beyond the OpenTofu
+token policy.
 
 Restoring by hand (`sudo harvester-secrets restore <file>`) does not check
 the console's running actions.

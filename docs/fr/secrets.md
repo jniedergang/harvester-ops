@@ -230,12 +230,21 @@ cette console attend : noms et textes exacts des politiques (la politique
 `default` comparée à l'empreinte notée à l'installation), méthodes
 d'authentification `token` et `approle` seulement, les deux rôles AppRole
 avec leurs politiques, plages d'adresses et `secret_id` unique, le rôle de
-jeton d'OpenTofu, aucun groupe d'identité, les montages et le périphérique
-d'audit attendus. Toute différence refuse l'instantané et remet le volume
+jeton d'OpenTofu, aucun groupe d'identité, des entités d'identité sans
+politique dont les alias sont les deux rôles AppRole ou `tf-<déclaration>`
+sur `token/`, aucun espace de noms, les montages et le périphérique d'audit
+attendus. Toute différence refuse l'instantané et remet le volume
 précédent. Ensuite, chaque jeton de l'instantané est révoqué ; la console
 et l'agent se reconnectent. Les politiques de l'agent et du jeton
 d'OpenTofu sont réécrites avant la relecture : un instantané qui ne fait
 que les élargir est réparé, pas refusé.
+
+Un alias d'entité `tf-<déclaration>` est accepté pour tout nom bien formé,
+pas seulement pour les déclarations vivantes : un instantané pris avant le
+retrait d'une déclaration garde son entité, et le rôle de jeton accepte
+`tf-*` parce que la console crée l'alias d'une nouvelle déclaration à sa
+première action. Une telle entité ne porte aucune politique : elle ne donne
+rien de plus que la politique des jetons d'OpenTofu.
 
 Une restauration à la main (`sudo harvester-secrets restore <file>`) ne
 vérifie pas les actions en cours de la console.

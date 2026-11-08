@@ -127,9 +127,13 @@ def test_agent_removes_the_entity_of_a_declaration(agent_env):
     srv = agent_env["srv"]
     c = agent_env["agent"]().console_client(addr=srv.addr)
     c.token_create_child(pol.tf_role(CID), [pol.tf_role(CID)], "60s", entity_alias=pol.tf_alias("d1d1d1d1d1d1"))
-    assert srv.entities
+    # (les connexions AppRole créent aussi les entités de la console et de
+    # l'agent, comme OpenBao : seules les entités `tf-*` comptent ici)
+    def tf_entities():
+        return [e for e in srv.entities.values() if any(n.startswith("tf-") for _a, n in e["aliases"])]
+    assert tf_entities()
     rc, st = tagent.request(agent_env, op="tf-entity-remove", decl="d1d1d1d1d1d1")
-    assert rc == 0 and st["state"] == "done" and not srv.entities, st
+    assert rc == 0 and st["state"] == "done" and not tf_entities(), st
     rc, st = tagent.request(agent_env, op="tf-entity-remove", decl="d1d1d1d1d1d1")
     assert rc == 0 and "already absent" in st["message"]
 
