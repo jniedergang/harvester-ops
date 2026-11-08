@@ -35,6 +35,8 @@ Ce que les essais préalables (tâche 1) ont imposé :
 import json
 import re
 
+import openbao_jwt as oj
+
 ID_RE = re.compile(r"^[0-9a-f]{12}$")
 MOUNT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 PREFIX_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}(/[a-z0-9][a-z0-9_-]{0,62}){0,3}$")
@@ -169,6 +171,169 @@ def tf_child_policy(cid, token_accessor):
                         (f"{TRANSIT}/decrypt/{tmpl}", ["update"])])
 
 
+# ---------------------------------------------------------------------------
+# 2.10.0 : jeton OpenBao par personne, groupes, ESO
+# ---------------------------------------------------------------------------
+# Classes que la politique commune ouvre (plan 2.10.0, « Politiques ») :
+# lecture des trois classes personnelles et de leurs versions, écriture de
+# `tf-kvm` (variable d'une déclaration) et `ssh-cluster` (clé téléversée),
+# écriture sans lecture de `eso`.
+PERSON_READ = ("ssh-cluster", "ssh-kvm", "tf-kvm")
+PERSON_WRITE = ("ssh-cluster", "tf-kvm")
+PERSON_WRITE_ONLY = ("eso",)            # écrite par une personne, jamais relue par la console
+GROUP_CLASSES = ("kubeconfig", "ssh-cluster", "ssh-kvm", "tf-kvm", "eso")
+GROUP_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
+TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")      # cluster, hôte KVM ou clé ESO : aucun motif
+ESO_KEY_RE = re.compile(r"^[0-9a-f]{8}$")
+ENTITY_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+JWT_ACCESSOR_RE = re.compile(r"^(auth_jwt_[0-9a-f]{6,64}|\$ACCESSOR)$")
+
+
+def person_policy_name(cid):
+    return oj.person_policy_name(_check(ID_RE, cid, "console id"))
+
+
+def group_name(cid, name):
+    """Groupe d'identité interne d'OpenBao `hops-<id>-<nom>`."""
+    return f"hops-{_check(ID_RE, cid, 'console id')}-{_check(GROUP_RE, name, 'group name')}"
+
+
+def group_policy_name(cid, name):
+    return f"hops-group-{_check(ID_RE, cid, 'console id')}-{_check(GROUP_RE, name, 'group name')}"
+
+
+def eso_policy_name(cid, key):
+    return f"hops-eso-{_check(ID_RE, cid, 'console id')}-{_check(ESO_KEY_RE, key, 'ESO cluster key')}"
+
+
+def person_rules(mount, prefix, cid, groups_only=False):
+    """Politique commune `hops-person-<id>` des personnes connectées par
+    Rancher (texte de référence du plan 2.10.0, complété par le concern 1).
+    `groups_only` (réglage « lecture seulement par groupe ») : seulement
+    `capabilities-self`, tout le reste vient des groupes."""
+    m = _check(MOUNT_RE, mount, "mount")
+    p = _check(PREFIX_RE, prefix, "prefix")
+    person_policy_name(cid)
+    rules = []
+    if not groups_only:
+        for cls in PERSON_READ:
+            rules.append((f"{m}/data/{p}/{cls}/*", _data_caps(cls)))
+        for cls in PERSON_WRITE_ONLY:
+            rules.append((f"{m}/data/{p}/{cls}/*", _data_caps(cls)))
+        for cls in PERSON_READ:
+            rules.append((f"{m}/metadata/{p}/{cls}/*", _meta_caps(cls)))
+    rules.append(("sys/capabilities-self", ["update"]))
+    return rules
+
+
+def _data_caps(cls):
+    if cls in PERSON_WRITE_ONLY:
+        return ["create", "update"]
+    return ["read", "create", "update"] if cls in PERSON_WRITE else ["read"]
+
+
+def _meta_caps(cls):
+    return ["read"]
+
+
+def person_policy(mount, prefix, cid, groups_only=False):
+    return _hcl_policy(person_rules(mount, prefix, cid, groups_only))
+
+
+def _group_spec(name, classes, clusters):
+    classes = list(classes or [])
+    clusters = list(clusters or [])
+    _check(GROUP_RE, name, "group name")
+    if not classes or any(c not in GROUP_CLASSES for c in classes) or len(set(classes)) != len(classes):
+        raise ValueError("group classes: " + ", ".join(GROUP_CLASSES))
+    if not clusters or len(set(clusters)) != len(clusters) or len(clusters) > 200:
+        raise ValueError("group clusters: a non-empty list of distinct names")
+    for c in clusters:
+        _check(TARGET_RE, c, "cluster name")
+    if "eso" in classes and not all(ESO_KEY_RE.match(c) for c in clusters):
+        raise ValueError("the eso class takes ESO cluster keys (8 hexadecimals)")
+    return classes, clusters
+
+
+def group_rules(mount, prefix, cid, name, classes, clusters):
+    """Politique `hops-group-<id>-<nom>` d'un groupe interne : les mêmes
+    droits que la politique commune, limités à `<classe>/<cluster>` pour
+    chaque cluster (ou hôte KVM, ou clé ESO) de la liste ; `kubeconfig` en
+    lecture (sans effet en 2.10.0, classe de service)."""
+    m = _check(MOUNT_RE, mount, "mount")
+    p = _check(PREFIX_RE, prefix, "prefix")
+    group_policy_name(cid, name)
+    classes, clusters = _group_spec(name, classes, clusters)
+    rules = []
+    for cls in classes:
+        for c in clusters:
+            # tf-kvm/<hôte>/<décl>/<variable> : tout l'hôte ; eso/<clé>/<ns>/<nom> : tout le cluster
+            leaf = f"{cls}/{c}/*" if cls in ("tf-kvm", "eso") else f"{cls}/{c}"
+            rules.append((f"{m}/data/{p}/{leaf}", _data_caps(cls)))
+            if cls not in PERSON_WRITE_ONLY:
+                rules.append((f"{m}/metadata/{p}/{leaf}", _meta_caps(cls)))
+    return rules
+
+
+def group_policy(mount, prefix, cid, name, classes, clusters):
+    return _hcl_policy(group_rules(mount, prefix, cid, name, classes, clusters))
+
+
+def group_body(cid, name, members):
+    """Corps de `identity/group/name/hops-<id>-<nom>` : groupe interne, sa
+    seule politique, ses membres (entités tenues par l'administrateur
+    d'OpenBao ; en B1, par l'agent à la demande de la console)."""
+    members = list(members or [])
+    if len(set(members)) != len(members) or not all(isinstance(e, str) and ENTITY_RE.match(e) for e in members):
+        raise ValueError("group members: distinct entity ids (UUID)")
+    return {"type": "internal", "policies": [group_policy_name(cid, name)], "member_entity_ids": members}
+
+
+def eso_rules(mount, prefix, cid, key, accessor):
+    """Politique `hops-eso-<id>-<clé>` d'un cluster enfant (une seule, à
+    gabarit : essai 5) : un namespace ne lit que `eso/<clé>/<namespace>/*`,
+    le namespace venant des métadonnées de l'alias (`claim_mappings`)."""
+    m = _check(MOUNT_RE, mount, "mount")
+    p = _check(PREFIX_RE, prefix, "prefix")
+    eso_policy_name(cid, key)
+    acc = _check(JWT_ACCESSOR_RE, accessor, "jwt auth accessor")
+    leaf = f"eso/{key}/{{{{identity.entity.aliases.{acc}.metadata.namespace}}}}/*"
+    return [(f"{m}/data/{p}/{leaf}", ["read"]), (f"{m}/metadata/{p}/{leaf}", ["read", "list"])]
+
+
+def eso_policy(mount, prefix, cid, key, accessor):
+    return _hcl_policy(eso_rules(mount, prefix, cid, key, accessor))
+
+
+def person_capability_checks(mount, prefix, cid, groups_only=False):
+    """Vérification 4 de `person-token check` : {chemin concret: attendu},
+    attendu = "read" (lecture permise), "write-only" (écriture sans
+    lecture) ou "deny". `check-x` ne désigne aucun cluster réel : une
+    politique de groupe (par cluster) ne l'ouvre pas."""
+    m = _check(MOUNT_RE, mount, "mount")
+    p = _check(PREFIX_RE, prefix, "prefix")
+    _check(ID_RE, cid, "console id")
+    head, _, last = p.rpartition("/")
+    other = (head + "/" if head else "") + ("000000000000" if last != "000000000000" else "ffffffffffff")
+    out = {}
+    for cls in PERSON_READ:
+        out[f"{m}/data/{p}/{cls}/check-x"] = "deny" if groups_only else "read"
+    out[f"{m}/data/{p}/eso/check-x/ns/check-x"] = "deny" if groups_only else "write-only"
+    for cls in ("kubeconfig", "rancher-oidc", "plan-run"):
+        out[f"{m}/data/{p}/{cls}/check-x"] = "deny"
+    out[f"{m}/data/{other}/ssh-kvm/check-x"] = "deny"
+    return out
+
+
+def capability_verdict(expect, caps):
+    caps = set(caps or [])
+    if expect == "read":
+        return "read" in caps
+    if expect == "write-only":
+        return bool(caps & {"create", "update"}) and "read" not in caps
+    return not (caps - {"deny"})
+
+
 def agent_rules(cid, mount=DEFAULT_MOUNT):
     """Politique de l'agent de l'hôte en B1 (point 271) : rotation de la clé
     racine après un changement de clé de descellement (essai 7), retrait des
@@ -228,6 +393,26 @@ def agent_rules(cid, mount=DEFAULT_MOUNT):
         ("sys/mounts", ["read"]),
         ("sys/audit", ["read", "sudo"]),
         ("auth/token/revoke-accessor", ["update"]),
+        # 2.10.0 (plan, « Mode A et mode B1 », essai 6) : méthodes `jwt` des
+        # personnes et des clusters enfants de CETTE console, leurs rôles
+        # (`list` pour relire les rôles d'un montage), la politique commune
+        # des personnes, celles des groupes et d'ESO, les groupes d'identité
+        # créés par leur nom (`POST identity/group` avec le nom dans le corps
+        # n'est pas couvert). Les chemins par identifiant ne se restreignent
+        # pas par nom : l'agent n'y vise que les groupes `hops-<id>-*` qu'il
+        # vient de lire par nom. Il peut poser n'importe quelle politique sur
+        # ces groupes (`allowed_parameters` ne l'empêche pas, une chaîne à
+        # virgules contourne le motif) : décision 306 A, la revue d'un
+        # instantané et la liste fermée des opérations sont les gardes. Aucun
+        # droit sur `identity/group-alias` : groupes internes seulement
+        # (décision 303 A).
+        (f"sys/auth/{oj.MOUNT_PREFIX}{cid}-*", ["create", "update", "read", "delete", "sudo"]),
+        (f"auth/{oj.MOUNT_PREFIX}{cid}-*", ["create", "update", "read", "delete", "list"]),
+        (f"sys/policies/acl/{person_policy_name(cid)}", ["create", "update", "read", "delete"]),
+        (f"sys/policies/acl/hops-group-{cid}-*", ["create", "update", "read", "delete"]),
+        (f"sys/policies/acl/hops-eso-{cid}-*", ["create", "update", "read", "delete"]),
+        (f"identity/group/name/hops-{cid}-*", ["create", "update", "read", "delete"]),
+        ("identity/group/id/*", ["update", "read", "delete"]),
     ]
 
 
@@ -319,6 +504,82 @@ def mode_a_commands(addr, mount, prefix, cid, console_cidr):
         f"bao read -field=role_id auth/approle/role/{role}/role-id",
         f"bao write -wrap-ttl={WRAP_TTL} -f auth/approle/role/{role}/secret-id",
     ]
+
+
+def _heredoc_json(cmd, body):
+    return f"{cmd} - <<'EOF'\n{json.dumps(body, indent=2, sort_keys=True)}\nEOF"
+
+
+def _addr_line(addr):
+    if not isinstance(addr, str) or not re.match(r"^https?://[A-Za-z0-9.:\[\]-]+(/)?$", addr):
+        raise ValueError("invalid OpenBao address")
+    return f"export BAO_ADDR={addr.rstrip('/')}"
+
+
+def person_token_commands(addr, cid, rancher, client_id, issuer, ca_pem, console_cidr, keys,
+                          mount=DEFAULT_MOUNT, prefix=None, groups_only=False):
+    """Mode A (décision 287) : commandes `bao` qui posent la méthode `jwt`
+    d'un Rancher pour cette console (montage, politique commune,
+    configuration, rôle `person`). `keys` : None (découverte par l'émetteur,
+    avec `ca_pem` si la console en a une) ou la liste des clés publiques PEM
+    (clés statiques, point 286). Aucune valeur secrète : CA et clés
+    publiques seulement ; corps JSON lus sur l'entrée standard (`-`)."""
+    pm = oj.person_mount(_check(ID_RE, cid, "console id"), rancher)
+    prefix = prefix or f"consoles/{cid}"
+    config = oj.mount_config(issuer, ca_pem=None if keys else ca_pem, pubkeys=keys or None)
+    role = oj.person_role_params(client_id, console_cidr, cid)
+    return [
+        _addr_line(addr),
+        f"# Méthode jwt du Rancher {rancher} (sautez la ligne suivante si le montage {pm}/ existe déjà)",
+        f"bao auth enable -path={pm} jwt",
+        f"bao policy write {person_policy_name(cid)} - <<'EOF'\n{person_policy(mount, prefix, cid, groups_only)}EOF",
+        _heredoc_json(f"bao write auth/{pm}/config", config),
+        _heredoc_json(f"bao write auth/{pm}/role/{oj.PERSON_ROLE}", role),
+        f"bao list auth/{pm}/role",
+    ]
+
+
+def person_policy_commands(addr, mount, prefix, cid, groups_only=False):
+    """Mode A : la politique commune seule (réglage « lecture seulement par
+    groupe » changé)."""
+    return [_addr_line(addr), f"bao policy write {person_policy_name(cid)} - <<'EOF'\n"
+                              f"{person_policy(mount, prefix, cid, groups_only)}EOF"]
+
+
+def person_keys_commands(addr, cid, rancher, issuer, keys):
+    """Mode A, tâche 7 : clés statiques remplacées (ancienne et nouvelle
+    ensemble pendant une rotation, puis la seule nouvelle à la
+    confirmation)."""
+    pm = oj.person_mount(_check(ID_RE, cid, "console id"), rancher)
+    if not keys:
+        raise ValueError("static keys expected")
+    return [_addr_line(addr), _heredoc_json(f"bao write auth/{pm}/config", oj.mount_config(issuer, pubkeys=keys))]
+
+
+def person_remove_commands(addr, cid, rancher, last=False):
+    """Mode A : montage d'un Rancher retiré ; la politique commune avec le
+    dernier. Les entités restent (point 289)."""
+    pm = oj.person_mount(_check(ID_RE, cid, "console id"), rancher)
+    out = [_addr_line(addr), f"bao auth disable {pm}"]
+    if last:
+        out.append(f"bao policy delete {person_policy_name(cid)}")
+    return out
+
+
+def group_commands(addr, mount, prefix, cid, name, classes, clusters, members):
+    """Mode A : politique d'un groupe interne et le groupe lui-même (créé
+    ou mis à jour par son nom). Groupes externes reportés (décision 303 A)."""
+    return [
+        _addr_line(addr),
+        f"bao policy write {group_policy_name(cid, name)} - <<'EOF'\n"
+        f"{group_policy(mount, prefix, cid, name, classes, clusters)}EOF",
+        _heredoc_json(f"bao write identity/group/name/{group_name(cid, name)}", group_body(cid, name, members)),
+    ]
+
+
+def group_remove_commands(addr, cid, name):
+    return [_addr_line(addr), f"bao delete identity/group/name/{group_name(cid, name)}",
+            f"bao policy delete {group_policy_name(cid, name)}"]
 
 
 # ---------------------------------------------------------------------------

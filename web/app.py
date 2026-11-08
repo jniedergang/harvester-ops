@@ -34847,7 +34847,48 @@ def _secrets_warnings(s, health, store_st, now=None):
                 out.append({"code": "audit-space-low", "level": "error", "free": free, "total": total})
     if s.get("tf_entities_pending"):
         out.append({"code": "tf-entities-pending", "level": "info", "count": len(s["tf_entities_pending"])})
+    changed = _person_keys_changed(s)
+    if changed:
+        # 2.10.0 tâche 7 : clé de signature de Rancher absente des clés
+        # statiques ; « Mettre à jour les clés » (person-token keys --refresh)
+        out.append({"code": "openbao-jwt-keys-changed", "level": "error", "servers": changed})
     return out
+
+
+# -- 2.10.0 tâche 7 : clés de signature des Rancher en clés statiques ---------
+PERSON_KEYS_CHECK_S = 3600
+_PERSON_KEYS = {"at": 0.0, "seen": {}}         # Rancher -> empreinte du JWKS relu
+
+
+def _person_keys_tick(now=None, fetch=None):
+    """Chaque heure : JWKS de chaque Rancher dont la méthode jwt est en clés
+    statiques (lecture publique, sans jeton), empreinte comparée aux
+    réglages. Mode `discovery` : rien à faire, OpenBao relit le JWKS. Une
+    rotation propre de Rancher publie la nouvelle clé avant de signer avec :
+    le changement se voit dès l'ajout. Rend {Rancher: empreinte relue}."""
+    now = time.time() if now is None else now
+    if now - _PERSON_KEYS["at"] < PERSON_KEYS_CHECK_S:
+        return dict(_PERSON_KEYS["seen"])
+    _PERSON_KEYS["at"] = now
+    fetch = fetch or _oj.fetch_json
+    seen = {}
+    for rid, e in _oj.settings_of(_secrets_settings())["servers"].items():
+        if e.get("keys") != "static" or not e.get("issuer"):
+            continue
+        try:
+            seen[rid] = _oj.keys_sha256(fetch(_oj.jwks_url(e["issuer"]), e.get("ca_pem")))
+        except ValueError as ex:
+            log.warning("Rancher %s: JWKS not read (%s)", rid, str(ex)[:120])
+    _PERSON_KEYS["seen"] = seen
+    return dict(seen)
+
+
+def _person_keys_changed(s):
+    """Rancher en clés statiques dont le JWKS relu diffère des réglages
+    (`openbao-jwt-keys-changed`), triés."""
+    servers = _oj.settings_of(s)["servers"]
+    return sorted(rid for rid, sha in _PERSON_KEYS["seen"].items()
+                  if rid in servers and sha != servers[rid].get("keys_sha256"))
 
 
 def _secrets_banner():
@@ -34857,7 +34898,7 @@ def _secrets_banner():
     st = _secrets_store_status(s)
     return {"active": _sst.openbao_active(s), "mode": s.get("mode"), "state": st.get("state"),
             "down_since": st.get("down_since"), "cache_until": st.get("cache_until"),
-            "error": st.get("error")}
+            "error": st.get("error"), "jwt_keys_changed": bool(_person_keys_changed(s))}
 
 
 def _secrets_status(admin=False):
@@ -35103,6 +35144,10 @@ def _secrets_housekeeping_tick(now=None):
     started = []
     if not _sst.openbao_active(s) or not (BIN_DIR / SECRETS_TOOL).is_file():
         return started
+    try:
+        _person_keys_tick(now)                 # 2.10.0 tâche 7 : lecture seule, aucune action
+    except Exception as e:                     # noqa: BLE001 : la tâche de fond continue
+        log.warning("Rancher keys check failed: %s", type(e).__name__)
     snaps = s.get("snapshots") if isinstance(s.get("snapshots"), dict) else {}
     if s.get("mode") == "b1" and s.get("snapshot_dir"):
         slot = _snapshot_slot(s.get("snapshot_time"), now)

@@ -5,8 +5,9 @@ OIDC d'un Rancher (montage, configuration, rôle `person`), lecture des
 revendications utiles d'un jeton d'identité, empreinte d'un JWKS, et la table
 « Qui agit » du plan : avec quelle identité la console lit un secret.
 
-Aucune entrée-sortie ici : les textes et paramètres sont rendus, la console
-ne les écrit jamais dans OpenBao (décision 287 : agent en B1, commandes de
+Aucune entrée-sortie ici, sauf `fetch_json` (GET sans jeton des documents
+publics de Rancher, découverte et JWKS) : les textes et paramètres sont
+rendus, la console ne les écrit jamais dans OpenBao (décision 287 : agent en B1, commandes de
 l'assistant en mode A).
 
 Valeurs exactes : plan `docs/design/2026-11-08-jeton-personne-2100-plan.md`,
@@ -126,6 +127,123 @@ def keys_sha256(jwks):
     norm = sorted(({k: str(key.get(k) or "") for k in ("kid", "kty", "n", "e")} for key in keys
                    if isinstance(key, dict)), key=lambda d: (d["kid"], d["n"]))
     return hashlib.sha256(json.dumps(norm, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _der_len(n):
+    if n < 0x80:
+        return bytes([n])
+    b = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([0x80 | len(b)]) + b
+
+
+def _der(tag, body):
+    return bytes([tag]) + _der_len(len(body)) + body
+
+
+def _der_int(value):
+    b = value.to_bytes(max(1, (value.bit_length() + 7) // 8), "big")
+    if b[0] & 0x80:
+        b = b"\x00" + b
+    return _der(0x02, b)
+
+
+def _b64u_int(text):
+    import base64
+    raw = base64.urlsafe_b64decode(str(text) + "=" * (-len(str(text)) % 4))
+    return int.from_bytes(raw, "big")
+
+
+RSA_OID = bytes.fromhex("06092a864886f70d0101010500")      # rsaEncryption + NULL
+
+
+def jwk_to_pem(jwk):
+    """Clé publique RSA d'un JWK (`kty` RSA, `n`, `e`) en PEM
+    SubjectPublicKeyInfo, la forme que prend `jwt_validation_pubkeys`
+    (tâche 7, clés statiques). Une clé qui n'est pas RSA, ou de moins de
+    2048 bits, est refusée."""
+    import base64
+    if not isinstance(jwk, dict) or jwk.get("kty") != "RSA" or jwk.get("use") not in (None, "sig"):
+        raise ValueError("RSA signing key expected")
+    try:
+        n, e = _b64u_int(jwk["n"]), _b64u_int(jwk["e"])
+    except (KeyError, ValueError, TypeError):
+        raise ValueError("RSA key without n or e") from None
+    if n.bit_length() < 2048 or e < 3:
+        raise ValueError("RSA key below 2048 bits")
+    spki = _der(0x30, _der(0x30, RSA_OID) + _der(0x03, b"\x00" + _der(0x30, _der_int(n) + _der_int(e))))
+    b64 = base64.b64encode(spki).decode()
+    return "-----BEGIN PUBLIC KEY-----\n" + "\n".join(b64[i:i + 64] for i in range(0, len(b64), 64)) \
+        + "\n-----END PUBLIC KEY-----"
+
+
+def pubkeys_of(jwks):
+    """Clés publiques PEM d'un JWKS, dans l'ordre des `kid` (Rancher : une
+    clé `kid` `key`, toutes les clés publiques du Secret
+    `cattle-system/oidc-signing-key` pendant une rotation)."""
+    keys = (jwks or {}).get("keys") if isinstance(jwks, dict) else None
+    if not isinstance(keys, list) or not keys:
+        raise ValueError("no key in the JWKS")
+    if len(keys) > 8:
+        raise ValueError("too many keys in the JWKS")
+    return [jwk_to_pem(k) for k in sorted(keys, key=lambda k: str((k or {}).get("kid") or ""))]
+
+
+def merge_pubkeys(old, new):
+    """Rotation sans coupure (tâche 7) : ancienne(s) et nouvelle(s) clés
+    ensemble jusqu'à la confirmation ; ordre stable, sans doublon."""
+    out = []
+    for k in list(new or []) + list(old or []):
+        k = str(k).strip()
+        if k and k not in out:
+            out.append(k)
+    return out
+
+
+def discovery_url(issuer):
+    return str(issuer).rstrip("/") + "/.well-known/openid-configuration"
+
+
+def jwks_url(issuer):
+    return str(issuer).rstrip("/") + "/.well-known/jwks.json"
+
+
+def check_discovery(doc, issuer):
+    """Vérification 1 de `person-token check` : [(raison, ok)] du document de
+    découverte de Rancher (émetteur égal au réglage, `jwks_uri`, RS256)."""
+    doc = doc if isinstance(doc, dict) else {}
+    iss = str(issuer).rstrip("/")
+    algs = doc.get("id_token_signing_alg_values_supported")
+    return [(f"issuer {doc.get('issuer')!s:.120}", str(doc.get("issuer") or "").rstrip("/") == iss),
+            ("jwks_uri announced", bool(doc.get("jwks_uri"))),
+            ("RS256 announced", isinstance(algs, list) and "RS256" in algs)]
+
+
+def fetch_json(url, ca_pem=None, timeout=10, opener=None):
+    """GET sans authentification d'un document public de Rancher (découverte,
+    JWKS : lisibles sans jeton, essai 1), CA épinglée s'il y en a une, sans
+    proxy ni redirection hors https. Seule entrée-sortie du module ; `opener`
+    injectable (tests). Rend le JSON (dict) ou lève ValueError."""
+    import ssl
+    import urllib.request
+    if not str(url).startswith("https://"):
+        raise ValueError("https URL expected")
+    if opener is None:
+        ctx = ssl.create_default_context(cadata=ca_pem) if ca_pem else ssl.create_default_context()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                             urllib.request.HTTPSHandler(context=ctx))
+    try:
+        with opener.open(urllib.request.Request(url, headers={"Accept": "application/json"}),
+                         timeout=timeout) as r:
+            raw = r.read(1 << 20)
+    except OSError as e:
+        raise ValueError(f"{url}: {type(e).__name__}") from None
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        raise ValueError(f"{url}: not JSON") from None
+    if not isinstance(doc, dict):
+        raise ValueError(f"{url}: not an object")
+    return doc
 
 
 def useful_claims(claims):

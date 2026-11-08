@@ -179,3 +179,97 @@ def test_settings_of_defaults():
         "enabled": True, "servers": {"a": {"mount": "m"}}, "groups_only": False}
     assert ss.load_settings("/nonexistent")["person_token"] == {"enabled": False, "servers": {},
                                                                  "groups_only": False}
+
+
+# ---------------------------------------------------------------------------
+# Tâche 7 : clés statiques tirées du JWKS de Rancher
+# ---------------------------------------------------------------------------
+def _b64i(i):
+    import base64
+    return base64.urlsafe_b64encode(i.to_bytes((i.bit_length() + 7) // 8, "big")).rstrip(b"=").decode()
+
+
+def test_jwk_to_pem_equals_openssl(tmp_path):
+    """La conversion est celle d'openssl (clé RSA 2048 tirée pour l'essai)."""
+    import subprocess
+    key, pub = tmp_path / "k.pem", tmp_path / "k.pub"
+    subprocess.run(["openssl", "genrsa", "-out", str(key), "2048"], check=True, capture_output=True)
+    subprocess.run(["openssl", "rsa", "-in", str(key), "-pubout", "-out", str(pub)], check=True, capture_output=True)
+    mod = subprocess.run(["openssl", "rsa", "-in", str(key), "-noout", "-modulus"], check=True,
+                         capture_output=True, text=True).stdout.strip().split("=")[1]
+    jwk = {"kty": "RSA", "kid": "key", "use": "sig", "n": _b64i(int(mod, 16)), "e": "AQAB"}
+    assert oj.jwk_to_pem(jwk).strip() == pub.read_text().strip()
+
+
+@pytest.mark.parametrize("jwk", [
+    {"kty": "EC", "crv": "P-256", "x": "AA", "y": "BB"},
+    {"kty": "RSA", "n": _b64i((1 << 1023) + 1), "e": "AQAB"},               # 1024 bits
+    {"kty": "RSA", "e": "AQAB"},
+    {"kty": "RSA", "n": "!!", "e": "AQAB"},
+    {"kty": "RSA", "use": "enc", "n": _b64i((1 << 2047) + 1), "e": "AQAB"},
+    "not a dict",
+])
+def test_jwk_to_pem_refusals(jwk):
+    with pytest.raises(ValueError):
+        oj.jwk_to_pem(jwk)
+
+
+def test_pubkeys_of_order_and_bounds():
+    k1 = {"kty": "RSA", "kid": "b", "n": _b64i((1 << 2047) + 3), "e": "AQAB"}
+    k2 = {"kty": "RSA", "kid": "a", "n": _b64i((1 << 2047) + 5), "e": "AQAB"}
+    assert oj.pubkeys_of({"keys": [k1, k2]}) == [oj.jwk_to_pem(k2), oj.jwk_to_pem(k1)]
+    with pytest.raises(ValueError):
+        oj.pubkeys_of({"keys": [k1] * 9})
+    with pytest.raises(ValueError):
+        oj.pubkeys_of({"keys": []})
+
+
+@pytest.mark.parametrize("old,new,want", [
+    (["A"], ["B"], ["B", "A"]),
+    (["A", "B"], ["B"], ["B", "A"]),
+    (None, ["A"], ["A"]),
+    (["A"], ["A"], ["A"]),
+])
+def test_merge_pubkeys(old, new, want):
+    assert oj.merge_pubkeys(old, new) == want
+
+
+@pytest.mark.parametrize("doc,ok", [
+    ({"issuer": "https://r/oidc", "jwks_uri": "https://r/oidc/.well-known/jwks.json",
+      "id_token_signing_alg_values_supported": ["RS256"]}, [True, True, True]),
+    ({"issuer": "https://other/oidc", "jwks_uri": "x", "id_token_signing_alg_values_supported": ["RS256"]},
+     [False, True, True]),
+    ({"issuer": "https://r/oidc/", "id_token_signing_alg_values_supported": ["ES256"]}, [True, False, False]),
+    ("not a dict", [False, False, False]),
+])
+def test_check_discovery(doc, ok):
+    assert [o for _r, o in oj.check_discovery(doc, "https://r/oidc")] == ok
+
+
+def test_fetch_json_https_only_and_objects_only():
+    with pytest.raises(ValueError):
+        oj.fetch_json("http://r/oidc/.well-known/jwks.json")
+
+    class R:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            return self.body
+
+    class Opener:
+        def __init__(self, body):
+            self.body = body
+
+        def open(self, req, timeout=None):
+            return R(self.body)
+    assert oj.fetch_json("https://r/x", opener=Opener(b'{"keys": []}')) == {"keys": []}
+    for bad in (b"[1]", b"not json"):
+        with pytest.raises(ValueError):
+            oj.fetch_json("https://r/x", opener=Opener(bad))

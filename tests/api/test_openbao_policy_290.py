@@ -67,8 +67,9 @@ def test_agent_sudo_only_on_root_rotation_and_the_token_review():
     politiques d'un jeton par son accesseur, jamais sa valeur."""
     rules = dict(pol.agent_rules(CID))
     sudo = sorted(p for p, caps in rules_of(pol.agent_policy(CID)) if "sudo" in caps)
-    # relecture finale I3 : la liste des montages d'audit (lecture) se lit en sudo
-    assert sudo == ["auth/token/accessors", "sys/audit", "sys/rotate/root"]
+    # relecture finale I3 : la liste des montages d'audit (lecture) se lit en sudo ;
+    # 2.10.0 : montages jwt des personnes et des clusters enfants de CETTE console
+    assert sudo == ["auth/token/accessors", "sys/audit", f"sys/auth/jwt-hops-{CID}-*", "sys/rotate/root"]
     assert rules["sys/audit"] == ["read", "sudo"]
     assert rules["auth/token/accessors"] == ["list", "sudo"]
     assert rules["auth/token/lookup-accessor"] == ["update"]
@@ -80,12 +81,16 @@ def test_agent_amends_only_its_hops_policies():
     console ni par motif ; les entités tf se retirent par alias."""
     rules = dict(pol.agent_rules(CID))
     acl = sorted(p for p in rules if p.startswith("sys/policies/") and set(rules[p]) - {"read", "list"})
-    assert acl == [f"sys/policies/acl/hops-agent-{CID}", f"sys/policies/acl/hops-tf-{CID}"]
-    assert all("delete" not in rules[p] and "*" not in p for p in acl)
+    # 2.10.0 : politiques des personnes, des groupes et d'ESO de cette console
+    assert acl == [f"sys/policies/acl/hops-agent-{CID}", f"sys/policies/acl/hops-eso-{CID}-*",
+                   f"sys/policies/acl/hops-group-{CID}-*", f"sys/policies/acl/hops-person-{CID}",
+                   f"sys/policies/acl/hops-tf-{CID}"]
+    assert all("delete" not in rules[p] and "*" not in p for p in acl[:1] + acl[-1:])
     # relecture finale I3 : lecture seule de toutes les politiques (revue)
     assert rules["sys/policies/acl/*"] == ["read"] and rules["sys/policies/acl"] == ["list"]
     writes = sorted(p for p, c in rules.items() if set(c) - {"read", "list"})
-    assert all("*" not in p or p == "identity/entity/id/*" for p in writes)
+    assert all("*" not in p or p in ("identity/entity/id/*", "identity/group/id/*") or f"-{CID}-*" in p
+               for p in writes)
     assert not any(p.startswith("identity/entity/name/") for p in rules)    # ne désignait rien (essai P4)
     assert rules["identity/lookup/entity"] == ["update"] and rules["sys/auth"] == ["read"]
 
@@ -292,3 +297,152 @@ def test_console_policy_has_no_mid_path_glob():
     """Revue M5 : un `*` au milieu d'un chemin n'est pas un motif pour OpenBao."""
     for path, _caps in pol.console_rules("harvester-ops", PREFIX, CID, b1=True):
         assert "*" not in path[:-1], path
+
+
+# ---------------------------------------------------------------------------
+# 2.10.0 (tâche 6) : personnes, groupes, ESO, commandes de l'assistant
+# ---------------------------------------------------------------------------
+FIX10 = ROOT / "tests" / "api" / "fixtures" / "openbao_policy_2100"
+
+
+@pytest.mark.parametrize("name,text", [
+    ("person.hcl", pol.person_policy("harvester-ops", PREFIX, CID)),
+    ("person_groups_only.hcl", pol.person_policy("harvester-ops", PREFIX, CID, groups_only=True)),
+    ("group_ops.hcl", pol.group_policy("harvester-ops", PREFIX, CID, "ops", ["kubeconfig", "ssh-kvm", "tf-kvm"],
+                                       ["harv1", "node2"])),
+    ("eso.hcl", pol.eso_policy("harvester-ops", PREFIX, CID, "1d905023", "auth_jwt_1a2b3c4d")),
+])
+def test_2100_policy_text_is_the_reference(name, text):
+    assert text == (FIX10 / name).read_text()
+
+
+@pytest.mark.parametrize("text", [
+    pol.person_policy("harvester-ops", PREFIX, CID),
+    pol.person_policy("kv", "teams/x/consoles/" + CID, CID),
+    pol.group_policy("harvester-ops", PREFIX, CID, "ops", list(pol.GROUP_CLASSES[:4]), ["a", "b"]),
+    pol.eso_policy("harvester-ops", PREFIX, CID, "1d905023", "auth_jwt_1a2b3c4d"),
+])
+def test_2100_policies_stay_under_the_prefix_and_never_administer(text):
+    """Aucune capacité hors du préfixe (sauf `capabilities-self`), jamais
+    `kubeconfig/*`, `rancher-oidc`, `replication-*`, `plan-run`, transit ou
+    AppRole dans la politique commune, jamais d'administration."""
+    for path, _caps in rules_of(text):
+        assert path == "sys/capabilities-self" or "/consoles/" + CID + "/" in path, path
+    assert "sudo" not in text and "sys/polic" not in text and "transit/" not in text and "auth/" not in text
+    for cls in ("rancher-oidc", "replication-", "plan-run"):
+        assert f"/{cls}" not in text
+
+
+def test_person_policy_rights_by_class():
+    caps = {p: c for p, c in rules_of(pol.person_policy("harvester-ops", PREFIX, CID))}
+    d = f"harvester-ops/data/{PREFIX}"
+    assert caps[f"{d}/ssh-kvm/*"] == '"read"'
+    assert caps[f"{d}/eso/*"] == '"create", "update"'                   # écrite, jamais relue
+    assert "read" not in caps[f"{d}/eso/*"]
+    assert not any("kubeconfig" in p for p in caps)
+    assert list(caps)[-1] == "sys/capabilities-self"
+    only = rules_of(pol.person_policy("harvester-ops", PREFIX, CID, groups_only=True))
+    assert only == [("sys/capabilities-self", '"update"')]
+
+
+def test_group_rules_are_per_cluster_never_a_wildcard_class():
+    rules = rules_of(pol.group_policy("harvester-ops", PREFIX, CID, "ops", ["ssh-kvm"], ["node2"]))
+    assert [p for p, _ in rules] == [f"harvester-ops/data/{PREFIX}/ssh-kvm/node2",
+                                     f"harvester-ops/metadata/{PREFIX}/ssh-kvm/node2"]
+
+
+@pytest.mark.parametrize("call", [
+    lambda: pol.group_policy("harvester-ops", PREFIX, CID, "ops", ["rancher-oidc"], ["a"]),
+    lambda: pol.group_policy("harvester-ops", PREFIX, CID, "ops", ["ssh-kvm"], ["*"]),
+    lambda: pol.group_policy("harvester-ops", PREFIX, CID, "ops", ["ssh-kvm"], ["a/b"]),
+    lambda: pol.group_policy("harvester-ops", PREFIX, CID, "ops", ["ssh-kvm"], ["+"]),
+    lambda: pol.group_policy("harvester-ops", PREFIX, CID, "ops", ["ssh-kvm"], []),
+    lambda: pol.group_policy("harvester-ops", PREFIX, CID, "ops", ["ssh-kvm", "ssh-kvm"], ["a"]),
+    lambda: pol.group_policy("harvester-ops", PREFIX, CID, "ops", ["eso"], ["node2"]),
+    lambda: pol.group_policy("harvester-ops", PREFIX, CID, "Ops", ["ssh-kvm"], ["a"]),
+    lambda: pol.group_policy("harvester-ops", PREFIX, CID, "a" * 40, ["ssh-kvm"], ["a"]),
+    lambda: pol.group_body(CID, "ops", ["not-a-uuid"]),
+    lambda: pol.group_body(CID, "ops", ["11111111-2222-3333-4444-555555555555"] * 2),
+    lambda: pol.eso_policy("harvester-ops", PREFIX, CID, "xyz", "auth_jwt_1a2b3c4d"),
+    lambda: pol.eso_policy("harvester-ops", PREFIX, CID, "1d905023", "auth_token_1a2b3c"),
+    lambda: pol.eso_policy("harvester-ops", PREFIX, CID, "1d905023", "x}} path \"*\""),
+    lambda: pol.person_policy("harvester-ops", PREFIX, "nothex"),
+    lambda: pol.person_token_commands("https://x", CID, "../r", "c", "https://r/oidc", None, "1.2.3.4/32", None),
+    lambda: pol.person_token_commands("https://x", CID, "r", "c", "https://r", None, "1.2.3.4/32", None),
+    lambda: pol.person_token_commands("https://x", CID, "r", "c", "https://r/oidc", None, "any", None),
+    lambda: pol.person_token_commands("https://x/; rm -rf /", CID, "r", "c", "https://r/oidc", None, "1.2.3.4/32",
+                                      None),
+])
+def test_2100_bad_input_refused(call):
+    with pytest.raises(ValueError):
+        call()
+
+
+def _pt_cmds(keys=None, ca=None):
+    return pol.person_token_commands("https://bao.example:8200", CID, "rmgr", "client-7zjw5jtpx6",
+                                     "https://rancher.example/oidc", ca, "10.0.0.5/32", keys)
+
+
+def test_person_token_commands_exact_and_without_value():
+    c = _pt_cmds()
+    assert c[0] == "export BAO_ADDR=https://bao.example:8200"
+    assert f"bao auth enable -path=jwt-hops-{CID}-rmgr jwt" in c
+    assert f"bao policy write hops-person-{CID} - <<'EOF'\n{pol.person_policy('harvester-ops', PREFIX, CID)}EOF" in c
+    import json as _j
+    import openbao_jwt as oj
+    conf = next(x for x in c if x.startswith(f"bao write auth/jwt-hops-{CID}-rmgr/config - "))
+    assert _j.loads(conf.split("\n", 1)[1].rsplit("\n", 1)[0]) == oj.mount_config("https://rancher.example/oidc")
+    role = next(x for x in c if x.startswith(f"bao write auth/jwt-hops-{CID}-rmgr/role/person - "))
+    assert _j.loads(role.split("\n", 1)[1].rsplit("\n", 1)[0]) == oj.person_role_params("client-7zjw5jtpx6",
+                                                                                       "10.0.0.5/32", CID)
+    assert "groups_claim" not in "\n".join(c)
+    text = "\n".join(_pt_cmds(keys=["-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"]))
+    for t in (text, "\n".join(c)):
+        assert not re.search(r"secret_id|token=|password|BAO_TOKEN|hvs\.|eyJ", t)
+
+
+def test_person_token_commands_one_key_source():
+    import openbao_jwt as oj
+    ca = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
+    static = "\n".join(_pt_cmds(keys=["-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"], ca=ca))
+    assert "jwt_validation_pubkeys" in static and "oidc_discovery" not in static
+    disc = "\n".join(_pt_cmds(ca=ca))
+    assert '"oidc_discovery_ca_pem"' in disc and "jwt_validation_pubkeys" not in disc
+    assert oj.ALGS == ["RS256"]
+
+
+def test_group_and_remove_commands():
+    uid = "11111111-2222-3333-4444-555555555555"
+    c = pol.group_commands("https://b:8200", "harvester-ops", PREFIX, CID, "ops", ["ssh-kvm"], ["node2"], [uid])
+    assert c[1].startswith(f"bao policy write hops-group-{CID}-ops - <<'EOF'\n")
+    assert c[2].startswith(f"bao write identity/group/name/hops-{CID}-ops - <<'EOF'")
+    import json as _j
+    assert _j.loads(c[2].split("\n", 1)[1].rsplit("\n", 1)[0]) == {
+        "type": "internal", "policies": [f"hops-group-{CID}-ops"], "member_entity_ids": [uid]}
+    assert pol.group_remove_commands("https://b:8200", CID, "ops")[1:] == [
+        f"bao delete identity/group/name/hops-{CID}-ops", f"bao policy delete hops-group-{CID}-ops"]
+    assert pol.person_remove_commands("https://b:8200", CID, "rmgr", last=True)[1:] == [
+        f"bao auth disable jwt-hops-{CID}-rmgr", f"bao policy delete hops-person-{CID}"]
+    assert pol.person_remove_commands("https://b:8200", CID, "rmgr")[1:] == [f"bao auth disable jwt-hops-{CID}-rmgr"]
+
+
+@pytest.mark.parametrize("groups_only,expect", [
+    (False, {"ssh-cluster/check-x": "read", "ssh-kvm/check-x": "read", "tf-kvm/check-x": "read",
+             "eso/check-x/ns/check-x": "write-only", "kubeconfig/check-x": "deny", "rancher-oidc/check-x": "deny",
+             "plan-run/check-x": "deny"}),
+    (True, {"ssh-cluster/check-x": "deny", "eso/check-x/ns/check-x": "deny"}),
+])
+def test_person_capability_checks(groups_only, expect):
+    got = pol.person_capability_checks("harvester-ops", PREFIX, CID, groups_only)
+    for leaf, want in expect.items():
+        assert got[f"harvester-ops/data/{PREFIX}/{leaf}"] == want
+    assert got["harvester-ops/data/consoles/000000000000/ssh-kvm/check-x"] == "deny"
+
+
+@pytest.mark.parametrize("want,caps,ok", [
+    ("read", ["read"], True), ("read", ["deny"], False),
+    ("write-only", ["create", "update"], True), ("write-only", ["create", "read", "update"], False),
+    ("write-only", ["deny"], False), ("deny", ["deny"], True), ("deny", [], True), ("deny", ["read"], False),
+])
+def test_capability_verdict(want, caps, ok):
+    assert pol.capability_verdict(want, caps) is ok

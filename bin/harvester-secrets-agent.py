@@ -29,6 +29,15 @@ Liste FERMÉE d'opérations (toute autre : refus) :
     restore-snapshot   instance neuve sur un volume neuf, restauration par le
                        jeton d'amorce, relecture, bascule (ancien volume
                        gardé 7 jours)
+    b1-jwt             2.10.0 : méthode `jwt` d'un Rancher (montage, politique
+                       commune des personnes, configuration, rôle `person`),
+                       relue ; même opération pour remplacer des clés
+                       statiques (rotation de la clé de Rancher)
+    b1-jwt-remove      montage d'un Rancher retiré (politique commune avec
+                       le dernier) ; les entités restent (point 289)
+    b1-groups          groupe interne `hops-<id>-<nom>` et sa politique
+                       (pose, membres, retrait), réglage « lecture seulement
+                       par groupe »
     status             état sans aucune valeur
 
 Aucune valeur secrète dans status.json, les journaux ni les messages : le
@@ -59,13 +68,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import openbao_bundle as ob  # noqa: E402
 import openbao_client as oc  # noqa: E402
+import openbao_jwt as oj  # noqa: E402
 import openbao_policy as pol  # noqa: E402
 import safe_fs as sf  # noqa: E402
 
 VERSION_FILE = Path(os.environ.get("HARVESTER_OPS_OPT", "/opt/harvester-ops")) / "VERSION"
 OPS = ("store-secret-id", "b1-install", "b1-upgrade", "b1-remove", "rotate-secret-id", "rotate-unseal-key",
        "restore-snapshot", "b1-policies", "export-unseal-key", "export-unseal-key-done", "ack-offline-copy",
-       "tf-entity-remove", "status")
+       "tf-entity-remove", "b1-jwt", "b1-jwt-remove", "b1-groups", "status")
 KEYS = {
     "store-secret-id": {"console_id", "addr", "role_id", "wrap_token", "ca_pem"},
     "b1-install": {"console_id", "bundle"},
@@ -79,6 +89,12 @@ KEYS = {
     "export-unseal-key-done": set(),
     "ack-offline-copy": {"key_id"},
     "tf-entity-remove": {"decl"},
+    # 2.10.0 (plan 2.10.0, tâches 6 et 7) : méthode jwt d'un Rancher (pose,
+    # mise à jour des clés statiques), son retrait, groupes internes et
+    # réglage « lecture seulement par groupe »
+    "b1-jwt": {"rancher", "client_id", "issuer", "ca_pem", "pubkeys", "groups_only"},
+    "b1-jwt-remove": {"rancher"},
+    "b1-groups": {"name", "classes", "clusters", "members", "remove", "groups_only"},
     "status": set(),
 }
 COMMON = {"op", "id", "requested_by"}
@@ -115,6 +131,9 @@ WAIT_S = int(os.environ.get("HARVESTER_SECRETS_AGENT_WAIT", "120"))
 # root des identifiants de la console, monté en lecture seule dans le
 # conteneur), effacé après le téléchargement ou au bout de 10 minutes.
 EXPORT_NAME = "unseal-export.key"
+# 2.10.0 : CA et clés publiques de Rancher dans une demande (rien de secret)
+PEM_MAX = 16 << 10
+PUBKEYS_MAX = 8
 EXPORT_TTL_S = 600
 
 
@@ -1174,6 +1193,7 @@ class Agent:
             raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
         cid = st["console_id"]
         self.step("policies", "running")
+        done = [pol.agent_role(cid), pol.tf_role(cid)]
         a = self.agent_client()
         try:
             _, auths = a._call("GET", "sys/auth")
@@ -1187,10 +1207,32 @@ class Agent:
             # instantané restauré, qui la compare)
             if not review and not st.get("default_policy_sha256"):
                 self._record_default_policy(a)
+            # 2.10.0 : politique commune des personnes et politiques des
+            # groupes remises au texte de cette version (jamais pendant la
+            # revue d'un instantané, qui les compare)
+            if not review:
+                done += self._person_policies_refresh(a, st)
         finally:
             a.revoke_self()
-        self.step("policies", "done", f"{pol.agent_role(cid)}, {pol.tf_role(cid)}")
+        self.step("policies", "done", ", ".join(done))
         return "policies of the agent and of the OpenTofu tokens updated"
+
+    def _person_policies_refresh(self, a, st):
+        cid, kv, prefix = self._person_layout(st)
+        done = []
+        if st.get("person_jwt"):
+            a._call("POST", f"sys/policies/acl/{pol.person_policy_name(cid)}",
+                    {"policy": pol.person_policy(kv, prefix, cid, bool(st.get("person_groups_only")))})
+            done.append(pol.person_policy_name(cid))
+        for name, g in sorted((st.get("person_groups") or {}).items()):
+            try:
+                text = pol.group_policy(kv, prefix, cid, name, g.get("classes"), g.get("clusters"))
+            except (ValueError, AttributeError):
+                self.log(f"group {sf.clean_line(name, 40)} of the agent state unreadable, policy left as is")
+                continue
+            a._call("POST", f"sys/policies/acl/{pol.group_policy_name(cid, name)}", {"policy": text})
+            done.append(pol.group_policy_name(cid, name))
+        return done
 
     def _record_default_policy(self, a):
         """Empreinte (sha256) de la politique `default` de l'instance en
@@ -1231,6 +1273,286 @@ class Agent:
         gone = self.remove_tf_entity(req["decl"])
         self.step("entity", "done", "removed" if gone else "no such entity")
         return f"identity entity {alias} " + ("removed" if gone else "already absent")
+
+    # -- 2.10.0 : jeton OpenBao par personne (tâches 6 et 7) -------------------
+    def _with_agent(self, fn):
+        a = self.agent_client()
+        try:
+            return fn(a)
+        finally:
+            a.revoke_self()
+
+    def _person_layout(self, st):
+        cid = st["console_id"]
+        return cid, st.get("mount") or pol.DEFAULT_MOUNT, f"consoles/{cid}"
+
+    @staticmethod
+    def _bool_or_none(req, key):
+        v = req.get(key)
+        if v is not None and not isinstance(v, bool):
+            raise AgentError("bad-request", f"{key}: true or false")
+        return v
+
+    def _jwt_spec(self, st, req):
+        """Demande `b1-jwt` contrôlée : nom de montage dérivé (jamais lu dans
+        la demande), configuration et rôle rendus par openbao_jwt ; plage de
+        la console = 127.0.0.1/32 (B1, `--network host`)."""
+        cid = st["console_id"]
+        pubkeys, ca = req.get("pubkeys"), req.get("ca_pem")
+        try:
+            mount = oj.person_mount(cid, req.get("rancher"))
+            if pubkeys is not None and (not isinstance(pubkeys, list) or not 1 <= len(pubkeys) <= PUBKEYS_MAX
+                                        or any(not isinstance(k, str) or len(k) > PEM_MAX for k in pubkeys)):
+                raise ValueError(f"pubkeys: 1 to {PUBKEYS_MAX} PEM public keys")
+            if ca is not None and (not isinstance(ca, str) or len(ca) > PEM_MAX * 4
+                                   or "-----BEGIN CERTIFICATE-----" not in ca):
+                raise ValueError("ca_pem: PEM certificate expected")
+            config = oj.mount_config(req.get("issuer"), ca_pem=ca, pubkeys=pubkeys)
+            role = oj.person_role_params(req.get("client_id"), pol.B1_CIDR, cid)
+        except ValueError as e:
+            raise AgentError("bad-request", str(e)) from None
+        return mount, config, role
+
+    @staticmethod
+    def _ttl_s(v):
+        v = str(v if v is not None else "").strip()
+        try:
+            if v[-1:] in ("s", "m", "h"):
+                return int(v[:-1]) * {"s": 1, "m": 60, "h": 3600}[v[-1]]
+            return int(v or 0)
+        except ValueError:
+            return -1
+
+    def _jwt_role_diff(self, d, client_id, cid):
+        """Écarts entre un rôle `person` relu et celui que rend openbao_jwt
+        (liste vide : conforme). `token_policies_template_claims` (propre à
+        OpenBao) ferait choisir des politiques par le jeton : refusé."""
+        want = oj.person_role_params(client_id, pol.B1_CIDR, cid)
+        bad = []
+        for k in ("role_type", "user_claim", "token_type"):
+            if str(d.get(k) or "") != str(want[k]):
+                bad.append(k)
+        for k in ("bound_audiences", "token_policies"):
+            if list(d.get(k) or []) != list(want[k]):
+                bad.append(k)
+        if set(d.get("policies") or []) - set(want["token_policies"]):
+            bad.append("policies")
+        if dict(d.get("claim_mappings") or {}) != want["claim_mappings"]:
+            bad.append("claim_mappings")
+        if _networks(d.get("token_bound_cidrs")) != _networks(want["token_bound_cidrs"]):
+            bad.append("token_bound_cidrs")
+        for k in ("token_ttl", "token_max_ttl"):
+            if self._ttl_s(d.get(k)) != self._ttl_s(want[k]):
+                bad.append(k)
+        for k in ("groups_claim", "bound_claims", "bound_subject", "bound_cidrs", "token_period",
+                  "token_explicit_max_ttl", "token_num_uses", "token_no_default_policy",
+                  "token_policies_template_claims", "verbose_oidc_logging"):
+            if d.get(k):
+                bad.append(k)
+        return bad
+
+    @staticmethod
+    def _jwt_config_diff(d, issuer, ca_pem, pubkeys_allowed, static):
+        """Écarts d'une configuration relue : émetteur, algorithme, rôle par
+        défaut, une seule source de clés (la découverte par l'émetteur avec
+        sa CA, ou des clés statiques parmi celles que l'agent a posées)."""
+        bad = []
+        if str(d.get("bound_issuer") or "") != issuer:
+            bad.append("bound_issuer")
+        if list(d.get("jwt_supported_algs") or []) != list(oj.ALGS):
+            bad.append("jwt_supported_algs")
+        if str(d.get("default_role") or "") != oj.PERSON_ROLE:
+            bad.append("default_role")
+        for k in ("jwks_url", "jwks_ca_pem", "provider_config", "oidc_client_id"):
+            if d.get(k):
+                bad.append(k)
+        keys = [str(k).strip() for k in d.get("jwt_validation_pubkeys") or []]
+        if static:
+            if d.get("oidc_discovery_url") or not keys or set(keys) - {str(k).strip() for k in pubkeys_allowed}:
+                bad.append("jwt_validation_pubkeys")
+        else:
+            if str(d.get("oidc_discovery_url") or "") != issuer or keys:
+                bad.append("oidc_discovery_url")
+            if str(d.get("oidc_discovery_ca_pem") or "").strip() != str(ca_pem or "").strip():
+                bad.append("oidc_discovery_ca_pem")
+        return bad
+
+    def op_b1_jwt(self, req):
+        """Méthode `jwt` d'un Rancher posée sans redémarrer OpenBao (essai 6) :
+        montage (s'il manque), politique commune, configuration, rôle
+        `person` ; rôles du montage relus (un rôle étranger est retiré),
+        configuration et rôle comparés au rendu d'openbao_jwt. Rejouée pour
+        remplacer les clés statiques (tâche 7)."""
+        st = self.agent_state()
+        if not st:
+            raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
+        mount, config, role = self._jwt_spec(st, req)
+        groups_only = self._bool_or_none(req, "groups_only")
+        if groups_only is None:
+            groups_only = bool(st.get("person_groups_only"))
+        cid, kv, prefix = self._person_layout(st)
+        rancher = str(req["rancher"])
+        static = "jwt_validation_pubkeys" in config
+        prev = (st.get("person_jwt") or {}).get(rancher) or {}
+        seen = oj.merge_pubkeys(prev.get("pubkeys_seen"), config.get("jwt_validation_pubkeys"))
+        self.step("mount", "running", mount)
+
+        def apply(a):
+            _, auths = a._call("GET", "sys/auth")
+            cur = (self._data(auths) or {}).get(mount + "/")
+            if cur and (cur or {}).get("type") != "jwt":
+                raise AgentError("jwt-mount-taken", f"{mount}/ is already used by another auth method")
+            if not cur:
+                a._call("POST", f"sys/auth/{mount}", {"type": "jwt",
+                                                      "description": f"harvester-ops {cid} Rancher {rancher}"})
+                self.undo.append(("jwt mount removed",
+                                  lambda: self._with_agent(lambda b: b._call("DELETE", f"sys/auth/{mount}"))))
+            self.step("mount", "done", mount + ("/ kept" if cur else "/ created"))
+            self.step("policy", "running", pol.person_policy_name(cid))
+            a._call("POST", f"sys/policies/acl/{pol.person_policy_name(cid)}",
+                    {"policy": pol.person_policy(kv, prefix, cid, groups_only)})
+            self.step("policy", "done", pol.person_policy_name(cid) + (" (groups only)" if groups_only else ""))
+            self.step("config", "running", "static keys" if static else "discovery")
+            a._call("POST", f"auth/{mount}/config", config)
+            a._call("POST", f"auth/{mount}/role/{oj.PERSON_ROLE}", role)
+            for other in self._list(a, f"auth/{mount}/role"):
+                if other != oj.PERSON_ROLE:
+                    a._call("DELETE", f"auth/{mount}/role/{other}")
+                    self.log(f"role {sf.clean_line(other, 64)} of {mount} removed (not set by the console)")
+            _, doc = a._call("GET", f"auth/{mount}/config")
+            bad = self._jwt_config_diff(self._data(doc) or {}, config["bound_issuer"], config.get(
+                "oidc_discovery_ca_pem"), config.get("jwt_validation_pubkeys") or [], static)
+            _, doc = a._call("GET", f"auth/{mount}/role/{oj.PERSON_ROLE}")
+            bad += self._jwt_role_diff(self._data(doc) or {}, req["client_id"], cid)
+            if bad:
+                raise AgentError("jwt-readback", f"{mount}: read back differs ({', '.join(bad)})")
+            self.step("config", "done", f"{mount}: configuration and role read back")
+        self._with_agent(apply)
+        entry = {"mount": mount, "client_id": str(req["client_id"]), "issuer": config["bound_issuer"],
+                 "keys": "static" if static else "discovery", "pubkeys": config.get("jwt_validation_pubkeys"),
+                 "pubkeys_seen": seen, "ca_pem": config.get("oidc_discovery_ca_pem"),
+                 "at": self.now(), "by": self.status.get("requested_by")}
+        st = self.agent_state()
+        st["person_jwt"] = dict(st.get("person_jwt") or {}, **{rancher: entry})
+        st["person_groups_only"] = groups_only
+        self.save_agent_state(st)
+        self.undo = []
+        self.status["info"] = {"mount": mount, "keys": entry["keys"]}
+        return f"jwt auth method {mount} set"
+
+    def op_b1_jwt_remove(self, req):
+        st = self.agent_state()
+        if not st:
+            raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
+        cid = st["console_id"]
+        try:
+            mount = oj.person_mount(cid, req.get("rancher"))
+        except ValueError as e:
+            raise AgentError("bad-request", str(e)) from None
+        rancher = str(req["rancher"])
+        rest = {k: v for k, v in (st.get("person_jwt") or {}).items() if k != rancher}
+        self.step("mount", "running", mount)
+
+        def remove(a):
+            _, auths = a._call("GET", "sys/auth")
+            cur = (self._data(auths) or {}).get(mount + "/")
+            if cur and cur.get("type") == "jwt":
+                a._call("DELETE", f"sys/auth/{mount}")
+            self.step("mount", "done", f"{mount}/ " + ("removed" if cur else "already absent"))
+            if not rest:
+                a._call("DELETE", f"sys/policies/acl/{pol.person_policy_name(cid)}")
+                self.step("policy", "done", pol.person_policy_name(cid) + " removed (last Rancher)")
+        self._with_agent(remove)
+        st = self.agent_state()
+        st["person_jwt"] = rest
+        self.save_agent_state(st)
+        return f"jwt auth method {mount} removed"
+
+    def _person_accessors(self, a, st):
+        _, auths = a._call("GET", "sys/auth")
+        auths = self._data(auths) or {}
+        mounts = {e.get("mount") for e in (st.get("person_jwt") or {}).values() if isinstance(e, dict)}
+        return {(v or {}).get("accessor") for k, v in auths.items()
+                if k.rstrip("/") in mounts and (v or {}).get("type") == "jwt" and (v or {}).get("accessor")}
+
+    def op_b1_groups(self, req):
+        """Groupe interne `hops-<id>-<nom>` (décision 303 A) : sa politique
+        rendue par openbao_policy, ses membres (entités d'une personne
+        connue : alias sur un montage `jwt` de cette console, aucune
+        politique propre). Retrait. Seul, `groups_only` réécrit la politique
+        commune (« lecture seulement par groupe »)."""
+        st = self.agent_state()
+        if not st:
+            raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
+        cid, kv, prefix = self._person_layout(st)
+        groups_only = self._bool_or_none(req, "groups_only")
+        remove = self._bool_or_none(req, "remove")
+        name = req.get("name")
+        if name is None:
+            if groups_only is None or any(req.get(k) is not None for k in ("classes", "clusters", "members",
+                                                                          "remove")):
+                raise AgentError("bad-request", "a group name, or groups_only alone")
+            self._with_agent(lambda a: a._call("POST", f"sys/policies/acl/{pol.person_policy_name(cid)}",
+                                               {"policy": pol.person_policy(kv, prefix, cid, groups_only)}))
+            self.save_agent_state(dict(self.agent_state(), person_groups_only=groups_only))
+            self.step("policy", "done", pol.person_policy_name(cid) + (" (groups only)" if groups_only else ""))
+            return "person policy " + ("reduced to groups" if groups_only else "restored")
+        if groups_only is not None:
+            raise AgentError("bad-request", "groups_only goes alone")
+        try:
+            gname, pname = pol.group_name(cid, name), pol.group_policy_name(cid, name)
+            if remove:
+                if any(req.get(k) is not None for k in ("classes", "clusters", "members")):
+                    raise ValueError("remove takes the group name only")
+            else:
+                text = pol.group_policy(kv, prefix, cid, name, req.get("classes"), req.get("clusters"))
+                body = pol.group_body(cid, name, req.get("members"))
+        except ValueError as e:
+            raise AgentError("bad-request", str(e)) from None
+        groups = dict(st.get("person_groups") or {})
+        self.step("group", "running", gname)
+        if remove:
+            def drop(a):
+                try:
+                    a._call("DELETE", f"identity/group/name/{gname}")
+                except oc.OpenBaoError as e:
+                    if e.code != "openbao-missing":
+                        raise
+                a._call("DELETE", f"sys/policies/acl/{pname}")
+            self._with_agent(drop)
+            groups.pop(name, None)
+            self.save_agent_state(dict(self.agent_state(), person_groups=groups))
+            self.step("group", "done", f"{gname} removed")
+            return f"group {gname} removed"
+
+        def put(a):
+            accs = self._person_accessors(a, st)
+            for eid in body["member_entity_ids"]:
+                try:
+                    _, doc = a._call("GET", f"identity/entity/id/{eid}")
+                except oc.OpenBaoError as e:
+                    if e.code == "openbao-missing":
+                        raise AgentError("group-member-unknown", f"no identity entity {eid}") from None
+                    raise
+                d = self._data(doc) or {}
+                aliases = d.get("aliases") or []
+                if d.get("policies") or not aliases \
+                        or any((al or {}).get("mount_accessor") not in accs for al in aliases):
+                    raise AgentError("group-member-refused", f"entity {eid} is not a person of this console")
+            a._call("POST", f"sys/policies/acl/{pname}", {"policy": text})
+            a._call("POST", f"identity/group/name/{gname}", body)
+            _, doc = a._call("GET", f"identity/group/name/{gname}")
+            d = self._data(doc) or {}
+            if d.get("type") != "internal" or list(d.get("policies") or []) != [pname] \
+                    or sorted(d.get("member_entity_ids") or []) != sorted(body["member_entity_ids"]):
+                raise AgentError("group-readback", f"{gname}: read back differs")
+        self._with_agent(put)
+        groups[name] = {"classes": list(req["classes"]), "clusters": list(req["clusters"]),
+                        "members": list(body["member_entity_ids"]), "at": self.now(),
+                        "by": self.status.get("requested_by")}
+        self.save_agent_state(dict(self.agent_state(), person_groups=groups))
+        self.step("group", "done", f"{gname}: {len(body['member_entity_ids'])} member(s)")
+        return f"group {gname} set"
 
     def op_b1_remove(self, req):
         st = self.agent_state()
@@ -1458,13 +1780,21 @@ class Agent:
             for c in (a, console):
                 _, me = c._call("GET", "auth/token/lookup-self")
                 mine.add(str((self._data(me) or {}).get("accessor") or ""))
-            # méthodes d'authentification : token et approle seulement
-            _, auths = a._call("GET", "sys/auth")
-            auths = {k: (v or {}).get("type") for k, v in (self._data(auths) or {}).items() if isinstance(v, dict)}
-            if auths != {"token/": "token", "approle/": "approle"}:
-                self._untrusted(f"auth methods {sorted(auths)}")
+            # méthodes d'authentification : token et approle, plus (2.10.0)
+            # les montages `jwt` des personnes que l'agent a posés lui-même
+            # (état de root) ; un instantané plus ancien peut en avoir moins
             _, auth_doc = a._call("GET", "sys/auth")
+            auths = {k: (v or {}).get("type") for k, v in (self._data(auth_doc) or {}).items()
+                     if isinstance(v, dict)}
+            person = {e.get("mount"): e for e in (st.get("person_jwt") or {}).values() if isinstance(e, dict)}
+            jwt_present = {k.rstrip("/") for k, t in auths.items() if k not in ("token/", "approle/")}
+            if auths.get("token/") != "token" or auths.get("approle/") != "approle" \
+                    or any(auths[k + "/"] != "jwt" or k not in person for k in jwt_present):
+                self._untrusted(f"auth methods {sorted(auths)}")
             token_acc = ((self._data(auth_doc) or {}).get("token/") or {}).get("accessor")
+            jwt_accs = {((self._data(auth_doc) or {}).get(m + "/") or {}).get("accessor") for m in jwt_present}
+            for m in sorted(jwt_present):
+                self._review_jwt_mount(a, m, person[m], cid)
             # montages : les quatre du système, le KV de la console et transit
             _, mounts = a._call("GET", "sys/mounts")
             mounts = {k: (v or {}).get("type") for k, v in (self._data(mounts) or {}).items() if isinstance(v, dict)}
@@ -1481,6 +1811,18 @@ class Agent:
                         pol.agent_role(cid): pol.agent_policy(cid, mount),
                         pol.tf_role(cid): pol.tf_child_policy(cid, token_acc),
                         pol.boot_policy_name(cid): pol.boot_policy(cid, mount)}
+            # 2.10.0 : politique commune (l'un ou l'autre réglage « lecture
+            # seulement par groupe », textes rendus par la console) et celles
+            # des groupes de l'état de l'agent, au texte exact
+            prefix = f"consoles/{cid}"
+            person_texts = {pol.person_policy(mount, prefix, cid, g).strip() for g in (False, True)}
+            groups = {n: g for n, g in (st.get("person_groups") or {}).items() if isinstance(g, dict)}
+            for n, g in groups.items():
+                try:
+                    expected[pol.group_policy_name(cid, n)] = pol.group_policy(mount, prefix, cid, n, g.get("classes"),
+                                                                               g.get("clusters"))
+                except ValueError:
+                    continue
             for name in self._list(a, "sys/policies/acl"):
                 if name == "root":
                     continue
@@ -1490,6 +1832,8 @@ class Agent:
                     seen = hashlib.sha256(text.encode()).hexdigest()
                     if st.get("default_policy_sha256") and seen != st["default_policy_sha256"]:
                         self._untrusted("the default policy was changed")
+                    continue
+                if name == pol.person_policy_name(cid) and text.strip() in person_texts:
                     continue
                 if name not in expected or text.strip() != expected[name].strip():
                     self._untrusted(f"policy {name}")
@@ -1526,19 +1870,21 @@ class Agent:
                     or list(d.get("allowed_entity_aliases") or []) != tp["allowed_entity_aliases"] \
                     or d.get("allowed_policies_glob") or d.get("orphan") or d.get("renewable"):
                 self._untrusted("token role of the OpenTofu tokens")
-            # aucun groupe d'identité (il porterait des politiques)
-            if self._list(a, "identity/group/id"):
-                self._untrusted("identity groups")
+            # groupes d'identité : seulement les groupes internes `hops-<id>-*`
+            # de l'état de l'agent, chacun avec sa seule politique (2.10.0) ;
+            # rien d'autre (un groupe porte des politiques)
+            groups_present = self._review_groups(a, cid, groups)
             # relecture des corrections finales IMP-1 : entités d'identité sans
-            # politique, alias sur approle/ (role_id des deux rôles) ou sur
-            # token/ (`tf-<déclaration>`) seulement
-            self._review_entities(a, roles, token_acc)
+            # politique, alias sur approle/ (role_id des deux rôles), sur
+            # token/ (`tf-<déclaration>`) ou (2.10.0) sur un montage jwt des
+            # personnes seulement
+            self._review_entities(a, roles, token_acc, jwt_accs - {None})
             # m4 : aucun espace de noms (révocation faite dans la racine)
             if self._list(a, "sys/namespaces"):
                 self._untrusted("namespaces")
             # jetons : politiques permises, puis tous révoqués sauf les deux
             # de cette revue (révoqués ensuite)
-            allowed = {"default", *roles, pol.tf_role(cid), pol.boot_policy_name(cid)}
+            allowed = {"default", *roles, pol.tf_role(cid), pol.boot_policy_name(cid), pol.person_policy_name(cid)}
             accessors = self._list(a, "auth/token/accessors")
             for acc in accessors:
                 _, info = a._call("POST", "auth/token/lookup-accessor", {"accessor": acc})
@@ -1551,10 +1897,49 @@ class Agent:
                     a._call("POST", "auth/token/revoke-accessor", {"accessor": acc})
                     revoked += 1
             self.step("review", "running", f"{revoked} token(s) of the snapshot revoked")
+            return {"jwt": jwt_present, "groups": groups_present}
         finally:
             a.revoke_self()
 
-    def _review_entities(self, a, roles, token_acc):
+    def _review_jwt_mount(self, a, m, entry, cid):
+        """Montage `jwt` d'une personne restauré : un seul rôle, `person`,
+        et la configuration que l'agent a posée (émetteur, client, CA ou
+        clés statiques déjà vues pour ce montage)."""
+        roles = self._list(a, f"auth/{m}/role")
+        if roles != [oj.PERSON_ROLE]:
+            self._untrusted(f"roles of {m}: " + ", ".join(roles))
+        try:
+            _, doc = a._call("GET", f"auth/{m}/role/{oj.PERSON_ROLE}")
+            bad = self._jwt_role_diff(self._data(doc) or {}, entry.get("client_id"), cid)
+            _, doc = a._call("GET", f"auth/{m}/config")
+            conf = self._data(doc) or {}
+            # clés statiques : parmi celles que l'agent a posées pour ce
+            # montage (un instantané pris pendant une rotation en porte deux)
+            bad += self._jwt_config_diff(conf, entry.get("issuer"), entry.get("ca_pem"),
+                                         entry.get("pubkeys_seen") or [], bool(conf.get("jwt_validation_pubkeys")))
+        except ValueError:
+            bad = ["unreadable"]
+        if bad:
+            self._untrusted(f"jwt auth method {m} ({', '.join(bad)})")
+
+    def _review_groups(self, a, cid, groups):
+        present = set()
+        for gid in self._list(a, "identity/group/id"):
+            try:
+                _, doc = a._call("GET", f"identity/group/id/{gid}")
+            except oc.OpenBaoError:
+                self._untrusted(f"identity group {gid}")
+            d = self._data(doc) or {}
+            name = str(d.get("name") or "")
+            mine = next((n for n in groups if pol.group_name(cid, n) == name), None)
+            if mine is None or d.get("type") != "internal" or (d.get("alias") or {}).get("id") \
+                    or list(d.get("policies") or []) != [pol.group_policy_name(cid, mine)] \
+                    or d.get("parent_group_ids") or d.get("member_group_ids"):
+                self._untrusted(f"identity group {sf.clean_line(name or gid, 80)}")
+            present.add(mine)
+        return present
+
+    def _review_entities(self, a, roles, token_acc, jwt_accs=frozenset()):
         """Les politiques d'une entité valent pour chaque jeton de l'entité,
         y compris ceux émis après la révocation (prochain login AppRole de la
         console, jeton enfant `auth/token/create/<rôle>` avec un alias
@@ -1577,6 +1962,8 @@ class Agent:
                     continue
                 if acc and acc == token_acc and name.startswith("tf-") and pol.DECL_RE.match(name[3:]):
                     continue
+                if acc and acc in jwt_accs:
+                    continue                # une personne (alias = `sub`) ; ses droits viennent du rôle et des groupes
                 self._untrusted(f"identity entity {eid} alias on an unexpected mount or name")
 
     def op_restore_snapshot(self, req):
@@ -1664,11 +2051,12 @@ class Agent:
         c = self._console_identity_back(st)
         self.step("review", "running", "tokens and console rights of the restored snapshot")
         try:
-            self.review_restored(st, c)
+            present = self.review_restored(st, c)
         except BaseException:
             c.revoke_self()
             raise
         self.step("review", "done", "configuration as expected, tokens of the snapshot revoked")
+        self._prune_person_state(present or {})
         if witness:
             c.kv_metadata(st["mount"], f"consoles/{st['console_id']}/{witness}")
         else:
@@ -1679,6 +2067,19 @@ class Agent:
         self.rollback()                              # relance la console
         shutil.rmtree(self.p.work, ignore_errors=True)
         return f"snapshot {req['file']} restored; previous volume kept {OLD_VOLUME_DAYS} days"
+
+    def _prune_person_state(self, present):
+        """2.10.0 : un instantané plus ancien qu'un montage `jwt` ou qu'un
+        groupe ne les porte pas : l'état de l'agent suit ce qui est restauré
+        (la console les reconfigure par `person-token`)."""
+        st = self.agent_state()
+        pj = {k: v for k, v in (st.get("person_jwt") or {}).items()
+              if isinstance(v, dict) and v.get("mount") in present.get("jwt", set())}
+        pg = {k: v for k, v in (st.get("person_groups") or {}).items() if k in present.get("groups", set())}
+        if pj != (st.get("person_jwt") or {}) or pg != (st.get("person_groups") or {}):
+            gone = sorted(set(st.get("person_jwt") or {}) - set(pj)) + sorted(set(st.get("person_groups") or {}) - set(pg))
+            self.save_agent_state(dict(st, person_jwt=pj, person_groups=pg))
+            self.step("person-state", "done", "absent from the snapshot: " + ", ".join(gone))
 
     def _console_identity_back(self, st):
         """Après une restauration, la console doit se connecter avec son

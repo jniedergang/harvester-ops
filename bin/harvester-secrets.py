@@ -27,6 +27,14 @@
     harvester-secrets tf-encryption status | ack-vault
     harvester-secrets tf-entity-remove DECL [--done] [--trial]
     harvester-secrets tf-keys list | delete DECL --confirm DECL | sweep
+    harvester-secrets person-token status
+    harvester-secrets person-token assistant --rancher ID --issuer URL --client-id ID [--ca FILE]
+                                             [--keys discovery|static] [--console-cidr CIDR]
+    harvester-secrets person-token check|enable --rancher ID --id-token-stdin
+    harvester-secrets person-token disable [--rancher ID [--remove]]
+    harvester-secrets person-token groups list | set NAME --class C --cluster X [--member ID]
+                                          | remove NAME | only on|off
+    harvester-secrets person-token keys --rancher ID [--refresh | --confirm]
 
 Options communes : `--id` (action de la console, en-tête X-Hops-Action),
 `--actor` (personne, en-tête X-Hops-Actor).
@@ -67,6 +75,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 import openbao_bundle as ob  # noqa: E402
 import openbao_client as oc  # noqa: E402
+import openbao_jwt as oj  # noqa: E402
 import openbao_policy as pol  # noqa: E402
 import secret_classes as sc  # noqa: E402
 import secret_store as ss  # noqa: E402
@@ -1991,6 +2000,410 @@ def cmd_tf_keys(args):
 
 
 # ---------------------------------------------------------------------------
+# 2.10.0 : jeton OpenBao par personne (plan 2.10.0, tâches 6 et 7)
+# ---------------------------------------------------------------------------
+PERSON_SETTABLE = ("rancher", "client_id", "issuer")
+
+
+def _pt_doc(doc):
+    pt = doc.get("person_token") if isinstance(doc.get("person_token"), dict) else {}
+    pt.setdefault("enabled", False)
+    pt.setdefault("servers", {})
+    pt.setdefault("pending", {})
+    pt.setdefault("groups", {})
+    pt.setdefault("groups_only", False)
+    doc["person_token"] = pt
+    return pt
+
+
+def _pt_target(s):
+    """(adresse, CA, montage KV, préfixe) du serveur actif ; refus sinon."""
+    if not ss.openbao_active(s):
+        raise CliError("openbao-inactive", "OpenBao is not active (harvester-secrets enable first)", EXIT_REFUSED)
+    if s["mode"] == "b1":
+        return pol.B1_ADDR, ca_of(), pol.DEFAULT_MOUNT, s["prefix"] or f"consoles/{s['console_id']}"
+    return s["addr"], ca_of(s.get("ca_file")), s["mount"], s["prefix"] or f"consoles/{s['console_id']}"
+
+
+def _pt_identity_token(args):
+    """Jeton d'identité de l'administrateur qui lance la vérification : par
+    le fichier de spécification de la console (0600), ou sur l'entrée
+    standard ; jamais en argument. Un jeton d'accès de Rancher est refusé
+    avant tout envoi (point 280)."""
+    jwt = SPEC.get("id_token") or (sys.stdin.readline().strip() if getattr(args, "id_token_stdin", False) else None)
+    if not jwt:
+        raise CliError("openbao-person-no-token", "connect through Rancher to run the checks (the identity "
+                       "token of your session is needed)", EXIT_REFUSED)
+    try:
+        body = jwt.split(".")[1]
+        claims = json.loads(__import__("base64").urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    except (IndexError, ValueError):
+        raise CliError("bad-input", "not a JWT", EXIT_REFUSED) from None
+    if oj.is_access_token(claims):
+        raise CliError("bad-input", "an access token was given, not the identity token", EXIT_REFUSED)
+    return jwt
+
+
+def _pt_rancher_ca(args):
+    """CA de Rancher (publique) : fichier de l'administrateur, ou fichier de
+    spécification de la console ; None quand Rancher a un certificat public
+    (essai 2 : `oidc_discovery_ca_pem` facultatif)."""
+    if getattr(args, "ca", None):
+        return read_input_text(args.ca)
+    return SPEC.get("rancher_ca") or None
+
+
+def _pt_entry(pt, rancher, pending_first=True):
+    order = ("pending", "servers") if pending_first else ("servers", "pending")
+    for k in order:
+        e = pt[k].get(rancher)
+        if isinstance(e, dict) and e.get("mount"):
+            return e
+    raise CliError("person-token-unconfigured", f"no jwt auth method configured for the Rancher {rancher!r}: "
+                   "run `person-token assistant` first", EXIT_REFUSED)
+
+
+def run_person_checks(addr, ca, kv, prefix, cid, entry, jwt, groups_only=False):
+    """Vérifications avant activation (plan 2.10.0, tâche 6), chacune son
+    résultat et sa raison. La politique de la console n'est pas élargie :
+    tout se prouve par une connexion réelle avec le jeton d'identité de
+    l'administrateur qui les lance, révoquée à la fin."""
+    res = []
+
+    def put(cid_, ok, reason=""):
+        res.append({"id": cid_, "ok": ok, "reason": reason})
+        step(f"check-{cid_}", "done" if ok else ("skipped" if ok is None else "error"), reason)
+        return ok
+
+    issuer, mount = entry["issuer"], entry["mount"]
+    try:
+        doc = oj.fetch_json(oj.discovery_url(issuer), entry.get("ca_pem"))
+        found = oj.check_discovery(doc, issuer)
+        put("discovery", all(ok for _r, ok in found), "; ".join(f"{r}: {'ok' if ok else 'no'}" for r, ok in found))
+    except ValueError as e:
+        put("discovery", False, f"Rancher discovery document unreadable ({ss_scrub(str(e), jwt)[:160]})")
+    base = oc.Client(addr, ca_pem=ca, timeout=10, actor=ARGS.actor or "service", action=ARGS.id)
+    c = base.for_token(None)
+    try:
+        info = c.login_jwt(mount, oj.PERSON_ROLE, jwt)
+    except oc.OpenBaoError as e:
+        put("login", False, f"{e.code}: {e.detail}"[:240])
+        return res
+    except ValueError:
+        put("login", False, "invalid mount name")
+        return res
+    put("login", True, f"{mount}: identity token accepted (entity {info.get('entity_id')})")
+    token = c._tok.value
+    try:
+        look = c.lookup_self()
+        pname = pol.person_policy_name(cid)
+        pols = set(look["policies"])
+        want_net = {str(n) for n in _pt_networks([entry.get("console_cidr") or pol.B1_CIDR])}
+        got_net = {str(n) for n in _pt_networks(look["bound_cidrs"])}
+        ttl = look.get("ttl")
+        bad = []
+        if pols != {"default", pname}:
+            bad.append("policies " + ", ".join(sorted(pols)))
+        if got_net != want_net:
+            bad.append("bound to " + (", ".join(sorted(got_net)) or "any address"))
+        if not isinstance(ttl, int) or not 0 < ttl <= 900:
+            bad.append(f"ttl {ttl}")
+        groups = ", ".join(look["identity_policies"]) or "none"
+        put("token", not bad, "; ".join(bad) if bad else
+            f"policies default and {pname}, bound to the console, {ttl} s; group policies: {groups}")
+        checks = pol.person_capability_checks(kv, prefix, cid, groups_only)
+        got = c.capabilities(list(checks))
+        wrong = [f"{p} ({','.join(got.get(p) or []) or 'none'}, want {want})" for p, want in checks.items()
+                 if not pol.capability_verdict(want, got.get(p))]
+        put("capabilities", not wrong, "personal classes readable, eso write-only, other classes and "
+            "consoles refused" if not wrong else "unexpected: " + "; ".join(wrong)[:300])
+    except oc.OpenBaoError as e:
+        put("token", False, f"{e.code}: {e.detail}"[:240])
+    finally:
+        try:
+            c.revoke_self()
+        except oc.OpenBaoError:
+            pass
+    try:
+        refused = not base.for_token(token).token_valid()
+        put("revoke", refused, "token revoked, then refused" if refused else "the revoked token is still accepted")
+    except oc.OpenBaoError as e:
+        put("revoke", False, f"{e.code}: {e.detail}"[:240])
+    return res
+
+
+def _pt_networks(values):
+    import ipaddress
+    out = set()
+    for v in values or []:
+        try:
+            out.add(ipaddress.ip_network(str(v), strict=False))
+        except ValueError:
+            out.add(str(v))
+    return out
+
+
+def _pt_apply_jwt(s, cid, rancher, entry, pubkeys, groups_only):
+    """Pose (ou met à jour) la méthode jwt d'un Rancher : agent en B1,
+    commandes rendues en mode A (décision 287)."""
+    addr, _ca, kv, prefix = _pt_target(s)
+    if s["mode"] == "b1":
+        req = {"op": "b1-jwt", "rancher": rancher, "client_id": entry["client_id"], "issuer": entry["issuer"],
+               "groups_only": bool(groups_only)}
+        if pubkeys:
+            req["pubkeys"] = list(pubkeys)
+        elif entry.get("ca_pem"):
+            req["ca_pem"] = entry["ca_pem"]
+        agent_ok(run_agent(req))
+        return None
+    return pol.person_token_commands(addr, cid, rancher, entry["client_id"], entry["issuer"], entry.get("ca_pem"),
+                                     entry["console_cidr"], pubkeys or None, mount=kv, prefix=prefix,
+                                     groups_only=groups_only)
+
+
+def cmd_person_token(args):
+    return {"status": _pt_status, "assistant": _pt_assistant, "check": _pt_check, "enable": _pt_enable,
+            "disable": _pt_disable, "groups": _pt_groups, "keys": _pt_keys}[args.what](args)
+
+
+def _pt_status(args):
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    view = {k: {f: e.get(f) for f in ("mount", "client_id", "issuer", "keys", "keys_sha256", "keys_pending_confirm",
+                                      "configured_at", "configured_by", "checked_at")}
+            for k, e in pt["servers"].items() if isinstance(e, dict)}
+    out({"ok": True, "enabled": pt["enabled"], "groups_only": pt["groups_only"], "servers": view,
+         "pending": sorted(pt["pending"]), "groups": pt["groups"]})
+    return EXIT_OK
+
+
+def _pt_assistant(args):
+    s = settings()
+    doc = raw_settings()
+    cid = ensure_console_id(doc)
+    _pt_target(s)
+    if not args.rancher or not args.issuer or not args.client_id:
+        return refuse("bad-input", "--rancher, --issuer and --client-id are needed")
+    cidr = pol.B1_CIDR if s["mode"] == "b1" else args.console_cidr
+    if s["mode"] != "b1" and not cidr:
+        return refuse("bad-input", "mode a needs --console-cidr (the address OpenBao sees for the console)")
+    rancher_ca = _pt_rancher_ca(args)
+    try:
+        mount = oj.person_mount(cid, args.rancher)
+        oj.person_role_params(args.client_id, cidr, cid)
+        oj.mount_config(args.issuer)
+    except ValueError as e:
+        return refuse("bad-input", str(e))
+    issuer = args.issuer.rstrip("/")
+    pubkeys, sha = None, None
+    try:
+        jwks = oj.fetch_json(oj.jwks_url(issuer), rancher_ca)
+        sha = oj.keys_sha256(jwks)
+        if args.keys == "static":
+            pubkeys = oj.pubkeys_of(jwks)
+    except ValueError as e:
+        if args.keys == "static":
+            return fail("openbao-jwt-keys-unreadable", f"Rancher JWKS unreadable: {str(e)[:200]}")
+    entry = {"mount": mount, "client_id": args.client_id, "issuer": issuer, "keys": args.keys,
+             "keys_sha256": sha, "pubkeys": pubkeys, "ca_pem": None if pubkeys else rancher_ca,
+             "console_cidr": cidr, "configured_at": time.time(),
+             "configured_by": ARGS.actor or os.environ.get("SUDO_USER") or os.environ.get("USER") or "cli"}
+    pt = _pt_doc(raw_settings())
+    step("person-token", "running", f"{mount} ({args.keys})")
+    cmds = _pt_apply_jwt(s, cid, args.rancher, entry, pubkeys, pt["groups_only"])
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    pt["pending"][args.rancher] = entry
+    save_settings(doc)
+    step("person-token", "done", "set by the agent" if cmds is None else "commands for the OpenBao administrator")
+    _a, _c, kv, prefix = _pt_target(s)
+    out({"ok": True, "mount": mount, "keys": args.keys, "keys_sha256": sha, "applied": cmds is None,
+         "commands": cmds, "policy": pol.person_policy(kv, prefix, cid, pt["groups_only"]),
+         "next": "person-token check, then person-token enable (connected through Rancher)"})
+    return EXIT_OK
+
+
+def _pt_run_checks(args):
+    s = settings()
+    addr, ca, kv, prefix = _pt_target(s)
+    pt = _pt_doc(raw_settings())
+    if not args.rancher:
+        raise CliError("bad-input", "--rancher is needed", EXIT_REFUSED)
+    entry = _pt_entry(pt, args.rancher)
+    jwt = _pt_identity_token(args)
+    return pt, entry, run_person_checks(addr, ca, kv, prefix, s["console_id"], entry, jwt, pt["groups_only"])
+
+
+def _pt_check(args):
+    _pt, _entry, res = _pt_run_checks(args)
+    ok = all_green(res)
+    out({"ok": ok, "checks": res})
+    return EXIT_OK if ok else EXIT_FAIL
+
+
+def _pt_enable(args):
+    """Rien n'est activé tant qu'une vérification est rouge (plan 2.10.0) :
+    les cinq sont rejouées, puis la méthode du Rancher passe des réglages
+    en attente aux réglages actifs et le réglage est allumé, à chaud."""
+    _pt, entry, res = _pt_run_checks(args)
+    if not all_green(res):
+        out({"ok": False, "code": "person-token-checks-failed", "checks": res})
+        return EXIT_FAIL
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    pt["servers"][args.rancher] = dict(entry, checked_at=time.time())
+    pt["pending"].pop(args.rancher, None)
+    pt["enabled"] = True
+    save_settings(doc)
+    step("enable", "done", f"person tokens on for the Rancher {args.rancher}")
+    out({"ok": True, "checks": res, "enabled": True})
+    return EXIT_OK
+
+
+def _pt_disable(args):
+    """Sans `--rancher` : réglage éteint (tout repasse au service, à chaud).
+    Avec : la méthode de ce Rancher retirée des réglages ; `--remove` la
+    retire aussi d'OpenBao (agent en B1, commandes en A)."""
+    s = settings()
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    cmds = None
+    if not args.rancher:
+        if args.remove:
+            return refuse("bad-input", "--remove needs --rancher")
+        pt["enabled"] = False
+        save_settings(doc)
+        step("disable", "done", "person tokens off")
+        out({"ok": True, "enabled": False})
+        return EXIT_OK
+    known = args.rancher in pt["servers"] or args.rancher in pt["pending"]
+    if not known and not args.remove:
+        return refuse("person-token-unconfigured", f"no jwt auth method for the Rancher {args.rancher!r}")
+    pt["servers"].pop(args.rancher, None)
+    pt["pending"].pop(args.rancher, None)
+    save_settings(doc)
+    if args.remove:
+        addr, _ca, _kv, _prefix = _pt_target(s)
+        if s["mode"] == "b1":
+            agent_ok(run_agent({"op": "b1-jwt-remove", "rancher": args.rancher}))
+        else:
+            try:
+                cmds = pol.person_remove_commands(addr, s["console_id"], args.rancher,
+                                                  last=not (pt["servers"] or pt["pending"]))
+            except ValueError as e:
+                return refuse("bad-input", str(e))
+    step("disable", "done", f"Rancher {args.rancher} removed from the person token settings")
+    out({"ok": True, "rancher": args.rancher, "removed": bool(args.remove), "commands": cmds})
+    return EXIT_OK
+
+
+def _pt_groups(args):
+    """Groupes internes (décision 303 A) : `list`, `set NOM --class C
+    --cluster X [--member ENTITÉ]`, `remove NOM`, `only on|off` (réglage
+    « lecture seulement par groupe »)."""
+    s = settings()
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    if args.action == "list":
+        out({"ok": True, "groups": pt["groups"], "groups_only": pt["groups_only"]})
+        return EXIT_OK
+    addr, _ca, kv, prefix = _pt_target(s)
+    cid = s["console_id"]
+    if args.action == "only":
+        if args.name not in ("on", "off"):
+            return refuse("bad-input", "groups only on|off")
+        on = args.name == "on"
+        cmds = None
+        if s["mode"] == "b1":
+            agent_ok(run_agent({"op": "b1-groups", "groups_only": on}))
+        else:
+            cmds = pol.person_policy_commands(addr, kv, prefix, cid, on)
+        doc = raw_settings()
+        _pt_doc(doc)["groups_only"] = on
+        save_settings(doc)
+        out({"ok": True, "groups_only": on, "commands": cmds})
+        return EXIT_OK
+    if not args.name:
+        return refuse("bad-input", "a group name is needed")
+    cmds = None
+    try:
+        if args.action == "remove":
+            pol.group_name(cid, args.name)
+            if s["mode"] == "b1":
+                agent_ok(run_agent({"op": "b1-groups", "name": args.name, "remove": True}))
+            else:
+                cmds = pol.group_remove_commands(addr, cid, args.name)
+            doc = raw_settings()
+            _pt_doc(doc)["groups"].pop(args.name, None)
+        else:
+            classes, clusters, members = args.cls or [], args.cluster or [], args.member or []
+            pol.group_rules(kv, prefix, cid, args.name, classes, clusters)
+            pol.group_body(cid, args.name, members)
+            if s["mode"] == "b1":
+                agent_ok(run_agent({"op": "b1-groups", "name": args.name, "classes": classes, "clusters": clusters,
+                                    "members": members}))
+            else:
+                cmds = pol.group_commands(addr, kv, prefix, cid, args.name, classes, clusters, members)
+            doc = raw_settings()
+            _pt_doc(doc)["groups"][args.name] = {"classes": classes, "clusters": clusters, "members": members,
+                                                 "at": time.time(), "by": ARGS.actor or os.environ.get("USER")}
+    except ValueError as e:
+        return refuse("bad-input", str(e))
+    save_settings(doc)
+    out({"ok": True, "group": pol.group_name(cid, args.name), "removed": args.action == "remove",
+         "commands": cmds})
+    return EXIT_OK
+
+
+def _pt_keys(args):
+    """Tâche 7 : clés statiques de Rancher. Sans option, l'empreinte du JWKS
+    est comparée à celle des réglages (`openbao-jwt-keys-changed`) ;
+    `--refresh` pose l'ancienne et la nouvelle clé ensemble (aucune session
+    coupée pendant la rotation) ; `--confirm` ne garde que les clés
+    publiées. Mode `discovery` : rien à faire, OpenBao relit le JWKS."""
+    s = settings()
+    if not args.rancher:
+        return refuse("bad-input", "--rancher is needed")
+    pt = _pt_doc(raw_settings())
+    entry = _pt_entry(pt, args.rancher, pending_first=False)
+    if entry.get("keys") != "static":
+        out({"ok": True, "keys": "discovery", "changed": False,
+             "message": "OpenBao reads the JWKS of Rancher itself (discovery)"})
+        return EXIT_OK
+    try:
+        jwks = oj.fetch_json(oj.jwks_url(entry["issuer"]), entry.get("ca_pem"))
+        sha, now_keys = oj.keys_sha256(jwks), oj.pubkeys_of(jwks)
+    except ValueError as e:
+        return fail("openbao-jwt-keys-unreadable", f"Rancher JWKS unreadable: {str(e)[:200]}")
+    changed = sha != entry.get("keys_sha256") or entry.get("keys_pending_confirm")
+    if not args.refresh and not args.confirm:
+        out({"ok": True, "keys": "static", "changed": bool(sha != entry.get("keys_sha256")),
+             "pending_confirm": bool(entry.get("keys_pending_confirm")),
+             **({"code": "openbao-jwt-keys-changed"} if sha != entry.get("keys_sha256") else {})})
+        return EXIT_OK
+    if not changed and not args.confirm:
+        out({"ok": True, "keys": "static", "changed": False, "commands": None})
+        return EXIT_OK
+    keys = now_keys if args.confirm else oj.merge_pubkeys(entry.get("pubkeys"), now_keys)
+    cid = s["console_id"]
+    if s["mode"] == "b1":
+        _pt_apply_jwt(s, cid, args.rancher, entry, keys, pt["groups_only"])
+        cmds = None
+    else:
+        addr, _ca, _kv, _prefix = _pt_target(s)
+        cmds = pol.person_keys_commands(addr, cid, args.rancher, entry["issuer"], keys)
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    for k in ("servers", "pending"):
+        if args.rancher in pt[k]:
+            pt[k][args.rancher].update(pubkeys=keys, keys_sha256=sha, keys_pending_confirm=keys != now_keys)
+    save_settings(doc)
+    step("keys", "done", f"{len(keys)} key(s) set" + (" (old and new until confirm)" if keys != now_keys else ""))
+    out({"ok": True, "keys": "static", "count": len(keys), "pending_confirm": keys != now_keys, "commands": cmds})
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 def parser():
     p = argparse.ArgumentParser(prog="harvester-secrets", description="Console secret store (OpenBao).")
     p.add_argument("--id", help="action id of the console (X-Hops-Action)")
@@ -2084,6 +2497,34 @@ def parser():
     s.add_argument("decl")
     s.add_argument("--done", action="store_true", help="mode a: the administrator removed it")
     s.add_argument("--trial", action="store_true", help="declaration of a dry run: its transit key goes now")
+    s = sub.add_parser("person-token", help="per-person OpenBao tokens of the Rancher sign-in (2.10.0)")
+    pt = s.add_subparsers(dest="what", required=True)
+    pt.add_parser("status")
+    x = pt.add_parser("assistant", help="jwt auth method of a Rancher: agent (b1) or commands (a)")
+    for o in ("--rancher", "--issuer", "--client-id", "--ca", "--console-cidr"):
+        x.add_argument(o)
+    x.add_argument("--keys", choices=("discovery", "static"), default="discovery")
+    x.add_argument("--spec", help=argparse.SUPPRESS)
+    for name in ("check", "enable"):
+        x = pt.add_parser(name)
+        x.add_argument("--rancher")
+        x.add_argument("--id-token-stdin", action="store_true",
+                       help="the identity token of the administrator, on stdin (never as an argument)")
+        x.add_argument("--spec", help=argparse.SUPPRESS)
+    x = pt.add_parser("disable")
+    x.add_argument("--rancher")
+    x.add_argument("--remove", action="store_true", help="with --rancher: remove its jwt auth method too")
+    x = pt.add_parser("groups", help="internal OpenBao groups: list | set NAME | remove NAME | only on|off")
+    x.add_argument("action", choices=("list", "set", "remove", "only"))
+    x.add_argument("name", nargs="?")
+    x.add_argument("--class", dest="cls", action="append")
+    x.add_argument("--cluster", action="append")
+    x.add_argument("--member", action="append", help="identity entity id")
+    x = pt.add_parser("keys", help="static keys of a Rancher: compare, --refresh (old and new), --confirm")
+    x.add_argument("--rancher")
+    g = x.add_mutually_exclusive_group()
+    g.add_argument("--refresh", action="store_true")
+    g.add_argument("--confirm", action="store_true")
     s = sub.add_parser("tf-keys", help="transit keys of removed declarations (kept 30 days)")
     s.add_argument("what", choices=("list", "delete", "sweep"))
     s.add_argument("decl", nargs="?")
@@ -2098,7 +2539,7 @@ COMMANDS = {"status": cmd_status, "assistant": cmd_assistant, "check": cmd_check
             "bundle": cmd_bundle, "file": cmd_file, "offline-copy": cmd_offline_copy,
             "tf-encryption": cmd_tf_encryption, "tf-entity-remove": cmd_tf_entity_remove,
             "tf-keys": cmd_tf_keys, "snapshots": cmd_snapshots, "settings": cmd_settings,
-            "sweep-orphans": cmd_sweep_orphans}
+            "sweep-orphans": cmd_sweep_orphans, "person-token": cmd_person_token}
 
 
 def _load_spec(path):
@@ -2115,7 +2556,8 @@ def _load_spec(path):
             raise CliError("bad-input", "the spec file must be private (0600, same owner)", EXIT_REFUSED)
         doc = json.loads(f.read(1 << 20) or "{}")
     if isinstance(doc, dict):
-        SPEC.update({k: v for k, v in doc.items() if k in ("wrap_token", "ca_pem") and isinstance(v, str)})
+        SPEC.update({k: v for k, v in doc.items() if k in ("wrap_token", "ca_pem", "id_token", "rancher_ca")
+                     and isinstance(v, str)})
 
 
 def main(argv=None):

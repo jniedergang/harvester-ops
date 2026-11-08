@@ -19,6 +19,7 @@ import test_oci_push_175 as t175
 from fake_openbao import MSG_WRAP, FakeOpenBao, new_token
 
 TOKEN_ACCESSOR = "auth_token_1a2b3c4d"
+_NOT_MINE = object()
 
 
 ADMIN_PREFIXES = ("sys/policies/", "sys/rotate/", "sys/auth/", "sys/mounts/", "sys/audit/", "sys/raw/",
@@ -30,6 +31,49 @@ def admin_path(p):
     return (p.startswith(ADMIN_PREFIXES) or p in ("auth/token/create", "auth/token/create-orphan")
             or re.fullmatch(r"auth/approle/role/[^/]+", p) is not None
             or re.fullmatch(r"auth/approle/role/hops-agent-[^/]+/secret-id", p) is not None)
+
+
+def _acl_rules(text):
+    return [(p, [c.strip().strip('"') for c in caps.split(",") if c.strip()])
+            for p, caps in re.findall(r'^path "([^"]+)" \{ capabilities = \[([^\]]*)\] \}$', text or "", re.M)]
+
+
+def _acl_match(pattern, path):
+    glob = pattern.endswith("*")
+    pat = pattern[:-1] if glob else pattern
+    if "+" not in pat:
+        return path.startswith(pat) if glob else path == pat
+    pp, ps = pat.split("/"), path.split("/")
+    if len(ps) < len(pp) or (not glob and len(ps) != len(pp)):
+        return False
+    for i, seg in enumerate(pp):
+        last = i == len(pp) - 1
+        if seg == "+":
+            continue
+        if last and glob:
+            if not ps[i].startswith(seg):
+                return False
+        elif seg != ps[i]:
+            return False
+    return True
+
+
+def _acl_priority(pattern):
+    """Clé de priorité d'OpenBao (la plus grande gagne) : premier joker le
+    plus tard possible, pas de `*` final, moins de `+`, plus long, puis
+    l'ordre lexicographique."""
+    first = min([i for i, ch in enumerate(pattern) if ch in "+*"] or [len(pattern)])
+    return (first, not pattern.endswith("*"), -pattern.count("+"), len(pattern), pattern)
+
+
+def acl_allows(policy_text, path, cap):
+    """La politique (texte rendu par openbao_policy._hcl_policy) donne-t-elle
+    `cap` sur `path` ? La règle la plus précise décide, sans union."""
+    rules = [(p, c) for p, c in _acl_rules(policy_text) if _acl_match(p, path)]
+    if not rules:
+        return False
+    best = max(rules, key=lambda r: _acl_priority(r[0]))
+    return cap in best[1] or (cap == "update" and "create" in best[1])
 
 
 def token_accessor(tok):
@@ -71,6 +115,14 @@ class FakeB1(FakeOpenBao):
         self.audit_devices = {"hops/": {"type": "file", "path": "hops/"}}
         self.token_roles = {}
         self.groups = []
+        # 2.10.0 : méthodes jwt posées par l'agent (configuration et rôles
+        # relus comme OpenBao 2.7.2), groupes d'identité par nom, et la
+        # politique de l'agent appliquée à ses jetons (`enforce_agent`)
+        self.jwt_config = {}                 # montage -> configuration posée
+        self.jwt_roles = {}                  # montage -> {rôle: paramètres}
+        self.group_docs = {}                 # id -> {"name", "type", "policies", "member_entity_ids", ...}
+        self.enforce_agent = False
+        self.agent_denied = []               # (méthode, chemin) refusés par la politique de l'agent
 
     # -- amorce, comme `initialize` -------------------------------------------
     def initialize(self, boot_dir):
@@ -106,8 +158,149 @@ class FakeB1(FakeOpenBao):
         # comme `initialize` : token_policies = nom du rôle
         return [next((n for n, r in self.role_ids.items() if r == role_id), "default")]
 
+    def _agent_check(self, rec, path):
+        """Politique de l'agent appliquée à ses jetons (règles d'OpenBao :
+        la règle la plus précise décide, `*` final, `+` par segment)."""
+        tok = self._auth(rec)
+        info = self.tokens.get(tok) or {}
+        if pol.agent_role(self.cid) not in info.get("policies", ()):
+            return True
+        if path in ("auth/token/lookup-self", "auth/token/revoke-self", "auth/token/renew-self"):
+            return True                     # politique `default`
+        cap = {"GET": "read", "LIST": "list", "DELETE": "delete"}.get(rec["method"], "update")
+        if rec["method"] == "GET" and rec["query"].get("list") == ["true"]:
+            cap = "list"
+        text = self.policies.get(pol.agent_role(self.cid)) or ""
+        need_sudo = path.startswith("sys/auth/") or path in ("sys/rotate/root", "sys/audit", "auth/token/accessors")
+        ok = acl_allows(text, path, cap) and (not need_sudo or acl_allows(text, path, "sudo"))
+        if not ok:
+            self.agent_denied.append((rec["method"], path))
+        return ok
+
+    def _jwt_mount_of(self, path):
+        for k, v in self.auth_mounts.items():
+            if v.get("type") == "jwt" and path.startswith("auth/" + k):
+                return k.rstrip("/"), path[len("auth/" + k):]
+        return None, None
+
+    def _route_jwt_and_groups(self, h, rec, path, body):
+        """Rend None si le chemin n'est pas l'un de ceux-là."""
+        m = rec["method"]
+        parts = path.split("/")
+        if path.startswith("sys/auth/") and len(parts) >= 3:
+            name = "/".join(parts[2:]).strip("/")
+            key = name + "/"
+            if m in ("POST", "PUT"):
+                if key in self.auth_mounts:
+                    return h._err(400, f"path is already in use at {key}")
+                typ = body.get("type")
+                self.auth_mounts[key] = {"type": typ, "accessor": f"auth_{typ}_" + secrets.token_hex(4),
+                                         "description": body.get("description", "")}
+                self.events.append(("auth-enable", name))
+                return h._send(204)
+            if m == "DELETE":
+                gone = self.auth_mounts.pop(key, None)
+                self.jwt_config.pop(name, None)
+                self.jwt_roles.pop(name, None)
+                if gone:
+                    for e in self.entities.values():          # comme OpenBao : alias du montage retirés
+                        if isinstance(e, dict) and "aliases" in e:
+                            e["aliases"] = {a for a in e["aliases"] if a[0] != gone.get("accessor")}
+                self.events.append(("auth-disable", name))
+                return h._send(204)
+            cur = self.auth_mounts.get(key)
+            return h._send(200, {"data": dict(cur)}) if cur else h._err(400, f"no auth engine at {key}")
+        mount, rest = self._jwt_mount_of(path)
+        if mount is not None and rest == "config":
+            if m in ("POST", "PUT"):
+                srcs = [k for k in ("jwt_validation_pubkeys", "jwks_url", "oidc_discovery_url") if body.get(k)]
+                if len(srcs) != 1:
+                    return h._err(400, "exactly one of 'jwt_validation_pubkeys', 'jwks_url', 'jwks_pairs', "
+                                       "'oidc_discovery_url', or 'provider_config' must be set")
+                self.jwt_config[mount] = dict(body)
+                self.events.append(("jwt-config", mount))
+                return h._send(204)
+            c = self.jwt_config.get(mount)
+            if c is None:
+                return h._err(404)
+            out = {"bound_issuer": "", "default_role": "", "jwt_supported_algs": [], "jwt_validation_pubkeys": [],
+                   "jwks_url": "", "jwks_ca_pem": "", "oidc_discovery_url": "", "oidc_discovery_ca_pem": "",
+                   "oidc_client_id": "", "provider_config": {}, "namespace_in_state": True,
+                   "oidc_response_mode": "", "oidc_response_types": []}
+            out.update(c)
+            return h._send(200, {"data": out})
+        if mount is not None and (rest == "role" or rest.startswith("role/")):
+            roles = self.jwt_roles.setdefault(mount, {})
+            if rest == "role" or rest == "role/":
+                if m == "LIST" or rec["query"].get("list") == ["true"]:
+                    return h._send(200, {"data": {"keys": sorted(roles)}}) if roles else h._err(404)
+                return h._err(405)
+            name = rest[len("role/"):]
+            if m in ("POST", "PUT"):
+                roles[name] = dict(body)
+                self.events.append(("jwt-role", f"{mount}/{name}"))
+                return h._send(204)
+            if m == "DELETE":
+                roles.pop(name, None)
+                self.events.append(("jwt-role-delete", f"{mount}/{name}"))
+                return h._send(204)
+            r = roles.get(name)
+            if r is None:
+                return h._err(404)
+            from fake_openbao import _ttl_s
+            d = {"bound_claims": None, "bound_claims_type": "string", "bound_subject": "", "groups_claim": "",
+                 "token_period": 0, "token_explicit_max_ttl": 0, "token_num_uses": 0, "bound_cidrs": [],
+                 "token_policies_template_claims": False, "user_claim_json_pointer": False,
+                 "token_strictly_bind_ip": False, "verbose_oidc_logging": False}
+            d.update(r)
+            d["policies"] = list(r.get("token_policies") or [])
+            for k in ("token_ttl", "token_max_ttl"):
+                d[k] = _ttl_s(r.get(k), 0)
+            d["token_bound_cidrs"] = [c[:-3] if str(c).endswith("/32") else c for c in r.get("token_bound_cidrs") or []]
+            return h._send(200, {"data": d})
+        if path.startswith("identity/group/name/") and len(parts) == 4:
+            name = parts[3]
+            gid = next((i for i, g in self.group_docs.items() if g["name"] == name), None)
+            if m in ("POST", "PUT"):
+                if gid is None:
+                    gid = "grp-" + secrets.token_hex(6)
+                    self.group_docs[gid] = {"id": gid, "name": name, "type": "internal", "policies": [],
+                                            "member_entity_ids": [], "alias": {}}
+                    self.groups.append(gid)
+                g = self.group_docs[gid]
+                for k in ("type", "policies", "member_entity_ids", "metadata"):
+                    if k in body:
+                        v = body[k]
+                        g[k] = [x for x in v.split(",") if x] if k != "type" and isinstance(v, str) else v
+                self.events.append(("group-put", name))
+                return h._send(200, {"data": {"id": gid, "name": name}})
+            if gid is None:
+                return h._err(404)
+            if m == "DELETE":
+                del self.group_docs[gid]
+                self.groups.remove(gid)
+                self.events.append(("group-delete", name))
+                return h._send(204)
+            return h._send(200, {"data": dict(self.group_docs[gid])})
+        if path.startswith("identity/group/id/") and len(parts) == 4:
+            g = self.group_docs.get(parts[3])
+            if g is None:
+                return h._err(404)
+            if m == "DELETE":
+                del self.group_docs[parts[3]]
+                self.groups.remove(parts[3])
+                return h._send(204)
+            return h._send(200, {"data": dict(g)})
+        return _NOT_MINE
+
     def _route(self, h, rec, path, body, raw):
         m = rec["method"]
+        if self.enforce_agent and self._auth(rec) and not self._agent_check(rec, path):
+            return h._err(403, "1 error occurred:\n\t* permission denied\n\n")
+        if self._auth(rec):
+            r = self._route_jwt_and_groups(h, rec, path, body)
+            if r is not _NOT_MINE:
+                return r
         if path in ("sys/storage/raft/snapshot", "sys/storage/raft/snapshot-force") and m in ("POST", "PUT") \
                 and getattr(self, "_before_fresh", None) is not None and self._auth(rec) \
                 and (self.snapshot_key_ok or path.endswith("-force")):
@@ -150,7 +343,8 @@ class FakeB1(FakeOpenBao):
         if tok and m == "GET" and path.startswith("auth/token/roles/"):
             r = self.token_roles.get(parts[3])
             return h._send(200, {"data": dict(r, name=parts[3])}) if r else h._err(404)
-        if tok and path == "auth/token/lookup-self" and tok in self.tokens:
+        person = bool(tok) and (self.tokens.get(tok) or {}).get("kind") == "person"
+        if tok and path == "auth/token/lookup-self" and tok in self.tokens and not person:
             info = self.tokens[tok]
             return h._send(200, {"data": {"accessor": token_accessor(tok), "ttl": info["ttl"],
                                           "policies": info["policies"], "period": info["ttl"]}})
@@ -210,7 +404,7 @@ class FakeB1(FakeOpenBao):
                     self.roles[r_s[0]]["secret_ids"].discard(r_s[1])
                 self.events.append(("destroy-accessor", acc))
                 return h._send(204)
-        if path == "sys/capabilities-self" and tok:
+        if path == "sys/capabilities-self" and tok and not person:
             # comme la politique de la console : patch en plus sur metadata ;
             # les chemins d'administration lui sont refusés (sauf instantané
             # fabriqué, tâche 11)
