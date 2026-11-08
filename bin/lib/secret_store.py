@@ -267,19 +267,24 @@ def record_console_paths(state_dir, tf_workspaces):
     return True
 
 
-def encrypted_states(root=None, state_dir=None):
-    """Identifiants des déclarations dont l'état OpenTofu est chiffré (clés
-    de premier niveau seulement, jamais le contenu)."""
+def encrypted_state_times(root=None, state_dir=None):
+    """{déclaration: date d'écriture (mtime) de son état chiffré} (clés de
+    premier niveau seulement, jamais le contenu)."""
     import tf_encryption as tfe
     root = Path(root or tf_workspaces_dir(state_dir))
-    out = set()
+    out = {}
     for f in list(root.glob("*/decls/*/terraform.tfstate")) + list(root.glob(".kvm/*/decls/*/terraform.tfstate")):
         try:
             if not f.is_symlink() and tfe.is_encrypted(f.read_text()):
-                out.add(f.parent.name)
+                out[f.parent.name] = max(out.get(f.parent.name, 0), f.stat().st_mtime)
         except OSError:
             continue
-    return sorted(out)
+    return out
+
+
+def encrypted_states(root=None, state_dir=None):
+    """Identifiants des déclarations dont l'état OpenTofu est chiffré."""
+    return sorted(encrypted_state_times(root, state_dir))
 
 
 # Relecture finale I1 : première version qui sait lire les références

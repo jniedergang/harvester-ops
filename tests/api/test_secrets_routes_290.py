@@ -528,10 +528,13 @@ def pre(wapp, sx, monkeypatch, tmp_path):
     monkeypatch.setattr(wapp, "TF_DECLS", type("D", (), {"get": staticmethod(lambda i: decls.get(i))})())
     sx.set(mode="b1")
 
-    def encrypted(decl, created):
-        d = ws / "c1" / "decls" / decl
+    def encrypted(decl, created, written=None, kvm=False):
+        # `written` : date d'écriture de l'état (sa création par défaut)
+        d = (ws / ".kvm" / "h1" if kvm else ws / "c1") / "decls" / decl
         d.mkdir(parents=True)
-        (d / "terraform.tfstate").write_text(json.dumps({"encrypted_data": "x", "encryption_version": "v0"}))
+        f = d / "terraform.tfstate"
+        f.write_text(json.dumps({"encrypted_data": "x", "encryption_version": "v0"}))
+        os.utime(f, (written or created,) * 2)
         decls[decl] = {"id": decl, "name": f"n-{decl}", "created_at": time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime(created))}
 
@@ -545,10 +548,11 @@ def pre(wapp, sx, monkeypatch, tmp_path):
 
 
 def test_preflight_lists_what_the_restore_would_break(wapp, sx, pre):
-    pre.encrypted("old0decl0001", SNAP_AT - 86400)          # existait à l'instantané : lisible
+    pre.encrypted("old0decl0001", SNAP_AT - 86400)          # écrit avant l'instantané : lisible
     pre.encrypted("new0decl0001", SNAP_AT + 3600)           # créée après : clé absente de l'instantané
-    pre.encrypted("rot0decl0001", SNAP_AT - 86400)
-    pre.done("secrets:rotate-transit:rot0decl0001", SNAP_AT + 60)     # clé tournée après
+    # tournée après l'instantané, état réécrit avec la nouvelle version
+    pre.encrypted("rot0decl0001", SNAP_AT - 86400, written=SNAP_AT + 90)
+    pre.done("secrets:rotate-transit:rot0decl0001", SNAP_AT + 60)
     pre.done("secrets:rotate-ssh-kvm:node2", SNAP_AT + 120)           # clé KVM tournée après
     pre.done("secrets:rotate-ssh-kvm:node3", SNAP_AT - 120)           # avant : sans effet
     sx.set(mode="b1", migrated={"kubeconfig": {"at": SNAP_AT + 30, "by": "alice"},
@@ -560,6 +564,22 @@ def test_preflight_lists_what_the_restore_would_break(wapp, sx, pre):
     assert [h["host"] for h in doc["kvm_hosts"]] == ["node2"]
     assert doc["classes"] == ["kubeconfig"]
     assert doc["risks"] is True and doc["busy"] == []
+
+
+@pytest.mark.parametrize("kvm", [False, True])
+def test_preflight_lists_a_state_first_encrypted_after_the_snapshot(wapp, sx, pre, kvm):
+    """Relecture des corrections finales IMP-2 : déclaration créée bien avant
+    l'instantané, état migré (clé transit créée) après lui. Sa clé n'existe
+    pas dans l'instantané : l'état serait illisible après la restauration."""
+    pre.encrypted("mig0decl0001", SNAP_AT - 90 * 86400, written=SNAP_AT + 86400, kvm=kvm)
+    pre.encrypted("old0decl0001", SNAP_AT - 90 * 86400, written=SNAP_AT - 60, kvm=kvm)
+    status, doc = post(wapp, f"/api/secrets/restore/preflight?file={SNAP}", method="get")
+    assert status == 200, doc
+    assert [d["id"] for d in doc["tf_declarations"]] == ["mig0decl0001"]
+    assert doc["tf_declarations"][0]["reason"] == "state written after the snapshot"
+    assert doc["risks"] is True
+    status, doc = post(wapp, "/api/secrets/restore", {"file": SNAP, "confirm": CID})
+    assert status == 409 and doc["code"] == "restore-risks"
 
 
 def test_restore_refused_while_actions_run_or_risks_are_not_acknowledged(wapp, sx, pre):

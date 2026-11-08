@@ -59,9 +59,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   the console account); "Secret store" protected object in the Disaster
   Recovery overview; restore into a fresh instance with the snapshot key.
 - **Restore preflight**: before anything stops, the console lists running
-  actions, encrypted declarations whose transit key is newer than the
-  snapshot, KVM keys rotated since and classes moved since; the typed
-  identifier acknowledges the list.
+  actions, encrypted declarations whose state was written after the
+  snapshot (the transit key is created at the first encryption, often long
+  after the declaration), KVM keys rotated since and classes moved since;
+  the typed identifier acknowledges the list.
 - **Restore review by allowlist**: exact names and texts of the policies
   (`default` compared with the hash recorded at install), auth methods,
   AppRole roles with their policies, address ranges and single

@@ -205,8 +205,11 @@ anything stops, the console lists what the restore would break and you
 acknowledge it:
 
 - running actions (they stop with the console);
-- encrypted declarations whose transit key was created or rotated after the
-  snapshot (their state becomes unreadable);
+- encrypted declarations whose state was written after the snapshot: the
+  transit key is created at the first encryption (often long after the
+  declaration) and a rotation adds a version, so such a state may need a key
+  the snapshot does not hold and become unreadable (a state rewritten with a
+  key that already existed is listed too, harmlessly);
 - KVM hosts whose SSH key was rotated since (OpenBao would give back a key
   the host refuses);
 - classes moved to OpenBao after the snapshot (their secrets are not in it).

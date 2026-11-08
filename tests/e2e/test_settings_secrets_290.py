@@ -331,7 +331,7 @@ def test_restore_shows_what_it_would_break_before_anything_stops(context, flask_
                     "files": [{"file": snap, "bytes": 40000, "at": time.time() - 3600, "where": "dir"}],
                     "agent_files": []},
           "preflight": {"busy": [{"id": "a1", "action": "tf-apply:c1/web", "cluster": "c1"}],
-                        "tf_declarations": [{"id": "d1", "name": HOSTILE, "reason": "created after the snapshot"}],
+                        "tf_declarations": [{"id": "d1", "name": HOSTILE, "reason": "state written after the snapshot"}],
                         "kvm_hosts": [{"host": "node2", "rotated_at": 1}], "classes": ["kubeconfig"],
                         "snapshot_at": 1794105000, "risks": True}}
     page = open_secrets(context, flask_server, st)

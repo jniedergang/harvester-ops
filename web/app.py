@@ -35200,9 +35200,12 @@ _SNAP_STAMP_RE = re.compile(r"(\d{8}T\d{6}Z)")
 
 def _secrets_restore_preflight(name):
     """Relecture finale I2 : ce qu'une restauration casserait, lu AVANT tout
-    arrêt. Actions en cours (tuées avec la console) ; déclarations chiffrées
-    dont la clé transit a été créée ou tournée après l'instantané (état
-    illisible ensuite) ; clés KVM tournées depuis (OpenBao rendrait
+    arrêt. Actions en cours (tuées avec la console) ; déclarations dont
+    l'état chiffré a été écrit après l'instantané (relecture des corrections
+    finales IMP-2 : la clé transit naît au premier chiffrement, souvent bien
+    après la création de la déclaration ; un état réécrit après l'instantané
+    peut demander une clé ou une version qu'il n'a pas, illisible ensuite ;
+    faux positifs sans danger) ; clés KVM tournées depuis (OpenBao rendrait
     l'ancienne, que l'hôte refuse) ; classes migrées depuis (leurs secrets
     n'existent pas dans l'instantané). Aucune valeur."""
     m = _SNAP_STAMP_RE.search(name)
@@ -35221,26 +35224,17 @@ def _secrets_restore_preflight(name):
         try:
             for label, at in conn.execute(
                     "SELECT action, started_at FROM actions WHERE status = 'done' AND started_at > ? "
-                    "AND (action LIKE 'secrets:rotate-transit:%' OR action LIKE 'secrets:rotate-ssh-kvm:%')",
-                    (since,)):
+                    "AND action LIKE 'secrets:rotate-ssh-kvm:%'", (since,)):
                 rotated.setdefault(label, at)
         finally:
             conn.close()
     except sqlite3.Error:
         pass
     tf = []
-    for decl in _sst.encrypted_states(TF_WORKSPACES):
-        d = TF_DECLS.get(decl) or {}
-        created = None
-        try:
-            created = calendar.timegm(time.strptime(str(d.get("created_at") or ""), "%Y-%m-%dT%H:%M:%SZ"))
-        except ValueError:
-            pass
-        why = ("created after the snapshot" if snap_at is None or (created is not None and created > snap_at)
-               else "transit key rotated after the snapshot"
-               if f"secrets:rotate-transit:{decl}" in rotated else None)
-        if why:
-            tf.append({"id": decl, "name": d.get("name"), "reason": why})
+    for decl, written in sorted(_sst.encrypted_state_times(TF_WORKSPACES).items()):
+        if snap_at is None or written > snap_at:
+            tf.append({"id": decl, "name": (TF_DECLS.get(decl) or {}).get("name"),
+                       "reason": "state written after the snapshot", "written_at": int(written)})
     kvm = sorted(({"host": label.split(":", 2)[2], "rotated_at": at} for label, at in rotated.items()
                   if label.startswith("secrets:rotate-ssh-kvm:")), key=lambda h: h["host"])
     migrated = _secrets_settings().get("migrated") or {}

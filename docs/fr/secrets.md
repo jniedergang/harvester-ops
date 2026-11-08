@@ -215,8 +215,11 @@ l'identifiant). Avant tout arrêt, la console liste ce que la restauration
 casserait, et vous l'acquittez :
 
 - les actions en cours (elles s'arrêtent avec la console) ;
-- les déclarations chiffrées dont la clé transit a été créée ou tournée
-  après l'instantané (leur état devient illisible) ;
+- les déclarations chiffrées dont l'état a été écrit après l'instantané :
+  la clé transit naît au premier chiffrement (souvent bien après la
+  déclaration) et une rotation ajoute une version, donc un tel état peut
+  demander une clé que l'instantané n'a pas et devenir illisible (un état
+  réécrit avec une clé qui existait déjà est listé aussi, sans danger) ;
 - les hôtes KVM dont la clé SSH a été tournée depuis (OpenBao rendrait une
   clé que l'hôte refuse) ;
 - les classes passées dans OpenBao après l'instantané (leurs secrets n'y
