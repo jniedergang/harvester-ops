@@ -68,7 +68,28 @@ AGENT_TIMEOUT = {"b1-install": 1800, "b1-upgrade": 1800, "restore-snapshot": 180
 SNAP_RE = re.compile(r"^openbao-[0-9A-Za-z_.-]{1,80}\.snap$")
 COSIGN_KEY = HERE.parent / "config" / "openbao" / "application-collection-cosign.pub"
 ARGS = argparse.Namespace(id=None, actor=None)
+SERVICE_ACCOUNT = "harvester-ops"
+# 2.9.0, revue de la seconde passe (I1) : lancé en root, l'outil ne fait
+# lui-même que l'appel en mémoire à l'agent ; tout le reste tourne dans un
+# fils passé au compte de la console AVANT de lire son état. `bundle` ne lit
+# ni n'écrit l'état de la console (il reste en root) ; `snapshot` écrit dans
+# un répertoire de l'administrateur avec l'identité de la console : refusé
+# en root (le lancer avec `sudo -u harvester-ops`).
+ROOT_DIRECT = ("bundle",)
+ROOT_REFUSED = ("snapshot",)
+AGENT_CHANNEL = None          # fils : envoie une demande au parent root, rend son état
+INPUT_FDS = {}                # chemin donné par l'administrateur -> fd ouvert par root
+OUTPUT_FDS = {}
+REQUEST_LINE_MAX = 64 << 10
 OUTAGE_ADDR = "https://127.0.0.1:9"           # panne simulée : port sans serveur (discard)
+
+
+def cosign_key():
+    """Clé publique de l'Application Collection : celle qu'install.sh pose
+    dans /opt/harvester-ops/openbao (le script tourne depuis /usr/local/bin,
+    où `HERE.parent/config` n'existe pas), sinon celle du dépôt."""
+    opt = Path(os.environ.get("HARVESTER_OPS_OPT") or "/opt/harvester-ops") / "openbao" / ob.COSIGN_KEY_NAME
+    return opt if opt.is_file() else COSIGN_KEY
 
 
 def step(sid, status, msg=""):
@@ -109,13 +130,14 @@ def raw_settings():
 
 
 def save_settings(doc):
-    p = state() / ss.SETTINGS_FILE
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.")
-    with os.fdopen(fd, "w") as f:
-        json.dump(doc, f, indent=2)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, p)
+    """Écrit les réglages sous un nom neuf puis les renomme, droits posés sur
+    le descripteur (jamais un chmod par chemin qu'un lien posé entre-temps
+    pourrait détourner)."""
+    import safe_fs as sf
+    p = state()
+    p.mkdir(parents=True, exist_ok=True)
+    with sf.SafeDir.open_base(p) as d:
+        d.write(ss.SETTINGS_FILE, json.dumps(doc, indent=2).encode(), 0o600)
 
 
 def ensure_console_id(doc):
@@ -187,38 +209,27 @@ def _is_root():
 
 
 def run_agent(req, timeout=None):
-    """Une opération de l'agent ; rend son état final. En root, l'outil la
-    joue lui-même (même code, même demande) ; sinon il dépose la demande
-    (refus si une autre attend) et suit status.json."""
+    """Une opération de l'agent ; rend son état final. Lancé par root, le
+    fils sans privilège la passe au parent root, qui la joue en mémoire ;
+    sinon l'outil dépose la demande (refus si une autre attend) et suit
+    status.json."""
     timeout = timeout or AGENT_TIMEOUT.get(req["op"], 600)
     req = dict(req, id=secrets.token_hex(8), requested_by=ARGS.actor or os.environ.get("USER") or "cli")
     d = state() / "secrets-agent"
     rp = d / "request.json"
-    in_process = _is_root()
-    if not in_process and not (d / "agent.json").is_file():
-        raise CliError("secrets-agent-missing", "no secret store agent on this host: run "
-                       "`sudo harvester-secrets ...` on the host, or install the agent (install.sh --upgrade)",
-                       EXIT_REFUSED)
-    if in_process:
-        # Root joue l'agent lui-même : la demande lui est passée en mémoire,
-        # et son état rendu de même ; rien n'est écrit ni lu par un chemin du
-        # répertoire de la console (qui pourrait y avoir posé un lien).
+    if AGENT_CHANNEL is not None:
         if os.path.lexists(rp):
             raise CliError("secrets-agent-busy", "another request is waiting for the agent", EXIT_REFUSED)
-        # mêmes répertoires que l'outil (revue M11 des tâches 5-7) : hors des
-        # chemins par défaut, Paths() de l'agent lirait ailleurs
-        mod = _agent_module()
-        env = dict(os.environ, HARVESTER_OPS_STATE_DIR=str(state()))
-        if ss.openbao_dir().name == "openbao":
-            env["HARVESTER_OPS_ETC"] = str(ss.openbao_dir().parent)
-        agent = mod.Agent(paths=mod.Paths(env))
-        agent.process(request=req)
-        st = agent.status
+        st = AGENT_CHANNEL(req)
         for s in st.get("steps") or []:
-            step(f"agent-{s['id']}", s.get("status"), s.get("message") or "")
+            step(f"agent-{s.get('id')}", s.get("status"), s.get("message") or "")
         if st.get("state") not in ("done", "failed"):
             raise CliError("secrets-agent-failed", "the agent did not run (see its log)", EXIT_FAIL)
         return st
+    if not (d / "agent.json").is_file():
+        raise CliError("secrets-agent-missing", "no secret store agent on this host: run "
+                       "`sudo harvester-secrets ...` on the host, or install the agent (install.sh --upgrade)",
+                       EXIT_REFUSED)
     d.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(rp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -248,6 +259,176 @@ def run_agent(req, timeout=None):
 
 def _pause(s):
     time.sleep(s)
+
+
+# ---------------------------------------------------------------------------
+# Lancé en root (revue I1 de la seconde passe)
+# ---------------------------------------------------------------------------
+def _agent_env(state_dir):
+    """Répertoires de l'agent joué en mémoire : ceux de l'outil (revue M11
+    des tâches 5-7)."""
+    env = dict(os.environ, HARVESTER_OPS_STATE_DIR=str(state_dir))
+    if ss.openbao_dir().name == "openbao":
+        env["HARVESTER_OPS_ETC"] = str(ss.openbao_dir().parent)
+    return env
+
+
+def _root_agent_call(state_dir):
+    """Le parent root : joue l'agent en mémoire avec la demande du fils
+    (l'agent la contrôle comme une demande déposée : liste fermée, clés,
+    identifiants) et rend son état. Rien d'autre n'est fait en root."""
+    def call(req):
+        if not isinstance(req, dict):
+            return {"state": "failed", "code": "bad-request", "message": "not an object", "steps": []}
+        mod = _agent_module()
+        agent = mod.Agent(paths=mod.Paths(_agent_env(state_dir)))
+        agent.process(request=req)
+        return agent.status
+    return call
+
+
+def _drop_privileges():
+    """Le fils passe au compte de la console (groupes, puis gid, puis uid,
+    les trois ids réels/effectifs/sauvés) : il ne peut plus lire ni écrire
+    que ce que la console peut lire ou écrire elle-même."""
+    import grp
+    import pwd
+    try:
+        pw = pwd.getpwnam(SERVICE_ACCOUNT)
+    except KeyError:
+        raise CliError("service-account-missing", f"no {SERVICE_ACCOUNT} account on this host: "
+                       "the tool never works on the console state as root", EXIT_REFUSED) from None
+    try:
+        gid = grp.getgrnam(SERVICE_ACCOUNT).gr_gid
+    except KeyError:
+        gid = pw.pw_gid
+    os.setgroups([gid])
+    os.setresgid(gid, gid, gid)
+    os.setresuid(pw.pw_uid, pw.pw_uid, pw.pw_uid)
+    if os.getresuid() != (pw.pw_uid,) * 3 or os.getresgid() != (gid,) * 3:
+        raise CliError("privilege-drop-failed", "could not drop to the console account", EXIT_FAIL)
+    os.environ["HOME"] = pw.pw_dir
+    os.umask(0o077)
+
+
+def _pipe_channel(w, r):
+    wf, rf = os.fdopen(w, "wb"), os.fdopen(r, "rb")
+
+    def call(req):
+        wf.write(json.dumps(req).encode() + b"\n")
+        wf.flush()
+        line = rf.readline(REQUEST_LINE_MAX * 16)
+        if not line:
+            raise CliError("secrets-agent-failed", "no answer from the root parent", EXIT_FAIL)
+        return json.loads(line)
+    return call
+
+
+def _spawn_unprivileged(fn, handler):
+    """fn() dans un fils passé au compte de la console ; ses appels à
+    l'agent remontent par un tube au parent root, qui les passe à
+    handler(demande) et renvoie l'état. Le demandeur est fixé par le parent
+    (utilisateur de sudo). Rend le code de sortie du fils."""
+    req_r, req_w = os.pipe()
+    resp_r, resp_w = os.pipe()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid == 0:                                        # pragma: no cover (fils, couvert par son code de sortie)
+        code = EXIT_FAIL
+        try:
+            os.close(req_r)
+            os.close(resp_w)
+            _drop_privileges()
+            global AGENT_CHANNEL
+            AGENT_CHANNEL = _pipe_channel(req_w, resp_r)
+            code = fn()
+        except CliError as e:
+            code = (refuse if e.exit_code == EXIT_REFUSED else fail)(e.code, str(e))
+        except BaseException:                           # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+        finally:
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(code if isinstance(code, int) else EXIT_FAIL)
+    os.close(req_w)
+    os.close(resp_r)
+    who = ARGS.actor or os.environ.get("SUDO_USER") or "root"
+    with os.fdopen(req_r, "rb") as rin, os.fdopen(resp_w, "wb") as rout:
+        while True:
+            line = rin.readline(REQUEST_LINE_MAX)
+            if not line:
+                break
+            try:
+                req = json.loads(line)
+                if isinstance(req, dict):
+                    req["requested_by"] = who
+                st = handler(req)
+            except Exception as e:                      # noqa: BLE001 : rendu au fils, jamais propagé
+                st = {"state": "failed", "code": "secrets-agent-failed",
+                      "message": f"{type(e).__name__}", "steps": []}
+            try:
+                rout.write(json.dumps(st).encode() + b"\n")
+                rout.flush()
+            except BrokenPipeError:
+                break
+    _, status = os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status)
+
+
+def _preopen(args):
+    """Fichiers de l'administrateur (chemins tapés après sudo) ouverts par
+    root avant de quitter ses droits : le fils les lit ou les écrit par
+    descripteur, jamais par chemin."""
+    for attr in ("ca", "bundle"):
+        path = getattr(args, attr, None)
+        if path:
+            try:
+                INPUT_FDS[path] = os.open(path, os.O_RDONLY | os.O_NOCTTY)
+            except OSError:
+                pass                    # le fils le dira (il l'ouvre alors sans droit particulier)
+    to = getattr(args, "to", None) if args.cmd == "offline-copy" else None
+    if to:
+        try:
+            OUTPUT_FDS[to] = os.open(to, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NOCTTY, 0o600)
+        except OSError as e:
+            raise CliError("offline-copy-write", f"--to: {e.strerror} (a new file is required)", EXIT_REFUSED) \
+                from None
+
+
+def open_input(path):
+    """Fichier d'entrée donné en argument : par le descripteur ouvert par
+    root s'il y en a un, sinon par son chemin."""
+    fd = INPUT_FDS.get(path)
+    if fd is None:
+        return open(path, "rb")
+    os.lseek(fd, 0, os.SEEK_SET)
+    return os.fdopen(os.dup(fd), "rb")
+
+
+def read_input_text(path):
+    with open_input(path) as f:
+        return f.read(1 << 20).decode()
+
+
+def _main_as_root(args):
+    if args.cmd in ROOT_DIRECT:
+        return COMMANDS[args.cmd](args)
+    if args.cmd in ROOT_REFUSED:
+        return refuse("root-refused", f"`{args.cmd}` runs as the console account: "
+                      f"sudo -u {SERVICE_ACCOUNT} harvester-secrets {args.cmd} ...")
+    state_dir = ss._state_dir()         # chemin seulement (variable d'environnement ou défaut), rien n'est lu
+    _preopen(args)
+    to = OUTPUT_FDS and next(iter(OUTPUT_FDS))
+    rc = _spawn_unprivileged(lambda: _dispatch(args), _root_agent_call(state_dir))
+    if to and rc != EXIT_OK:
+        try:
+            if os.fstat(OUTPUT_FDS[to]).st_size == 0:
+                os.unlink(to)                           # fichier neuf resté vide : retiré
+        except OSError:
+            pass
+    return rc
 
 
 class CliError(Exception):
@@ -403,7 +584,7 @@ def cmd_assistant(args):
 def _mode_target(args, s):
     if args.mode == "b1":
         return pol.B1_ADDR, ca_of(), pol.DEFAULT_MOUNT
-    return args.addr or s["addr"], (Path(args.ca).read_text() if args.ca else ca_of()), args.mount or s["mount"]
+    return args.addr or s["addr"], (read_input_text(args.ca) if args.ca else ca_of()), args.mount or s["mount"]
 
 
 def cmd_check(args):
@@ -435,7 +616,7 @@ def _enable_a(args, doc):
     wrap = sys.stdin.readline().strip()
     if not wrap:
         return refuse("bad-input", "no wrapping token on stdin")
-    ca = Path(args.ca).read_text() if args.ca else None
+    ca = read_input_text(args.ca) if args.ca else None
     cid = ensure_console_id(doc)
     mount = args.mount or pol.DEFAULT_MOUNT
     prefix = args.prefix or f"consoles/{cid}"
@@ -466,26 +647,42 @@ def _enable_a(args, doc):
     return EXIT_OK
 
 
+def _stage_bundle(local):
+    """Le paquet vérifié rangé dans <état>/secrets-agent/staged/ : répertoires
+    ouverts sans suivre de lien (un lien posé à leur place est remplacé),
+    fichier écrit sous un nom neuf puis renommé (un lien à son nom est
+    remplacé, jamais suivi)."""
+    import safe_fs as sf
+    with sf.SafeDir.open_base(state()) as base, \
+            base.makedirs("secrets-agent/staged", 0o750) as d:
+        d.copy_from(str(local), local.name, 0o640)
+
+
 def _enable_b1(args, doc):
     if not args.bundle:
         return refuse("bad-input", "mode b1 needs --bundle")
     src = Path(args.bundle)
+    if not ob.NAME_RE.match(src.name):
+        return refuse("bundle-bad-name", "not an OpenBao bundle name (harvester-ops-openbao-<version>-<tag>.tar.gz)")
     step("bundle", "running", "checking the OpenBao bundle")
     with tempfile.TemporaryDirectory(prefix="openbao-bundle-") as tmp:
+        # copie privée d'abord (par le descripteur de root s'il y en a un),
+        # vérifiée, puis rangée dans staged/ sans suivre de lien : c'est
+        # cette copie vérifiée que l'agent revérifie
+        local = Path(tmp) / src.name
+        with open_input(args.bundle) as f, open(local, "wb") as o:
+            shutil.copyfileobj(f, o, 1 << 20)
         try:
-            info = ob.verify(src, tmp, cosign_key=COSIGN_KEY)
+            info = ob.verify(local, Path(tmp) / "check", cosign_key=cosign_key())
         except ob.BundleError as e:
             return refuse(e.code, str(e))
-    step("bundle", "done", f"OpenBao {info['version']} ({info['tag']}, {info['index_digest'][:19]})")
-    if args.dry_run:
-        out({"ok": True, "dry_run": True, "version": info["version"], "tag": info["tag"],
-             "would": ["stage the bundle", "install OpenBao B1 (agent)", "run every check", "activate mode b1"]})
-        return EXIT_OK
-    cid = ensure_console_id(doc)
-    staged = state() / "secrets-agent" / "staged"
-    staged.mkdir(parents=True, exist_ok=True)
-    if src.resolve().parent != staged.resolve():
-        shutil.copyfile(src, staged / src.name)
+        step("bundle", "done", f"OpenBao {info['version']} ({info['tag']}, {info['index_digest'][:19]})")
+        if args.dry_run:
+            out({"ok": True, "dry_run": True, "version": info["version"], "tag": info["tag"],
+                 "would": ["stage the bundle", "install OpenBao B1 (agent)", "run every check", "activate mode b1"]})
+            return EXIT_OK
+        cid = ensure_console_id(doc)
+        _stage_bundle(local)
     agent_ok(run_agent({"op": "b1-install", "console_id": cid, "bundle": src.name}))
     # décision 275 : la copie hors ligne de la clé se fait maintenant qu'elle
     # existe (offline-copy export, puis ack) ; migrer attend l'acquittement
@@ -935,10 +1132,14 @@ def cmd_offline_copy(args):
         key_id = (st.get("info") or {}).get("key_id")
         if args.to:
             src = ss.openbao_dir() / "unseal-export.key"
-            dst = Path(args.to)
             try:
                 data = src.read_bytes()
-                fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                fd = OUTPUT_FDS.get(args.to)
+                if fd is None:
+                    fd = os.open(args.to, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                                 0o600)
+                else:
+                    fd = os.dup(fd)             # ouvert par root (fichier neuf de l'administrateur)
                 with os.fdopen(fd, "wb") as f:
                     f.write(data)
             except OSError as e:
@@ -1105,7 +1306,7 @@ def cmd_bundle(args):
     else:
         out_dir, wanted = o, None
     out_dir.mkdir(parents=True, exist_ok=True)
-    key = Path(args.cosign_key) if args.cosign_key else COSIGN_KEY
+    key = Path(args.cosign_key) if args.cosign_key else cosign_key()
     cos = _cosign_runner(key, args.registry, args.user, password) if key.is_file() else None
     src = op.Registry(args.registry, {"username": args.user, "password": password}, plain_http=args.plain_http)
     step("pull", "running", f"{args.registry}/{args.repository}:{args.tag}")
@@ -1232,6 +1433,15 @@ def main(argv=None):
     ARGS.id, ARGS.actor = args.id, args.actor
     for k in [k for k in os.environ if k.startswith(("VAULT_", "BAO_"))]:
         os.environ.pop(k, None)
+    if _is_root() and AGENT_CHANNEL is None:
+        try:
+            return _main_as_root(args)
+        except CliError as e:
+            return (refuse if e.exit_code == EXIT_REFUSED else fail)(e.code, str(e))
+    return _dispatch(args)
+
+
+def _dispatch(args):
     try:
         return COMMANDS[args.cmd](args)
     except CliError as e:

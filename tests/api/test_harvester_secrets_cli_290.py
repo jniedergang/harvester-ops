@@ -76,8 +76,23 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(hsc, "_agent_module", lambda: types.SimpleNamespace(Agent=agent_factory, Paths=hsa.Paths))
     monkeypatch.setattr(hsc, "_is_root", lambda: True)
     monkeypatch.setattr(hsc, "_pause", lambda s: None)
+    # lancé en root : le fils sans privilège joué dans ce processus (pas de
+    # fork sous pytest), la perte de droits notée ; voir test_secrets_cli_root_290
+    dropped = []
+    monkeypatch.setattr(hsc, "_drop_privileges", lambda: dropped.append(True))
+
+    def inline(fn, handler):
+        hsc._drop_privileges()
+        monkeypatch.setattr(hsc, "AGENT_CHANNEL", lambda req: handler(dict(req, requested_by="alice")))
+        try:
+            return fn()
+        finally:
+            monkeypatch.setattr(hsc, "AGENT_CHANNEL", None)
+            hsc.INPUT_FDS.clear()
+            hsc.OUTPUT_FDS.clear()
+    monkeypatch.setattr(hsc, "_spawn_unprivileged", inline)
     yield {"state": state, "etc": etc / "openbao", "run": run, "srv": srv, "paths": paths, "host": host,
-           "seen_paths": seen_paths}
+           "seen_paths": seen_paths, "dropped": dropped}
     srv.stop()
 
 
@@ -468,7 +483,8 @@ def test_in_process_agent_uses_the_directories_of_the_tool(env, capsys, monkeypa
     assert got.state == env["state"] / "secrets-agent" and got.etc == env["etc"]
 
 
-def test_snapshot(env, capsys, tmp_path):
+def test_snapshot(env, capsys, tmp_path, monkeypatch):
+    monkeypatch.setattr(hsc, "_is_root", lambda: False)      # lancé sous le compte de la console (refusé en root)
     creds(env)
     settings(env)
     assert cli(["snapshot", "--dest", str(tmp_path)], capsys=capsys)[1]["code"] == "b1-only"

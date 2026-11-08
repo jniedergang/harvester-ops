@@ -719,8 +719,11 @@ class FileStore:
             f = self.local_file(cls, path, field)
             if isinstance(f, str):
                 return None
-            base = os.path.abspath(str(self._base(cls)))
-            if not os.path.abspath(str(f)).startswith(base + os.sep) or os.path.islink(f):
+            # chemin réel (revue I1 de la seconde passe) : un répertoire lien
+            # sous l'état ne fait pas passer un fichier de l'hôte pour un
+            # secret de la console
+            base = os.path.realpath(str(self._base(cls)))
+            if not os.path.realpath(str(f)).startswith(base + os.sep) or os.path.islink(f):
                 return "secret-outside-state"
             if kind == "decl-file" and not Path(extra[0]).is_file():
                 return "secret-no-declaration"
