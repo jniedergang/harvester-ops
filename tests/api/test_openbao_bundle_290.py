@@ -265,6 +265,7 @@ def index_of(built, tmp_path):
     ("payload-altered", "bundle-signature-bad"),
     ("not-cosign-type", "bundle-signature-bad"),
     ("garbage", "bundle-signature-bad"),
+    ("critical-not-object", "bundle-signature-bad"),
 ])
 def test_unpinned_tag_needs_a_collection_signature(built, tmp_path, case, code):
     idx = index_of(built, tmp_path)
@@ -291,6 +292,8 @@ def test_unpinned_tag_needs_a_collection_signature(built, tmp_path, case, code):
             p = json.dumps({"critical": {"identity": {"docker-reference": "x/containers/openbao"},
                                          "image": {"docker-manifest-digest": idx}, "type": "other"}}).encode()
             set_sigs(root, [entry(idx, payload=p)])
+        elif case == "critical-not-object":
+            set_sigs(root, [entry(idx, payload=json.dumps({"critical": "x"}).encode())])
         else:
             (root / ob.SIGNATURE).write_text("not json")
     out = rebuilt(built, tmp_path, change)
@@ -361,3 +364,16 @@ def test_build_refuses_a_signature_that_would_not_install(tmp_path):
         assert e.value.code == "bundle-signature-bad" and not list(tmp_path.glob("*.tar.gz"))
     finally:
         reg.close()
+
+
+def test_version_below_the_minimum_refused(built, tmp_path):
+    """Review M3 of pass 2: an older OpenBao, even signed, is refused."""
+    out = rebuilt(built, tmp_path, lambda r: None, tag="2.7.1-1", version="2.7.1")
+    with pytest.raises(ob.BundleError) as e:
+        ob.verify(out, tmp_path / "check", cosign_key=KEY)
+    assert e.value.code == "bundle-version-too-old"
+
+
+@pytest.mark.parametrize("a,b", [("2.7.2", "2.7.10"), ("2.7.2", "2.8.0"), ("2.7", "2.7.1"), ("1.99.9", "2.0.0")])
+def test_version_order(a, b):
+    assert ob.version_key(a) < ob.version_key(b)

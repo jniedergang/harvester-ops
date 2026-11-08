@@ -389,7 +389,14 @@ class Agent:
         try:
             self.open_state()
         except OSError as e:
-            print(f"harvester-secrets-agent: {e}; nothing done", file=sys.stderr, flush=True)
+            # revue M7 de la seconde passe : un lien reposé à chaque passage
+            # n'arrête pas le ménage de root (clés retirées, anciens volumes,
+            # rotation), qui n'écrit rien dans l'état de la console
+            print(f"harvester-secrets-agent: {e}; request ignored, housekeeping only", file=sys.stderr, flush=True)
+            try:
+                self.housekeeping()
+            finally:
+                shutil.rmtree(self.p.work, ignore_errors=True)
             return 1
         try:
             return self._process(request)
@@ -471,10 +478,18 @@ class Agent:
         secret-id de /etc/harvester-ops/openbao). B1 (installé, ou
         `addr` = B1) : adresse et CA de B1 ; mode A : celles de la console."""
         settings = self.console_settings() if addr is None else {}
-        if addr == self.b1_addr or (addr is None and settings.get("mode") != "a"):
+        # B1 posé : toujours B1, quoi que disent les réglages de la console
+        # (revue M1 de la seconde passe : `mode: a` posé par la console
+        # aurait envoyé la rotation vers son serveur, puis remplacé le
+        # secret_id de B1 par celui qu'il rend)
+        if addr == self.b1_addr or (addr is None and (self.agent_state() or settings.get("mode") != "a")):
             addr, ca = self.b1_addr, self.b1_ca()
         else:
-            addr, ca = addr or settings.get("addr"), self.ca_pem()
+            addr = addr or settings.get("addr")
+            if not check_addr(addr):
+                raise AgentError("openbao-bad-address", "the OpenBao address of the settings is refused "
+                                 "(https, or http on the loopback only)")
+            ca = self.ca_pem()
         c = self.client(addr, ca)
         c.login_approle(_read(self.p.etc / "role-id"), secret_id or _read(self.p.etc / "secret-id"))
         return c
@@ -686,7 +701,9 @@ class Agent:
             # revue I6 : en B1, les identifiants viennent de b1-install et de
             # rotate-secret-id ; un dépôt remplacerait la CA et l'adresse
             raise AgentError("b1-installed", "OpenBao B1 is installed on this host: its credentials are managed by "
-                                             "the agent (b1-remove first to use another OpenBao)")
+                                             "the agent; to use another OpenBao, bring the classes back "
+                                             "(harvester-secrets migrate --to local), then harvester-secrets "
+                                             "disable --remove-b1")
         role_id = str(req.get("role_id") or "")
         if not ROLE_ID_RE.match(role_id):
             raise AgentError("bad-request", "bad role id")
@@ -971,6 +988,11 @@ class Agent:
         self._need_podman()
         self.step("bundle", "running")
         info = self.staged_bundle(req.get("bundle"))
+        if ob.version_key(info["version"]) < ob.version_key(st.get("version") or "0"):
+            # revue M3 : une image signée plus ancienne (cosign ne signe pas le
+            # tag) ne remplace pas la version en place
+            raise AgentError("bundle-downgrade", f"OpenBao {info['version']} is older than the installed "
+                                                 f"{st.get('version')}: refused")
         self.step("bundle", "done", f"OpenBao {info['version']} ({info['tag']})")
         self.step("image", "running")
         ref = self.load_image(info)

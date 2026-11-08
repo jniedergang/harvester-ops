@@ -209,6 +209,25 @@ class SafeDir:
                 pass
             raise
 
+    def create(self, name, data, mode, owner=None):
+        """Crée `name` avec `data` seulement s'il n'existe pas (lien compris) :
+        écrit sous un nom neuf puis mis en place sans jamais remplacer
+        (renameat2 RENAME_NOREPLACE, sinon lien physique puis retrait du
+        temporaire). FileExistsError si le nom est pris."""
+        _check_name(name)
+        fd, tmp = self.create_new(f".{name}.", mode, owner)
+        try:
+            with os.fdopen(fd, "wb", closefd=True) as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            _rename_noreplace(self.fd, tmp, name)
+        finally:
+            try:
+                os.unlink(tmp, dir_fd=self.fd)
+            except OSError:
+                pass
+
     def _set_aside_dir(self, name):
         """Un répertoire posé là où root écrit un fichier est écarté sous un
         nom caché (sans le suivre ni le parcourir) : sinon le rename
@@ -342,6 +361,25 @@ class SafeDir:
                     os.close(fd)
 
 
+def _rename_noreplace(dir_fd, src, dst):
+    """rename(2) qui échoue si `dst` existe (FileExistsError)."""
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        fn = libc.renameat2
+    except (OSError, AttributeError):
+        fn = None
+    if fn is not None:
+        if fn(dir_fd, src.encode(), dir_fd, dst.encode(), 1) == 0:          # RENAME_NOREPLACE
+            return
+        err = ctypes.get_errno()
+        if err == 17:
+            raise FileExistsError(err, os.strerror(err), dst)
+        if err not in (22, 38, 95):                     # non pris en charge : repli
+            raise OSError(err, os.strerror(err), dst)
+    os.link(src, dst, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+
+
 def _set(fd, mode, owner):
     os.fchmod(fd, mode)
     if owner is not None:
@@ -375,6 +413,8 @@ def clean_line(text, limit=4000):
 USAGE = """usage: safe_fs.py [--owner ACCOUNT] COMMAND BASE ...
   mkdir BASE REL MODE                 create each directory of REL under BASE
   write BASE REL MODE                 write stdin to BASE/REL (atomic)
+  create BASE REL MODE                write stdin to BASE/REL only if absent (exit 4 if present);
+                                      --owner applies to the directories created, the file stays root's
   install SRC BASE REL MODE [--keep]  copy SRC to BASE/REL; --keep: leave an existing file
   exists BASE REL                     exit 0 if BASE/REL is a plain file, 3 otherwise
   read BASE REL                       print BASE/REL if it is a plain file (exit 3 if absent)
@@ -403,6 +443,13 @@ def main(argv):
         with SafeDir.open_base(base) as b:
             if cmd == "mkdir":
                 b.makedirs(rel, int(args[2], 8), owner, apply_last=True).close()
+            elif cmd == "create":
+                d, name = b.walk_to(rel, 0o750, owner)
+                with d:
+                    try:
+                        d.create(name, sys.stdin.buffer.read(), int(args[2], 8))
+                    except FileExistsError:
+                        return 4
             elif cmd in ("write", "install"):
                 mode = int(args[2], 8)
                 d, name = b.walk_to(rel, 0o750, owner)

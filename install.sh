@@ -603,12 +603,18 @@ install_secrets_agent() {
     # traitée par l'agent dès que son unité de chemin est active. Une demande
     # de la console déjà en attente n'est jamais remplacée.
     if [[ -f "${OPENBAO_ETC:-/etc/harvester-ops-openbao}/agent.json" ]]; then
-        if _safe_fs exists "$STATE_DIR" secrets-agent/request.json; then
+        # créée seulement si aucune demande n'attend, en une fois (O_EXCL,
+        # mise en place sans remplacement) ; les répertoires recréés vont au
+        # compte de la console, la demande reste à root
+        local rc=0
+        printf '{"op": "b1-policies", "requested_by": "install.sh %s"}\n' "$(cat "$SCRIPT_DIR/VERSION")" \
+            | _safe_fs --owner harvester-ops create "$STATE_DIR" secrets-agent/request.json 0600 || rc=$?
+        if [[ $rc -eq 0 ]]; then
+            info "OpenBao B1 policies of this console queued for refresh (Settings > Secrets shows the result)"
+        elif [[ $rc -eq 4 ]]; then
             warn "OpenBao B1 policies not refreshed: a request is already waiting for the agent (reinstall later)"
         else
-            printf '{"op": "b1-policies", "requested_by": "install.sh %s"}\n' "$(cat "$SCRIPT_DIR/VERSION")" \
-                | _safe_fs write "$STATE_DIR" secrets-agent/request.json 0600 \
-                && info "OpenBao B1 policies of this console queued for refresh (Settings > Secrets shows the result)"
+            warn "OpenBao B1 policies not refreshed (request not written)"
         fi
     fi
     systemctl daemon-reload 2>/dev/null || true

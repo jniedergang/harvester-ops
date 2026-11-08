@@ -48,6 +48,11 @@ DEFAULT_TAG = "2.7.2-5.4"
 # Tag -> empreinte de l'index OCI (essai 1 de la tâche 1, signée cosign par la
 # clé de l'Application Collection).
 KNOWN = {"2.7.2-5.4": "sha256:355cbcca102b8a187a329d70a259fec31a19f607a5dee83488d5b35aafa96964"}
+# Version minimale posée (revue M3 de la seconde passe) : une image plus
+# ancienne, même signée par la collection, est refusée (cosign signe
+# l'empreinte, pas le tag : sans plancher, une version vulnérable signée
+# pourrait être rejouée). Relevée avec KNOWN.
+MIN_VERSION = "2.7.2"
 PLATFORM = "linux/amd64"
 IMAGE_TAR = "openbao-image.tar"
 TEMPLATE = "openbao.hcl.tpl"
@@ -77,6 +82,16 @@ class BundleError(Exception):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+def version_key(version):
+    """Clé de comparaison d'une version (2.7.2 < 2.7.10) ; un morceau non
+    numérique compte pour 0."""
+    out = []
+    for part in re.split(r"[.+-]", str(version)):
+        m = re.match(r"\d+", part)
+        out.append(int(m.group()) if m else 0)
+    return tuple(out)
 
 
 def bundle_name(version, tag):
@@ -250,6 +265,9 @@ def verify(path, workdir, cosign_key=None):
         raise BundleError("bundle-provenance", "malformed provenance")
     if prov["tag"] != m["tag"] or prov["version"] != m["version"]:
         raise BundleError("bundle-provenance", "the bundle name does not match its provenance")
+    if version_key(prov["version"]) < version_key(MIN_VERSION):
+        raise BundleError("bundle-version-too-old", f"OpenBao {prov['version']} is older than the minimum "
+                          f"{MIN_VERSION}")
     pin = KNOWN.get(prov["tag"])
     if pin:
         # quel que soit le nom de l'image : un miroir garde l'empreinte
@@ -321,11 +339,14 @@ def check_signature(path, index_digest, key, workdir, openssl="openssl"):
             payload = base64.b64decode(e["payload"], validate=True)
             sig = base64.b64decode(e["signature"], validate=True)
             crit = json.loads(payload)["critical"]
+            if not isinstance(crit, dict) or not isinstance(crit.get("image"), dict) \
+                    or not isinstance(crit.get("identity"), dict):
+                continue
             if crit.get("type") != "cosign container image signature" \
                     or crit["image"]["docker-manifest-digest"] != index_digest \
                     or _reference_repo(crit["identity"]["docker-reference"]) != DEFAULT_REPOSITORY:
                 continue
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, AttributeError):
             continue
         pf, sf = work / f".sig-payload-{i}", work / f".sig-{i}"
         pf.write_bytes(payload)

@@ -156,7 +156,8 @@ def test_upgrade_b1_policies_request_never_follows_a_link(tmp_path):
     before = victim.read_text()
     r = run_install(tmp_path, "install_secrets_agent", release(tmp_path), state, b1=True)
     assert r.returncode == 0 and victim.read_text() == before
-    assert not (state / "secrets-agent" / "request.json").is_symlink()
+    # un nom pris (lien compris) n'est jamais remplacé ; l'agent écarte le lien
+    assert "already waiting" in r.stdout
 
 
 @pytest.mark.parametrize("name", ["install_secrets_agent", "install_bundles"])
@@ -178,6 +179,7 @@ def test_secrets_steps_touch_the_state_only_through_the_helper(name):
 import time  # noqa: E402
 
 from test_secrets_agent_290 import env, bundle, request, install, hsa, CID  # noqa: E402,F401
+from fake_openbao_b1 import make_bundle  # noqa: E402
 import openbao_client as oc  # noqa: E402
 
 
@@ -481,3 +483,89 @@ def test_agent_log_escapes_every_line_it_writes(env):
     text = (env["p"].logs / a.log_path.name).read_text()
     assert "\r" not in text and "\x1b" not in text and "\x00" not in text
     assert len(text.splitlines()) == 4          # splitlines coupe aussi sur CR
+
+
+def test_upgrade_b1_policies_request_with_a_linked_agent_directory(tmp_path, chowns):
+    """Review M5: secrets-agent replaced by a link when install.sh queues the
+    request: the directory is recreated (not followed) and handed to the
+    console account, never left to root."""
+    state = tmp_path / "state"
+    state.mkdir()
+    outside = plant_dir_link(state, "secrets-agent", tmp_path)
+    r = run_install(tmp_path, "install_secrets_agent", release(tmp_path), state, b1=True)
+    assert r.returncode == 0, r.stderr
+    assert list(outside.iterdir()) == []
+    d = state / "secrets-agent"
+    assert d.is_dir() and not d.is_symlink() and (d / "request.json").is_file()
+
+
+# ---------------------------------------------------------------------------
+# Revue de la seconde passe : mineurs de l'agent
+# ---------------------------------------------------------------------------
+def test_housekeeping_runs_when_the_state_directory_is_refused(env, tmp_path):
+    """M7: a link put back as secrets-agent/ at every run must not stop the
+    root housekeeping (retired keys, old volumes)."""
+    install(env)
+    p, clock = env["p"], env["clock"]
+    a = env["agent"]()
+    st = a.agent_state()
+    (p.b1_etc / "keys" / "hops-20261001-1.key").write_bytes(b"k" * 32)
+    st["keys"].append({"id": "hops-20261001-1", "created": 0, "retired": clock["t"] - 15 * 86400})
+    a.save_agent_state(st)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    os.rename(p.state, tmp_path / "moved")
+    p.state.symlink_to(outside)
+    assert env["agent"]().process() == 1
+    assert not (p.b1_etc / "keys" / "hops-20261001-1.key").exists()
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("settings_doc,b1,expect", [
+    ({"mode": "a", "addr": "https://attacker.example"}, True, "b1"),         # B1 posé : toujours B1
+    ({"mode": "a", "addr": "http://attacker.example:8200"}, False, "refused"),
+    ({"mode": "a", "addr": "https://bao.example:8200"}, False, "https://bao.example:8200"),
+    ({"mode": "b1"}, False, "b1"),
+])
+def test_console_client_address(env, settings_doc, b1, expect):
+    """M1: the address of the console settings is checked, and ignored once
+    B1 is installed."""
+    if b1:
+        install(env)
+    p = env["p"]
+    p.etc.mkdir(parents=True, exist_ok=True)
+    (p.etc / "role-id").write_text("rid")
+    (p.etc / "secret-id").write_text("sid")
+    (p.console_state / "secrets-settings.json").write_text(json.dumps(settings_doc))
+    seen = []
+
+    class Stub:
+        def __init__(self, addr):
+            self.addr = addr
+
+        def login_approle(self, *a):
+            pass
+    a = env["agent"]()
+    a.client = lambda addr, ca_pem=None: seen.append((addr, ca_pem)) or Stub(addr)
+    if expect == "refused":
+        with pytest.raises(hsa.AgentError) as e:
+            a.console_client()
+        assert e.value.code == "openbao-bad-address" and not seen
+        return
+    a.console_client()
+    want = a.b1_addr if expect == "b1" else expect
+    assert seen[0][0] == want
+    if expect == "b1" and b1:
+        assert seen[0][1] == (p.b1_etc / "ca.pem").read_text()
+
+
+def test_b1_upgrade_refuses_an_older_signed_version(env, tmp_path):
+    """M3: cosign signs the digest, not the tag; an older signed image does
+    not replace the one in place."""
+    install(env)
+    (tmp_path / "old").mkdir()
+    old_path, _ = make_bundle(tmp_path / "old", tag="9.9.8-1", version="9.9.8")
+    (env["p"].state / "staged" / old_path.name).write_bytes(old_path.read_bytes())
+    rc, st = request(env, op="b1-upgrade", bundle=old_path.name)
+    assert rc == 1 and st["code"] == "bundle-downgrade", st
+    assert not env["host"].ran("podman", "tag", f"{hsa.IMAGE}:current", f"{hsa.IMAGE}:previous")
