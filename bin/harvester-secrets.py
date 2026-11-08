@@ -1883,6 +1883,28 @@ def tf_keys_view(doc=None, now=None):
     return rows
 
 
+def _tf_decl_alive(decl):
+    """Relecture finale I5 : la déclaration existe (recréée avec le même
+    identifiant) : un espace de travail avec un état, ou une ligne dans la
+    base des déclarations. Sa clé transit est alors en service."""
+    root = tf_workspaces_dir()
+    for ws in list(root.glob(f"*/decls/{decl}")) + list(root.glob(f".kvm/*/decls/{decl}")):
+        if (ws / "terraform.tfstate").exists() or (ws / "terraform.tfstate.backup").exists():
+            return True
+    db = Path(os.environ.get("HARVESTER_OPS_TF_DB") or state() / "tf-declarations.db")
+    if db.is_file():
+        import sqlite3
+        try:
+            c = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=10)
+            try:
+                return c.execute("SELECT 1 FROM tf_declarations WHERE id = ?", (decl,)).fetchone() is not None
+            finally:
+                c.close()
+        except sqlite3.Error:
+            return True                  # base illisible : jamais de retrait sur un doute
+    return False
+
+
 def cmd_tf_keys(args):
     """`list` : clés gardées et leur date de retrait ; `delete DECL --confirm
     DECL` : retrait avant le délai (l'administrateur tape l'identifiant) ;
@@ -1902,6 +1924,12 @@ def cmd_tf_keys(args):
             return refuse("tf-key-not-retired", "no kept transit key for this declaration")
     else:
         targets = [r for r in rows if r["due"]]
+    # une déclaration recréée avec le même identifiant chiffre de nouveau avec
+    # cette clé : jamais retirée, et plus en attente de retrait
+    alive = [r["decl"] for r in targets if _tf_decl_alive(r["decl"])]
+    for d in alive:
+        step(f"key-{d}", "done", f"{pol.tf_key(s['console_id'], d)} kept: the declaration exists again")
+    targets = [r for r in targets if r["decl"] not in alive]
     c = admin_client(s=s) if targets else None
     done, failed = [], []
     for r in targets:
@@ -1914,11 +1942,11 @@ def cmd_tf_keys(args):
             step(f"key-{r['decl']}", "error", f"{r['key']}: {e.code}")
     doc = raw_settings()
     kept = dict(doc.get("tf_keys_retired") or {})
-    for d in done:
+    for d in done + alive:
         kept.pop(d, None)
     doc["tf_keys_retired"] = kept
     save_settings(doc)
-    out({"ok": not failed, "removed": done, "failed": failed})
+    out({"ok": not failed, "removed": done, "failed": failed, "alive": alive})
     return EXIT_OK if not failed else EXIT_FAIL
 
 

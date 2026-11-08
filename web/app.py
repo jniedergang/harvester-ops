@@ -30276,6 +30276,17 @@ def api_tf_declarations():
     return jsonify({"declarations": [_tf_decl_for_role(_tf_decl_view(d)) for d in TF_DECLS.list(cluster, family)]})
 
 
+def _tf_decl_id_for_create(requested):
+    """Identifiant d'une nouvelle déclaration : celui du navigateur (reprise
+    localStorage d'avant la v1.54) sauf s'il désigne une déclaration
+    supprimée dont la clé transit est gardée (relecture finale I5 : elle
+    reprendrait cette clé, que le balayage retirerait) ; sinon tiré ici."""
+    requested = str(requested or "")
+    if requested and requested not in (_secrets_settings().get("tf_keys_retired") or {}):
+        return requested
+    return uuid.uuid4().hex[:12]
+
+
 @app.route("/api/tf-declarations", methods=["POST"])
 @requires_auth
 @_rate_limit("60/minute")
@@ -30298,7 +30309,7 @@ def api_tf_declaration_create():
                               current_role())
     if denied:
         return jsonify(denied), 403
-    decl_id = str(data.get("id") or uuid.uuid4().hex[:12])
+    decl_id = _tf_decl_id_for_create(data.get("id"))
     try:
         d = TF_DECLS.create(decl_id, cluster, data.get("name"), data.get("description") or "",
                             data.get("resources") or [], user=current_user() or "",

@@ -226,3 +226,42 @@ def test_key_deletion_failure_keeps_the_key_listed(env, capsys, monkeypatch):
     rc, doc, err = cli(["tf-keys", "delete", D1, "--confirm", D1], capsys=capsys)
     assert rc == 1 and doc["failed"] == [D1] and "openbao-denied" in err
     assert D1 in read_settings(env)["tf_keys_retired"]
+
+
+# Relecture finale I5 : une déclaration supprimée puis recréée avec le même
+# identifiant reprend la même clé ; le balayage (ou un retrait anticipé) ne
+# la détruit jamais tant que la déclaration vit (espace avec un état, ou
+# ligne dans la base des déclarations) : l'état deviendrait illisible.
+def _live_by_workspace(env):
+    ws = env["state"] / "terraform" / "c1" / "decls" / D1
+    ws.mkdir(parents=True)
+    (ws / "terraform.tfstate").write_text("{}")
+
+
+def _live_by_db(env):
+    import sqlite3
+    c = sqlite3.connect(str(env["state"] / "tf-declarations.db"))
+    c.execute("CREATE TABLE tf_declarations (id TEXT PRIMARY KEY, cluster TEXT, name TEXT)")
+    c.execute("INSERT INTO tf_declarations VALUES (?, 'c1', 'n')", (D1,))
+    c.commit()
+    c.close()
+
+
+@pytest.mark.parametrize("live", [_live_by_workspace, _live_by_db], ids=["workspace", "database"])
+@pytest.mark.parametrize("how", ["sweep", "delete"])
+def test_key_of_a_live_recreated_declaration_is_never_removed(env, capsys, monkeypatch, live, how):
+    monkeypatch.delenv("HARVESTER_OPS_TF_WORKSPACES", raising=False)
+    monkeypatch.delenv("HARVESTER_OPS_TF_DB", raising=False)
+    creds(env)
+    settings(env)
+    key = pol.tf_key(CID, D1)
+    env["srv"].transit[key] = 1
+    cli(["tf-entity-remove", D1], capsys=capsys)
+    live(env)                                            # recréée avec le même identifiant
+    real = tcli.hsc.time.time
+    monkeypatch.setattr(tcli.hsc.time, "time", lambda: real() + 31 * 86400)
+    argv = ["tf-keys", "sweep"] if how == "sweep" else ["tf-keys", "delete", D1, "--confirm", D1]
+    rc, doc, err = cli(argv, capsys=capsys)
+    assert key in env["srv"].transit
+    assert doc.get("removed", []) == [] and D1 in doc.get("alive", [D1])
+    assert D1 not in read_settings(env).get("tf_keys_retired", {})       # plus en attente de retrait

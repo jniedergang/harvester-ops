@@ -490,3 +490,19 @@ def test_originals_sweep_and_entity_removal_carry_their_action_id():
         body = src[src.index(fn):]
         body = body[:body.index("\ndef ", 1)]
         assert "id_arg=True" in body, fn
+
+
+# Relecture finale I5 : un identifiant de déclaration venu du navigateur
+# (reprise localStorage d'avant la v1.54) qui désigne une déclaration
+# supprimée dont la clé transit est gardée n'est pas repris : la nouvelle
+# déclaration reçoit un identifiant tiré par le serveur.
+@pytest.mark.parametrize("requested,kept", [
+    ("d1d1d1d1d1d1", False),       # retirée, clé gardée : identifiant neuf
+    ("e2e2e2e2e2e2", True),        # inconnue : reprise telle quelle
+    (None, False),                 # rien demandé : tiré par le serveur
+])
+def test_declaration_id_of_a_retired_key_is_not_reused(wapp, sx, requested, kept):
+    sx.set(tf_keys_retired={"d1d1d1d1d1d1": {"at": 1, "trial": False}})
+    got = wapp._tf_decl_id_for_create(requested)
+    assert (got == requested) is kept
+    assert wapp._tfs.ID_RE.match(got) if hasattr(wapp._tfs, "ID_RE") else len(got) == 12
