@@ -336,7 +336,12 @@ def test_2100_policies_stay_under_the_prefix_and_never_administer(text):
 def test_person_policy_rights_by_class():
     caps = {p: c for p, c in rules_of(pol.person_policy("harvester-ops", PREFIX, CID))}
     d = f"harvester-ops/data/{PREFIX}"
-    assert caps[f"{d}/ssh-kvm/*"] == '"read"'
+    # décision 309 : les trois classes personnelles s'écrivent, avec leurs
+    # métadonnées (attribution `hops_actor`, `hops_identity`)
+    for cls in ("ssh-cluster", "ssh-kvm", "tf-kvm"):
+        assert caps[f"{d}/{cls}/*"] == '"read", "create", "update"'
+        assert caps[f"harvester-ops/metadata/{PREFIX}/{cls}/*"] == '"read", "create", "update"'
+    assert f"harvester-ops/metadata/{PREFIX}/eso/*" not in caps
     assert caps[f"{d}/eso/*"] == '"create", "update"'                   # écrite, jamais relue
     assert "read" not in caps[f"{d}/eso/*"]
     assert not any("kubeconfig" in p for p in caps)

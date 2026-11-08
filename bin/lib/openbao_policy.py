@@ -176,10 +176,14 @@ def tf_child_policy(cid, token_accessor):
 # ---------------------------------------------------------------------------
 # Classes que la politique commune ouvre (plan 2.10.0, « Politiques ») :
 # lecture des trois classes personnelles et de leurs versions, écriture de
-# `tf-kvm` (variable d'une déclaration) et `ssh-cluster` (clé téléversée),
-# écriture sans lecture de `eso`.
+# `tf-kvm` (variable d'une déclaration), `ssh-cluster` (clé téléversée) et,
+# décision 309 (revue I3 des tâches 2 à 5), `ssh-kvm` (déclaration d'un hôte
+# KVM) : OpenBao juge. Écriture sans lecture de `eso`. `custom_metadata`
+# (`hops_actor`, `hops_identity`, décision 274) ne s'écrit que par le chemin
+# `metadata` : une classe qu'une personne écrit y reçoit `create, update`,
+# sinon la valeur s'écrit et son attribution échoue.
 PERSON_READ = ("ssh-cluster", "ssh-kvm", "tf-kvm")
-PERSON_WRITE = ("ssh-cluster", "tf-kvm")
+PERSON_WRITE = ("ssh-cluster", "ssh-kvm", "tf-kvm")
 PERSON_WRITE_ONLY = ("eso",)            # écrite par une personne, jamais relue par la console
 GROUP_CLASSES = ("kubeconfig", "ssh-cluster", "ssh-kvm", "tf-kvm", "eso")
 GROUP_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,30}$")
@@ -233,7 +237,7 @@ def _data_caps(cls):
 
 
 def _meta_caps(cls):
-    return ["read"]
+    return ["read", "create", "update"] if cls in PERSON_WRITE else ["read"]
 
 
 def person_policy(mount, prefix, cid, groups_only=False):

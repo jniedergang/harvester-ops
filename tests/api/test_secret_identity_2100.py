@@ -289,13 +289,28 @@ def test_renew_refused_drops(w, srv):
     assert w.pt.get("s-a") is None and old not in srv.tokens
 
 
-def test_person_write_metadata(w, srv):
+@pytest.mark.parametrize("cls,path,field", [
+    ("tf-kvm", "k1/d1/rke2_token", "value"),
+    ("ssh-kvm", "k7", "private_key"),            # décision 309 : déclaration d'un hôte KVM
+    ("ssh-cluster", "h7", "private_key"),
+])
+def test_person_write_metadata(w, srv, cls, path, field):
+    """Écriture d'une personne avec le texte EXACT de la politique commune
+    (openbao_policy.person_rules) : valeur et métadonnées d'attribution
+    (`hops_actor`, `hops_identity`) écrites avec son jeton (revue M7, I3)."""
+    import openbao_policy as pol
+    srv.jwt[JWT_MOUNT]["allow"] = [(p.rstrip("*"), set(c)) for p, c in pol.person_rules(KV, PREFIX, CID)]
     alice = w.person("s-a", "user-alice")
-    ref = w.store.put("tf-kvm", "k1/d1/rke2_token", "value", "tok-2100", identity=alice, action="act-9")
-    assert ref == "openbao:tf-kvm/k1/d1/rke2_token#value"
-    puts = [r for r in srv.log if r["path"] == f"{KV}/data/{PREFIX}/tf-kvm/k1/d1/rke2_token"
-            and r["method"] in ("POST", "PUT")]
-    assert puts and puts[-1]["headers"]["x-vault-token"] == w.pt.get("s-a")._tok.value
+    ref = w.store.put(cls, path, field, "val-2100", identity=alice, action="act-9")
+    assert ref == f"openbao:{cls}/{path}#{field}"
+    tok = w.pt.get("s-a")._tok.value
+    for kind in ("data", "metadata"):
+        puts = [r for r in srv.log if r["path"] == f"{KV}/{kind}/{PREFIX}/{cls}/{path}"
+                and r["method"] in ("POST", "PUT")]
+        assert puts and puts[-1]["headers"]["x-vault-token"] == tok, kind
+    assert w.store.last_metadata_error is None
+    custom = srv.kv[(KV, f"{PREFIX}/{cls}/{path}")]["custom"]
+    assert custom["hops_identity"] == "person" and custom["hops_actor"] == "user-alice@rancher"
     assert not w.approle_reads()
 
 

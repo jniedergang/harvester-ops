@@ -2,11 +2,11 @@ path "harvester-ops/data/consoles/abc123def456/kubeconfig/harv1" { capabilities 
 path "harvester-ops/metadata/consoles/abc123def456/kubeconfig/harv1" { capabilities = ["read"] }
 path "harvester-ops/data/consoles/abc123def456/kubeconfig/node2" { capabilities = ["read"] }
 path "harvester-ops/metadata/consoles/abc123def456/kubeconfig/node2" { capabilities = ["read"] }
-path "harvester-ops/data/consoles/abc123def456/ssh-kvm/harv1" { capabilities = ["read"] }
-path "harvester-ops/metadata/consoles/abc123def456/ssh-kvm/harv1" { capabilities = ["read"] }
-path "harvester-ops/data/consoles/abc123def456/ssh-kvm/node2" { capabilities = ["read"] }
-path "harvester-ops/metadata/consoles/abc123def456/ssh-kvm/node2" { capabilities = ["read"] }
+path "harvester-ops/data/consoles/abc123def456/ssh-kvm/harv1" { capabilities = ["read", "create", "update"] }
+path "harvester-ops/metadata/consoles/abc123def456/ssh-kvm/harv1" { capabilities = ["read", "create", "update"] }
+path "harvester-ops/data/consoles/abc123def456/ssh-kvm/node2" { capabilities = ["read", "create", "update"] }
+path "harvester-ops/metadata/consoles/abc123def456/ssh-kvm/node2" { capabilities = ["read", "create", "update"] }
 path "harvester-ops/data/consoles/abc123def456/tf-kvm/harv1/*" { capabilities = ["read", "create", "update"] }
-path "harvester-ops/metadata/consoles/abc123def456/tf-kvm/harv1/*" { capabilities = ["read"] }
+path "harvester-ops/metadata/consoles/abc123def456/tf-kvm/harv1/*" { capabilities = ["read", "create", "update"] }
 path "harvester-ops/data/consoles/abc123def456/tf-kvm/node2/*" { capabilities = ["read", "create", "update"] }
-path "harvester-ops/metadata/consoles/abc123def456/tf-kvm/node2/*" { capabilities = ["read"] }
+path "harvester-ops/metadata/consoles/abc123def456/tf-kvm/node2/*" { capabilities = ["read", "create", "update"] }
