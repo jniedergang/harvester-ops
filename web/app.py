@@ -33711,6 +33711,7 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
                "artefacts": arts["summary"], "gitops": gops["summary"]}
     ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
            "update_differing": bool(update_differing), "clusters": capi["entries"],
+           "deferred": capi["deferred"],
            "registries": reg["entries"], "artefacts": arts["rows"], "gitops": gops["rows"]}
     return findings, summary, ctx
 
@@ -33989,11 +33990,14 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=(
     seule : paquet actif, version de Harvester et pile (décisions 117,
     171), modèles et rendu de chaque entrée, clusters déjà présents (repris
     ou nom pris), puis `check --many` pour ceux à créer (capacité, pools,
-    droits, identité). Rend {"capi", "summary", "entries", "estimate"}."""
+    droits, identité). Rend {"capi", "summary", "entries", "estimate",
+    "deferred"} ; `deferred` : clés (_deploy_check_key) des constats
+    bloquants reportés à la phase Clusters (`*-later`), qu'un essai ne
+    rejoue pas (relecture 2.8.2 I-1)."""
     phases = plan["phases"]
     capi_on = bool((phases.get("capi") or {}).get("enabled"))
     cl_on = bool((phases.get("clusters") or {}).get("enabled")) and bool(_dpl.plan_clusters(plan))
-    out = {"capi": None, "summary": [], "entries": [], "estimate": 0}
+    out = {"capi": None, "summary": [], "entries": [], "estimate": 0, "deferred": []}
     if not (capi_on or cl_on):
         return out
     providers = _capi_bundle_providers()
@@ -34103,6 +34107,7 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=(
             continue                            # informations par cluster : le résumé de flotte suffit
         level = DEPLOY_CHECK_LEVELS.get(f.get("level"), "blocking")
         code = f.get("code") or "check"
+        key = _deploy_check_key(f) if level == "blocking" else None
         e = by_ref.get(f.get("cluster") or "")
         if code in ("cluster-registry-unknown", "cluster-registry-not-attached") and \
                 (f.get("facts") or {}).get("registry") in set(later):
@@ -34122,8 +34127,16 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=(
                 _bmp.variables_in(e["raw"].get(k)) for k in DEPLOY_REF_KEYS[code]):
             code, level = "refs-later", "info"
             f = dict(f, facts=dict(f.get("facts") or {}, check=f.get("code")))
+        if key and level != "blocking":
+            out["deferred"].append(key)
         findings.append({"code": code, "level": level, "phase": "clusters", "detail": _deploy_check_detail(f)})
     return out
+
+
+def _deploy_check_key(f):
+    """Clé d'un constat de `check --many` : cluster, code et faits ; la même
+    au lancement et au rejeu du début de la phase Clusters."""
+    return json.dumps([f.get("cluster") or "", f.get("code") or "", f.get("facts") or {}], sort_keys=True)
 
 
 def _deploy_resources_differ(rendered, existing):
@@ -34582,6 +34595,14 @@ def _deploy_clusters_phase(run, cluster, kc_ref, dctx):
         if err:
             return _dch.PhaseOutcome("error", message=f"check failed ({err})"[:200])
         blocking = [f for f in res.get("findings") or [] if f.get("level") == "block"]
+        deferred = set(dctx.get("deferred") or ())
+        if dry and blocking and all(_deploy_check_key(f) in deferred for f in blocking):
+            # relecture 2.8.2 I-1 : en essai, les phases d'avant (Terraform,
+            # Registre) n'ont rien créé ; ces manques ont été reportés au
+            # lancement, ils sont rejoués au vrai déroulé
+            return _dch.PhaseOutcome("done", message="dry run: the clusters are checked once the earlier phases "
+                                                     "of the plan have made what they name",
+                                     data={"deferred": sorted({f.get("code") or "check" for f in blocking})})
         if blocking:
             codes = sorted({f.get("code") or "check" for f in blocking})
             return _dch.PhaseOutcome("error", message="blocked by the pre-check: " + ", ".join(codes),

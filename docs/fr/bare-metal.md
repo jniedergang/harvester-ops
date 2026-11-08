@@ -793,7 +793,14 @@ Une image se reconnaît à `namespace/nom` ou `namespace/nom affiché` ;
 sans espace de noms écrit, c'est `default`. Une
 déclaration gardée avec d'autres valeurs compte avec ses propres
 ressources. La phase Clusters revérifie avant toute création et bloque si
-la référence manque encore.
+la référence manque encore. En essai à blanc, les phases d'avant ne
+créent rien : quand chaque constat bloquant de ce contrôle a été reporté
+au lancement (`terraform-ref-later`, `refs-later`,
+`cluster-registry-later`, `offline-later`, même cluster et mêmes faits),
+la phase Clusters se termine par « dry run: the clusters are checked once
+the earlier phases of the plan have made what they name », sans rien
+créer. Tout autre constat bloquant arrête l'essai comme il arrête une
+exécution.
 
 Un manque que la fenêtre de création signale seulement en avertissement
 bloque un plan : la chaîne tourne sans surveillance.

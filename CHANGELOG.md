@@ -26,6 +26,15 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   Clusters phase replays the check before any creation and blocks if the
   reference is still missing. Install chains are unchanged (no check
   there). Five languages.
+- **Dry run of such a plan ended in error** (review of 2.8.2). In a dry
+  run the Terraform and Registry phases create nothing, so the replay at
+  the start of the Clusters phase found the deferred reference still
+  missing and stopped. When every blocking finding of that replay was
+  deferred at launch (same cluster, code and facts: `terraform-ref-later`,
+  `refs-later`, `cluster-registry-later`, `offline-later`), a dry run now
+  ends the phase with "dry run: the clusters are checked once the earlier
+  phases of the plan have made what they name" and creates nothing. Any
+  other blocking finding still stops it.
 - **Rancher agent bundle left after removing an import** (decision 247,
   concern 4 of the 2.8.1 bench). Rancher 2.14 keeps the Bundle
   `fleet-agent-<cluster>` of the imported child in `fleet-default` after
@@ -48,7 +57,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   literal name, `count`, a template or a computed namespace, a resource
   that does not render, phase disabled, declaration kept or
   updated, replay at the phase start (blocks, or creates once Terraform
-  made the image), and `tf_guard.resource_literals`.
+  made the image), dry runs (deferred findings pass, a new one or other
+  facts block), and `tf_guard.resource_literals`.
+- `test_deploy_offline_later_281.py`: a dry run of an offline plan passes
+  the findings its Registry phase would satisfy.
 - `test_rancher_unimport_bundle_282.py`: the Bundle goes after the cluster
   on both paths (unimport, delete), each kept case (other or second
   target, no target, no mark, label of the console, other namespace, long

@@ -245,3 +245,56 @@ def test_declared_free_code_never_guesses(case, tf, want):
     if tf is None:
         res["spec"]["namespace"] = ""             # formulaire : vide = `default` au rendu
     assert wapp._deploy_tf_declared({"a": [res]})["image"] == want
+
+
+def test_dry_run_passes_what_the_terraform_phase_would_make(capi):
+    """Relecture 2.8.2 I-1 : en essai, la phase Terraform ne fait que
+    planifier ; la référence qu'elle créerait manque encore au début de la
+    phase Clusters. Ce constat reporté au lancement ne fait pas échouer
+    l'essai : les clusters sont vérifiés au vrai déroulé, rien n'est créé."""
+    fake = capi["capi"]
+    seed(capi["client"], [image()])
+    fake.fleet.append({"code": "image-missing", "level": "block", "facts": {"image": "default/leap"},
+                       "cluster": REF})
+    run = trn.start(capi, dry_run=True)
+    ph = tc.phase(run, "clusters")
+    assert run.status == "done", run.result
+    assert ph["message"] == ("dry run: the clusters are checked once the earlier phases of the plan "
+                             "have made what they name")
+    assert ph["deferred"] == ["image-missing"] and fake.subs("create") == []
+
+
+def test_dry_run_still_blocks_on_what_was_not_deferred(capi, monkeypatch):
+    """Un constat bloquant apparu après le lancement (non reporté) arrête
+    l'essai comme le vrai déroulé."""
+    fake = capi["capi"]
+    seed(capi["client"], [image()])
+    fake.fleet.append({"code": "image-missing", "level": "block", "facts": {"image": "default/leap"},
+                       "cluster": REF})
+    real = wapp._tf_decl_launch
+
+    def tf_launch(*a, **kw):
+        fake.fleet.append({"code": "pool-missing", "level": "block", "facts": {"pool": "autre"}, "cluster": REF})
+        return real(*a, **kw)
+    monkeypatch.setattr(wapp, "_tf_decl_launch", tf_launch)
+    run = trn.start(capi, dry_run=True)
+    ph = tc.phase(run, "clusters")
+    assert run.status == "error" and ph["message"] == "blocked by the pre-check: image-missing, pool-missing"
+    assert fake.subs("create") == []
+
+
+def test_dry_run_deferral_needs_the_same_facts(capi, monkeypatch):
+    """Même code, autre référence (autre image) : non reporté, l'essai
+    s'arrête."""
+    fake = capi["capi"]
+    seed(capi["client"], [image()])
+    fake.fleet.append({"code": "image-missing", "level": "block", "facts": {"image": "default/leap"},
+                       "cluster": REF})
+    real = wapp._tf_decl_launch
+
+    def tf_launch(*a, **kw):
+        fake.fleet[0] = dict(fake.fleet[0], facts={"image": "default/autre"})
+        return real(*a, **kw)
+    monkeypatch.setattr(wapp, "_tf_decl_launch", tf_launch)
+    run = trn.start(capi, dry_run=True)
+    assert run.status == "error" and tc.phase(run, "clusters")["message"] == "blocked by the pre-check: image-missing"

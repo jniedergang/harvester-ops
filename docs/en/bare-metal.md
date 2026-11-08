@@ -752,7 +752,13 @@ does not render (missing field) counts for nothing.
 An image matches by `namespace/name` or `namespace/display name`; a
 namespace not written means `default`. A declaration kept with other values
 counts with its own resources. The Clusters phase checks again before
-any creation and blocks if the reference is still missing.
+any creation and blocks if the reference is still missing. In a dry
+run the earlier phases create nothing: when every blocking finding of
+that check was deferred at launch (`terraform-ref-later`, `refs-later`,
+`cluster-registry-later`, `offline-later`, same cluster and same facts),
+the Clusters phase ends with "dry run: the clusters are checked once the
+earlier phases of the plan have made what they name", without creating
+anything. Any other blocking finding stops the dry run as it stops a run.
 
 A shortage that the creation window only reports as a warning blocks a
 plan: the chain runs unattended.
