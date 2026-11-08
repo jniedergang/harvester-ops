@@ -332,3 +332,82 @@ def identity_for(cls, session, settings, actor=None):
     return secret_store.Identity("person", who, session_id=getattr(session, "sid", None),
                                  mount=server["mount"], role=PERSON_ROLE)
 
+
+# ---------------------------------------------------------------------------
+# 2.10.0 (tâche 9) : méthode `jwt` d'un cluster enfant pour ESO (point 295)
+# ---------------------------------------------------------------------------
+ESO_ROLE = "eso"
+ESO_TOKEN_TTL = "10m"
+ESO_TOKEN_MAX_TTL = "10m"
+ESO_ACCOUNT = "hops-eso"
+# RKE2 : émetteur par défaut des comptes de service, le même pour tous les
+# clusters (essai 7), d'où un montage par cluster qui isole ses clés
+RKE2_ISSUER = "https://kubernetes.default.svc.cluster.local"
+NS_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+
+
+def eso_audience(console_id):
+    """Audience des jetons de compte de service demandés par ESO : propre à
+    la console (jamais `vault`, le défaut d'ESO)."""
+    if not CONSOLE_ID_RE.match(str(console_id or "")):
+        raise ValueError("invalid console id")
+    return f"hops-openbao-{console_id}"
+
+
+def eso_mount_config(issuer, pubkeys):
+    """Configuration du montage d'un cluster enfant : clés publiques du JWKS
+    de ses comptes de service, lues par la console avec le kubeconfig du
+    cluster (accès anonyme refusé par RKE2 : 401, essai 7) ; OpenBao ne
+    joint jamais l'API du cluster enfant."""
+    iss = str(issuer or "").rstrip("/")
+    if not iss.startswith("https://") or any(c.isspace() for c in iss) or len(iss) > 512:
+        raise ValueError("the service account issuer is an https URL")
+    keys = [str(k).strip() for k in pubkeys or []]
+    if not keys or len(keys) > 8 or not all(k.startswith("-----BEGIN PUBLIC KEY-----") for k in keys):
+        raise ValueError("static keys are 1 to 8 PEM public keys")
+    return {"bound_issuer": iss, "jwt_validation_pubkeys": keys, "jwt_supported_algs": list(ALGS),
+            "default_role": ESO_ROLE}
+
+
+def eso_role_params(console_id, key, namespaces, node_cidr=None):
+    """Rôle `eso` (`auth/<montage>/role/eso`) : compte `hops-eso` seulement,
+    namespaces activés seulement (décision 304 B : `bound_claims` en glob,
+    réécrit à chaque activation ; un namespace non activé qui pose son
+    compte est refusé par OpenBao), namespace recopié dans les métadonnées
+    de l'alias pour le gabarit de la politique, jeton de 10 minutes, accepté
+    depuis le réseau des nœuds du cluster enfant quand il est connu (essai 7 :
+    OpenBao voit l'adresse du nœud)."""
+    from openbao_policy import eso_policy_name
+    nss = sorted(set(namespaces or []))
+    if not nss or not all(isinstance(n, str) and NS_RE.match(n) for n in nss):
+        raise ValueError("at least one enabled namespace (RFC 1123 names)")
+    out = {
+        "role_type": "jwt",
+        "user_claim": "sub",
+        "bound_audiences": [eso_audience(console_id)],
+        "bound_claims_type": "glob",
+        "bound_claims": {"/kubernetes.io/serviceaccount/name": ESO_ACCOUNT, "/kubernetes.io/namespace": nss},
+        "claim_mappings": {"/kubernetes.io/namespace": "namespace"},
+        "token_policies": [eso_policy_name(console_id, key)],
+        "token_type": "service",
+        "token_ttl": ESO_TOKEN_TTL,
+        "token_max_ttl": ESO_TOKEN_MAX_TTL,
+        "token_num_uses": 0,
+        "token_no_default_policy": False,
+        "verbose_oidc_logging": False,
+    }
+    if node_cidr:
+        if not CIDR_RE.match(str(node_cidr)):
+            raise ValueError("invalid node network (CIDR expected)")
+        out["token_bound_cidrs"] = [str(node_cidr)]
+    return out
+
+
+def eso_settings_of(secrets_settings):
+    """Réglage `eso` complété : {"listener", "address", "clusters"}."""
+    raw = (secrets_settings or {}).get("eso")
+    raw = raw if isinstance(raw, dict) else {}
+    clusters = raw.get("clusters") if isinstance(raw.get("clusters"), dict) else {}
+    return {"listener": raw.get("listener") if isinstance(raw.get("listener"), str) else None,
+            "address": raw.get("address") if isinstance(raw.get("address"), str) else None,
+            "clusters": {str(k): v for k, v in clusters.items() if isinstance(v, dict) and ESO_KEY_RE.match(str(k))}}

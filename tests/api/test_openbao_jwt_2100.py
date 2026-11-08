@@ -287,3 +287,47 @@ def test_fetch_json_https_only_and_objects_only():
     for bad in (b"[1]", b"not json"):
         with pytest.raises(ValueError):
             oj.fetch_json("https://r/x", opener=Opener(bad))
+
+
+# ---------------------------------------------------------------------------
+# 2.10.0 (tâche 9) : méthode jwt d'un cluster enfant (ESO)
+# ---------------------------------------------------------------------------
+PEM = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
+
+
+def test_eso_role_params_exact():
+    """Rôle de l'essai 7 et de la décision 304 B (namespaces activés)."""
+    assert oj.eso_role_params(CID, "1d905023", ["team-b", "team-a", "team-a"], "172.16.2.0/24") == {
+        "role_type": "jwt", "user_claim": "sub", "bound_audiences": [f"hops-openbao-{CID}"],
+        "bound_claims_type": "glob",
+        "bound_claims": {"/kubernetes.io/serviceaccount/name": "hops-eso", "/kubernetes.io/namespace": ["team-a", "team-b"]},
+        "claim_mappings": {"/kubernetes.io/namespace": "namespace"},
+        "token_policies": [f"hops-eso-{CID}-1d905023"], "token_type": "service", "token_ttl": "10m",
+        "token_max_ttl": "10m", "token_num_uses": 0, "token_no_default_policy": False,
+        "verbose_oidc_logging": False, "token_bound_cidrs": ["172.16.2.0/24"]}
+    assert "token_bound_cidrs" not in oj.eso_role_params(CID, "1d905023", ["a"])
+
+
+@pytest.mark.parametrize("args", [
+    (CID, "1d905023", []), (CID, "1d905023", ["Team_A"]), (CID, "xyz", ["a"]), ("ABC", "1d905023", ["a"]),
+    (CID, "1d905023", ["a"], "nope"),
+])
+def test_eso_role_params_refused(args):
+    with pytest.raises(ValueError):
+        oj.eso_role_params(*args)
+
+
+def test_eso_mount_config_static_keys_only():
+    c = oj.eso_mount_config("https://kubernetes.default.svc.cluster.local/", [PEM])
+    assert c == {"bound_issuer": "https://kubernetes.default.svc.cluster.local", "jwt_validation_pubkeys": [PEM],
+                 "jwt_supported_algs": ["RS256"], "default_role": "eso"}
+    for bad in (("http://k8s", [PEM]), ("https://k8s", []), ("https://k8s", ["nope"]), ("https://k8s", [PEM] * 9)):
+        with pytest.raises(ValueError):
+            oj.eso_mount_config(*bad)
+
+
+def test_eso_settings_of():
+    assert oj.eso_settings_of({}) == {"listener": None, "address": None, "clusters": {}}
+    got = oj.eso_settings_of({"eso": {"listener": "1.2.3.4:8212", "clusters": {"1d905023": {"mount": "m"},
+                                                                               "bad": {"mount": "x"}}}})
+    assert got["listener"] == "1.2.3.4:8212" and list(got["clusters"]) == ["1d905023"]

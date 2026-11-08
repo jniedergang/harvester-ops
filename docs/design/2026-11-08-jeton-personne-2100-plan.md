@@ -1540,3 +1540,17 @@ Points 303 à 307 : recommandations retenues (303 A groupes internes seuls,
 304 B liste des namespaces activés dans le rôle, 305 A un `SecretStore` par
 namespace, 306 A droits de l'agent gardés par la revue d'instantané, 307 A
 défaut d'ESO avec exemple à `refreshInterval: 1h`).
+
+## Décisions confirmées (09/11/2026)
+
+Recommandations retenues par ju : 279 B (VM `idp` non employée, groupes
+internes), 303 à 307 (plus haut), et :
+
+| # | Sens |
+|---|---|
+| 309 | Une personne écrit `ssh-kvm` (déclaration d'un hôte KVM) comme `ssh-cluster` et `tf-kvm`, avec `create, update` sur les métadonnées de ces trois classes (attribution gardée). |
+| 310 | La portée `groups` n'est jamais demandée à Rancher en 2.10.0 (inutilisée, et refusée par Rancher 2.14.1 qui fait échouer toute la connexion). |
+| 311 | Les vues KVM partagées (relevés, tableau des hôtes, vue de toutes les VMs) lisent `ssh-kvm` avec l'identité de service ; les gestes gardent le jeton de la personne. |
+| 312 | Une personne écrit aussi les métadonnées de la classe `eso` (`create, update`, sans lecture) : une valeur ESO garde son auteur ; elle s'écrit sans lecture préalable. |
+| 313 | En B1, le montage `jwt` d'une personne se règle par la découverte seule (clés statiques réservées au mode A, où l'administrateur d'OpenBao porte la confiance dans les clés) ; émetteur, client et CA d'un Rancher épinglés dans l'état de root à la première pose, changés seulement par `sudo harvester-secrets person-token ...` ; l'épinglage survit au retrait du montage. |
+| 314 | Montages des personnes préfixés `p-` (`jwt-hops-<id>-p-<rancher>`), jamais confondus avec ceux d'ESO (`jwt-hops-<id>-eso-<clé>`), troncature comprise. |

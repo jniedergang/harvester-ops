@@ -65,6 +65,12 @@ C_DATA = "/openbao/data"
 C_AUDIT = "/openbao/audit/audit.log"
 C_TLS_CERT = "/openbao/tls/server.pem"
 C_TLS_KEY = "/openbao/tls/server.key"
+# 2.10.0 (point 298) : second écouteur, pour ESO seulement, avec son propre
+# certificat (la CA de l'écouteur local est contrainte à 127.0.0.1 et sa clé
+# n'est pas gardée : une CA dédiée, contrainte à l'adresse de l'écouteur)
+C_ESO_CERT = "/openbao/tls/eso.pem"
+C_ESO_KEY = "/openbao/tls/eso.key"
+ESO_PORT = 8212
 C_UNSEAL = "/run/secrets/hops-openbao-unseal"
 C_UNSEAL_PREV = "/run/secrets/hops-openbao-unseal-prev"
 BOOT_DIR = "/run/hops-openbao-boot"          # même chemin sur l'hôte (tmpfs) et dans le conteneur
@@ -178,7 +184,8 @@ def tf_child_policy(cid, token_accessor):
 # lecture des trois classes personnelles et de leurs versions, écriture de
 # `tf-kvm` (variable d'une déclaration), `ssh-cluster` (clé téléversée) et,
 # décision 309 (revue I3 des tâches 2 à 5), `ssh-kvm` (déclaration d'un hôte
-# KVM) : OpenBao juge. Écriture sans lecture de `eso`. `custom_metadata`
+# KVM) : OpenBao juge. Écriture sans lecture de `eso` (métadonnées comprises,
+# décision 312). `custom_metadata`
 # (`hops_actor`, `hops_identity`, décision 274) ne s'écrit que par le chemin
 # `metadata` : une classe qu'une personne écrit y reçoit `create, update`,
 # sinon la valeur s'écrit et son attribution échoue.
@@ -224,7 +231,7 @@ def person_rules(mount, prefix, cid, groups_only=False):
             rules.append((f"{m}/data/{p}/{cls}/*", _data_caps(cls)))
         for cls in PERSON_WRITE_ONLY:
             rules.append((f"{m}/data/{p}/{cls}/*", _data_caps(cls)))
-        for cls in PERSON_READ:
+        for cls in PERSON_READ + PERSON_WRITE_ONLY:
             rules.append((f"{m}/metadata/{p}/{cls}/*", _meta_caps(cls)))
     rules.append(("sys/capabilities-self", ["update"]))
     return rules
@@ -237,6 +244,10 @@ def _data_caps(cls):
 
 
 def _meta_caps(cls):
+    # décision 312 : une valeur ESO écrite par une personne garde son auteur
+    # (`custom_metadata`), sans lecture des métadonnées
+    if cls in PERSON_WRITE_ONLY:
+        return ["create", "update"]
     return ["read", "create", "update"] if cls in PERSON_WRITE else ["read"]
 
 
@@ -274,8 +285,7 @@ def group_rules(mount, prefix, cid, name, classes, clusters):
             # tf-kvm/<hôte>/<décl>/<variable> : tout l'hôte ; eso/<clé>/<ns>/<nom> : tout le cluster
             leaf = f"{cls}/{c}/*" if cls in ("tf-kvm", "eso") else f"{cls}/{c}"
             rules.append((f"{m}/data/{p}/{leaf}", _data_caps(cls)))
-            if cls not in PERSON_WRITE_ONLY:
-                rules.append((f"{m}/metadata/{p}/{leaf}", _meta_caps(cls)))
+            rules.append((f"{m}/metadata/{p}/{leaf}", _meta_caps(cls)))
     return rules
 
 
@@ -596,6 +606,77 @@ def group_commands(addr, mount, prefix, cid, name, classes, clusters, members):
     ]
 
 
+def eso_cluster_commands(addr, mount, prefix, cid, key, issuer, pubkeys, namespaces, node_cidr=None):
+    """Mode A (tâche 9) : commandes `bao` d'un cluster enfant pour ESO :
+    montage `jwt` (s'il manque), configuration (clés publiques des comptes
+    de service, lues par la console), rôle `eso` (namespaces activés,
+    décision 304 B), politique à gabarit. L'accesseur du montage est relu
+    par `bao read -field=accessor sys/auth/<montage>` (gabarit de la
+    politique) : le corps de la politique est un document non cité, seul
+    `$ACCESSOR` y est développé."""
+    jm = oj.eso_mount(_check(ID_RE, cid, "console id"), key)
+    prefix = prefix or f"consoles/{cid}"
+    config = oj.eso_mount_config(issuer, pubkeys)
+    role = oj.eso_role_params(cid, key, namespaces, node_cidr)
+    policy = eso_policy(mount, prefix, cid, key, "$ACCESSOR")
+    return [
+        _addr_line(addr),
+        f"# External Secrets du cluster enfant de clé {key} (sautez la ligne suivante si {jm}/ existe déjà)",
+        f"bao auth enable -path={jm} jwt",
+        f"ACCESSOR=$(bao read -field=accessor sys/auth/{jm})",
+        f"bao policy write {eso_policy_name(cid, key)} - <<EOF\n{policy}EOF",
+        _heredoc_json(f"bao write auth/{jm}/config", config),
+        _heredoc_json(f"bao write auth/{jm}/role/{oj.ESO_ROLE}", role),
+        f"bao list auth/{jm}/role",
+    ]
+
+
+def eso_role_commands(addr, cid, key, namespaces, node_cidr=None):
+    """Mode A : le rôle seul (namespace activé ou retiré, décision 304 B)."""
+    jm = oj.eso_mount(_check(ID_RE, cid, "console id"), key)
+    return [_addr_line(addr), _heredoc_json(f"bao write auth/{jm}/role/{oj.ESO_ROLE}",
+                                            oj.eso_role_params(cid, key, namespaces, node_cidr))]
+
+
+def eso_keys_commands(addr, cid, key, issuer, pubkeys):
+    jm = oj.eso_mount(_check(ID_RE, cid, "console id"), key)
+    return [_addr_line(addr), _heredoc_json(f"bao write auth/{jm}/config", oj.eso_mount_config(issuer, pubkeys))]
+
+
+def eso_remove_commands(addr, cid, key):
+    jm = oj.eso_mount(_check(ID_RE, cid, "console id"), key)
+    return [_addr_line(addr), f"bao auth disable {jm}", f"bao policy delete {eso_policy_name(cid, key)}"]
+
+
+ESO_LISTEN_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$")
+
+
+def check_eso_listen(address):
+    """`<IPv4>:<port>` d'un second écouteur : adresse unicast de l'hôte (ni
+    la boucle locale, déjà servie, ni 0.0.0.0 qui ouvrirait les rôles de la
+    console sur toutes les interfaces), port non privilégié distinct de
+    l'écouteur local. Rend (adresse, port) ; ValueError sinon."""
+    import ipaddress
+    m = ESO_LISTEN_RE.match(str(address or ""))
+    if not m:
+        raise ValueError("listener: <IPv4 address of the host>:<port>")
+    ip, port = ipaddress.IPv4Address(m.group(1)), int(m.group(2))
+    if ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local or str(ip).endswith(".255"):
+        raise ValueError("listener: a unicast address of the host (not loopback, not 0.0.0.0)")
+    if not 1024 <= port <= 65535 or port in (8210, 8211):
+        raise ValueError("listener: a port from 1024 to 65535, not 8210 or 8211")
+    return str(ip), port
+
+
+def eso_listener_block(address):
+    """Strophe du second écouteur (point 298) : TLS par le certificat de
+    l'écouteur ESO, sans adresse de cluster (raft reste sur 127.0.0.1)."""
+    ip, port = check_eso_listen(address)
+    return "\n".join(['# Écouteur ESO (2.10.0) : seuls les rôles `eso` des clusters enfants l\'acceptent',
+                      'listener "tcp" {', f'  address       = "{ip}:{port}"',
+                      f'  tls_cert_file = "{C_ESO_CERT}"', f'  tls_key_file  = "{C_ESO_KEY}"', "}"])
+
+
 def group_remove_commands(addr, cid, name):
     return [_addr_line(addr), f"bao delete identity/group/name/{group_name(cid, name)}",
             f"bao policy delete {group_policy_name(cid, name)}"]
@@ -686,7 +767,7 @@ def seal_block(key_id, previous_key_id=None):
     return "\n".join(out + ["}"]) + "\n"
 
 
-def b1_config(cid, key_id, template, previous_key_id=None, init=True, mount=DEFAULT_MOUNT):
+def b1_config(cid, key_id, template, previous_key_id=None, init=True, mount=DEFAULT_MOUNT, eso_listener=None):
     """Configuration de B1 depuis le modèle (`config/openbao/openbao.hcl.tpl`,
     porté par le paquet OpenBao) : écoute, stockage raft, audit, descellement
     `static` (et `previous_key` pendant une rotation), `initialize` à la
@@ -705,8 +786,15 @@ def b1_config(cid, key_id, template, previous_key_id=None, init=True, mount=DEFA
             raise ValueError("the OpenBao listener must stay on 127.0.0.1")
     seal = seal_block(key_id, previous_key_id).rstrip("\n")
     init_text = initialize_block(cid, mount).rstrip("\n") if init else ""
+    # 2.10.0 (point 298) : second écouteur ESO, posé seulement à la ligne
+    # `__ESO_LISTENER__` du modèle (un modèle plus ancien ne le porte pas)
+    has_eso = bool(re.search(r"^__ESO_LISTENER__$", template, re.M))
+    if eso_listener and not has_eso:
+        raise ValueError("the OpenBao template has no __ESO_LISTENER__ line (template older than 2.10.0)")
+    eso_text = eso_listener_block(eso_listener) if eso_listener else ""
     # placeholders sur leur propre ligne seulement (jamais dans un commentaire)
     out = re.sub(r"^__SEAL__$", lambda _m: seal, template, flags=re.M)
+    out = re.sub(r"^__ESO_LISTENER__$", lambda _m: eso_text, out, flags=re.M)
     return re.sub(r"^__INITIALIZE__$", lambda _m: init_text, out, flags=re.M)
 
 

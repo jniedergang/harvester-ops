@@ -99,6 +99,9 @@ DEFAULTS = {
     # 2.10.0 : jeton OpenBao par personne (éteint tant que l'administrateur
     # ne l'a pas activé : point 290)
     "person_token": {"enabled": False, "servers": {}, "groups_only": False},
+    # 2.10.0 (tâche 9) : External Secrets Operator des clusters enfants
+    # (écouteur de B1, adresse voulue, CA publique de l'écouteur, clusters)
+    "eso": {"listener": None, "address": None, "ca_pem": None, "clusters": {}},
 }
 SNAPSHOT_KEEP_RANGE = (1, 365)
 SNAPSHOT_TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
@@ -692,6 +695,8 @@ def load_settings(state_dir=None):
     pt = out["person_token"]
     out["person_token"] = (dict(pt) if isinstance(pt, dict)
                            else dict(DEFAULTS["person_token"], servers={}))
+    eso = out["eso"]
+    out["eso"] = dict(eso) if isinstance(eso, dict) else dict(DEFAULTS["eso"], clusters={})
     if not out["prefix"] and out["console_id"]:
         out["prefix"] = f"consoles/{out['console_id']}"
     return out
@@ -1686,6 +1691,44 @@ class OpenBaoStore:
         self.last_metadata_error = getattr(written, "metadata_error", None)
         return ref
 
+    def put_write_only(self, cls, path, fields, actor=None, action=None, identity=None):
+        """2.10.0 (décision 312, concern 2 des tâches 2-5) : écriture d'une
+        classe écrite et jamais relue par la console (`eso`) : une version
+        neuve avec tous ses champs, SANS lecture préalable (une personne n'a
+        ni `read` ni la version courante), puis ses `custom_metadata`
+        d'attribution. Rien n'est gardé en cache. Rend le numéro de version."""
+        import openbao_client as oc
+        idt = as_identity(identity if identity is not None else actor)
+        if cls not in secret_classes.BAO_ONLY:
+            raise SecretError("class-not-write-only", cls, path, "written with a prior read")
+        make_ref(cls, path, "value", "openbao")
+        if not isinstance(fields, dict) or not fields:
+            raise ValueError("fields: at least one field")
+        total = 0
+        for k, v in fields.items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                raise TypeError("a secret field and its value are strings")
+            total += len(v.encode())
+        if total > VALUE_MAX:
+            raise SecretError("secret-too-big", cls, path, f"over {VALUE_MAX} bytes")
+        kv = self._kv(cls, path)
+
+        def write(c):
+            w = c.kv_put(self.mount, kv, dict(fields))
+            cm = version_metadata({}, int(w) or 1, cls, idt.header, action, identity=self._identity_mark(idt))
+            try:
+                c.kv_set_metadata(self.mount, kv, cm)
+            except oc.OpenBaoError as e:
+                w.metadata_error = e.code
+            return w
+        try:
+            written = self._run(idt, action, write)
+        except oc.OpenBaoError as e:
+            raise (self._failed(e, cls, path) or SecretError(e.code, cls, path, e.detail)) from None
+        self._ok()
+        self.last_metadata_error = getattr(written, "metadata_error", None)
+        return int(written)
+
     def _identity_mark(self, idt):
         """`hops_identity` des métadonnées : posé quand le jeton par personne
         est allumé (ou pour une écriture de personne), absent sinon
@@ -2230,6 +2273,13 @@ class MultiStore(LocalStore):
         return cls in (self.settings.get("migrated") or {}) and self._bao is not None
 
     # -- interface -------------------------------------------------------------
+    def put_write_only(self, cls, path, fields, actor=None, action=None, identity=None):
+        """Classe écrite sans relecture (`eso`) : toujours dans OpenBao."""
+        if cls not in secret_classes.BAO_ONLY:
+            raise SecretError("class-not-write-only", cls, path, "written with a prior read")
+        return self._need_bao(cls, path).put_write_only(cls, path, fields, actor=actor, action=action,
+                                                        identity=identity)
+
     def put(self, cls, path, field, value, actor=None, action=None, identity=None):
         if identity is not None:
             actor = identity

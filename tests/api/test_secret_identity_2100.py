@@ -11,6 +11,7 @@ jugement d'OpenBao », « repli AppRole après un refus », « entrée de cache
 partagée entre entités » (cache indexé par la référence seule).
 """
 
+import json
 import os
 import pickle
 import sys
@@ -312,6 +313,38 @@ def test_person_write_metadata(w, srv, cls, path, field):
     custom = srv.kv[(KV, f"{PREFIX}/{cls}/{path}")]["custom"]
     assert custom["hops_identity"] == "person" and custom["hops_actor"] == "user-alice@rancher"
     assert not w.approle_reads()
+
+
+def test_person_eso_write_without_any_read(w, srv):
+    """Décision 312 et concern 2 des tâches 2-5 : une valeur ESO d'une
+    personne s'écrit sans aucune lecture (la politique ne donne pas `read`),
+    ses métadonnées d'attribution avec son jeton ; rien n'est gardé en cache
+    (la console ne relit jamais une valeur ESO)."""
+    import openbao_policy as pol
+    srv.jwt[JWT_MOUNT]["allow"] = [(p.rstrip("*"), set(c)) for p, c in pol.person_rules(KV, PREFIX, CID)]
+    alice = w.person("s-a", "user-alice")
+    path = "1d905023/team-a/db"
+    before = len(srv.log)
+    version = w.store.put_write_only("eso", path, {"password": "val-2100", "user": "app"}, identity=alice,
+                                     action="act-9")
+    assert version == 1
+    tok = w.pt.get("s-a")._tok.value
+    mine = [r for r in srv.log[before:] if f"{PREFIX}/eso/" in r["path"]]
+    assert mine and all(r["method"] in ("POST", "PUT") for r in mine), [(r["method"], r["path"]) for r in mine]
+    assert all(r["headers"]["x-vault-token"] == tok for r in mine)
+    e = srv.kv[(KV, f"{PREFIX}/eso/{path}")]
+    assert e["versions"][e["current"]] == {"password": "val-2100", "user": "app"}
+    custom = srv.kv[(KV, f"{PREFIX}/eso/{path}")]["custom"]
+    assert custom["hops_identity"] == "person" and custom["hops_actor"] == "user-alice@rancher"
+    assert w.store.last_metadata_error is None
+    assert "val-2100" not in json.dumps([list(map(str, k)) + [str(v)] for k, v in w.store._cache.items()])
+    assert not w.approle_reads()
+
+
+@pytest.mark.parametrize("cls,fields", [("ssh-kvm", {"private_key": "x"}), ("eso", {}), ("eso", {"a": 3})])
+def test_write_only_refusals(w, srv, cls, fields):
+    with pytest.raises((ss.SecretError, ValueError, TypeError)):
+        w.store.put_write_only(cls, "1d905023/team-a/db", fields, identity=ss.SERVICE)
 
 
 def test_identity_mark_in_metadata(w, srv):

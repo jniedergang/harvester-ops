@@ -2412,6 +2412,278 @@ def _pt_keys(args):
 
 
 # ---------------------------------------------------------------------------
+# 2.10.0 (tâche 9) : External Secrets Operator des clusters enfants
+# ---------------------------------------------------------------------------
+ESO_CLUSTER_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]{0,62})/([a-z0-9][-a-z0-9]{0,62})/([a-z0-9][-a-z0-9]{0,62})$")
+
+
+def _eso_doc(doc):
+    e = doc.get("eso") if isinstance(doc.get("eso"), dict) else {}
+    for k, v in (("listener", None), ("address", None), ("ca_pem", None), ("clusters", {})):
+        e.setdefault(k, v)
+    if not isinstance(e["clusters"], dict):
+        e["clusters"] = {}
+    doc["eso"] = e
+    return e
+
+
+def _eso_ref(args):
+    m = ESO_CLUSTER_RE.match(getattr(args, "cluster", None) or "")
+    if not m:
+        raise CliError("bad-input", "--cluster <harvester>/<namespace>/<cluster> is needed", EXIT_REFUSED)
+    h, ns, c = m.groups()
+    import child_eso as ce
+    return h, ns, c, ce.cluster_key(h, ns, c)
+
+
+def _eso_namespaces(args):
+    import child_eso as ce
+    try:
+        nss = ce.normalize_namespaces(list(getattr(args, "namespace", None) or []))
+    except ce.EsoError as e:
+        raise CliError(e.code, str(e), EXIT_REFUSED) from None
+    except ValueError as e:
+        raise CliError("bad-input", str(e), EXIT_REFUSED) from None
+    if not nss:
+        raise CliError("eso-no-namespace", "at least one --namespace (a team namespace) is needed", EXIT_REFUSED)
+    return nss
+
+
+def _eso_child_keys(args, h, ns, c):
+    """(émetteur, JWKS) des comptes de service du cluster enfant : par le
+    fichier de spécification de l'appelant (`harvester-capi` les a lus avec
+    le kubeconfig du cluster), sinon lus ici par `kubectl get --raw` avec le
+    kubeconfig du cluster Harvester (`--kubeconfig`, identité de qui lance) ;
+    l'accès anonyme est refusé par RKE2 (essai 7)."""
+    if SPEC.get("eso_jwks") and SPEC.get("eso_issuer"):
+        try:
+            return SPEC["eso_issuer"], json.loads(SPEC["eso_jwks"])
+        except ValueError:
+            raise CliError("bad-input", "the JWKS of the spec file is not JSON", EXIT_REFUSED) from None
+    kc = getattr(args, "kubeconfig", None)
+    if not kc:
+        from kube import cluster_config
+        kc = (cluster_config(h) or {}).get("kubeconfig")
+    if not kc:
+        raise CliError("bad-input", "--kubeconfig of the Harvester cluster is needed to read the child cluster",
+                       EXIT_REFUSED)
+    import child_access as ca
+    from kube import Kube, KubeError
+    try:
+        with ca.session(Kube(kc), ns, c) as path:
+            child = Kube(path)
+            disc = json.loads(child.run("get", "--raw", "/.well-known/openid-configuration"))
+            jwks = json.loads(child.run("get", "--raw", "/openid/v1/jwks"))
+    except ca.ChildAccessError as e:
+        raise CliError(e.code, str(e), EXIT_REFUSED) from None
+    except (KubeError, ValueError) as e:
+        raise CliError("eso-child-keys-unreadable", f"service account keys of {ns}/{c} unreadable: "
+                       f"{str(e)[:200]}", EXIT_FAIL) from None
+    return str(disc.get("issuer") or ""), jwks
+
+
+def _eso_store_params(s, e, cid, key):
+    """Ce que le magasin d'un namespace porte (aucune valeur secrète) :
+    adresse d'OpenBao vue du cluster enfant, montage KV, préfixe, CA
+    publique, montage jwt du cluster, audience."""
+    _addr, _ca, kv, prefix = _pt_target(s)
+    if s["mode"] == "b1":
+        server, ca = (f"https://{e['listener']}" if e.get("listener") else None), e.get("ca_pem")
+    else:
+        server, ca = s["addr"], ca_of(s.get("ca_file"))
+    return {"server": server, "ca_pem": ca, "kv_mount": kv, "prefix": prefix,
+            "jwt_mount": oj.eso_mount(cid, key), "audience": oj.eso_audience(cid)}
+
+
+def _eso_listener_on(s, address):
+    """B1 : second écouteur posé par l'agent ; adresse et CA publique
+    rangées dans les réglages."""
+    st = agent_ok(run_agent({"op": "b1-eso-listener", "address": address}))
+    info = st.get("info") or {}
+    doc = raw_settings()
+    e = _eso_doc(doc)
+    e["listener"] = info.get("eso_listener")
+    if address:
+        e["address"] = address
+    e["ca_pem"] = info.get("eso_ca_pem") if info.get("eso_listener") else None
+    save_settings(doc)
+    return e
+
+
+def cmd_eso(args):
+    return {"status": _eso_status, "listener": _eso_listener, "assistant": _eso_assistant, "add": _eso_add,
+            "keys": _eso_keys, "remove": _eso_remove}[args.what](args)
+
+
+def _eso_status(args):
+    e = _eso_doc(raw_settings())
+    view = {k: {f: v.get(f) for f in ("harvester", "namespace", "cluster", "mount", "issuer", "keys_sha256",
+                                      "namespaces", "node_cidr", "applied", "at", "by")}
+            for k, v in e["clusters"].items() if isinstance(v, dict)}
+    out({"ok": True, "mode": settings().get("mode"), "listener": e["listener"], "address": e["address"],
+         "clusters": view})
+    return EXIT_OK
+
+
+def _eso_listener(args):
+    s = settings()
+    _pt_target(s)
+    if s["mode"] != "b1":
+        return refuse("eso-listener-b1-only", "the ESO listener belongs to mode b1; in mode a, child clusters "
+                      "reach the OpenBao of the settings")
+    if args.off == bool(args.addr):
+        return refuse("bad-input", "--addr <address of the host>:<port>, or --off")
+    if args.addr:
+        try:
+            pol.check_eso_listen(args.addr)
+        except ValueError as e:
+            return refuse("bad-input", str(e))
+    e = _eso_doc(raw_settings())
+    if e["clusters"] and (args.off or (e["listener"] and e["listener"] != args.addr)):
+        # les magasins des clusters enfants visent l'adresse actuelle
+        return refuse("eso-listener-in-use", "child clusters still use the ESO listener: remove them first")
+    if args.addr and not e["listener"] and not e["clusters"]:
+        # point 298 : éteint tant qu'aucun cluster n'a ESO ; l'adresse est
+        # gardée, l'écouteur s'allume au premier `eso add`
+        doc = raw_settings()
+        _eso_doc(doc)["address"] = args.addr
+        save_settings(doc)
+        step("listener", "done", f"ESO listener address {args.addr} kept; on with the first child cluster")
+        out({"ok": True, "listener": None, "address": args.addr, "port": pol.ESO_PORT})
+        return EXIT_OK
+    step("listener", "running", args.addr or "off")
+    e = _eso_listener_on(s, None if args.off else args.addr)
+    step("listener", "done", f"ESO listener on {e['listener']}" if e["listener"] else "ESO listener off")
+    out({"ok": True, "listener": e["listener"], "port": pol.ESO_PORT,
+         "firewall": f"open {e['listener']} (TCP) to the node network of the child clusters"
+         if e["listener"] else None})
+    return EXIT_OK
+
+
+def _eso_prepare(args):
+    s = settings()
+    _pt_target(s)
+    cid = s["console_id"]
+    h, ns, c, key = _eso_ref(args)
+    nss = _eso_namespaces(args)
+    issuer, jwks = _eso_child_keys(args, h, ns, c)
+    try:
+        pubkeys = oj.pubkeys_of(jwks)
+        sha = oj.keys_sha256(jwks)
+        oj.eso_mount_config(issuer, pubkeys)
+        oj.eso_role_params(cid, key, nss, args.node_cidr)
+    except ValueError as e:
+        raise CliError("eso-child-keys-unreadable", str(e)[:200], EXIT_FAIL) from None
+    return s, cid, (h, ns, c, key), nss, issuer, pubkeys, sha
+
+
+def _eso_assistant(args):
+    """Rendu sans rien écrire : commandes du mode A (ou ce que l'agent posera
+    en B1) et paramètres du magasin."""
+    s, cid, (h, ns, c, key), nss, issuer, pubkeys, sha = _eso_prepare(args)
+    addr, _ca, kv, prefix = _pt_target(s)
+    cmds = pol.eso_cluster_commands(addr, kv, prefix, cid, key, issuer, pubkeys, nss, args.node_cidr)
+    out({"ok": True, "key": key, "mount": oj.eso_mount(cid, key), "keys_sha256": sha, "namespaces": nss,
+         "commands": cmds if s["mode"] != "b1" else None,
+         "store": _eso_store_params(s, _eso_doc(raw_settings()), cid, key)})
+    return EXIT_OK
+
+
+def _eso_add(args):
+    """Pose (ou met à jour) l'authentification d'un cluster enfant : agent en
+    B1 (écouteur allumé au premier cluster), commandes en A ; réglages
+    tenus ; rend les paramètres du magasin (aucune valeur secrète)."""
+    s, cid, (h, ns, c, key), nss, issuer, pubkeys, sha = _eso_prepare(args)
+    e = _eso_doc(raw_settings())
+    cmds = None
+    step("eso", "running", f"{h}/{ns}/{c} ({key}), {len(nss)} namespace(s)")
+    if s["mode"] == "b1":
+        if not e["listener"]:
+            address = args.listen or e["address"]
+            if not address:
+                return refuse("eso-listener-needed", "the ESO listener has no address: harvester-secrets eso "
+                              "listener --addr <address of the host>:8212 (or --listen here)")
+            try:
+                pol.check_eso_listen(address)
+            except ValueError as err:
+                return refuse("bad-input", str(err))
+            e = _eso_listener_on(s, address)
+        agent_ok(run_agent({"op": "b1-eso-cluster", "key": key, "harvester": h, "namespace": ns, "cluster": c,
+                            "issuer": issuer, "pubkeys": pubkeys, "namespaces": nss,
+                            **({"node_cidr": args.node_cidr} if args.node_cidr else {})}))
+    else:
+        addr, _ca, kv, prefix = _pt_target(s)
+        cmds = pol.eso_cluster_commands(addr, kv, prefix, cid, key, issuer, pubkeys, nss, args.node_cidr)
+    doc = raw_settings()
+    e = _eso_doc(doc)
+    e["clusters"][key] = {"harvester": h, "namespace": ns, "cluster": c, "mount": oj.eso_mount(cid, key),
+                          "issuer": issuer.rstrip("/"), "keys_sha256": sha, "namespaces": nss,
+                          "node_cidr": args.node_cidr, "applied": cmds is None, "at": time.time(),
+                          "by": ARGS.actor or os.environ.get("SUDO_USER") or os.environ.get("USER") or "cli"}
+    save_settings(doc)
+    step("eso", "done", "set by the agent" if cmds is None else "commands for the OpenBao administrator")
+    out({"ok": True, "key": key, "mount": oj.eso_mount(cid, key), "keys_sha256": sha, "namespaces": nss,
+         "applied": cmds is None, "commands": cmds, "store": _eso_store_params(s, e, cid, key)})
+    return EXIT_OK
+
+
+def _eso_keys(args):
+    """Clés des comptes de service d'un cluster enfant : empreinte comparée
+    (`eso-keys-changed`) ; `--refresh` repose l'authentification avec les
+    clés publiées (mêmes namespaces)."""
+    s = settings()
+    _pt_target(s)
+    h, ns, c, key = _eso_ref(args)
+    have = _eso_doc(raw_settings())["clusters"].get(key)
+    if not have:
+        return refuse("eso-cluster-unknown", f"ESO is not set on {h}/{ns}/{c}")
+    issuer, jwks = _eso_child_keys(args, h, ns, c)
+    try:
+        sha = oj.keys_sha256(jwks)
+    except ValueError as e:
+        return fail("eso-child-keys-unreadable", str(e)[:200])
+    changed = sha != have.get("keys_sha256") or issuer.rstrip("/") != have.get("issuer")
+    if not args.refresh:
+        out({"ok": True, "key": key, "changed": changed, **({"code": "eso-keys-changed"} if changed else {})})
+        return EXIT_OK
+    args.namespace = list(have.get("namespaces") or [])
+    args.node_cidr = have.get("node_cidr")
+    args.listen = None
+    return _eso_add(args)
+
+
+def _eso_remove(args):
+    """Authentification d'un cluster enfant retirée (agent en B1, commandes
+    en A) ; au dernier cluster, l'écouteur de B1 est éteint (point 298)."""
+    s = settings()
+    addr, _ca, _kv, _prefix = _pt_target(s)
+    cid = s["console_id"]
+    e = _eso_doc(raw_settings())
+    if args.all:
+        keys = sorted(e["clusters"])
+    else:
+        h, ns, c, key = _eso_ref(args)
+        keys = [key]
+    cmds = []
+    for key in keys:
+        step("eso", "running", f"remove {key}")
+        if s["mode"] == "b1":
+            agent_ok(run_agent({"op": "b1-eso-cluster-remove", "key": key}))
+        else:
+            cmds += pol.eso_remove_commands(addr, cid, key)[0 if not cmds else 1:]
+        doc = raw_settings()
+        _eso_doc(doc)["clusters"].pop(key, None)
+        save_settings(doc)
+    left = _eso_doc(raw_settings())["clusters"]
+    if s["mode"] == "b1" and not left and _eso_doc(raw_settings())["listener"]:
+        _eso_listener_on(s, None)
+        step("listener", "done", "ESO listener off (no child cluster left)")
+    step("eso", "done", f"{len(keys)} child cluster(s) removed")
+    out({"ok": True, "removed": keys, "left": sorted(left), "commands": cmds or None})
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 def parser():
     p = argparse.ArgumentParser(prog="harvester-secrets", description="Console secret store (OpenBao).")
     p.add_argument("--id", help="action id of the console (X-Hops-Action)")
@@ -2533,6 +2805,28 @@ def parser():
     g = x.add_mutually_exclusive_group()
     g.add_argument("--refresh", action="store_true")
     g.add_argument("--confirm", action="store_true")
+    s = sub.add_parser("eso", help="External Secrets Operator of the child clusters (2.10.0)")
+    es = s.add_subparsers(dest="what", required=True)
+    es.add_parser("status")
+    x = es.add_parser("listener", help="mode b1: second OpenBao listener for ESO on an address of the host")
+    x.add_argument("--addr")
+    x.add_argument("--off", action="store_true")
+    for name in ("assistant", "add"):
+        x = es.add_parser(name)
+        x.add_argument("--cluster", help="<harvester>/<namespace>/<cluster>")
+        x.add_argument("--namespace", action="append", help="enabled team namespace (the full list)")
+        x.add_argument("--kubeconfig", help="kubeconfig of the Harvester cluster (reads the child cluster)")
+        x.add_argument("--node-cidr", help="node network of the child cluster (token_bound_cidrs)")
+        x.add_argument("--listen", help="mode b1: listener address if it is not set yet")
+        x.add_argument("--spec", help=argparse.SUPPRESS)
+    x = es.add_parser("keys", help="service account keys of a child cluster: compare, --refresh")
+    x.add_argument("--cluster")
+    x.add_argument("--kubeconfig")
+    x.add_argument("--refresh", action="store_true")
+    x.add_argument("--spec", help=argparse.SUPPRESS)
+    x = es.add_parser("remove")
+    x.add_argument("--cluster")
+    x.add_argument("--all", action="store_true")
     s = sub.add_parser("tf-keys", help="transit keys of removed declarations (kept 30 days)")
     s.add_argument("what", choices=("list", "delete", "sweep"))
     s.add_argument("decl", nargs="?")
@@ -2547,7 +2841,7 @@ COMMANDS = {"status": cmd_status, "assistant": cmd_assistant, "check": cmd_check
             "bundle": cmd_bundle, "file": cmd_file, "offline-copy": cmd_offline_copy,
             "tf-encryption": cmd_tf_encryption, "tf-entity-remove": cmd_tf_entity_remove,
             "tf-keys": cmd_tf_keys, "snapshots": cmd_snapshots, "settings": cmd_settings,
-            "sweep-orphans": cmd_sweep_orphans, "person-token": cmd_person_token}
+            "sweep-orphans": cmd_sweep_orphans, "person-token": cmd_person_token, "eso": cmd_eso}
 
 
 def _load_spec(path):
@@ -2564,7 +2858,8 @@ def _load_spec(path):
             raise CliError("bad-input", "the spec file must be private (0600, same owner)", EXIT_REFUSED)
         doc = json.loads(f.read(1 << 20) or "{}")
     if isinstance(doc, dict):
-        SPEC.update({k: v for k, v in doc.items() if k in ("wrap_token", "ca_pem", "id_token", "rancher_ca")
+        SPEC.update({k: v for k, v in doc.items() if k in ("wrap_token", "ca_pem", "id_token", "rancher_ca",
+                                                            "eso_jwks", "eso_issuer")
                      and isinstance(v, str)})
 
 

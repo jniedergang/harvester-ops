@@ -14,6 +14,7 @@ juste après le montage », « `transit/encrypt` à la place de
 `transit/datakey/plaintext` », « écoute sur 0.0.0.0 ».
 """
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -22,6 +23,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bin" / "lib"))
+import openbao_jwt as oj  # noqa: E402
 import openbao_policy as pol  # noqa: E402
 
 FIX = ROOT / "tests" / "api" / "fixtures" / "openbao_policy_290"
@@ -341,13 +343,20 @@ def test_person_policy_rights_by_class():
     for cls in ("ssh-cluster", "ssh-kvm", "tf-kvm"):
         assert caps[f"{d}/{cls}/*"] == '"read", "create", "update"'
         assert caps[f"harvester-ops/metadata/{PREFIX}/{cls}/*"] == '"read", "create", "update"'
-    assert f"harvester-ops/metadata/{PREFIX}/eso/*" not in caps
+    # décision 312 : les métadonnées d'`eso` s'écrivent (auteur gardé), sans lecture
+    assert caps[f"harvester-ops/metadata/{PREFIX}/eso/*"] == '"create", "update"'
     assert caps[f"{d}/eso/*"] == '"create", "update"'                   # écrite, jamais relue
     assert "read" not in caps[f"{d}/eso/*"]
     assert not any("kubeconfig" in p for p in caps)
     assert list(caps)[-1] == "sys/capabilities-self"
     only = rules_of(pol.person_policy("harvester-ops", PREFIX, CID, groups_only=True))
     assert only == [("sys/capabilities-self", '"update"')]
+
+
+def test_group_eso_class_writes_values_and_metadata_without_reading():
+    rules = rules_of(pol.group_policy("harvester-ops", PREFIX, CID, "ops", ["eso"], ["1d905023"]))
+    assert rules == [(f"harvester-ops/data/{PREFIX}/eso/1d905023/*", '"create", "update"'),
+                     (f"harvester-ops/metadata/{PREFIX}/eso/1d905023/*", '"create", "update"')]
 
 
 def test_group_rules_are_per_cluster_never_a_wildcard_class():
@@ -451,3 +460,58 @@ def test_person_capability_checks(groups_only, expect):
 ])
 def test_capability_verdict(want, caps, ok):
     assert pol.capability_verdict(want, caps) is ok
+
+
+# ---------------------------------------------------------------------------
+# 2.10.0 (tâche 9) : ESO, commandes du mode A et second écouteur de B1
+# ---------------------------------------------------------------------------
+ESO_PEM = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
+
+
+def test_eso_cluster_commands_mode_a():
+    c = pol.eso_cluster_commands("https://bao.example:8200", "harvester-ops", PREFIX, CID, "1d905023",
+                                 "https://kubernetes.default.svc.cluster.local", [ESO_PEM], ["team-a"],
+                                 "172.16.2.0/24")
+    m = f"jwt-hops-{CID}-eso-1d905023"
+    assert c[0] == "export BAO_ADDR=https://bao.example:8200"
+    assert f"bao auth enable -path={m} jwt" in c
+    assert f"ACCESSOR=$(bao read -field=accessor sys/auth/{m})" in c
+    p = next(x for x in c if x.startswith(f"bao policy write hops-eso-{CID}-1d905023 - <<EOF\n"))
+    assert "{{identity.entity.aliases.$ACCESSOR.metadata.namespace}}" in p          # développé par le shell
+    assert "<<'EOF'" not in p
+    role = next(x for x in c if x.startswith(f"bao write auth/{m}/role/eso - <<'EOF'"))
+    assert json.loads(role.split("\n", 1)[1].rsplit("\nEOF", 1)[0]) == \
+        oj.eso_role_params(CID, "1d905023", ["team-a"], "172.16.2.0/24")
+    assert pol.eso_remove_commands("https://b:8200", CID, "1d905023")[1:] == [
+        f"bao auth disable {m}", f"bao policy delete hops-eso-{CID}-1d905023"]
+    assert pol.eso_role_commands("https://b:8200", CID, "1d905023", ["x"])[1].startswith(f"bao write auth/{m}/role/eso")
+
+
+@pytest.mark.parametrize("addr,ok", [
+    ("172.16.1.11:8212", True), ("10.0.0.5:9000", True),
+    ("127.0.0.1:8212", False), ("0.0.0.0:8212", False), ("172.16.1.11:8210", False), ("172.16.1.11:8211", False),
+    ("172.16.1.11:80", False), ("224.0.0.1:8212", False), ("169.254.1.1:8212", False), ("host:8212", False),
+    ("172.16.1.11:8212\nlistener", False),
+])
+def test_check_eso_listen(addr, ok):
+    if ok:
+        assert pol.check_eso_listen(addr)[1] in (8212, 9000)
+    else:
+        with pytest.raises(ValueError):
+            pol.check_eso_listen(addr)
+
+
+def test_b1_config_eso_listener_only_at_its_line():
+    tpl = (ROOT / "config" / "openbao" / "openbao.hcl.tpl").read_text()
+    off = pol.b1_config(CID, "hops-20261108-1", tpl)
+    assert off.count('listener "tcp"') == 1 and "\n__ESO_LISTENER__\n" not in off
+    on = pol.b1_config(CID, "hops-20261108-1", tpl, eso_listener="172.16.1.11:8212")
+    assert on.count('listener "tcp"') == 2
+    assert 'address       = "172.16.1.11:8212"' in on and pol.C_ESO_CERT in on and pol.C_ESO_KEY in on
+    assert on.count("cluster_address") == 1                         # raft reste sur 127.0.0.1
+    old = tpl.replace("__ESO_LISTENER__\n", "")
+    assert pol.b1_config(CID, "hops-20261108-1", old).count('listener "tcp"') == 1
+    with pytest.raises(ValueError, match="__ESO_LISTENER__"):
+        pol.b1_config(CID, "hops-20261108-1", old, eso_listener="172.16.1.11:8212")
+    with pytest.raises(ValueError):
+        pol.b1_config(CID, "hops-20261108-1", tpl, eso_listener="0.0.0.0:8212")

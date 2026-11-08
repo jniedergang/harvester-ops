@@ -501,6 +501,10 @@ class FakeHost:
         self.secrets = {}                    # nom -> octets (secret podman)
         self.fail = {}                       # premier mot-clé de commande -> code de sortie
         self.chowns = []
+        self.addrs = ["172.16.1.11"]          # adresses de l'hôte (écouteur ESO, 2.10.0)
+
+    def addresses(self):
+        return list(self.addrs)
 
     def run(self, argv, input=None, check=True, timeout=600):
         self.cmds.append(list(argv))

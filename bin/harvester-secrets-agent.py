@@ -39,6 +39,13 @@ Liste FERMÉE d'opérations (toute autre : refus) :
     b1-groups          groupe interne `hops-<id>-<nom>` et sa politique
                        (pose, membres, retrait), réglage « lecture seulement
                        par groupe »
+    b1-eso-listener    2.10.0 : second écouteur TLS d'OpenBao pour ESO sur une
+                       adresse de l'hôte (certificat et CA dédiés), ou son
+                       retrait ; redémarrage d'OpenBao
+    b1-eso-cluster     méthode `jwt` d'un cluster enfant (montage, clés de
+                       ses comptes de service, rôle `eso` aux namespaces
+                       activés, politique à gabarit), relue
+    b1-eso-cluster-remove  montage et politique d'un cluster enfant retirés
     status             état sans aucune valeur
 
 Aucune valeur secrète dans status.json, les journaux ni les messages : le
@@ -76,7 +83,8 @@ import safe_fs as sf  # noqa: E402
 VERSION_FILE = Path(os.environ.get("HARVESTER_OPS_OPT", "/opt/harvester-ops")) / "VERSION"
 OPS = ("store-secret-id", "b1-install", "b1-upgrade", "b1-remove", "rotate-secret-id", "rotate-unseal-key",
        "restore-snapshot", "b1-policies", "export-unseal-key", "export-unseal-key-done", "ack-offline-copy",
-       "tf-entity-remove", "b1-jwt", "b1-jwt-remove", "b1-groups", "status")
+       "tf-entity-remove", "b1-jwt", "b1-jwt-remove", "b1-groups", "b1-eso-listener", "b1-eso-cluster",
+       "b1-eso-cluster-remove", "status")
 KEYS = {
     "store-secret-id": {"console_id", "addr", "role_id", "wrap_token", "ca_pem"},
     "b1-install": {"console_id", "bundle"},
@@ -96,6 +104,10 @@ KEYS = {
     "b1-jwt": {"rancher", "client_id", "issuer", "ca_pem", "pubkeys", "groups_only"},
     "b1-jwt-remove": {"rancher"},
     "b1-groups": {"name", "classes", "clusters", "members", "remove", "groups_only"},
+    # 2.10.0 (tâche 9) : External Secrets Operator des clusters enfants
+    "b1-eso-listener": {"address"},
+    "b1-eso-cluster": {"key", "harvester", "namespace", "cluster", "issuer", "pubkeys", "namespaces", "node_cidr"},
+    "b1-eso-cluster-remove": {"key"},
     "status": set(),
 }
 COMMON = {"op", "id", "requested_by"}
@@ -262,6 +274,15 @@ class Host:
             return grp.getgrnam(name).gr_gid
         except KeyError:
             return None
+
+    def addresses(self):
+        """Adresses IPv4 des interfaces de l'hôte (`ip -j -4 addr`)."""
+        r = self.run(["ip", "-j", "-4", "addr", "show"], check=False)
+        try:
+            doc = json.loads(r.stdout or "[]")
+        except ValueError:
+            return []
+        return sorted({a.get("local") for i in doc for a in i.get("addr_info") or [] if a.get("local")})
 
 
 class Agent:
@@ -660,7 +681,7 @@ class Agent:
 
     def render(self, st, template, prev=None, init=False):
         cfg = pol.b1_config(st["console_id"], st["current_key"], template, previous_key_id=prev, init=init,
-                            mount=st.get("mount", pol.DEFAULT_MOUNT))
+                            mount=st.get("mount", pol.DEFAULT_MOUNT), eso_listener=st.get("eso_listener"))
         _w(self.p.b1_etc / "openbao.hcl", cfg, 0o444)
 
     def staged_bundle(self, name):
@@ -1236,6 +1257,15 @@ class Agent:
             a._call("POST", f"sys/policies/acl/{pol.person_policy_name(cid)}",
                     {"policy": pol.person_policy(kv, prefix, cid, bool(st.get("person_groups_only")))})
             done.append(pol.person_policy_name(cid))
+        if st.get("eso_clusters"):
+            _, auths = a._call("GET", "sys/auth")
+            auths = self._data(auths) or {}
+            for key, e in sorted((st.get("eso_clusters") or {}).items()):
+                acc = (auths.get(f"{e.get('mount')}/") or {}).get("accessor")
+                if acc:
+                    a._call("POST", f"sys/policies/acl/{pol.eso_policy_name(cid, key)}",
+                            {"policy": pol.eso_policy(kv, prefix, cid, key, acc)})
+                    done.append(pol.eso_policy_name(cid, key))
         for name, g in sorted((st.get("person_groups") or {}).items()):
             try:
                 text = pol.group_policy(kv, prefix, cid, name, g.get("classes"), g.get("clusters"))
@@ -1625,6 +1655,296 @@ class Agent:
         self.step("group", "done", f"{gname}: {len(body['member_entity_ids'])} member(s)")
         return f"group {gname} set"
 
+    # -- 2.10.0 : External Secrets Operator (tâche 9) ---------------------------
+    def make_eso_tls(self, uid, ip):
+        """CA dédiée à l'écouteur ESO (10 ans, contrainte à son adresse) et
+        certificat serveur de 2 ans pour cette adresse ; la clé de la CA est
+        jetée comme celle de l'écouteur local. La CA (publique) est remise à
+        la console dans le répertoire de ses identifiants : les clusters
+        enfants la reçoivent dans `caBundle`."""
+        tls = self.p.b1_etc / "tls"
+        tls.mkdir(mode=0o700, exist_ok=True)
+        for f in ("eso.key", "eso.pem"):        # fichiers 0400 d'une pose précédente
+            (tls / f).unlink(missing_ok=True)
+        work = self.p.work / "eso-pki"
+        work.mkdir(mode=0o700, parents=True, exist_ok=True)
+        run = self.host.run
+        run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+             "-keyout", str(work / "ca.key"), "-out", str(work / "ca.pem"), "-days", "3650",
+             "-subj", "/CN=harvester-ops OpenBao ESO CA", "-addext", "basicConstraints=critical,CA:TRUE",
+             "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-addext", "subjectKeyIdentifier=hash",
+             "-addext", f"nameConstraints=critical,permitted;IP:{ip}/255.255.255.255"])
+        run(["openssl", "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
+             "-keyout", str(tls / "eso.key"), "-out", str(work / "server.csr"), "-subj", f"/CN={ip}"])
+        (work / "ext.cnf").write_text(f"subjectAltName=IP:{ip}\nbasicConstraints=critical,CA:FALSE\n"
+                                      "keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n"
+                                      "subjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n")
+        run(["openssl", "x509", "-req", "-in", str(work / "server.csr"), "-CA", str(work / "ca.pem"),
+             "-CAkey", str(work / "ca.key"), "-CAcreateserial", "-out", str(tls / "eso.pem"), "-days", "730",
+             "-extfile", str(work / "ext.cnf")])
+        ca = (work / "ca.pem").read_text()
+        for f, mode in (("eso.key", 0o400), ("eso.pem", 0o444)):
+            os.chmod(tls / f, mode)
+            self.own(tls / f, uid)
+        shutil.rmtree(work, ignore_errors=True)
+        _w(self.p.b1_etc / "eso-ca.pem", ca, 0o644)
+        self.p.etc.mkdir(parents=True, exist_ok=True)
+        _w(self.p.etc / "eso-ca.pem", ca, 0o644)
+        return ca
+
+    def _drop_eso_tls(self):
+        for f in (self.p.b1_etc / "tls" / "eso.key", self.p.b1_etc / "tls" / "eso.pem",
+                  self.p.b1_etc / "eso-ca.pem", self.p.etc / "eso-ca.pem"):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+    def _template(self):
+        """Modèle de configuration de B1 : celui posé avec le paquet, ou, s'il
+        est d'avant 2.10.0 (sans ligne `__ESO_LISTENER__`), celui
+        qu'install.sh a posé dans /opt (root) ; il remplace alors l'ancien."""
+        try:
+            cur = (self.p.b1_etc / "openbao.hcl.tpl").read_text()
+        except OSError:
+            cur = ""
+        if re.search(r"^__ESO_LISTENER__$", cur, re.M):
+            return cur
+        try:
+            new = (self.p.unit_src.parent / "openbao.hcl.tpl").read_text()
+        except OSError:
+            new = ""
+        if not re.search(r"^__ESO_LISTENER__$", new, re.M):
+            raise AgentError("eso-listener-template", "the OpenBao template has no ESO listener line: upgrade "
+                             "harvester-ops (install.sh --upgrade) first")
+        _w(self.p.b1_etc / "openbao.hcl.tpl", new, 0o644)
+        return new
+
+    def op_b1_eso_listener(self, req):
+        """Point 298 : second écouteur TLS sur `<adresse de l'hôte>:<port>`
+        (8212 par défaut), éteint tant qu'aucun cluster n'a ESO. Le rôle
+        AppRole de la console reste lié à 127.0.0.1/32, celui des personnes
+        aussi : l'écouteur n'ouvre que les rôles `eso`. Le pare-feu de
+        l'hôte n'est pas touché. `address` null : écouteur retiré."""
+        st = self.agent_state()
+        if not st:
+            raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
+        addr = req.get("address")
+        if addr is not None:
+            try:
+                ip, port = pol.check_eso_listen(addr)
+            except ValueError as e:
+                raise AgentError("bad-request", str(e)) from None
+            if ip not in self.host.addresses():
+                raise AgentError("eso-listener-not-local", f"{ip} is not an address of this host")
+            addr = f"{ip}:{port}"
+        elif st.get("eso_clusters"):
+            raise AgentError("eso-listener-in-use", "child clusters still use the ESO listener: remove them first")
+        old = st.get("eso_listener")
+        if old == addr:
+            self.step("listener", "done", f"ESO listener {addr or 'off'} unchanged")
+            self.status["info"] = {"eso_listener": addr, "eso_ca_pem": self._eso_ca() if addr else None}
+            return "ESO listener unchanged"
+        uid = self.host.uid_of(ACCOUNT)
+        if uid is None:
+            raise AgentError("b1-not-installed", f"no {ACCOUNT} account on this host")
+        tpl = self._template()                   # avant tout geste : un modèle trop ancien ne change rien
+        self.step("listener", "running", addr or "off")
+        ca = None
+        if addr:
+            ca = self.make_eso_tls(uid, addr.rpartition(":")[0])
+        new = dict(st, eso_listener=addr)
+
+        def back():
+            self.render(st, tpl)
+            self.own(self.p.b1_etc / "openbao.hcl", uid)
+            if not old:
+                self._drop_eso_tls()
+            self.restart()
+            self.wait_unsealed(self.b1_ca(), "OpenBao with its previous listeners")
+        self.undo.append(("listeners put back", back))
+        self.render(new, tpl)
+        self.own(self.p.b1_etc / "openbao.hcl", uid)
+        self.restart()
+        self.wait_unsealed(self.b1_ca(), "OpenBao with the ESO listener" if addr else "OpenBao without the ESO listener")
+        if not addr:
+            self._drop_eso_tls()
+        self.save_agent_state(dict(self.agent_state(), eso_listener=addr))
+        self.undo = []
+        self.step("listener", "done", f"ESO listener on {addr}" if addr else "ESO listener removed")
+        self.status["info"] = {"eso_listener": addr, "eso_ca_pem": ca}
+        return f"ESO listener {'on ' + addr if addr else 'removed'}"
+
+    def _eso_ca(self):
+        try:
+            return (self.p.b1_etc / "eso-ca.pem").read_text()
+        except OSError:
+            return None
+
+    def _eso_spec(self, st, req):
+        cid = st["console_id"]
+        key = str(req.get("key") or "")
+        try:
+            mount = oj.eso_mount(cid, key)
+            for k in ("harvester", "namespace", "cluster"):
+                v = req.get(k)
+                if not isinstance(v, str) or not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$", v):
+                    raise ValueError(f"{k}: a name")
+            if hashlib.sha256(f"{req['harvester']}/{req['namespace']}/{req['cluster']}".encode()) \
+                    .hexdigest()[:8] != key:
+                raise ValueError("key: not the key of this child cluster")
+            pubkeys = req.get("pubkeys")
+            if not isinstance(pubkeys, list) or not 1 <= len(pubkeys) <= PUBKEYS_MAX \
+                    or any(not isinstance(k, str) or len(k) > PEM_MAX for k in pubkeys):
+                raise ValueError(f"pubkeys: 1 to {PUBKEYS_MAX} PEM public keys")
+            config = oj.eso_mount_config(req.get("issuer"), pubkeys)
+            role = oj.eso_role_params(cid, key, req.get("namespaces"), req.get("node_cidr"))
+        except (ValueError, KeyError) as e:
+            raise AgentError("bad-request", str(e)) from None
+        if not oj.is_eso_mount(cid, mount) or oj.is_person_mount(cid, mount):
+            raise AgentError("jwt-mount-kind", f"{mount} is not an ESO mount")
+        return key, mount, config, role
+
+    def _eso_role_diff(self, d, want):
+        bad = []
+        for k in ("role_type", "user_claim", "token_type", "bound_claims_type"):
+            if str(d.get(k) or "") != str(want[k]):
+                bad.append(k)
+        for k in ("bound_audiences", "token_policies"):
+            if list(d.get(k) or []) != list(want[k]):
+                bad.append(k)
+        if set(d.get("policies") or []) - set(want["token_policies"]):
+            bad.append("policies")
+        bc = d.get("bound_claims") or {}
+        wbc = want["bound_claims"]
+        if set(bc) != set(wbc) or bc.get("/kubernetes.io/serviceaccount/name") != wbc[
+                "/kubernetes.io/serviceaccount/name"] or sorted(bc.get("/kubernetes.io/namespace") or []) != \
+                wbc["/kubernetes.io/namespace"]:
+            bad.append("bound_claims")
+        if dict(d.get("claim_mappings") or {}) != want["claim_mappings"]:
+            bad.append("claim_mappings")
+        if _networks(d.get("token_bound_cidrs")) != _networks(want.get("token_bound_cidrs")):
+            bad.append("token_bound_cidrs")
+        for k in ("token_ttl", "token_max_ttl"):
+            if self._ttl_s(d.get(k)) != self._ttl_s(want[k]):
+                bad.append(k)
+        for k in ("groups_claim", "bound_subject", "bound_cidrs", "token_period", "token_explicit_max_ttl",
+                  "token_num_uses", "token_no_default_policy", "token_policies_template_claims",
+                  "verbose_oidc_logging") + tuple(ROLE_RESET):
+            if d.get(k):
+                bad.append(k)
+        return bad
+
+    @staticmethod
+    def _eso_config_diff(d, config):
+        bad = []
+        if str(d.get("bound_issuer") or "") != config["bound_issuer"]:
+            bad.append("bound_issuer")
+        if list(d.get("jwt_supported_algs") or []) != list(oj.ALGS):
+            bad.append("jwt_supported_algs")
+        if str(d.get("default_role") or "") != oj.ESO_ROLE:
+            bad.append("default_role")
+        for k in ("jwks_url", "jwks_ca_pem", "provider_config", "oidc_client_id", "oidc_discovery_url"):
+            if d.get(k):
+                bad.append(k)
+        if sorted(str(k).strip() for k in d.get("jwt_validation_pubkeys") or []) != \
+                sorted(config["jwt_validation_pubkeys"]):
+            bad.append("jwt_validation_pubkeys")
+        return bad
+
+    def op_b1_eso_cluster(self, req):
+        """Point 295 : méthode `jwt` d'un cluster enfant, posée sans
+        redémarrer OpenBao ; rejouée à chaque namespace activé ou retiré
+        (décision 304 B) et pour remplacer les clés (`eso-keys-changed`).
+        Les clés publiques viennent du JWKS du cluster enfant, lu par la
+        console avec son kubeconfig (accès anonyme refusé par RKE2) : elles
+        n'ouvrent que les chemins `eso/<clé>/*`, que la console peut déjà
+        lire."""
+        st = self.agent_state()
+        if not st:
+            raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
+        if not st.get("eso_listener"):
+            raise AgentError("eso-listener-off", "the ESO listener is off: set its address first")
+        key, mount, config, role = self._eso_spec(st, req)
+        cid, kv, prefix = self._person_layout(st)
+        self.step("mount", "running", mount)
+
+        def apply(a):
+            _, auths = a._call("GET", "sys/auth")
+            cur = (self._data(auths) or {}).get(mount + "/")
+            if cur and cur.get("type") != "jwt":
+                raise AgentError("jwt-mount-taken", f"{mount}/ is already used by another auth method")
+            if not cur:
+                a._call("POST", f"sys/auth/{mount}", {"type": "jwt", "description": f"harvester-ops {cid} ESO "
+                                                      f"{req['harvester']}/{req['namespace']}/{req['cluster']}"})
+                self.undo.append(("ESO jwt mount removed",
+                                  lambda: self._with_agent(lambda b: b._call("DELETE", f"sys/auth/{mount}"))))
+                _, auths = a._call("GET", "sys/auth")
+                cur = (self._data(auths) or {}).get(mount + "/") or {}
+            acc = cur.get("accessor")
+            if not acc:
+                raise AgentError("jwt-readback", f"{mount}: no accessor")
+            self.step("mount", "done", f"{mount}/ ready")
+            self.step("policy", "running", pol.eso_policy_name(cid, key))
+            a._call("POST", f"sys/policies/acl/{pol.eso_policy_name(cid, key)}",
+                    {"policy": pol.eso_policy(kv, prefix, cid, key, acc)})
+            self.step("policy", "done", pol.eso_policy_name(cid, key))
+            self.step("config", "running", f"{len(config['jwt_validation_pubkeys'])} key(s), "
+                                           f"{len(role['bound_claims']['/kubernetes.io/namespace'])} namespace(s)")
+            a._call("POST", f"auth/{mount}/config", config)
+            a._call("POST", f"auth/{mount}/role/{oj.ESO_ROLE}", dict(role, **ROLE_RESET))
+            for other in self._list(a, f"auth/{mount}/role"):
+                if other != oj.ESO_ROLE:
+                    a._call("DELETE", f"auth/{mount}/role/{other}")
+                    self.log(f"role {sf.clean_line(other, 64)} of {mount} removed (not set by the console)")
+            _, doc = a._call("GET", f"auth/{mount}/config")
+            bad = self._eso_config_diff(self._data(doc) or {}, config)
+            _, doc = a._call("GET", f"auth/{mount}/role/{oj.ESO_ROLE}")
+            bad += self._eso_role_diff(self._data(doc) or {}, role)
+            if bad:
+                raise AgentError("jwt-readback", f"{mount}: read back differs ({', '.join(bad)})")
+            self.step("config", "done", f"{mount}: configuration and role read back")
+        self._with_agent(apply)
+        entry = {"mount": mount, "harvester": req["harvester"], "namespace": req["namespace"],
+                 "cluster": req["cluster"], "issuer": config["bound_issuer"],
+                 "pubkeys": config["jwt_validation_pubkeys"],
+                 "namespaces": role["bound_claims"]["/kubernetes.io/namespace"],
+                 "node_cidr": (role.get("token_bound_cidrs") or [None])[0],
+                 "at": self.now(), "by": self.status.get("requested_by")}
+        st = self.agent_state()
+        st["eso_clusters"] = dict(st.get("eso_clusters") or {}, **{key: entry})
+        self.save_agent_state(st)
+        self.undo = []
+        self.status["info"] = {"mount": mount, "key": key, "eso_listener": st.get("eso_listener"),
+                               "eso_ca_pem": self._eso_ca()}
+        return f"ESO jwt auth method {mount} set"
+
+    def op_b1_eso_cluster_remove(self, req):
+        st = self.agent_state()
+        if not st:
+            raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
+        cid = st["console_id"]
+        key = str(req.get("key") or "")
+        try:
+            mount = oj.eso_mount(cid, key)
+        except ValueError as e:
+            raise AgentError("bad-request", str(e)) from None
+        self.step("mount", "running", mount)
+
+        def remove(a):
+            _, auths = a._call("GET", "sys/auth")
+            cur = (self._data(auths) or {}).get(mount + "/")
+            if cur and cur.get("type") == "jwt":
+                a._call("DELETE", f"sys/auth/{mount}")
+            a._call("DELETE", f"sys/policies/acl/{pol.eso_policy_name(cid, key)}")
+            self.step("mount", "done", f"{mount}/ " + ("removed" if cur else "already absent"))
+        self._with_agent(remove)
+        st = self.agent_state()
+        st["eso_clusters"] = {k: v for k, v in (st.get("eso_clusters") or {}).items() if k != key}
+        self.save_agent_state(st)
+        self.status["info"] = {"left": len(st["eso_clusters"])}
+        return f"ESO jwt auth method {mount} removed"
+
     def op_b1_remove(self, req):
         st = self.agent_state()
         if not st:
@@ -1858,12 +2178,22 @@ class Agent:
             auths = {k: (v or {}).get("type") for k, v in (self._data(auth_doc) or {}).items()
                      if isinstance(v, dict)}
             person = {e.get("mount"): e for e in (st.get("person_jwt") or {}).values() if isinstance(e, dict)}
-            jwt_present = {k.rstrip("/") for k, t in auths.items() if k not in ("token/", "approle/")}
+            # 2.10.0 (tâche 9) : montages `jwt` des clusters enfants (ESO) posés
+            # par l'agent, à part de ceux des personnes
+            eso = {e.get("mount"): dict(e, key=k) for k, e in (st.get("eso_clusters") or {}).items()
+                   if isinstance(e, dict)}
+            all_present = {k.rstrip("/") for k, t in auths.items() if k not in ("token/", "approle/")}
             if auths.get("token/") != "token" or auths.get("approle/") != "approle" \
-                    or any(auths[k + "/"] != "jwt" or k not in person for k in jwt_present):
+                    or any(auths[k + "/"] != "jwt" or (k not in person and k not in eso) for k in all_present):
                 self._untrusted(f"auth methods {sorted(auths)}")
+            jwt_present = {m for m in all_present if m in person}
+            eso_present = {m for m in all_present if m in eso}
             token_acc = ((self._data(auth_doc) or {}).get("token/") or {}).get("accessor")
-            jwt_accs = {((self._data(auth_doc) or {}).get(m + "/") or {}).get("accessor") for m in jwt_present}
+            acc_of = {m: ((self._data(auth_doc) or {}).get(m + "/") or {}).get("accessor") for m in all_present}
+            jwt_accs = {acc_of[m] for m in jwt_present}
+            eso_accs = {acc_of[m] for m in eso_present}
+            for m in sorted(eso_present):
+                self._review_eso_mount(a, m, eso[m], cid)
             pins = st.get("person_pins") or {}
             for m in sorted(jwt_present):
                 r = next((k for k, e in (st.get("person_jwt") or {}).items() if (e or {}).get("mount") == m), None)
@@ -1897,6 +2227,12 @@ class Agent:
                                                                                g.get("clusters"))
                 except ValueError:
                     continue
+            for m in eso_present:
+                try:
+                    expected[pol.eso_policy_name(cid, eso[m]["key"])] = pol.eso_policy(mount, prefix, cid,
+                                                                                     eso[m]["key"], acc_of[m])
+                except ValueError:
+                    self._untrusted(f"ESO jwt auth method {m}")
             for name in self._list(a, "sys/policies/acl"):
                 if name == "root":
                     continue
@@ -1953,13 +2289,14 @@ class Agent:
             # token/ (`tf-<déclaration>`) ou (2.10.0) sur un montage jwt des
             # personnes seulement
             self._review_entities(a, roles, token_acc, jwt_accs - {None},
-                                  {e for ms in group_members.values() for e in ms})
+                                  {e for ms in group_members.values() for e in ms}, eso_accs - {None})
             # m4 : aucun espace de noms (révocation faite dans la racine)
             if self._list(a, "sys/namespaces"):
                 self._untrusted("namespaces")
             # jetons : politiques permises, puis tous révoqués sauf les deux
             # de cette revue (révoqués ensuite)
-            allowed = {"default", *roles, pol.tf_role(cid), pol.boot_policy_name(cid), pol.person_policy_name(cid)}
+            allowed = {"default", *roles, pol.tf_role(cid), pol.boot_policy_name(cid), pol.person_policy_name(cid),
+                       *(pol.eso_policy_name(cid, eso[m]["key"]) for m in eso_present)}
             accessors = self._list(a, "auth/token/accessors")
             for acc in accessors:
                 _, info = a._call("POST", "auth/token/lookup-accessor", {"accessor": acc})
@@ -1972,7 +2309,8 @@ class Agent:
                     a._call("POST", "auth/token/revoke-accessor", {"accessor": acc})
                     revoked += 1
             self.step("review", "running", f"{revoked} token(s) of the snapshot revoked")
-            return {"jwt": jwt_present, "groups": groups_present, "members": group_members}
+            return {"jwt": jwt_present, "groups": groups_present, "members": group_members,
+                    "eso": {eso[m]["key"] for m in eso_present}}
         finally:
             a.revoke_self()
 
@@ -2023,7 +2361,26 @@ class Agent:
             members[mine] = sorted(got)
         return present, members
 
-    def _review_entities(self, a, roles, token_acc, jwt_accs=frozenset(), members=frozenset()):
+    def _review_eso_mount(self, a, m, entry, cid):
+        """Montage `jwt` d'un cluster enfant restauré : un seul rôle, `eso`,
+        aux namespaces de l'état, et les clés que l'agent a posées."""
+        roles = self._list(a, f"auth/{m}/role")
+        if roles != [oj.ESO_ROLE]:
+            self._untrusted(f"roles of {m}: " + ", ".join(roles))
+        try:
+            want_role = oj.eso_role_params(cid, entry.get("key"), entry.get("namespaces"), entry.get("node_cidr"))
+            want_conf = oj.eso_mount_config(entry.get("issuer"), entry.get("pubkeys"))
+            _, doc = a._call("GET", f"auth/{m}/role/{oj.ESO_ROLE}")
+            bad = self._eso_role_diff(self._data(doc) or {}, want_role)
+            _, doc = a._call("GET", f"auth/{m}/config")
+            bad += self._eso_config_diff(self._data(doc) or {}, want_conf)
+        except ValueError:
+            bad = ["unreadable"]
+        if bad:
+            self._untrusted(f"ESO jwt auth method {m} ({', '.join(bad)})")
+
+    def _review_entities(self, a, roles, token_acc, jwt_accs=frozenset(), members=frozenset(),
+                         eso_accs=frozenset()):
         """Les politiques d'une entité valent pour chaque jeton de l'entité,
         y compris ceux émis après la révocation (prochain login AppRole de la
         console, jeton enfant `auth/token/create/<rôle>` avec un alias
@@ -2051,6 +2408,11 @@ class Agent:
             if on_jwt:
                 persons.add(eid)
                 continue                # une personne (alias = `sub`) ; ses droits viennent du rôle et des groupes
+            on_eso = [al for al in aliases if (al or {}).get("mount_accessor") in eso_accs]
+            if on_eso:
+                if len(on_eso) != len(aliases):
+                    self._untrusted(f"identity entity {eid} mixes ESO and other aliases")
+                continue                # compte `hops-eso` d'un namespace : droits du seul rôle `eso`
             for al in aliases:
                 acc, name = (al or {}).get("mount_accessor"), str((al or {}).get("name") or "")
                 if acc and acc == approle_acc and name in role_ids:
@@ -2156,7 +2518,7 @@ class Agent:
         # groupe » compris) et celles des groupes reprennent le texte de
         # l'état de l'agent ; la revue en acceptait deux
         st_now = self.agent_state()
-        if st_now.get("person_jwt") or st_now.get("person_groups"):
+        if st_now.get("person_jwt") or st_now.get("person_groups") or st_now.get("eso_clusters"):
             done = self._with_agent(lambda a: self._person_policies_refresh(a, st_now))
             if done:
                 self.step("person-policies", "done", ", ".join(done))
@@ -2180,9 +2542,12 @@ class Agent:
               if isinstance(v, dict) and v.get("mount") in present.get("jwt", set())}
         pg = {k: (dict(v, members=present["members"][k]) if k in (present.get("members") or {}) else v)
               for k, v in (st.get("person_groups") or {}).items() if k in present.get("groups", set())}
-        if pj != (st.get("person_jwt") or {}) or pg != (st.get("person_groups") or {}):
-            gone = sorted(set(st.get("person_jwt") or {}) - set(pj)) + sorted(set(st.get("person_groups") or {}) - set(pg))
-            self.save_agent_state(dict(st, person_jwt=pj, person_groups=pg))
+        ec = {k: v for k, v in (st.get("eso_clusters") or {}).items() if k in present.get("eso", set())}
+        if pj != (st.get("person_jwt") or {}) or pg != (st.get("person_groups") or {}) \
+                or ec != (st.get("eso_clusters") or {}):
+            gone = sorted(set(st.get("person_jwt") or {}) - set(pj)) + sorted(set(st.get("person_groups") or {}) - set(pg)) \
+                + sorted(f"eso {k}" for k in set(st.get("eso_clusters") or {}) - set(ec))
+            self.save_agent_state(dict(st, person_jwt=pj, person_groups=pg, eso_clusters=ec))
             self.step("person-state", "done", "absent from the snapshot: " + ", ".join(gone))
 
     def _console_identity_back(self, st):

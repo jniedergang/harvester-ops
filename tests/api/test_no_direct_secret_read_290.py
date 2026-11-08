@@ -31,6 +31,7 @@ _BIN_TOOLS_MATERIALIZED = {
     ("bin/harvester-registry.py", "kube_from"), ("bin/harvester-registry.py", "users"),
     ("bin/harvester-registry.py", "_cluster_kube"), ("bin/harvester-replication.py", "cluster_client"),
     ("bin/harvester-resources.py", "kube_from"), ("bin/harvester-vm-transfer.py", "cluster_kubeconfig"),
+    ("bin/harvester-secrets.py", "_eso_child_keys"),       # 2.10.0 : comme kube_from (cluster_config)
 }
 
 ALLOWED = {
