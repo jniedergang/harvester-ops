@@ -479,3 +479,22 @@ def test_app_stage_kubeconfig_local_after_openbao_replaces_the_link(wapp, env, l
         d = wapp._stage_kubeconfig(kc, ws)
         assert d.is_file() and not d.is_symlink() and d.read_text() == VALUE
         assert gone or target.read_text() == VALUE              # la cible n'a pas été réécrite
+
+
+def test_app_tf_kvm_stage_migrated_key_stays_off_disk(wapp, env, tmp_path, monkeypatch):
+    """I4 : clé ssh-kvm migrée : l'espace ne porte qu'un lien vers tmpfs,
+    retiré avec la copie par _tf_kvm_unstage."""
+    import tf_kvm
+    ref = env["put"]("ssh-kvm", "k1", "private_key")
+    (env["state"] / "ssh").mkdir()
+    (env["state"] / "ssh" / "k1_known").write_text("[h]:22 ssh-ed25519 AAAA\n")
+    monkeypatch.setattr(wapp, "_state_dir", lambda: env["state"])
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    wapp._tf_kvm_stage(ws, {"name": "k1", "ssh_key": ref, "known_hosts": "ssh/k1_known", "address": "h",
+                            "user": "root"})
+    key = ws / tf_kvm.KEY_FILE
+    assert key.is_symlink() and Path(os.readlink(key)).parent == env["run"] and key.read_text() == VALUE
+    target = Path(os.readlink(key))
+    wapp._tf_kvm_unstage(ws)
+    assert not key.exists() and not key.is_symlink() and not target.exists()

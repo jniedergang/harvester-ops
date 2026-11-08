@@ -28446,6 +28446,16 @@ def _tf_kvm_stage(ws, host_decl):
         # 2.9.0 : la clé de l'hôte par le magasin de secrets (référence) ou
         # son fichier rangé sous l'état
         src = _kd.key_path(state, rel, "tf-kvm-ssh") if name == _tfk.KEY_FILE else _kd.resolve(state, rel)
+        if name == _tfk.KEY_FILE and _sst.is_active():
+            # revue I4 : OpenBao actif, la clé reste sur tmpfs ; l'espace
+            # (disque) n'en porte qu'un lien, retiré avec elle au déstockage
+            tmp = _tf_tmpfs_copy("tf-kvm-key", src.read_text(), ("tf-kvm-key", str(ws)))
+            try:
+                (ws / name).unlink()
+            except FileNotFoundError:
+                pass
+            (ws / name).symlink_to(tmp)
+            continue
         _tf_private_write(ws / name, src.read_bytes())
     # le script ssh strict que le provider lance (qemu+sshcmd, command=)
     _tf_private_write(ws / _tfk.WRAPPER_FILE, _tfk.ssh_wrapper(ws).encode())
@@ -28455,6 +28465,8 @@ def _tf_kvm_stage(ws, host_decl):
 def _tf_kvm_unstage(ws):
     for name in (_tfk.KEY_FILE, _tfk.KNOWN_FILE, _tfk.WRAPPER_FILE):
         try:
+            if (ws / name).is_symlink():
+                Path(os.readlink(ws / name)).unlink(missing_ok=True)    # copie tmpfs (revue I4)
             (ws / name).unlink()
         except FileNotFoundError:
             pass
