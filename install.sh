@@ -580,9 +580,13 @@ install_secrets_agent() {
     install -d -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/openbao" "$SECRETS_UNIT_DIR"
     install -m 0644 "$SCRIPT_DIR/config/systemd/harvester-ops-openbao.service" "$INSTALL_DIR/openbao/"
     install -m 0644 "$SCRIPT_DIR/config/openbao/openbao.hcl.tpl" "$INSTALL_DIR/openbao/"
+    # clé publique de l'Application Collection : l'agent vérifie avec elle la
+    # signature cosign d'un paquet B1 à la pose (jamais une clé de l'état)
+    install -m 0644 "$SCRIPT_DIR/config/openbao/application-collection-cosign.pub" "$INSTALL_DIR/openbao/"
+    # sous $STATE_DIR (au compte de la console) : seulement par _safe_fs (2.8.3)
     install -d -m 0750 "$STATE_DIR"
-    install -d -m 0750 -o harvester-ops -g harvester-ops "$STATE_DIR/secrets-agent" "$STATE_DIR/secrets-agent/staged" 2>/dev/null \
-        || install -d -m 0750 "$STATE_DIR/secrets-agent" "$STATE_DIR/secrets-agent/staged"
+    _safe_fs --owner harvester-ops mkdir "$STATE_DIR" secrets-agent 0750
+    _safe_fs --owner harvester-ops mkdir "$STATE_DIR" secrets-agent/staged 0750
     for u in harvester-secrets-agent.path harvester-secrets-rotate.timer; do
         install -m 0644 "$SCRIPT_DIR/config/systemd/$u" "$SECRETS_UNIT_DIR/$u"
     done
@@ -593,8 +597,7 @@ install_secrets_agent() {
         install -m 0644 "$SCRIPT_DIR/config/systemd/harvester-ops-openbao.service" "$SECRETS_UNIT_DIR/"
     fi
     printf '{"installed": "%s", "ts": %s}\n' "$(cat "$SCRIPT_DIR/VERSION")" "$(date +%s)" \
-        > "$STATE_DIR/secrets-agent/agent.json"
-    chown harvester-ops:harvester-ops "$STATE_DIR/secrets-agent/agent.json" 2>/dev/null || true
+        | _safe_fs --owner harvester-ops write "$STATE_DIR" secrets-agent/agent.json 0644
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now harvester-secrets-agent.path harvester-secrets-rotate.timer >/dev/null 2>&1 \
         && ok "Secret store agent installed (OpenBao from the web UI)" \
@@ -715,17 +718,19 @@ PY
     # l'installation : somme vérifiée, rangé où la console le propose
     # (l'agent le revérifie entièrement avant de le poser)
     if compgen -G "$src/openbao/harvester-ops-openbao-*.tar.gz" >/dev/null; then
-        install -d -m 0750 "$STATE_DIR" "$STATE_DIR/secrets-agent" "$STATE_DIR/secrets-agent/staged"
+        install -d -m 0750 "$STATE_DIR"
+        _safe_fs "${own[@]}" mkdir "$STATE_DIR" secrets-agent/staged 0750
         for b in "$src"/openbao/harvester-ops-openbao-*.tar.gz; do
             name="$(basename "$b")"
             if ! (cd "$src/openbao" && sha256sum -c "$name.sha256" >/dev/null 2>&1); then
                 warn "OpenBao bundle $name: checksum mismatch, not installed"
                 continue
             fi
-            install -m 0640 "$b" "$b.sha256" "$STATE_DIR/secrets-agent/staged/"
+            _safe_fs "${own[@]}" install "$b" "$STATE_DIR" "secrets-agent/staged/$name" 0640
+            _safe_fs "${own[@]}" install "$b.sha256" "$STATE_DIR" "secrets-agent/staged/$name.sha256" 0640
             ok "OpenBao bundle $name available (Settings > Secrets, or sudo harvester-secrets enable --mode b1)"
         done
-        chown -R "$owner" "$STATE_DIR/secrets-agent" 2>/dev/null || warn "could not give $STATE_DIR/secrets-agent to $owner"
+        _safe_fs "${own[@]}" chown-tree "$STATE_DIR" secrets-agent || warn "could not give secrets-agent to harvester-ops"
     fi
     # 2.3.0 : le provider libvirt des déclarations KVM, vérifié au build
     # (signature GPG + somme) ; celui du livrable remplace toujours le précédent

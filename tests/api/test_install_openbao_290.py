@@ -40,6 +40,8 @@ def sandbox(tmp_path):
     subprocess.run(["cp", "-r", str(ROOT / "config" / "systemd"), str(ROOT / "config" / "openbao"),
                     str(src / "config")], check=True)
     (src / "VERSION").write_text("2.9.0\n")
+    (src / "bin" / "lib").mkdir(parents=True)
+    (src / "bin" / "lib" / "safe_fs.py").symlink_to(ROOT / "bin" / "lib" / "safe_fs.py")
     env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
     return {"tmp": tmp_path, "src": src, "log": log, "env": env}
 
@@ -55,7 +57,7 @@ warn() {{ echo "WARN $*"; }}
 err() {{ echo "ERR $*" >&2; }}
 detect_update_python() {{ echo {shlex.quote(sys.executable)}; }}
 """
-    script = pre + function("render_python_unit") + function("install_secrets_agent") + function("install_bundles") \
+    script = pre + function("_safe_fs") + function("render_python_unit") + function("install_secrets_agent") + function("install_bundles") \
         + body
     return subprocess.run(["/bin/bash", "-c", script], env=sb["env"], capture_output=True, text=True)
 
