@@ -54,11 +54,13 @@ const BMPlans = (() => {
     terraform: () => tr('bmpl.phase.terraform'), capi: () => tr('bmpl.phase.capi'),
     clusters: () => tr('bmpl.phase.clusters'), registry: () => tr('bmpl.phase.registry'),
     artefacts: () => tr('bmpl.phase.artefacts'), plan: () => tr('bmpl.phase.plan'),
+    gitops: () => tr('bmpl.phase.gitops'),
   };
   const PHASE_TIPS = {
     readiness: () => tr('bmpl.phaseTip.readiness'), terraform: () => tr('bmpl.phaseTip.terraform'),
     capi: () => tr('bmpl.phaseTip.capi'), clusters: () => tr('bmpl.phaseTip.clusters'),
     registry: () => tr('bmpl.phaseTip.registry'), artefacts: () => tr('bmpl.phaseTip.artefacts'),
+    gitops: () => tr('bmpl.phaseTip.gitops'),
   };
   const FINDINGS = {
     'plan-invalid': () => tr('dpw.f.planInvalid'),
@@ -161,6 +163,47 @@ const BMPlans = (() => {
     'team-namespace-taken': () => tr('dpw.f.teamNamespaceTaken'),
     'team-namespace-missing': () => tr('dpw.f.teamNamespaceMissing'),
     'manifest-cluster-missing': () => tr('dpw.f.manifestClusterMissing'),
+    // 2.8.0 : phase GitOps, accès des clusters enfants (modèles), sans Internet
+    'gitops-var-missing': () => tr('dpw.f.gitopsVarMissing'),
+    'gitops-secret-missing': () => tr('dpw.f.gitopsSecretMissing'),
+    'gitops-privileges-admin-only': () => tr('dpw.f.gitopsPrivilegesAdminOnly'),
+    'gitops-fleet-admin-only': () => tr('dpw.f.gitopsFleetAdminOnly'),
+    'gitops-fleet-not-confined': () => tr('dpw.f.gitopsFleetNotConfined'),
+    'gitops-fleet-needs-rancher': () => tr('dpw.f.gitopsFleetNeedsRancher'),
+    'gitops-source-unsupported': () => tr('dpw.f.gitopsSourceUnsupported'),
+    'gitops-flux-in-plan': () => tr('dpw.f.gitopsFluxInPlan'),
+    'gitops-flux-missing': () => tr('dpw.f.gitopsFluxMissing'),
+    'gitops-flux-not-locked': () => tr('dpw.f.gitopsFluxNotLocked'),
+    'gitops-later': () => tr('dpw.f.gitopsLater'),
+    'gitops-package-not-published': () => tr('dpw.f.gitopsPackageNotPublished'),
+    'gitops-check-failed': () => tr('dpw.f.gitopsCheckFailed'),
+    'gitops-taken': () => tr('dpw.f.gitopsTaken'),
+    'gitops-cluster-unknown': () => tr('dpw.f.gitopsClusterUnknown'),
+    'gitops-namespace-not-team': () => tr('dpw.f.gitopsNamespaceNotTeam'),
+    'gitops-name-too-long': () => tr('dpw.f.gitopsNameTooLong'),
+    'gitops-invalid': () => tr('dpw.f.gitopsInvalid'),
+    'gitops-cluster-missing': () => tr('dpw.f.gitopsClusterMissing'),
+    'rancher-session-needed': () => tr('dpw.f.rancherSessionNeeded'),
+    'rancher-session-in-chain': () => tr('dpw.f.rancherSessionInChain'),
+    'rancher-import-conflict': () => tr('dpw.f.rancherImportConflict'),
+    'rancher-name-invalid': () => tr('dpw.f.rancherNameInvalid'),
+    'rancher-name-taken': () => tr('dpw.f.rancherNameTaken'),
+    'rancher-agent-image-missing': () => tr('dpw.f.rancherAgentImageMissing'),
+    'rancher-agent-image-unmirrored': () => tr('dpw.f.rancherAgentImageUnmirrored'),
+    'rancher-agent-image-fallback': () => tr('dpw.f.rancherAgentImageFallback'),
+    'oidc-invalid': () => tr('dpw.f.oidcInvalid'),
+    'oidc-issuer-invalid': () => tr('dpw.f.oidcIssuerInvalid'),
+    'oidc-audience-invalid': () => tr('dpw.f.oidcAudienceInvalid'),
+    'oidc-claim-invalid': () => tr('dpw.f.oidcClaimInvalid'),
+    'oidc-prefix-required': () => tr('dpw.f.oidcPrefixRequired'),
+    'oidc-prefix-system': () => tr('dpw.f.oidcPrefixSystem'),
+    'oidc-ca-unreadable': () => tr('dpw.f.oidcCaUnreadable'),
+    'oidc-admin-group-invalid': () => tr('dpw.f.oidcAdminGroupInvalid'),
+    'oidc-version-too-old': () => tr('dpw.f.oidcVersionTooOld'),
+    'oidc-with-rancher': () => tr('dpw.f.oidcWithRancher'),
+    'offline-needs-no-fallback': () => tr('dpw.f.offlineNeedsNoFallback'),
+    'offline-rke2-missing': () => tr('dpw.f.offlineRke2Missing'),
+    'offline-rke2-version-mismatch': () => tr('dpw.f.offlineRke2VersionMismatch'),
   };
   const LEVELS = {
     blocking: () => tr('dpw.lvl.blocking'), warning: () => tr('dpw.lvl.warning'), info: () => tr('dpw.lvl.info'),
@@ -232,7 +275,7 @@ const BMPlans = (() => {
   let tplData = { templates: [], kinds: [] };
   let ctplData = { templates: [] };       // 2.5.0 : modèles de cluster
   let bundleProviders = null;             // fournisseurs du paquet actif (null : non lu)
-  const AVAILABLE_DEFAULT = ['readiness', 'terraform', 'registry', 'capi', 'clusters', 'artefacts'];
+  const AVAILABLE_DEFAULT = ['readiness', 'terraform', 'registry', 'capi', 'clusters', 'artefacts', 'gitops'];
   // 2.7.0 : phase Artefacts, bornes du serveur (deploy_plans.ARTEFACTS_TIMEOUT) ;
   // sortes applicables (images : phase Registre ; gitops : 2.8)
   const ARTEFACTS_TIMEOUT = [1, 60, 15];
@@ -246,6 +289,16 @@ const BMPlans = (() => {
   const PUBLISH_TIMEOUT = [5, 600, 60];
   let regData = { registries: [], packages: [] };
   const MAX_CLUSTERS = 16;
+  // 2.8.0 : phase GitOps, bornes du serveur (deploy_plans.GITOPS_TIMEOUT,
+  // MAX_GITOPS_ENTRIES ; child_gitops.NAME_RE, INTERVAL_*)
+  const GITOPS_TIMEOUT = [1, 60, 15];
+  const MAX_GITOPS = 16;
+  const GITOPS_INTERVAL = [1, 1440, 10];
+  const GITOPS_NAME_RE = /^[a-z0-9]([-a-z0-9]{0,32}[a-z0-9])?$/;
+  const GITOPS_TOOLS = ['auto', 'flux', 'fleet'];
+  const GITOPS_SOURCES = ['oci', 'git', 'chart'];
+  // modèle de cluster -> import Rancher externe demandé (true/false), lu une fois
+  const tplAccess = new Map();
   const CAPI_TIMEOUT = [1, 60, 10];
   const CLUSTERS_TIMEOUT = [5, 180, 30];
   // plan affiché : { name, revision, isNew, doc, items, clusters, shortcut }
@@ -309,7 +362,7 @@ const BMPlans = (() => {
       </div>
       ${templatesHtml()}
       ${capiTemplatesHtml()}`;
-    if (edit) { paintTemplates(); paintClusters(); paintRegistries(); paintArtefacts(); }
+    if (edit) { paintTemplates(); paintClusters(); paintRegistries(); paintArtefacts(); paintGitops(); }
   }
 
   // --- éditeur d'un plan ---------------------------------------------------
@@ -342,9 +395,26 @@ const BMPlans = (() => {
         package: x.package || '', version: String(x.version || ''), item: x.item || '', registry: x.registry || '',
         valuesText: x.values && typeof x.values === 'object' ? JSON.stringify(x.values, null, 2) : '',
         clusters: (x.clusters || []).join(', '), depends_on: (x.depends_on || []).slice() })),
+      // 2.8.0 : phase GitOps ; les clés d'une entrée que la carte n'édite
+      // pas sont gardées telles que lues (`raw`)
+      gitops: (((d.phases || {}).gitops || {}).entries || []).map(gopFromDoc),
       shortcut: null,
     };
     lastMsg = '';
+  }
+
+  /** Entrée GitOps lue (format de deploy_plans) -> ligne éditée. */
+  function gopFromDoc(e) {
+    const src = (e && e.source) || {};
+    return {
+      raw: Object.assign({}, e || {}), name: (e && e.name) || '', tool: (e && e.tool) || 'auto',
+      clusters: ((e && e.clusters) || []).join(', '), target_namespace: (e && e.target_namespace) || '',
+      stype: src.type || 'oci', package: src.package || '', version: String(src.version || ''), item: src.item || '',
+      registry: src.registry || '', url: src.url || '', branch: src.branch || '', path: src.path || '', secret: src.secret || '',
+      privileges: (e && e.privileges) || 'namespace',
+      interval: e && e.interval_minutes != null ? String(e.interval_minutes) : String(GITOPS_INTERVAL[2]),
+      prune: !(e && e.prune === false),
+    };
   }
 
   async function openPlan(name) {
@@ -363,7 +433,7 @@ const BMPlans = (() => {
   function editorHtml() {
     const d = edit.doc;
     const phases = plansData.phases && plansData.phases.length ? plansData.phases
-      : ['readiness', 'terraform', 'registry', 'capi', 'clusters', 'artefacts'];
+      : ['readiness', 'terraform', 'registry', 'capi', 'clusters', 'artefacts', 'gitops'];
     const available = plansData.available && plansData.available.length ? plansData.available : AVAILABLE_DEFAULT;
     const tip = (t) => `class="tip" data-tip="${esc(t)}"`;
     return `
@@ -457,6 +527,16 @@ const BMPlans = (() => {
         <div class="apply-bar" style="grid-column:1/-1;">
           <button type="button" class="btn btn-secondary btn-sm btn-ico tip bmpl-art-add"
                   data-tip="${esc(tr('bmpl.t.artAdd'))}">${icon('add')} ${esc(tr('bmpl.artAdd'))}</button>
+        </div>`;
+    } else if (pid === 'gitops') {
+      body = `<label class="tip" data-tip="${esc(tr('bmpl.t.gopTimeout'))}">${esc(tr('bmpl.f.gopTimeout'))}
+          <input type="number" name="gitops_timeout" min="${GITOPS_TIMEOUT[0]}" max="${GITOPS_TIMEOUT[1]}" step="1"
+                 value="${esc(ph && ph.timeout_minutes != null ? ph.timeout_minutes : GITOPS_TIMEOUT[2])}"></label>
+        <p class="form-hint bmpl-gop-clusters-hint" style="grid-column:1/-1;"></p>
+        <ol class="bmpl-gops" style="grid-column:1/-1;"></ol>
+        <div class="apply-bar" style="grid-column:1/-1;">
+          <button type="button" class="btn btn-secondary btn-sm btn-ico tip bmpl-gop-add"
+                  data-tip="${esc(tr('bmpl.t.gopAdd', { max: MAX_GITOPS }))}">${icon('add')} ${esc(tr('bmpl.gopAdd'))}</button>
         </div>`;
     } else if (pid === 'clusters') {
       body = `<label class="tip" data-tip="${esc(tr('bmpl.t.clustersTimeout'))}">${esc(tr('bmpl.f.clustersTimeout'))}
@@ -592,6 +672,7 @@ const BMPlans = (() => {
     const full = items.length + (sc ? sc.count : 0) >= MAX_CLUSTERS;
     [add, several].forEach(b => { if (b) b.disabled = full || !tpls.length; });
     paintArtHint();
+    paintGitops();
   }
 
   // 2.6.0 : registres du plan et publications des paquets (phase Registre)
@@ -647,6 +728,7 @@ const BMPlans = (() => {
       pkgItems.set(key, r.ok ? ((r.d.index || {}).items || []).map(i => ({ name: i.name, kind: i.kind })) : 'error');
     }).catch(() => { pkgItems.set(key, 'error'); }).then(() => {
       if (edit && document.querySelector('#bm-plans .bmpl-arts')) paintArtefacts();
+      if (edit && document.querySelector('#bm-plans .bmpl-gops')) paintGitops();
     });
   }
   /** Sorte d'un élément d'une entrée, null si le paquet n'est pas lu. */
@@ -820,6 +902,191 @@ const BMPlans = (() => {
     };
   }
 
+  // =========================================================================
+  // 2.8.0 : phase GitOps (entrées Flux ou Fleet posées sur les clusters)
+  // =========================================================================
+  /** Le modèle de cluster demande-t-il l'import dans un Rancher externe ?
+   *  true/false, null tant que non lu (lu une fois, puis la carte se repeint). */
+  function templateImports(name) {
+    if (!name) return null;
+    const v = tplAccess.get(name);
+    if (v === true || v === false) return v;
+    if (v === undefined) {
+      tplAccess.set(name, 'loading');
+      api('GET', `/api/baremetal/capi-templates/${enc(name)}`).then(r => {
+        tplAccess.set(name, r.ok ? ((r.d.spec || {}).rancher_external === true) : 'error');
+      }).catch(() => { tplAccess.set(name, 'error'); }).then(() => {
+        if (edit && document.querySelector('#bm-plans .bmpl-gops')) paintGitops();
+      });
+    }
+    return null;
+  }
+
+  /** Outils prévus d'une entrée : ['fleet'], ['flux'], ['?'] (décidé au
+   *  contrôle : cluster hors du plan ou modèle non lu), ou plusieurs. */
+  function gopTools(e) {
+    if (e.tool !== 'auto') return [e.tool];
+    const out = new Set();
+    listOf(e.clusters).forEach(c => {
+      const it = edit.clusters.find(x => x.name === c);
+      const imp = it ? templateImports(it.template) : null;
+      out.add(imp === true ? 'fleet' : imp === false ? 'flux' : '?');
+    });
+    return out.size ? [...out] : ['?'];
+  }
+  const GOP_TOOL_TEXT = {
+    fleet: () => tr('bmpl.gopToolFleet'), flux: () => tr('bmpl.gopToolFlux'), '?': () => tr('bmpl.gopToolLater'),
+  };
+  const GOP_TOOL_OPT = {
+    auto: () => tr('bmpl.gopTool.auto'), flux: () => tr('bmpl.gopTool.flux'), fleet: () => tr('bmpl.gopTool.fleet'),
+  };
+  const GOP_SRC_OPT = {
+    oci: () => tr('bmpl.gopSrc.oci'), git: () => tr('bmpl.gopSrc.git'), chart: () => tr('bmpl.gopSrc.chart'),
+  };
+  const GOP_PRIV_OPT = { namespace: () => tr('bmpl.gopPriv.namespace'), cluster: () => tr('bmpl.gopPriv.cluster') };
+
+  let gopPainting = false;
+  function paintGitops() {
+    if (gopPainting) return;
+    gopPainting = true;
+    try { paintGitopsNow(); } finally { gopPainting = false; }
+  }
+
+  function paintGitopsNow() {
+    const ol = document.querySelector('#bm-plans .bmpl-gops');
+    if (!ol || !edit) return;
+    const hint = document.querySelector('#bm-plans .bmpl-gop-clusters-hint');
+    if (hint) {
+      const names = planClusterNames();
+      hint.innerHTML = `${esc(tr('bmpl.gopClustersHint'))} ${names.length ? names.map(n => `<code>${esc(n)}</code>`).join(' ')
+        : `<em>${esc(tr('bmpl.artNoPlanCluster'))}</em>`}`;
+    }
+    const pkgs = regData.packages || [];
+    const regNames = [...new Set(edit.registries.map(r => r.name).filter(Boolean).concat((regData.registries || []).map(x => x.name)))];
+    // `tip` : texte déjà traduit (un appel littéral par clé, contrôle de parité)
+    const f = (i, k, v, tip, ph, extra) => `<input class="bmpl-gop-f tip" data-i="${i}" data-k="${k}" spellcheck="false"
+        ${extra || ''} value="${esc(v == null ? '' : v)}" placeholder="${esc(ph || '')}" aria-label="${esc(tip)}" data-tip="${esc(tip)}">`;
+    const sel = (i, k, v, opts, map, tip) => `<select class="bmpl-gop-f tip" data-i="${i}" data-k="${k}" aria-label="${esc(tip)}"
+        data-tip="${esc(tip)}">${opts.map(o => `<option value="${esc(o)}"${o === v ? ' selected' : ''}>${esc(map[o]())}</option>`).join('')}</select>`;
+    ol.innerHTML = edit.gitops.length ? edit.gitops.map((e, i) => {
+      const tools = gopTools(e);
+      let src = '';
+      if (e.stype === 'git') {
+        src = `${f(i, 'url', e.url, tr('bmpl.t.gopUrl'), 'ssh://git@git.example:22/team/apps.git', 'maxlength="2048"')}
+          ${f(i, 'branch', e.branch, tr('bmpl.t.gopBranch'), 'main', 'maxlength="100"')}
+          ${f(i, 'path', e.path, tr('bmpl.t.gopPath'), './', 'maxlength="200"')}
+          ${f(i, 'secret', e.secret, tr('bmpl.t.gopSecret'), tr('bmpl.gopSecretPh'), 'maxlength="63"')}`;
+      } else {
+        const want = e.stype === 'oci' ? 'gitops' : 'chart';
+        const key = `${e.package}@${e.version}`;
+        if (e.package) ensurePkgItems(e.package, e.version);
+        const list = pkgItems.get(key);
+        const offered = Array.isArray(list) ? list.filter(x => x.kind === want) : null;
+        if (offered && !e.item && offered.length) e.item = offered[0].name;
+        const known = pkgs.some(x => `${x.name}@${x.version}` === key);
+        const itemOpts = offered == null
+          ? `<option value="${esc(e.item)}" selected>${esc(e.item || (e.package ? tr('bmpl.artLoading') : tr('bmpl.gopPickPackage')))}</option>`
+          : (e.item && !offered.some(x => x.name === e.item) ? `<option value="${esc(e.item)}" selected>${esc(e.item)} (${esc(tr('bmpl.artItemMissing'))})</option>` : '')
+            + (offered.length ? offered.map(x => `<option value="${esc(x.name)}"${x.name === e.item ? ' selected' : ''}>${esc(x.name)}</option>`).join('')
+              : (e.item ? '' : `<option value="">${esc(e.stype === 'oci' ? tr('bmpl.gopNoGitopsItem') : tr('bmpl.gopNoChartItem'))}</option>`));
+        src = `<select class="bmpl-gop-pkg tip" data-i="${i}" aria-label="${esc(tr('bmpl.t.gopPackage'))}" data-tip="${esc(tr('bmpl.t.gopPackage'))}">
+            ${e.package ? '' : `<option value="" selected>${esc(tr('bmpl.gopPickPackage'))}</option>`}
+            ${known || !e.package ? '' : `<option value="${esc(key)}" selected>${esc(`${e.package} ${e.version}`)} (${esc(tr('bmpl.pkgMissing'))})</option>`}
+            ${pkgs.map(x => `<option value="${esc(`${x.name}@${x.version}`)}"${`${x.name}@${x.version}` === key ? ' selected' : ''}>${esc(`${x.name} ${x.version}`)}</option>`).join('')}</select>
+          <select class="bmpl-gop-f tip" data-i="${i}" data-k="item" aria-label="${esc(tr('bmpl.t.gopItem'))}" data-tip="${esc(tr('bmpl.t.gopItem'))}">${itemOpts}</select>
+          ${f(i, 'registry', e.registry, tr('bmpl.t.gopRegistry'), '{{registre}}', `list="bmpl-gop-regs" maxlength="128"`)}`;
+      }
+      return `<li class="bmpl-gop" data-i="${i}" data-source="${esc(e.stype)}">
+        <div class="bmpl-gop-line">
+          ${f(i, 'name', e.name, tr('bmpl.t.gopName'), 'apps', 'maxlength="34"')}
+          ${sel(i, 'tool', e.tool, GITOPS_TOOLS, GOP_TOOL_OPT, tr('bmpl.t.gopTool'))}
+          <span class="badge info tip bmpl-gop-tool" data-tool="${esc(tools.join(','))}" data-tip="${esc(tr('bmpl.t.gopDeduced'))}">${esc(tools.map(t => GOP_TOOL_TEXT[t]()).join(' / '))}</span>
+          ${f(i, 'clusters', e.clusters, tr('bmpl.t.gopClusters'), '{{cluster}}-apps', 'maxlength="400"')}
+          ${f(i, 'target_namespace', e.target_namespace, tr('bmpl.t.gopNamespace'), 'equipe-a', 'maxlength="63"')}
+          <button type="button" class="btn btn-sm btn-danger tip bmpl-gop-rm" data-i="${i}"
+                  aria-label="${esc(tr('bmpl.t.gopRemove'))}" data-tip="${esc(tr('bmpl.t.gopRemove'))}">${icon('close', { size: 12 })}</button>
+        </div>
+        <div class="bmpl-gop-line">
+          ${sel(i, 'stype', e.stype, GITOPS_SOURCES, GOP_SRC_OPT, tr('bmpl.t.gopSource'))}
+          ${src}
+        </div>
+        <div class="bmpl-gop-line">
+          ${sel(i, 'privileges', e.privileges, ['namespace', 'cluster'], GOP_PRIV_OPT, tr('bmpl.t.gopPrivileges'))}
+          <label class="tip bmpl-gop-num" data-tip="${esc(tr('bmpl.t.gopInterval'))}">${esc(tr('bmpl.f.gopInterval'))}
+            <input type="number" class="bmpl-gop-f" data-i="${i}" data-k="interval" min="${GITOPS_INTERVAL[0]}" max="${GITOPS_INTERVAL[1]}"
+                   step="1" value="${esc(e.interval)}" aria-label="${esc(tr('bmpl.f.gopInterval'))}"></label>
+          <label class="bm-check tip" data-tip="${esc(tr('bmpl.t.gopPrune'))}"><input type="checkbox" class="bmpl-gop-f" data-i="${i}" data-k="prune"
+                 ${e.prune ? 'checked' : ''} aria-label="${esc(tr('bmpl.gopPrune'))}"> ${esc(tr('bmpl.gopPrune'))}</label>
+        </div>
+      </li>`;
+    }).join('') + `<datalist id="bmpl-gop-regs">${regNames.map(n => `<option value="${esc(n)}">`).join('')}</datalist>`
+      : `<li class="form-hint bmpl-no-gop">${esc(tr('bmpl.noGitops'))}</li>`;
+    const add = document.querySelector('#bm-plans .bmpl-gop-add');
+    if (add) add.disabled = edit.gitops.length >= MAX_GITOPS;
+  }
+
+  /** Refus de la phase GitOps avant l'envoi (texte), ou ''. */
+  function gitopsRefusal(on) {
+    for (const e of edit.gitops) {
+      const name = e.name || '?';
+      if (!GITOPS_NAME_RE.test(e.name)) return tr('bmpl.gopNameBad', { max: 34 });
+      if (edit.gitops.filter(x => x.name === e.name).length > 1) return tr('bmpl.gopNameTwice', { name });
+      const n = Number(e.interval);
+      if (!Number.isInteger(n) || n < GITOPS_INTERVAL[0] || n > GITOPS_INTERVAL[1]) {
+        return tr('bmpl.gopIntervalBad', { name, min: GITOPS_INTERVAL[0], max: GITOPS_INTERVAL[1] });
+      }
+      if (!on) continue;
+      if (!listOf(e.clusters).length) return tr('bmpl.gopClustersRequired', { name });
+      if (!e.target_namespace.trim()) return tr('bmpl.gopNamespaceRequired', { name });
+      if (e.stype === 'git') {
+        if (!/^(https|ssh):\/\/\S+$/.test(e.url.trim())) return tr('bmpl.gopUrlBad', { name });
+      } else if (!e.package || !e.item || !e.registry.trim()) {
+        return tr('bmpl.gopSourceRequired', { name });
+      }
+    }
+    return '';
+  }
+
+  /** Phase GitOps telle qu'enregistrée (format de deploy_plans). */
+  function collectGitops(on, timeout) {
+    return {
+      enabled: on, timeout_minutes: timeout,
+      entries: edit.gitops.map(e => {
+        const src = e.stype === 'git'
+          ? Object.assign({ type: 'git', url: e.url.trim() }, e.branch.trim() ? { branch: e.branch.trim() } : {},
+            e.path.trim() ? { path: e.path.trim() } : {}, e.secret.trim() ? { secret: e.secret.trim() } : {})
+          : { type: e.stype, package: e.package, version: e.version, item: e.item, registry: e.registry.trim() };
+        return Object.assign({}, e.raw, {
+          name: e.name.trim(), tool: e.tool, clusters: listOf(e.clusters), target_namespace: e.target_namespace.trim(),
+          source: src, privileges: e.privileges, interval_minutes: Number(e.interval), prune: !!e.prune,
+        });
+      }),
+    };
+  }
+
+  /** Saisie dans la carte GitOps ; true si l'élément en relevait. */
+  function gitopsChange(t) {
+    const pkg = t.closest('#bm-plans .bmpl-gop-pkg');
+    if (pkg) {
+      const e = edit.gitops[Number(pkg.dataset.i)];
+      if (!e) return true;
+      const k = pkg.value.lastIndexOf('@');
+      Object.assign(e, k < 0 ? { package: '', version: '' } : { package: pkg.value.slice(0, k), version: pkg.value.slice(k + 1) }, { item: '' });
+      paintGitops();
+      return true;
+    }
+    const gf = t.closest('#bm-plans .bmpl-gop-f');
+    if (!gf) return false;
+    const e = edit.gitops[Number(gf.dataset.i)];
+    if (!e) return true;
+    const k = gf.dataset.k;
+    e[k] = gf.type === 'checkbox' ? gf.checked : gf.value;
+    // une autre source : ses champs propres repartent de zéro
+    if (k === 'stype') Object.assign(e, { package: '', version: '', item: '', registry: '', url: '', branch: '', path: '', secret: '' });
+    if (['stype', 'tool', 'clusters'].includes(k)) paintGitops();
+    return true;
+  }
+
   // Raccourci « Plusieurs » : le serveur le développe à l'enregistrement
   // (après les entrées déjà listées) ; ici, seulement les refus évidents
   function takeShortcut(box) {
@@ -872,6 +1139,8 @@ const BMPlans = (() => {
           publish: edit.publish.filter(p => p.package && p.registry).map(p => ({ package: p.package, version: p.version, registry: p.registry })) };
       } else if (pid === 'artefacts') {
         phases.artefacts = collectArtefacts(on('artefacts'), Number(form.querySelector('[name="artefacts_timeout"]').value));
+      } else if (pid === 'gitops') {
+        phases.gitops = collectGitops(on('gitops'), Number(form.querySelector('[name="gitops_timeout"]').value));
       } else {
         phases[pid] = { enabled: on(pid) };
       }
@@ -897,7 +1166,8 @@ const BMPlans = (() => {
     }
     // 2.5.0 : délais des phases Cluster API et Clusters, bornes du serveur
     for (const [field, [lo, hi]] of [['capi_timeout', CAPI_TIMEOUT], ['clusters_timeout', CLUSTERS_TIMEOUT],
-      ['registry_timeout', REGISTRY_TIMEOUT], ['publish_timeout', PUBLISH_TIMEOUT], ['artefacts_timeout', ARTEFACTS_TIMEOUT]]) {
+      ['registry_timeout', REGISTRY_TIMEOUT], ['publish_timeout', PUBLISH_TIMEOUT], ['artefacts_timeout', ARTEFACTS_TIMEOUT],
+      ['gitops_timeout', GITOPS_TIMEOUT]]) {
       const el = form.querySelector(`[name="${field}"]`);
       const v = el ? Number(el.value) : lo;
       if (!Number.isInteger(v) || v < lo || v > hi) {
@@ -910,6 +1180,15 @@ const BMPlans = (() => {
       const why = artefactsRefusal(!!form.querySelector('.bmpl-phase-on[data-phase="artefacts"]:checked'));
       if (why) {
         msg.innerHTML = `<div class="bm-refusal bmpl-art-refusal">${icon('fail', { size: 14 })} ${esc(why)}</div>`;
+        msg.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+    }
+    // 2.8.0 : entrées GitOps contrôlées avant l'envoi
+    if (form.querySelector('[name="gitops_timeout"]')) {
+      const why = gitopsRefusal(!!form.querySelector('.bmpl-phase-on[data-phase="gitops"]:checked'));
+      if (why) {
+        msg.innerHTML = `<div class="bm-refusal bmpl-gop-refusal">${icon('fail', { size: 14 })} ${esc(why)}</div>`;
         msg.scrollIntoView({ block: 'nearest' });
         return;
       }
@@ -1405,6 +1684,9 @@ const BMPlans = (() => {
       plans: [], check: null, checking: false, tab: 'params', timer: null,
       needSecrets: !!(resume && res.install), machines: null, typed: {}, sse: null, launched: null,
       updateDiffering: false,
+      // 2.8.0 : secrets du plan demandés par la phase GitOps (noms lus dans
+      // le plan ; valeurs seulement dans les champs, jamais rangées)
+      gopSecrets: [], gopPlan: null,
     };
     const tip = (x) => `class="tip" data-tip="${esc(x)}"`;
     const tabBtn = (t, label, tp, ic) => `<button type="button" class="sub-tab tip${t === 'params' ? ' active' : ''}" role="tab"
@@ -1434,6 +1716,11 @@ const BMPlans = (() => {
             <fieldset class="dpw-vars">
               <legend>${esc(tr('dpw.fs.variables'))}</legend>
               <div class="dpw-vars-box" style="grid-column:1/-1;"></div>
+            </fieldset>
+            <fieldset class="dpw-gop-secrets" hidden>
+              <legend>${esc(tr('dpw.fs.gopSecrets'))}</legend>
+              <p class="form-hint" style="grid-column:1/-1;">${esc(tr('dpw.gopSecretsHint'))}</p>
+              <div class="dpw-gop-secrets-box" style="grid-column:1/-1;"></div>
             </fieldset>
             <fieldset class="dpw-secrets"${s.needSecrets ? '' : ' hidden'}>
               <legend>${esc(tr('dpw.fs.secrets'))}</legend>
@@ -1477,7 +1764,30 @@ const BMPlans = (() => {
     if (form.dataset.bound) return panel;
     form.dataset.bound = '1';
     const $ = (sel) => form.querySelector(sel);
-    const sig = () => JSON.stringify([s.cluster, s.plan, s.variables, s.updateDiffering]);
+    const sig = () => JSON.stringify([s.cluster, s.plan, s.variables, s.updateDiffering, Object.keys(gopValues()).sort()]);
+
+    // --- 2.8.0 : secrets Git de la phase GitOps ------------------------------
+    /** Secrets complets saisis : {nom: {identity[, known_hosts]} | {username, password}}. */
+    function gopValues() { return gopRead(form); }
+    function gopClear() { gopWipe(form); }
+    function paintGopSecrets() {
+      const fs = $('.dpw-gop-secrets');
+      fs.hidden = !s.gopSecrets.length;
+      const box = $('.dpw-gop-secrets-box');
+      const have = [...box.querySelectorAll('.dpw-gop-secret')].map(b => b.dataset.gopSecret);
+      if (JSON.stringify(have) === JSON.stringify(s.gopSecrets)) return;   // les saisies restent
+      box.innerHTML = gopSecretsHtml(s.gopSecrets);
+    }
+    /** Noms des secrets demandés par la phase GitOps du plan choisi. */
+    async function loadGopSecrets() {
+      const name = s.plan;
+      if (!name) { s.gopSecrets = []; paintGopSecrets(); return; }
+      let doc = null;
+      try { const r = await api('GET', `/api/baremetal/plans/${enc(name)}`); doc = r.ok ? r.d : null; } catch { doc = null; }
+      if (name !== s.plan || !form.isConnected) return;
+      s.gopSecrets = gopSecretNames(doc);
+      paintGopSecrets();
+    }
 
     function setTab(t) {
       s.tab = t;
@@ -1589,7 +1899,15 @@ const BMPlans = (() => {
           <tbody>${sum.artefacts.map(a => `<tr data-id="${esc(a.id)}"><td><code class="dpw-artefact-item">${esc(a.type === 'policies' ? tr('dpw.artPolicies') : a.item)}</code></td>
             <td><span class="badge dim">${esc(a.type)}</span></td><td><code>${esc(a.ref)}</code></td>
             <td>${a.package ? `<code>${esc(`${a.package} ${a.version || ''}`)}</code>` : ''}</td>
-            <td>${a.registry ? `<code>${esc(a.registry)}</code>` : ''}</td></tr>`).join('')}</tbody></table>` : ''}`;
+            <td>${a.registry ? `<code>${esc(a.registry)}</code>` : ''}</td></tr>`).join('')}</tbody></table>` : ''}
+        ${(sum.gitops || []).length ? `<h4 class="dpw-gitops-title">${esc(tr('bmpl.phase.gitops'))}</h4><table class="data-table dpw-gitops">
+          <thead><tr><th>${esc(tr('dpw.col.entry'))}</th><th>${esc(tr('dpw.col.cluster'))}</th><th>${esc(tr('dpw.col.tool'))}</th>
+            <th>${esc(tr('dpw.col.source'))}</th></tr></thead>
+          <tbody>${sum.gitops.map(g => `<tr data-id="${esc(g.id)}"><td><code class="dpw-gitops-entry">${esc(g.entry)}</code></td>
+            <td><code>${esc(g.ref)}</code></td>
+            <td>${g.tool ? `<span class="badge info">${esc(g.tool === 'fleet' ? tr('bmpl.gopToolFleet') : g.tool === 'flux' ? tr('bmpl.gopToolFlux') : g.tool)}</span>`
+              : `<span class="badge dim dpw-gitops-later">${esc(tr('bmpl.gopToolLater'))}</span>`}</td>
+            <td><span class="badge dim">${esc(g.source)}</span></td></tr>`).join('')}</tbody></table>` : ''}`;
       paintLaunch();
     }
 
@@ -1602,6 +1920,8 @@ const BMPlans = (() => {
       let r;
       const body = { plan: s.plan, variables: s.variables };
       if (s.updateDiffering) body.update_differing = true;
+      const gsec = gopValues();
+      if (Object.keys(gsec).length) body.gitops_secrets = gsec;
       try { r = await api('POST', `/api/deploy/${enc(s.cluster)}/check`, body); }
       catch (e) { r = { ok: false, status: 0, d: { error: e.message } }; }
       if (mine !== sig()) return;                 // les paramètres ont changé depuis
@@ -1650,6 +1970,8 @@ const BMPlans = (() => {
         const body = { action_id: resume.id };
         const sec = secrets();
         if (Object.keys(sec).length) body.secrets = sec;
+        const gsec = gopValues();
+        if (Object.keys(gsec).length) body.gitops_secrets = gsec;
         if (s.machines) {
           const typed = {};
           s.machines.filter(m => m.state === 'present').forEach(m => { typed[m.bmc_host] = (s.typed[m.bmc_host] || '').trim(); });
@@ -1664,10 +1986,13 @@ const BMPlans = (() => {
         out.textContent = '…';
         const body = { plan: s.plan, variables: s.variables, dry_run: !!dryRun };
         if (s.updateDiffering) body.update_differing = true;
+        const gsec = gopValues();
+        if (Object.keys(gsec).length) body.gitops_secrets = gsec;
         r = await api('POST', `/api/deploy/${enc(s.cluster)}`, body);
       }
       out.textContent = '';
       if (r.ok && r.d.action_id) {
+        gopClear();                               // jamais réaffichés après le départ
         // constats rendus au départ (plan changé depuis le déroulé repris...)
         const notes = (r.d.findings || []).filter(f => f && f.level !== 'info');
         msg.innerHTML = okLine(dryRun ? tr('dpw.dryStarted') : tr('dpw.started')) + (notes.length ? findingsHtml(notes) : '');
@@ -1701,6 +2026,11 @@ const BMPlans = (() => {
         msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('dpw.running'))} ${actionLink(r.d.running)}</div>`;
         return;
       }
+      if (r.d.code === 'renew-running' && r.d.running) {
+        // revue 5-8 I-9 : un renouvellement de machines tient ce cluster
+        msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('dpw.renewRunning'))} ${actionLink(r.d.running)}</div>`;
+        return;
+      }
       msg.innerHTML = refusal(r.d, r.status);
     }
 
@@ -1712,6 +2042,7 @@ const BMPlans = (() => {
     });
     form.addEventListener('change', (e) => {
       if (e.target.classList.contains('dpw-update')) { s.updateDiffering = e.target.checked; runCheck(); return; }
+      if (gopKindChange(e.target)) { later(); return; }
       if (e.target.name === 'cluster') { s.cluster = e.target.value; later(); }
       if (e.target.name === 'plan') {
         s.plan = e.target.value;
@@ -1720,6 +2051,7 @@ const BMPlans = (() => {
         (p ? p.variables || [] : []).forEach(v => { if (s.variables[v] != null) keep[v] = s.variables[v]; });
         s.variables = keep;
         paintVars();
+        loadGopSecrets();
         later();
       }
     });
@@ -1731,6 +2063,7 @@ const BMPlans = (() => {
       }
       const y = e.target.closest('[data-dpw-sys]');
       if (y) s.typed[y.dataset.dpwSys] = y.value;
+      if (e.target.closest('.dpw-gop-secret')) later();
     });
     form.addEventListener('submit', (ev) => { ev.preventDefault(); launch(false); });
 
@@ -1742,6 +2075,7 @@ const BMPlans = (() => {
     paintSelects();
     paintVars();
     paintSystem();
+    loadGopSecrets();
     // Reprise sans plan connu : la console revérifie seule
     if (resume && !s.plan) { s.check = { sig: sig(), error: tr('dpw.noPlanKnown') }; paintChecks(); } else runCheck();
     paintChecks();
@@ -1751,11 +2085,13 @@ const BMPlans = (() => {
   // =========================================================================
   // Fenêtre « Défaire le déploiement » (2.7.0, décision 128)
   // =========================================================================
-  const UNDO_KINDS = ['chart', 'manifest', 'policies', 'capi-cluster', 'registry', 'tf-declaration'];
+  // ordre de retrait de deploy_undo.KINDS_ORDER (2.8.0 : gitops, rancher-import)
+  const UNDO_KINDS = ['gitops', 'chart', 'manifest', 'policies', 'rancher-import', 'capi-cluster', 'registry', 'tf-declaration'];
   const UNDO_KIND_TEXT = {
     chart: () => tr('udw.kind.chart'), manifest: () => tr('udw.kind.manifest'), policies: () => tr('udw.kind.policies'),
     'capi-cluster': () => tr('udw.kind.capiCluster'), registry: () => tr('udw.kind.registry'),
     'tf-declaration': () => tr('udw.kind.tfDeclaration'),
+    gitops: () => tr('udw.kind.gitops'), 'rancher-import': () => tr('udw.kind.rancherImport'),
   };
   const UNDO_LIMITS = {
     'volumes-claimed': () => tr('udw.limit.volumesClaimed'), 'lb-dhcp': () => tr('udw.limit.lbDhcp'),
@@ -1835,6 +2171,15 @@ const BMPlans = (() => {
         ${(d.volumes || []).length ? `<p class="form-hint">${esc(tr('udw.volumes'))}</p><ul class="bm-paths">${li(d.volumes)}</ul>` : ''}
         ${(d.loadbalancers || []).length ? `<p class="form-hint">${esc(tr('udw.loadbalancers'))}</p><ul class="bm-paths">${li(d.loadbalancers)}</ul>` : ''}
         ${d.namespace_removed ? `<p class="form-hint">${esc(tr('udw.namespaceRemoved'))}</p>` : ''}`;
+    }
+    if (u.kind === 'gitops') {
+      return `<p class="udw-gitops">${esc(tr('udw.gitopsGoes', { tool: d.tool || '?', name: d.name || u.ref }))}</p>`;
+    }
+    if (u.kind === 'rancher-import') {
+      return `<p class="udw-rancher">${esc(tr('udw.rancherGoes', { name: d.name || '', rancher: d.rancher || '' }))}</p>
+        ${(d.delete || []).length ? `<p>${esc(tr('udw.objectsDeleted', { n: d.delete.length }))}</p><ul class="bm-paths udw-delete">${li(d.delete)}</ul>` : ''}
+        ${(d.kept || []).length ? `<p>${esc(tr('udw.objectsKept'))}</p><ul class="bm-paths udw-kept">${li(d.kept)}</ul>` : ''}
+        ${(d.refused || []).length ? `<div class="bm-refusal">${icon('fail', { size: 13 })} ${esc(tr('udw.objectsRefused'))}<ul class="bm-paths">${li(d.refused)}</ul></div>` : ''}`;
     }
     if (u.kind === 'registry') {
       return `<p>${esc(tr('udw.registryGoes', { address: d.address || '' }))}</p>
@@ -2055,6 +2400,11 @@ const BMPlans = (() => {
         msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('dpw.running'))} ${actionLink(r.d.running)}</div>`;
         return;
       }
+      if (r.d.code === 'renew-running' && r.d.running) {
+        // revue 5-8 I-9 : un renouvellement de machines tient ce cluster
+        msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('dpw.renewRunning'))} ${actionLink(r.d.running)}</div>`;
+        return;
+      }
       msg.innerHTML = refusal(r.d, r.status);
     }
 
@@ -2091,6 +2441,59 @@ const BMPlans = (() => {
   }
 
   // =========================================================================
+  // 2.8.0 : secrets Git de la phase GitOps (fenêtre Déployer, et revue 5-8
+  // I-10 : champ Plan des fenêtres d'installation et de série)
+  // =========================================================================
+  /** Noms des secrets que demandent les entrées Git de la phase GitOps d'un plan. */
+  function gopSecretNames(doc) {
+    const ph = ((doc || {}).phases || {}).gitops || {};
+    return ph.enabled ? [...new Set((ph.entries || []).map(e => ((e || {}).source || {}).secret).filter(Boolean))].sort() : [];
+  }
+  function gopSecretsHtml(names) {
+    return names.map(n => `<div class="dpw-gop-secret" data-gop-secret="${esc(n)}">
+          <h5><code>${esc(n)}</code></h5>
+          <label class="tip" data-tip="${esc(tr('dpw.t.gopKind'))}">${esc(tr('dpw.f.gopKind'))}
+            <select data-gop-k="kind" aria-label="${esc(tr('dpw.f.gopKind'))}">
+              <option value="ssh">${esc(tr('dpw.gopKind.ssh'))}</option><option value="basic">${esc(tr('dpw.gopKind.basic'))}</option></select></label>
+          <label class="tip dpw-gop-ssh" data-tip="${esc(tr('dpw.t.gopIdentity'))}">${esc(tr('dpw.f.gopIdentity'))}
+            <textarea data-gop-k="identity" rows="3" spellcheck="false" autocomplete="off" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                      aria-label="${esc(tr('dpw.f.gopIdentity'))}"></textarea></label>
+          <label class="tip dpw-gop-ssh" data-tip="${esc(tr('dpw.t.gopKnownHosts'))}">${esc(tr('dpw.f.gopKnownHosts'))}
+            <textarea data-gop-k="known_hosts" rows="2" spellcheck="false" autocomplete="off" aria-label="${esc(tr('dpw.f.gopKnownHosts'))}"></textarea></label>
+          <label class="tip dpw-gop-basic" data-tip="${esc(tr('dpw.t.gopUser'))}" hidden>${esc(tr('dpw.f.gopUser'))}
+            <input data-gop-k="username" autocomplete="off" spellcheck="false" aria-label="${esc(tr('dpw.f.gopUser'))}"></label>
+          <label class="tip dpw-gop-basic" data-tip="${esc(tr('dpw.t.gopPassword'))}" hidden>${esc(tr('dpw.f.gopPassword'))}
+            <input data-gop-k="password" type="password" autocomplete="new-password" aria-label="${esc(tr('dpw.f.gopPassword'))}"></label>
+        </div>`).join('');
+  }
+  /** Secrets complets saisis : {nom: {identity[, known_hosts]} | {username, password}}. */
+  function gopRead(root) {
+    const out = {};
+    root.querySelectorAll('.dpw-gop-secret').forEach(b => {
+      const v = (k) => ((b.querySelector(`[data-gop-k="${k}"]`) || {}).value || '');
+      const kind = (b.querySelector('[data-gop-k="kind"]') || {}).value;
+      if (kind === 'basic') {
+        if (v('username') && v('password')) out[b.dataset.gopSecret] = { username: v('username'), password: v('password') };
+      } else if (v('identity').trim()) {
+        out[b.dataset.gopSecret] = Object.assign({ identity: v('identity') }, v('known_hosts').trim() ? { known_hosts: v('known_hosts') } : {});
+      }
+    });
+    return out;
+  }
+  function gopWipe(root) {
+    root.querySelectorAll('.dpw-gop-secret textarea, .dpw-gop-secret input').forEach(el => { el.value = ''; });
+  }
+  /** Bascule clé SSH / compte d'un bloc ; vrai si l'événement le concernait. */
+  function gopKindChange(t) {
+    const gk = t.closest('.dpw-gop-secret [data-gop-k="kind"]');
+    if (!gk) return false;
+    const b = gk.closest('.dpw-gop-secret');
+    b.querySelectorAll('.dpw-gop-ssh').forEach(x => { x.hidden = gk.value !== 'ssh'; });
+    b.querySelectorAll('.dpw-gop-basic').forEach(x => { x.hidden = gk.value !== 'basic'; });
+    return true;
+  }
+
+  // =========================================================================
   // Historique : « Reprendre » sur un déroulé arrêté
   // =========================================================================
   /** 2.5.0 : un cluster enfant créé par un plan, lien vers Cluster API > Clusters. */
@@ -2114,7 +2517,30 @@ const BMPlans = (() => {
    *  plan absent est signalé) ; `withVars` : ses variables à saisir. Aucun
    *  champ nommé (FormData de la fenêtre ne le voit pas). */
   function mountPicker(box, initial, withVars) {
-    const ctl = { plan: initial || '', values: {}, plans: [], loaded: false };
+    const ctl = { plan: initial || '', values: {}, plans: [], loaded: false, gopNames: [] };
+    // revue 5-8 I-10 : secrets Git de la phase GitOps du plan, saisis ici
+    // (jamais rangés, effacés après l'envoi) ; hors du conteneur repeint
+    const gop = document.createElement('div');
+    gop.className = 'bmpl-pick-gop';
+    gop.style.gridColumn = '1 / -1';           // toute la largeur de la fenêtre, comme le choix du plan
+    gop.hidden = true;
+    box.insertAdjacentElement('afterend', gop);
+    async function loadGop() {
+      const name = ctl.plan;
+      if (!withVars || !name) { ctl.gopNames = []; paintGop(); return; }
+      let doc = null;
+      try { const r = await api('GET', `/api/baremetal/plans/${enc(name)}`); doc = r.ok ? r.d : null; } catch { doc = null; }
+      if (name !== ctl.plan || !box.isConnected) return;
+      ctl.gopNames = gopSecretNames(doc);
+      paintGop();
+    }
+    function paintGop() {
+      gop.hidden = !ctl.gopNames.length;
+      gop.innerHTML = ctl.gopNames.length ? `<fieldset class="dpw-gop-secrets"><legend>${esc(tr('dpw.fs.gopSecrets'))}</legend>
+        <p class="form-hint" style="grid-column:1/-1;">${esc(tr('dpw.gopSecretsHint'))}</p>
+        <div class="dpw-gop-secrets-box" style="grid-column:1/-1;">${gopSecretsHtml(ctl.gopNames)}</div></fieldset>` : '';
+    }
+    gop.addEventListener('change', (e) => { gopKindChange(e.target); });
     function paintPicker() {
       const names = ctl.plans.filter(p => !p.invalid).map(p => p.name);
       const missing = ctl.plan && ctl.loaded && !names.includes(ctl.plan);
@@ -2133,7 +2559,7 @@ const BMPlans = (() => {
         ${ctl.plan ? `<p class="form-hint">${esc(tr('bmpl.pick.hint'))}</p>` : ''}`;
     }
     box.addEventListener('change', (e) => {
-      if (e.target.matches('[data-pp="plan"]')) { ctl.plan = e.target.value; ctl.values = {}; paintPicker(); }
+      if (e.target.matches('[data-pp="plan"]')) { ctl.plan = e.target.value; ctl.values = {}; paintPicker(); loadGop(); }
     });
     box.addEventListener('input', (e) => {
       const v = e.target.closest('[data-pp-var]');
@@ -2143,9 +2569,14 @@ const BMPlans = (() => {
       if (!ctl.plan) return null;
       const vars = {};
       Object.entries(ctl.values).forEach(([k, v]) => { if (v) vars[k] = v; });
-      return withVars ? { plan: ctl.plan, plan_variables: vars } : { plan: ctl.plan };
+      if (!withVars) return { plan: ctl.plan };
+      const gsec = gopRead(gop);
+      return Object.assign({ plan: ctl.plan, plan_variables: vars }, Object.keys(gsec).length ? { gitops_secrets: gsec } : {});
     };
+    /** Efface les secrets Git saisis (après l'envoi). */
+    ctl.clearSecrets = () => gopWipe(gop);
     paintPicker();
+    loadGop();
     api('GET', '/api/baremetal/plans').then(r => {
       ctl.plans = r.ok ? (r.d.plans || []) : [];
       ctl.loaded = r.ok;
@@ -2333,6 +2764,15 @@ const BMPlans = (() => {
         return;
       }
       if ((el = e.target.closest('.bmpl-art-rm'))) { edit.artItems.splice(i(el), 1); fixDeps(); paintArtefacts(); return; }
+      // 2.8.0 : phase GitOps
+      if (e.target.closest('.bmpl-gop-add')) {
+        if (edit.gitops.length < MAX_GITOPS) {
+          edit.gitops.push(gopFromDoc({ name: '', clusters: planClusterNames().slice(0, 1) }));
+          paintGitops();
+        }
+        return;
+      }
+      if ((el = e.target.closest('.bmpl-gop-rm'))) { edit.gitops.splice(i(el), 1); paintGitops(); return; }
       if (e.target.closest('.bmpl-sc-ok')) { takeShortcut(box.querySelector('.bmpl-cl-shortcut')); return; }
       if (e.target.closest('.bmpl-sc-clear')) { edit.shortcut = null; paintClusters(); return; }
       if (e.target.closest('.bmpl-add-tpl-go')) {
@@ -2342,6 +2782,7 @@ const BMPlans = (() => {
     });
     document.addEventListener('change', (e) => {
       if (edit && artefactsChange(e.target)) return;
+      if (edit && gitopsChange(e.target)) return;
       const cdep = e.target.closest('#bm-plans .bmpl-cl-dep');
       if (cdep && edit) {
         const it = edit.clusters[Number(cdep.dataset.i)];

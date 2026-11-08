@@ -717,6 +717,10 @@ const CAPI = (() => {
       if (del) { e.preventDefault(); deleteCluster(del.dataset.ns, del.dataset.name); }
       const kc  = e.target.closest('.capi-cluster-kubeconfig');
       if (kc)  { e.preventDefault(); downloadKubeconfig(kc.dataset.ns, kc.dataset.name); }
+      const acc = e.target.closest('.capi-cluster-access');
+      if (acc) { e.preventDefault(); openAccess(acc.dataset.ns, acc.dataset.name); }
+      const ren = e.target.closest('.capi-cluster-renew');
+      if (ren) { e.preventDefault(); openRenew(ren.dataset.ns, ren.dataset.name); }
     });
     // Upload input change handler — delegated wiring done once
     document.addEventListener('change', (e) => {
@@ -855,10 +859,10 @@ const CAPI = (() => {
 
   // -------------------------------------------------------------------------
   // 2.2.0 : onglets de Cluster API (#automation/capi/<onglet>), dans l'ordre
-  // Clusters (défaut), Services, Registres et Artefacts (2.6.0), Historique,
-  // Installation
+  // Clusters (défaut), Services, GitOps (2.8.0), Registres et Artefacts
+  // (2.6.0), Historique, Installation
   // -------------------------------------------------------------------------
-  const TABS = ['clusters', 'services', 'registries', 'artefacts', 'history', 'installation'];
+  const TABS = ['clusters', 'services', 'gitops', 'registries', 'artefacts', 'history', 'installation'];
   // Anciens noms internes (onglets d'avant la 2.2.0, et « Création de
   // clusters » de la v1.53.0, devenue une fenêtre de Clusters)
   const OLD_TABS = { k8s: 'clusters', install: 'installation' };
@@ -892,6 +896,7 @@ const CAPI = (() => {
     if (tab !== 'history') capiHistory.stop();
     if (tab === 'clusters') { refreshK8sClustersPanel(); paintStackBanner(); }
     else if (tab === 'services') { if (window.CapiServices) CapiServices.start(); }
+    else if (tab === 'gitops') { if (window.CapiGitops) CapiGitops.start(); }
     else if (tab === 'registries') { if (window.Registries) Registries.start(); }
     else if (tab === 'artefacts') { if (window.Artefacts) Artefacts.start(); }
     else if (tab === 'history') capiHistory.render();
@@ -916,6 +921,13 @@ const CAPI = (() => {
       case 'capi-cluster-delete': return tr('capi.hist.kind.delete');
       case 'capi-service-deploy': return tr('capi.hist.kind.deploy');
       case 'capi-service-remove': return tr('capi.hist.kind.remove');
+      // 2.8.0 : accès, GitOps et renouvellement des machines
+      case 'capi-rancher-import': return tr('capi.hist.kind.rancherImport');
+      case 'capi-rancher-unimport': return tr('capi.hist.kind.rancherUnimport');
+      case 'capi-gitops': return tr('capi.hist.kind.gitops');
+      case 'capi-gitops-remove': return tr('capi.hist.kind.gitopsRemove');
+      case 'capi-renew': return tr('capi.hist.kind.renew');
+      case 'capi-renew-abandon': return tr('capi.hist.kind.renewAbandon');
       default: return verb;
     }
   }
@@ -1026,6 +1038,8 @@ const CAPI = (() => {
         <td>
           <button class="btn btn-sm btn-secondary capi-cluster-details tip" ${ref} data-tip="${esc(tr('capi.tip.clusterDetails'))}">${esc(tr('capi.v.details'))}</button>
           <button class="btn btn-sm btn-secondary capi-cluster-kubeconfig tip" ${ref} data-tip="${esc(tr('capi.tip.clusterKubeconfig'))}">${Icons.svg('download')} kubeconfig</button>
+          <button class="btn btn-sm btn-secondary capi-cluster-access tip" ${ref} data-tip="${esc(tr('capi.acc.t.open'))}">${Icons.svg('key')} ${esc(tr('capi.acc.open'))}</button>
+          <button class="btn btn-sm btn-secondary capi-cluster-renew tip" ${ref} data-tip="${esc(tr('capi.ren.t.open'))}">${Icons.svg('refresh')} ${esc(tr('capi.ren.open'))}</button>
           <button class="btn btn-sm btn-secondary capi-cluster-scale tip" ${ref} data-tip="${esc(tr('capi.tip.clusterScale'))}">${Icons.svg('moveVertical')} ${esc(tr('capi.v.scale'))}</button>
           <button class="btn btn-sm btn-danger capi-cluster-delete tip" ${ref} data-tip="${esc(tr('capi.tip.clusterDelete'))}">${Icons.svg('delete')} ${esc(tr('capi.v.delete'))}</button>
         </td>
@@ -1130,6 +1144,456 @@ const CAPI = (() => {
     window.open(`/api/capi/${enc(cluster)}/cluster/${enc(namespace)}/${enc(name)}/kubeconfig`, '_blank');
   }
 
+  // ---------------------------------------------------------------------
+  // 2.8.0 (tâche 9) : accès humain d'un cluster enfant (import dans le
+  // Rancher de la session, OIDC de l'API, membres dans Rancher) et
+  // renouvellement de ses machines. Fenêtres à onglets, comme Déployer ;
+  // les boutons qui écrivent restent grisés, raison dans la bulle, tant que
+  // la vérification n'est pas revenue.
+  // ---------------------------------------------------------------------
+  const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+  const can = (need) => (ROLE_RANK[window.App && App.role ? App.role() : null] || 0) >= ROLE_RANK[need];
+  const tabsHtml = (tabs, label) => `<div class="sub-tabs sub-tabs-inline capi-win-tabs" role="tablist" aria-label="${esc(label)}">
+    ${tabs.map(([k, text, tip, ic], i) => `<button type="button" role="tab" class="sub-tab tip${i ? '' : ' active'}" data-win-tab="${k}"
+      aria-selected="${i ? 'false' : 'true'}" data-tip="${esc(tip)}">${Icons.svg(ic, { size: 13 })} <span>${esc(text)}</span></button>`).join('')}</div>`;
+  function showWinTab(root, k) {
+    root.querySelectorAll('[data-win-tab]').forEach(b => {
+      b.classList.toggle('active', b.dataset.winTab === k);
+      b.setAttribute('aria-selected', b.dataset.winTab === k ? 'true' : 'false');
+    });
+    root.querySelectorAll('[data-win-pane]').forEach(x => { x.hidden = x.dataset.winPane !== k; });
+  }
+  /** Bouton qui écrit : grisé avec sa raison (bulle sur l'enveloppe, le
+   *  bouton grisé ne reçoit pas le survol). */
+  function gate(wrap, btn, ok, why) {
+    btn.disabled = !ok;
+    btn.title = why;
+    btn.setAttribute('aria-label', why);
+    wrap.dataset.tip = why;
+  }
+  /** Suit une action jusqu'à sa fin : ligne de progression, puis `done`. */
+  function followAction(id, line, done) {
+    line.hidden = false;
+    line.textContent = tr('capi.acc.started', { id });
+    if (!window.SSEReconnect) return;
+    const es = SSEReconnect.connect(`/api/stream/${enc(id)}`, {
+      on: {
+        step: (e) => { try { const st = JSON.parse(e.data); if (st.message) line.textContent = st.message; } catch { /* ligne illisible */ } },
+        end: (e) => {
+          let d = {};
+          try { d = JSON.parse(e.data); } catch { /* fin sans détail */ }
+          es.close();
+          line.textContent = d.status === 'done' ? tr('capi.acc.actionDone', { id })
+            : tr('capi.acc.actionFailed', { id, msg: d.error_summary || d.status || '?' });
+          if (done) done(d.status === 'done');
+        },
+      },
+    });
+  }
+  async function jsonCall(method, url, body) {
+    const r = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {},
+                                 body: body ? JSON.stringify(body) : undefined });
+    const d = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, d };
+  }
+
+  // --- Accès -------------------------------------------------------------
+  async function openAccess(namespace, name) {
+    const cluster = mgmtCluster();
+    const ref = `${namespace}/${name}`;
+    if (!window.FloatingPanels || !cluster) return;
+    const id = `capi-access-${namespace}-${name}`;
+    if (document.getElementById(`fp-${id}`)) FloatingPanels.close(id);
+    const panel = FloatingPanels.open({
+      id, title: tr('capi.acc.title', { name: ref }), icon: 'key', width: Math.min(760, Math.max(300, window.innerWidth - 120)), height: 480,
+      bodyHtml: `<div class="capi-access-win" style="padding:12px 14px;">
+        ${tabsHtml([['rancher', tr('capi.acc.tab.rancher'), tr('capi.acc.t.tabRancher'), 'plug'],
+                    ['oidc', tr('capi.acc.tab.oidc'), tr('capi.acc.t.tabOidc'), 'key'],
+                    ['members', tr('capi.acc.tab.members'), tr('capi.acc.t.tabMembers'), 'user']], tr('capi.acc.title', { name: ref }))}
+        <section data-win-pane="rancher" role="tabpanel"><p class="form-hint">${esc(tr('common.loading'))}</p></section>
+        <section data-win-pane="oidc" role="tabpanel" hidden><p class="form-hint">${esc(tr('common.loading'))}</p></section>
+        <section data-win-pane="members" role="tabpanel" hidden><p class="form-hint">${esc(tr('common.loading'))}</p></section>
+      </div>`,
+    });
+    const root = panel.el.querySelector('.capi-access-win');
+    root.querySelectorAll('[data-win-tab]').forEach(b => b.addEventListener('click', () => showWinTab(root, b.dataset.winTab)));
+    const pane = (k) => root.querySelector(`[data-win-pane="${k}"]`);
+
+    async function load() {
+      const [rs, dt] = await Promise.all([
+        jsonCall('GET', `/api/capi/${enc(cluster)}/rancher-status`).catch(e => ({ ok: false, d: { error: e.message } })),
+        jsonCall('GET', `/api/capi/${enc(cluster)}/cluster/${enc(namespace)}/${enc(name)}/details`).catch(e => ({ ok: false, d: { error: e.message } })),
+      ]);
+      if (!root.isConnected) return;
+      const session = rs.ok ? (rs.d.session || null) : null;
+      const row = rs.ok ? ((rs.d.clusters || []).find(x => x.namespace === namespace && x.cluster === name) || null) : null;
+      paintRancher(rs, session, row);
+      paintOidc(dt);
+      paintMembers(session, row);
+    }
+
+    function paintRancher(rs, session, row) {
+      const box = pane('rancher');
+      if (!rs.ok) { box.innerHTML = `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(rs.d.error || `HTTP ${rs.status}`)}</div></div>`; return; }
+      const imported = !!(row && row.imported);
+      const ours = imported && session && row.rancher === session;
+      const turtles = !!(row && row.turtles);
+      const state = !imported ? `<span class="badge dim">${esc(tr('capi.acc.notImported'))}</span>`
+        : row.ready ? `<span class="badge ok">${esc(tr('capi.acc.ready'))}</span>`
+          : `<span class="badge warn">${esc(row.state || tr('capi.acc.notReady'))}</span>`;
+      const run = imported && row.origin && row.origin.run;
+      box.innerHTML = `
+        <dl class="reg-facts capi-access-facts">
+          <dt>${esc(tr('capi.acc.session'))}</dt><dd>${session ? `<code>${esc(session)}</code>` : esc(tr('capi.acc.noSession'))}</dd>
+          <dt>${esc(tr('capi.acc.state'))}</dt><dd>${state}</dd>
+          ${imported ? `<dt>${esc(tr('capi.acc.where'))}</dt><dd><code>${esc(row.rancher)}</code> · <code>${esc(row.name)}</code> <span class="form-hint">${esc(row.cid)}</span></dd>` : ''}
+          ${run ? `<dt>${esc(tr('capi.acc.origin'))}</dt><dd><a class="tip" href="#activity/action/${enc(run)}" data-tip="${esc(tr('capi.acc.t.origin'))}"><code>${esc(run)}</code></a></dd>` : ''}
+        </dl>
+        ${turtles ? `<div class="sto-finding sev-watch" data-code="turtles"><div class="sto-finding-title">${esc(tr('capi.acc.turtles'))}</div></div>` : ''}
+        ${imported && session && !ours ? `<div class="sto-finding sev-watch" data-code="other-rancher"><div class="sto-finding-title">${esc(tr('capi.acc.otherRancher', { rancher: row.rancher }))}</div></div>` : ''}
+        <p class="form-hint">${esc(tr('capi.acc.rancherIntro'))}</p>
+        <div class="apply-bar" style="margin:8px 0 0;">
+          <span class="tip" data-x="import-wrap"><button type="button" class="btn btn-primary btn-sm" data-x="import">${Icons.svg('upload')} ${esc(tr('capi.acc.import'))}</button></span>
+          <span class="tip" data-x="unimport-wrap"><button type="button" class="btn btn-danger btn-sm" data-x="unimport">${Icons.svg('delete')} ${esc(tr('capi.acc.unimport'))}</button></span>
+          <button type="button" class="btn btn-secondary btn-sm tip" data-x="reload" data-tip="${esc(tr('capi.acc.t.reload'))}">${Icons.svg('refresh')} ${esc(tr('capi.acc.reload'))}</button>
+          <span class="apply-result" data-x="line" hidden></span>
+        </div>`;
+      const q = (x) => box.querySelector(`[data-x="${x}"]`);
+      const why = !can('operator') ? tr('capi.acc.t.operator')
+        : !session ? tr('capi.acc.t.noSession') : turtles ? tr('capi.acc.t.turtlesConflict')
+          : imported ? tr('capi.acc.t.already') : tr('capi.acc.t.import', { rancher: session });
+      gate(q('import-wrap'), q('import'), can('operator') && !!session && !imported && !turtles, why);
+      const whyUn = !can('operator') ? tr('capi.acc.t.operator') : !imported ? tr('capi.acc.t.notImported')
+        : !session ? tr('capi.acc.t.noSession') : !ours ? tr('capi.acc.otherRancher', { rancher: row.rancher }) : tr('capi.acc.t.unimport');
+      gate(q('unimport-wrap'), q('unimport'), can('operator') && imported && !!ours, whyUn);
+      q('reload').addEventListener('click', load);
+      const go = async (method, url, body, confirmText) => {
+        if (!confirm(confirmText)) return;
+        q('import').disabled = true;
+        q('unimport').disabled = true;
+        const r = await jsonCall(method, url, body);
+        const line = q('line');
+        if (!r.ok) {
+          line.hidden = false;
+          line.textContent = r.d.code === 'rancher-session-needed' ? tr('capi.acc.t.noSession') : (r.d.error || `HTTP ${r.status}`);
+          return;
+        }
+        followAction(r.d.action_id, line, () => setTimeout(load, 800));
+      };
+      q('import').addEventListener('click', () => !q('import').disabled && go('POST', `/api/capi/${enc(cluster)}/rancher-import`,
+        { cluster: ref }, tr('capi.acc.confirmImport', { name: ref, rancher: session || '' })));
+      q('unimport').addEventListener('click', () => !q('unimport').disabled && go('DELETE',
+        `/api/capi/${enc(cluster)}/rancher-import/${enc(namespace)}/${enc(name)}`, null, tr('capi.acc.confirmUnimport', { name: ref })));
+    }
+
+    function paintOidc(dt) {
+      const box = pane('oidc');
+      if (!dt.ok) { box.innerHTML = `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(dt.d.error || `HTTP ${dt.status}`)}</div></div>`; return; }
+      const o = dt.d.oidc || null;
+      const row = (k, label) => (o && o[k] ? `<dt>${esc(label)}</dt><dd><code>${esc(o[k])}</code></dd>` : '');
+      box.innerHTML = o ? `
+        <dl class="reg-facts capi-access-facts">
+          ${row('issuer_url', tr('capi.oidc.f.issuer'))}${row('audience', tr('capi.oidc.f.audience'))}
+          ${row('username_prefix', tr('capi.oidc.f.usernamePrefix'))}${row('groups_prefix', tr('capi.oidc.f.groupsPrefix'))}
+          ${row('admin_group', tr('capi.oidc.f.adminGroup'))}
+        </dl>
+        <p class="form-hint">${esc(tr('capi.acc.oidcKubeconfigNote'))}</p>
+        <div class="apply-bar" style="margin:8px 0 0;">
+          <span class="tip" data-x="dl-wrap"><button type="button" class="btn btn-primary btn-sm" data-x="dl">${Icons.svg('download')} ${esc(tr('capi.acc.oidcKubeconfig'))}</button></span>
+          <span class="apply-result" data-x="dl-line"></span>
+        </div>`
+        : `<p class="form-hint" data-x="no-oidc">${esc(tr('capi.acc.noOidc'))}</p>`;
+      const btn = box.querySelector('[data-x="dl"]');
+      if (!btn) return;
+      gate(box.querySelector('[data-x="dl-wrap"]'), btn, can('operator'),
+        can('operator') ? tr('capi.acc.t.oidcKubeconfig') : tr('capi.acc.t.operator'));
+      btn.addEventListener('click', async () => {
+        if (btn.disabled) return;
+        const line = box.querySelector('[data-x="dl-line"]');
+        const r = await jsonCall('GET', `/api/capi/${enc(cluster)}/oidc-kubeconfig/${enc(namespace)}/${enc(name)}`);
+        if (!r.ok || typeof r.d.kubeconfig !== 'string') { line.textContent = r.d.error || `HTTP ${r.status}`; return; }
+        // le fichier ne porte aucun identifiant (greffon kubelogin) ; il
+        // n'est jamais affiché, seulement remis
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([r.d.kubeconfig], { type: 'application/yaml' }));
+        a.download = `${name}-oidc.kubeconfig`;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+        line.textContent = tr('capi.acc.oidcDownloaded', { file: a.download });
+      });
+    }
+
+    function paintMembers(session, row) {
+      const box = pane('members');
+      const ours = row && row.imported && session && row.rancher === session && row.present !== false;
+      if (!ours || !window.RancherMembers) {
+        box.innerHTML = `<p class="form-hint" data-x="no-members">${esc(!session ? tr('capi.acc.t.noSession') : tr('capi.acc.membersNeedImport'))}</p>`;
+        return;
+      }
+      box.innerHTML = '<div data-x="members"></div>';
+      RancherMembers.render(box.querySelector('[data-x="members"]'),
+        { cluster, scope: 'cluster', child: ref, title: tr('capi.acc.membersTitle', { name: row.name }) });
+    }
+
+    load();
+    return panel;
+  }
+
+  // --- Renouveler les machines (point 233) --------------------------------
+  const RENEW_WHATS = ['registries', 'oidc', 'ca'];
+  const RENEW_ERRORS = {
+    'renew-busy': () => tr('capi.ren.err.busy'),
+    'renew-nothing': () => tr('capi.ren.err.nothing'),
+    'renew-plan-running': () => tr('capi.ren.err.planRunning'),
+    'renew-cluster-missing': () => tr('capi.ren.err.clusterMissing'),
+    'renew-class-missing': () => tr('capi.ren.err.classMissing'),
+    'renew-template-missing': () => tr('capi.ren.err.templateMissing'),
+    'child-admin-required': () => tr('capi.ren.err.childAdmin'),
+    // revue 5-8 (I-1, I-9) : renouvellement pas fini, abandon, verrou du cluster
+    'renew-not-running': () => tr('capi.ren.err.notRunning'),
+    'renew-marker-unreadable': () => tr('capi.ren.err.markerUnreadable'),
+    'renew-abandon-admin-only': () => tr('capi.ren.err.abandonAdmin'),
+    'capi-uninstall-running': () => tr('capi.ren.err.uninstallRunning'),
+  };
+  const RENEW_FINDINGS = {
+    'renew-pool-missing': (v) => tr('capi.ren.fd.renew-pool-missing', v),
+    'renew-pool-short': (v) => tr('capi.ren.fd.renew-pool-short', v),
+    'cpu-short': (v) => tr('capi.ren.fd.cpu-short', v),
+    'memory-short': (v) => tr('capi.ren.fd.memory-short', Object.assign({}, v, {
+      needed: window.XferProgress ? XferProgress.bytes(v.needed) : v.needed,
+      free: window.XferProgress ? XferProgress.bytes(v.free) : v.free })),
+  };
+  const renewErrorText = (d) => {
+    const code = d.code || (/^([a-z][a-z0-9-]+):/.exec(d.error || '') || [])[1];
+    return RENEW_ERRORS[code] ? RENEW_ERRORS[code]() : (d.error || '?');
+  };
+
+  async function openRenew(namespace, name) {
+    const cluster = mgmtCluster();
+    const ref = `${namespace}/${name}`;
+    if (!window.FloatingPanels || !cluster || !window.CapiCreate) return;
+    const id = `capi-renew-${namespace}-${name}`;
+    if (document.getElementById(`fp-${id}`)) FloatingPanels.close(id);
+    const [inv, dt] = await Promise.all([
+      jsonCall('GET', `/api/capi/${enc(cluster)}/inventory`).catch(() => ({ ok: false, d: {} })),
+      jsonCall('GET', `/api/capi/${enc(cluster)}/cluster/${enc(namespace)}/${enc(name)}/details`).catch(() => ({ ok: false, d: {} })),
+    ]);
+    const cur = (dt.ok && dt.d.oidc) || null;
+    const whatTip = { registries: tr('capi.ren.t.registries'), oidc: tr('capi.ren.t.oidc'), ca: tr('capi.ren.t.ca') };
+    const whatLabel = { registries: tr('capi.ren.what.registries'), oidc: tr('capi.ren.what.oidc'), ca: tr('capi.ren.what.ca') };
+    const panel = FloatingPanels.open({
+      id, title: tr('capi.ren.title', { name: ref }), icon: 'refresh', width: Math.min(860, Math.max(300, window.innerWidth - 120)),
+      height: Math.max(420, Math.min(680, window.innerHeight - 80)),
+      bodyHtml: `<div class="capi-renew-win capi-create" style="padding:12px 14px;">
+        ${tabsHtml([['params', tr('capi.ren.tab.params'), tr('capi.ren.t.tabParams'), 'edit'],
+                    ['diff', tr('capi.ren.tab.diff'), tr('capi.ren.t.tabDiff'), 'preview'],
+                    ['confirm', tr('capi.ren.tab.confirm'), tr('capi.ren.t.tabConfirm'), 'ok']], tr('capi.ren.title', { name: ref }))}
+        <section data-win-pane="params" role="tabpanel" class="tf-form">
+          <p class="tf-desc">${esc(tr('capi.ren.intro'))}</p>
+          <fieldset class="tf-block"><legend>${esc(tr('capi.ren.what'))}</legend><div class="tf-args">
+            ${RENEW_WHATS.map(w => `<label class="tf-field tf-type-bool tip" data-tip="${esc(whatTip[w])}"><input type="checkbox" data-w="${w}"><span class="tf-label">${esc(whatLabel[w])}</span></label>`).join('')}
+          </div></fieldset>
+          <fieldset class="tf-block" data-w-box="registries" hidden><legend>${esc(whatLabel.registries)}</legend>
+            <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('capi.ren.t.reread'))}"><input type="radio" name="ren-regs" data-reg-mode="reread" checked><span class="tf-label">${esc(tr('capi.ren.reread'))}</span></label>
+            <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('capi.ren.t.replace'))}"><input type="radio" name="ren-regs" data-reg-mode="replace"><span class="tf-label">${esc(tr('capi.ren.replace'))}</span></label>
+            <div data-reg-editor hidden>${CapiCreate.registriesHtml(inv.ok ? inv.d : {}, false)}</div>
+          </fieldset>
+          <fieldset class="tf-block" data-w-box="oidc" hidden><legend>${esc(whatLabel.oidc)}</legend>
+            <p class="tf-desc">${esc(cur ? tr('capi.ren.oidcCurrent') : tr('capi.ren.oidcNone'))}</p>
+            ${CapiCreate.oidcHtml(!!cur)}
+          </fieldset>
+          <fieldset class="tf-block" data-w-box="ca" hidden><legend>${esc(whatLabel.ca)}</legend>
+            <p class="tf-desc">${esc(tr('capi.ren.caIntro'))}</p></fieldset>
+          <div class="tf-args"><label class="tf-field"><span class="tf-label">${esc(tr('capi.ren.timeout'))}</span>
+            <input type="number" data-x="timeout" min="1" max="180" value="60" class="tip" data-tip="${esc(tr('capi.ren.t.timeout'))}"></label></div>
+        </section>
+        <section data-win-pane="diff" role="tabpanel" hidden><div class="xfer-report" data-x="diff"><p class="form-hint">${esc(tr('capi.ren.pickWhat'))}</p></div></section>
+        <section data-win-pane="confirm" role="tabpanel" hidden>
+          <ul class="reg-summary" data-x="summary"></ul>
+          <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('capi.ren.t.understand'))}"><input type="checkbox" data-x="understand"><span class="tf-label">${esc(tr('capi.ren.understand'))}</span></label>
+        </section>
+        <div class="bm-refusal bm-warning capi-ren-unfinished" data-x="unfinished" hidden>
+          <p>${Icons.svg('warn', { size: 13 })} ${esc(tr('capi.ren.unfinished'))}</p>
+          <div class="apply-bar">
+            <span class="tip" data-x="finish-wrap"><button type="button" class="btn btn-secondary btn-sm" data-x="finish">${Icons.svg('play')} ${esc(tr('capi.ren.finish'))}</button></span>
+            <span class="tip" data-x="abandon-wrap"><button type="button" class="btn btn-danger btn-sm" data-x="abandon">${Icons.svg('close')} ${esc(tr('capi.ren.abandon'))}</button></span>
+          </div>
+        </div>
+        <div class="apply-bar" style="margin-top:10px;">
+          <span class="tip" data-x="go-wrap"><button type="button" class="btn btn-primary btn-sm" data-x="go" disabled>${Icons.svg('refresh')} ${esc(tr('capi.ren.go'))}</button></span>
+          <span class="apply-result" data-x="line" hidden></span>
+        </div>
+      </div>`,
+    });
+    const root = panel.el.querySelector('.capi-renew-win');
+    const q = (x) => root.querySelector(`[data-x="${x}"]`);
+    root.querySelectorAll('[data-win-tab]').forEach(b => b.addEventListener('click', () => showWinTab(root, b.dataset.winTab)));
+    const st = { seq: 0, timer: null, diff: null, sig: '', launched: false };
+    const regs = CapiCreate.wireRegistries(root.querySelector('[data-reg-editor]'), inv.ok ? inv.d : {}, false, () => later());
+    if (cur) CapiCreate.fillOidc(root, cur);
+    const whats = () => RENEW_WHATS.filter(w => root.querySelector(`[data-w="${w}"]`).checked);
+    function body() {
+      const ws = whats();
+      const b = { what: ws, timeout: Math.max(1, Math.min(180, Number(q('timeout').value) || 60)) * 60 };
+      if (ws.includes('registries') && root.querySelector('[data-reg-mode="replace"]').checked) {
+        b.registries = CapiCreate.readRegistries(root.querySelector('[data-reg-editor]'));
+      }
+      if (ws.includes('oidc')) b.oidc = CapiCreate.readOidc(root);
+      return b;
+    }
+    function paintGo() {
+      const d = st.diff;
+      const fresh = d && st.sig === JSON.stringify(body());
+      const changed = fresh && d.ok && !d.blocked && ((d.changes || []).length || d.secrets_changed || d.access_changed);
+      const why = !can('operator') ? tr('capi.acc.t.operator')
+        : st.launched ? tr('capi.ren.t.launched')
+          : !whats().length ? tr('capi.ren.pickWhat')
+            : !fresh ? tr('capi.ren.t.checking')
+              : !d.ok ? tr('capi.ren.t.blocked', { reason: renewErrorText(d) })
+                : d.blocked ? tr('capi.ren.t.blocked', { reason: d.reason || tr('capi.ren.err.nothing') })
+                  : !changed ? tr('capi.ren.err.nothing')
+                    : !q('understand').checked ? tr('capi.ren.t.needUnderstand') : tr('capi.ren.t.go');
+      gate(q('go-wrap'), q('go'), can('operator') && !st.launched && !!changed && q('understand').checked, why);
+      paintUnfinished();
+    }
+    // revue 5-8 (I-1, m-2) : un renouvellement pas fini (marque du Cluster)
+    // se reprend (opérateur) ou s'abandonne sans rien supprimer (admin)
+    function paintUnfinished() {
+      const d = st.diff;
+      const code = d && !d.ok ? (d.code || (/^([a-z][a-z0-9-]+):/.exec(d.error || '') || [])[1]) : '';
+      const busy = code === 'renew-busy' || code === 'renew-marker-unreadable';
+      q('unfinished').hidden = !busy && !st.unfinishedLaunched;
+      const fin = can('operator') && !st.launched && code === 'renew-busy';
+      gate(q('finish-wrap'), q('finish'), fin, !can('operator') ? tr('capi.acc.t.operator')
+        : st.launched ? tr('capi.ren.t.launched') : tr('capi.ren.t.finish'));
+      const ab = can('admin') && !st.launched && busy;
+      gate(q('abandon-wrap'), q('abandon'), ab, !can('admin') ? tr('capi.ren.t.abandonAdmin')
+        : st.launched ? tr('capi.ren.t.launched') : tr('capi.ren.t.abandon'));
+    }
+    async function launchMode(mode) {
+      if (!confirm(mode === 'abandon' ? tr('capi.ren.confirmAbandon', { name: ref }) : tr('capi.ren.confirmFinish', { name: ref }))) return;
+      st.launched = true;
+      st.unfinishedLaunched = true;
+      paintGo();
+      const t = Math.max(1, Math.min(180, Number(q('timeout').value) || 60)) * 60;
+      const r = await jsonCall('POST', `/api/capi/${enc(cluster)}/renew/${enc(namespace)}/${enc(name)}`,
+        mode === 'abandon' ? { mode } : { mode, timeout: t });
+      const line = q('line');
+      if (!r.ok) {
+        st.launched = false;
+        line.hidden = false;
+        line.textContent = renewErrorText(r.d);
+        paintGo();
+        return;
+      }
+      followAction(r.d.action_id, line, () => setTimeout(refreshK8sClustersPanel, 800));
+    }
+    function paintDiff() {
+      const d = st.diff;
+      const box = q('diff');
+      if (!d) { box.innerHTML = `<p class="form-hint">${esc(whats().length ? tr('capi.ren.checking') : tr('capi.ren.pickWhat'))}</p>`; return; }
+      if (!d.ok) {
+        box.innerHTML = `<div class="sto-finding sev-critical" data-code="error"><div class="sto-finding-title">${esc(renewErrorText(d))}</div></div>`;
+        return;
+      }
+      const ch = d.changes || [];
+      const fs = (d.findings || []).map(f => `<div class="sto-finding ${f.level === 'block' ? 'sev-critical' : 'sev-watch'}" data-code="${esc(f.code)}">
+          <div class="sto-finding-title">${esc(RENEW_FINDINGS[f.code] ? RENEW_FINDINGS[f.code](Object.assign({}, f.facts || {})) : f.code)}</div></div>`).join('');
+      box.innerHTML = (!ch.length && !d.secrets_changed && !d.access_changed)
+        ? `<div class="sto-finding sev-watch" data-code="renew-nothing"><div class="sto-finding-title">${esc(tr('capi.ren.err.nothing'))}</div></div>`
+        : `<p>${esc(tr('capi.ren.revision', { n: d.revision }))}</p>
+          ${ch.map(c => `<div class="capi-ren-change"><strong><code>${esc(c.template)}</code></strong> <span class="badge dim">${esc(c.kind || '')}</span>
+            <ul class="bm-paths">${(c.paths || []).slice(0, 12).map(x => `<li><code>${esc(x)}</code></li>`).join('')}
+            ${(c.paths || []).length > 12 ? `<li class="form-hint">${esc(tr('capi.ren.more', { n: c.paths.length - 12 }))}</li>` : ''}</ul></div>`).join('')}
+          ${d.secrets_changed ? `<p class="form-hint">${Icons.svg('info', { size: 12 })} ${esc(tr('capi.ren.secretsChanged'))}</p>` : ''}
+          ${d.access_changed ? `<p class="form-hint" data-access-changed>${Icons.svg('info', { size: 12 })} ${esc(tr('capi.ren.accessChanged'))}</p>` : ''}
+          ${fs}`;
+    }
+    function paintSummary() {
+      const d = st.diff;
+      const ws = whats();
+      q('summary').innerHTML = `
+        <li>${esc(tr('capi.ren.sum.what', { what: ws.map(w => whatLabel[w]).join(', ') || '-' }))}</li>
+        ${d && d.ok && d.revision ? `<li>${esc(tr('capi.ren.sum.revision', { n: d.revision, count: (d.changes || []).length }))}</li>` : ''}
+        <li>${esc(tr('capi.ren.sum.rolling'))}</li>
+        <li>${esc(tr('capi.ren.sum.cut'))}</li>
+        <li>${esc(tr('capi.ren.sum.address'))}</li>
+        <li>${esc(tr('capi.ren.sum.rollback'))}</li>`;
+    }
+    async function check() {
+      const n = ++st.seq;
+      const b = body();
+      st.diff = null;
+      paintDiff();
+      paintSummary();
+      paintGo();
+      if (!b.what.length) return;
+      const local = b.what.includes('oidc') ? CapiCreate.oidcLocalErrors(root) : [];
+      if (local.length) {
+        st.sig = JSON.stringify(b);
+        st.diff = { ok: false, d: {}, code: local[0].code, error: CapiCreate._findingText(local[0]) };
+        q('diff').innerHTML = `<div class="sto-finding sev-critical" data-code="${esc(local[0].code)}"><div class="sto-finding-title">${esc(CapiCreate._findingText(local[0]))}</div></div>`;
+        paintGo();
+        return;
+      }
+      const r = await jsonCall('POST', `/api/capi/${enc(cluster)}/renew/${enc(namespace)}/${enc(name)}`, Object.assign({ dry_run: true }, b))
+        .catch(e => ({ ok: false, status: 0, d: { error: e.message } }));
+      if (n !== st.seq || !root.isConnected) return;
+      st.sig = JSON.stringify(b);
+      st.diff = r.ok ? Object.assign({ ok: true }, r.d) : Object.assign({ ok: false }, r.d);
+      paintDiff();
+      paintSummary();
+      paintGo();
+    }
+    const later = () => {
+      clearTimeout(st.timer);
+      st.seq++;
+      st.diff = null;
+      paintGo();
+      st.timer = setTimeout(check, 500);
+    };
+    root.querySelectorAll('[data-w]').forEach(c => c.addEventListener('change', () => {
+      root.querySelector(`[data-w-box="${c.dataset.w}"]`).hidden = !c.checked;
+      later();
+    }));
+    root.querySelectorAll('[data-reg-mode]').forEach(r => r.addEventListener('change', () => {
+      root.querySelector('[data-reg-editor]').hidden = !root.querySelector('[data-reg-mode="replace"]').checked;
+      later();
+    }));
+    const oon = root.querySelector('[data-w-box="oidc"] [data-o-on]');
+    if (oon) oon.addEventListener('change', () => { root.querySelector('[data-w-box="oidc"] [data-o-box]').hidden = !oon.checked; later(); });
+    root.querySelectorAll('[data-o]').forEach(el => {
+      el.addEventListener('input', () => CapiCreate.oidcLocalErrors(root));
+      el.addEventListener('change', later);
+    });
+    q('timeout').addEventListener('change', later);
+    q('understand').addEventListener('change', paintGo);
+    q('finish').addEventListener('click', () => { if (!q('finish').disabled) launchMode('finish'); });
+    q('abandon').addEventListener('click', () => { if (!q('abandon').disabled) launchMode('abandon'); });
+    q('go').addEventListener('click', async () => {
+      if (q('go').disabled) return;
+      const b = body();
+      if (!confirm(tr('capi.ren.confirm', { name: ref }))) return;
+      st.launched = true;
+      paintGo();
+      const r = await jsonCall('POST', `/api/capi/${enc(cluster)}/renew/${enc(namespace)}/${enc(name)}`, b);
+      const line = q('line');
+      if (!r.ok) {
+        st.launched = false;
+        line.hidden = false;
+        line.textContent = renewErrorText(r.d);
+        paintGo();
+        return;
+      }
+      followAction(r.d.action_id, line, () => setTimeout(refreshK8sClustersPanel, 800));
+    });
+    regs.set([]);
+    paintSummary();
+    paintGo();
+    return panel;
+  }
+
   /**
    * Rejoue l'activation du sous-onglet courant (v1.20.0).
    *
@@ -1150,7 +1614,8 @@ const CAPI = (() => {
   // Wire sub-tabs at DOMContentLoaded
   document.addEventListener('DOMContentLoaded', initSubtabs);
 
-  return { init, refresh, reactivate, setTab, tab: () => tab, refreshK8s: refreshK8sClustersPanel, openCreate, openUninstall };
+  return { init, refresh, reactivate, setTab, tab: () => tab, refreshK8s: refreshK8sClustersPanel, openCreate, openUninstall,
+    openAccess, openRenew };
 })();
 
 document.addEventListener('DOMContentLoaded', CAPI.init);

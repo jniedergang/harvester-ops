@@ -4,6 +4,224 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.8.0] - 2026-11-08 - Child cluster access, GitOps, machine renewal and finished registries
+
+### Added
+- **Import into the external Rancher** (decision 125, points 220 to 222,
+  232). A child cluster made by Cluster API is imported into the Rancher
+  of the person's session, the one that manages the Harvester cluster: a
+  `provisioning.cattle.io` cluster created through the Rancher API with the
+  session token, its registration manifest applied in the child (fetched
+  by the console, 10 MiB at most, written 0600 and erased, never logged).
+  The images of the Rancher agent are probed in the child registries first
+  (`rancher-agent-image-missing` when the fallback is cut). Option
+  `rancher_external` of a cluster or a cluster template, exclusive of the
+  embedded Turtles import (`rancher-import-conflict`); a local account is
+  refused (`rancher-session-needed`). The Members window works for the
+  child. Remove the import: the cluster leaves Rancher, then only the
+  leftovers that carry a mark of Rancher are deleted in the child
+  (`kept-not-rancher` otherwise). Deleting an imported child removes it from
+  Rancher without reading the child; `delete --forget-rancher`
+  (administrator, CLI and API only) forgets a Rancher that is gone.
+- **OIDC of the child API** (points 228 to 231): option `oidc` (issuer
+  `https://`, audience, claims, prefixes that are never empty nor
+  `system:`, issuer CA, administrator group). An
+  `AuthenticationConfiguration` (v1 on Kubernetes 1.34) in the control
+  plane template only, no secret on the cluster. The administrator group is
+  bound to `cluster-admin` by `hops-oidc-admins`, the only binding to
+  `cluster-admin` the console delivers. The OIDC kubeconfig given to people
+  uses the kubelogin exec plugin and holds no credential. Rancher and OIDC
+  together are warned (`oidc-with-rancher`).
+- **GitOps** (decision 124, points 223 to 227): new Cluster API tab
+  **GitOps** and plan phase **GitOps** (the last phase, 16 entries, 64
+  items, 1 to 60 minutes). Tool `auto` (Fleet when the child is imported,
+  Flux otherwise), `flux` or `fleet`. Sources `oci` (Flux artefact of a
+  `gitops` package item, Flux only), `git` (`https://` or `ssh://`, secret
+  of the plan entered at launch and asked again on resume, never stored)
+  and `chart` (Fleet `HelmOp` only). Flux is the community chart `flux2`
+  applied by CAAPH as the service `flux` in `flux-system`, with the
+  multi-tenant lockdown values imposed (`multitenancy`, no image
+  automation). Entries live in `hops-gitops`; each `Kustomization` runs as
+  `hops-gitops-<entry>`, bound to `edit` in its team namespace
+  (`privileges: cluster`, administrator only, binds it to `cluster-admin`).
+  Registry and Git credentials reach the child through a `resource-set`
+  Secret of the `ClusterResourceSet`, never the ConfigMap.
+- **Renew the machines of a child cluster** (point 233): Renew window and
+  `harvester-capi renew --name NS/C --what registries,oidc,ca [--spec F]
+  [--timeout 60-10800] [--dry-run]`. Only the templates that change are
+  copied to `<name>-r<N>`, the `ClusterClass` is repointed, and only the
+  machines of their roles are waited for (old machines named by their UID,
+  no clock compared). A mark `harvester-ops.io/renewal` stays on the
+  `Cluster` until the end: `--finish` resumes a renewal that timed out,
+  `--abandon` (administrator) clears the mark and removes nothing. An OIDC
+  renewal delivers the administrator group binding again from the new
+  settings; a change of the group alone replaces no machine.
+- **Registries finished** (points 234 to 236, decision 196): the read
+  password is stored once (label `harvester-ops.io/registry-<r>: used` on
+  the nodes secret, the old `-auth` form read and removed at the first
+  registries renewal); bootstrap registries laid from 2.8.0 keep their CA
+  key (critical name constraints) and `harvester-registry renew-cert`
+  renews the server certificate with the same CA (reads cut for a few
+  seconds); a registry laid before 2.8.0 renews with `--new-ca` in three
+  steps (new CA in transition, `renew --what ca` on each child, switch),
+  refused with the list of the copies that do not trust the new CA yet
+  (`registry-ca-transition-pending`); `harvester-registry harvester-nodes`
+  (administrator) merges a registry into the Harvester settings
+  `containerd-registry` and `additional-ca`, checks that Harvester moved the
+  read password into its own Secret, and returns the previous value masked.
+- **Child cluster without Internet** (point 237, decision 191): package kind
+  `rke2` (`harvester-artefacts pack --rke2 VERSION [--cni calico]`),
+  published as blobs (tag with `+` replaced by `_`); option `offline: true`
+  fetches the three RKE2 files by digest from the registry with a netrc,
+  checks every sha256 before `/opt/install.sh` is placed, and lets CAPRKE2
+  install with `airGapped`.
+- Package kind `gitops` (Flux artefact). CLI: `harvester-capi
+  rancher-import | rancher-unimport | rancher-status | oidc-kubeconfig |
+  gitops-check | gitops-deploy | gitops-remove | gitops-status | renew`,
+  `harvester-registry renew-cert | harvester-nodes`.
+
+### Changed
+- **Fleet is reserved to administrators**, to pose and to remove an entry
+  (`gitops-fleet-admin-only`; `gitops-remove --role`): a `GitRepo` or
+  `HelmOp` without a service account deploys with the Fleet agent, which is
+  `cluster-admin` of the child. A Fleet entry carries the plan that posed
+  it; another plan or a hand-made entry of the same name is refused
+  (`gitops-taken`).
+- **Flux chart and Kubernetes**: the chart `flux2` 2.20.0 (Flux 2.10)
+  refuses Kubernetes before 1.35 (pre-install check job). On 1.34 children,
+  package `flux2` 2.19.1 (Flux 2.9.5). The console does not pin the chart
+  version.
+- A renewal holds the lock of the Harvester cluster: plans, undo, the
+  Turtles uninstall and other renewals on the same Harvester cluster are
+  refused meanwhile (`renew-running`), up to its time limit (1 h by
+  default, 3 h at most).
+- Undo knows the kinds `gitops` and `rancher-import`; order gitops,
+  artefacts, rancher-import, clusters, registry, terraform.
+- Cluster templates accept `rancher_external`, `oidc`, `offline`,
+  `offline_artifacts`.
+- A plan chained to a Harvester install refuses at launch an external
+  Rancher import or a Fleet entry (`rancher-session-in-chain`), and its
+  install and batch windows take the Git secrets of the plan.
+- `harvester-capi create --by P`: the person who creates, written in
+  Rancher when the cluster is imported at creation.
+- Package downloads send a `User-Agent` (`get.rke2.io` refuses the default
+  one of Python).
+
+### Fixed
+- Found on the benches and fixed before release:
+  - a Fleet `HelmOp` asked for the package version instead of the chart
+    version and never deployed;
+  - removing a Fleet `GitRepo` or `HelmOp` left its `Bundle` in Rancher
+    and the release in the child (Fleet 0.15.1); the bundles are removed
+    too, and a refused Rancher delete is an error;
+  - the plan check of a GitOps entry on an existing child sent an empty
+    run and blocked every entry (`gitops-check-failed`);
+  - the `flux` release went to `default`; it goes to `flux-system`, and a
+    release already posed keeps its namespace (CAAPH reinstalled it to move
+    it, which removed the Flux CRDs and every Flux object);
+  - the renewal after an abandoned one left the nodes secret of the
+    abandoned revision;
+  - `applied-by` stayed empty in Rancher for a cluster imported at its
+    creation;
+  - `pack --rke2` failed with HTTP 403 on `get.rke2.io`.
+- Final review:
+  - `harvester-nodes` would erase the password Harvester keeps for another
+    registry of `containerd-registry` (Harvester 1.9 rewrites those Secrets
+    with the host only when the mirrors change, seen on harvlab2): refused
+    with `harvester-nodes-other-auth`, nothing written;
+  - an OIDC renewal left the old administrator group bound to
+    `cluster-admin`;
+  - chained bare-metal plans accepted `rancher_external` and Fleet;
+  - unused code removed (`group_with_prefix`).
+
+### Upgrade notes
+- Nothing to migrate. A child cluster created before 2.8.0 keeps its
+  `-auth` Secrets until its first registries renewal or its deletion; both
+  forms are read.
+- A bootstrap registry laid before 2.8.0 has no kept CA key:
+  `renew-cert` refuses (`registry-ca-key-missing`); use `--new-ca`.
+- A package built before 2.8.0 has no published `gitops` item
+  (`gitops-package-not-published`): build and publish it again.
+
+**Back to 2.7.1**:
+- Imports, OIDC options, GitOps entries and renewed templates stay on the
+  clusters; 2.7.1 neither shows nor removes them. Remove GitOps entries and
+  imports before going back.
+- 2.7.1 refuses a plan that carries a `gitops` phase, even disabled
+  (unknown phase), and a cluster template with the 2.8.0 options: remove
+  them before going back.
+- Child clusters created by 2.8.0 have no `-auth` Secret: 2.7.1 reads only
+  that form and would not see their registries as used.
+
+### Known limits
+- Fleet with a confined service account is not offered (Fleet stays
+  administrator only).
+- Fleet copies of a registry CA are not checked before a CA switch
+  (warning step `registry-ca-fleet-unchecked`).
+- No HEAD of the Flux artefact tag at check time: an entry whose artefact
+  is missing times out.
+- Row ids of a plan can collide (`a-b/c` and `a/b-c`), to be fixed in 2.9.
+- Offline fetch uses Basic authentication: registries that only do token
+  authentication (Harbor, ghcr style) are not supported; the `rke2rN`
+  release is not compared, only the Kubernetes version.
+- Two `renew-cert --new-ca` from the command line at once are not guarded
+  (the console blocks the second one).
+- Real Rancher leftovers without a mark of Rancher stay in the child after
+  the import is removed (`kept-not-rancher`: `cattle-cleanup-*`,
+  `p-*-namespaces-*`, `project-owner-promoted`, some `crb-*`).
+- The nodes of the Harvester cluster that hosts a bootstrap registry may
+  not reach its address themselves (seen on harvlab2): `harvester-nodes`
+  is for a registry the Harvester nodes can reach.
+- Undo of a plan that adopted a cluster created with an OIDC administrator
+  group removes the whole `hops-policies` item, the binding included.
+
+### Verified for real
+On harvlab2 (Harvester 1.9.0), with a bench Dex, the external Rancher
+2.14.1 (VM on harv1, started then stopped) and a temporary Gitea
+repository, all removed after:
+- OIDC: administrator group `cluster-admin`, another person limited to its
+  team role, another audience refused, OIDC kubeconfig without credential.
+- Import at creation (`Active` in 142 s), Members, removal (36 leftovers
+  deleted, 11 kept without a mark), Rancher cluster list identical before
+  and after; undo of a run that imported and created a cluster (import
+  left to the cluster removal, cluster removed).
+- Flux `oci` and `git` entries, prune at the move to 1.0.1, lockdown
+  refusal of a `ClusterRole`; Fleet `GitRepo` and `HelmOp`; resume and
+  undo (with and without a Rancher session).
+- Renewals: registries (2.7.1 cluster, old `-auth` removed), CA in three
+  steps with an image pulled after the switch, certificate with the kept
+  key, OIDC (control plane only, binding moved to the new group),
+  `--finish` and `--abandon`; the lock in both directions.
+- `harvester-nodes` refusal while another registry keeps a password, and
+  Harvester erasing it when the guard is bypassed; merge and removal.
+- Found there and fixed: seven defects (see Fixed).
+
+### Not verified for real
+- The child cluster without Internet end to end: stopped by the package
+  update CAPHV asks of cloud-init (zypper waits for each repository); the
+  fetch commands, `airGapped` and the blocked traffic were seen, RKE2 was
+  never reached.
+- Images pulled by the Harvester nodes through a merged registry (the node
+  holding the bootstrap registry address could not reach it).
+- A plan chained to a real Harvester install with a Git secret (no spare
+  machine to install), harv4 with two clusters in one run, more than two
+  child clusters.
+- A client identity provider other than Dex, Rancher 2.15, a Rancher in
+  airgap, Harbor or a token-only registry, Fleet with HTTPS Git basic
+  authentication, the CA switch with an offline child and a Flux entry.
+- The bench reached the external Rancher through a local proxy that made
+  harvlab2 look like a cluster of the session (harvlab2 is not imported in
+  that Rancher); the session server recorded on the marks was the proxy.
+
+### Tests
+- API tests for the import, OIDC, GitOps (Flux and Fleet, plan phase,
+  undo, chained plans), the renewal (roles, mark, finish, abandon, lock,
+  administrator binding), the registries (kept key, three-step CA,
+  Harvester nodes with a fake of Harvester's controller) and the offline
+  bootstrap; e2e tests for the Access, Renew and GitOps windows, the plan
+  GitOps card and the registries screen. Named mutations of each guard
+  killed. Full suites: API 13102 passed, 5 skipped; e2e 1340 passed.
+
 ## [2.7.1] - 2026-11-07 - Turtles uninstall safety and 2.7.0 leftovers
 
 ### Fixed

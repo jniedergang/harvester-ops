@@ -580,6 +580,120 @@ still recognises the registry and finishes the removal when run again.
 Everything the run created is gone. Apply the plan again to recreate it;
 an undo is never undone.
 
+## Child cluster access, GitOps, renewal and registries (2.8.0)
+
+### The import into Rancher says "rancher-agent-image-missing"
+
+The registration manifest pulls the Rancher agent (for example
+`registry.rancher.com/rancher/rancher-agent:<version>` with Rancher
+Prime). The console
+probes it in the registries of the child cluster first. When the cluster
+cuts the fallback to the Internet and no registry holds the image, the
+import is refused before anything is applied. Mirror
+`registry.rancher.com` in a registry of the cluster, publish a package
+that carries the agent image, then import again. With the fallback open,
+the same case is only a warning (`rancher-agent-image-fallback`).
+
+### A GitOps entry stays not ready: the Kustomization fails
+
+Read the state in the child cluster:
+
+```
+kubectl -n hops-gitops get kustomization,ocirepository,gitrepository
+kubectl -n hops-gitops describe kustomization <entry>
+```
+
+- A source not ready: the registry, its CA or the Git credentials. An
+  `oci` source whose artefact is missing times out (the tag is not checked
+  beforehand); publish the package again.
+- **A `ClusterRole` (or any cluster scoped object) in a `namespace`
+  entry is refused by the impersonated account.** That is the lockdown at
+  work, expected: the account `hops-gitops-<entry>` writes only in its team
+  namespace. Move the object to a manifest item, or ask an administrator
+  for `privileges: cluster`.
+- `gitops-flux-not-locked`: the `flux` service was installed without the
+  lockdown values. Apply the chart item `flux` again from the console.
+
+### Every Flux object of a child cluster disappeared at once
+
+The Flux CRDs come with the `flux2` chart. When CAAPH installs the
+release again (seen on the bench when its namespace was changed), the
+CRDs are removed and recreated, and every `OCIRepository`,
+`GitRepository` and `Kustomization` goes with them. The
+`ClusterResourceSet` of an entry does not apply its content again while
+its binding is at the same checksum, so the entry then times out.
+
+- Since 2.8.0 a `flux` release already posed keeps its namespace: the
+  console never asks CAAPH to move it.
+- To recover, have Cluster API apply the entries again: delete the
+  `ClusterResourceSetBinding` of the child cluster on the Harvester
+  cluster (`kubectl -n <ns> delete clusterresourcesetbinding <c>`), then
+  touch one of its `ClusterResourceSet` objects (an annotation is
+  enough). The objects come back within seconds.
+
+### A renewal is refused: "renew-busy" or "renew-plan-running"
+
+- `renew-busy`: an earlier renewal of this child cluster did not finish
+  (time limit, console stopped), or another renewal holds the Harvester
+  cluster. Its mark stays on the `Cluster`. **Finish the renewal**
+  (`harvester-capi renew --name NS/C --finish`) waits again and cleans up.
+  **Abandon** (`--abandon`, administrators) removes the mark only: the old
+  templates and Secrets are kept and named.
+- `renew-plan-running`: a plan (console or `harvester-plans`) holds the
+  Harvester cluster. Wait for it to end.
+- The reverse, `renew-running`: a renewal holds the Harvester cluster, so
+  plans, undo and the Turtles uninstall are refused until it ends (up to
+  its time limit, 3 h at most).
+
+### Renewing a certificate says "registry-ca-transition-pending"
+
+A new CA is in transition and some copies do not trust it yet. The
+refusal lists each copy with its reason. Run `harvester-capi renew --name
+NS/C --what ca` on each listed child cluster (`nodes`, `rke2-fetch`,
+`service-ca`), `renew --finish` for `renewing`, deploy again the Flux
+entries listed as `flux:<entry>`, and run `harvester-nodes` again for
+`harvester-nodes`. Then run `renew-cert` again. Fleet entries are not in
+the list (warning `registry-ca-fleet-unchecked`): deploy them again before
+the switch.
+
+### Building a package fails with HTTP 403
+
+Some download sites refuse the default agent of Python (`get.rke2.io` for
+`pack --rke2`). Since 2.8.0 the tools send a `User-Agent`. With an older
+`harvester-artefacts`, use the 2.8.0 one on the connected machine.
+
+### Harvester nodes is refused: "harvester-nodes-other-auth"
+
+Another registry of the Harvester setting `containerd-registry` keeps a
+password in Harvester (a Secret `rke.cattle.io/auth-config` of
+`fleet-local`). When the mirrors change, Harvester 1.9 rewrites those
+Secrets from the setting with the host only, and would erase that
+password. Nothing was written. Remove those credentials in Harvester
+first (Settings > containerd-registry), run Harvester nodes, then enter
+them again in Harvester afterwards.
+
+### A child cluster without Internet stays at 10 %
+
+CAPHV (v0.10.1) writes `package_update: true` and `packages: [iptables]`
+in the cloud-init of every machine. Without Internet, zypper waits for
+each repository of the image to time out (about 5 minutes each, seen on
+harvlab2 with Leap 15.6) before the RKE2 commands run. Read the console of
+the machine (`kubectl -n <ns>-vms logs <virt-launcher pod> -c
+guest-console-log`): lines `Timeout exceeded when accessing ...`. Use an
+image whose repositories point at a mirror the machines reach, or that
+has none. The end-to-end offline creation is not verified for real in
+2.8.0 for this reason.
+
+### Harvester nodes merged, but images still come from the origin
+
+The nodes of the Harvester cluster that hosts a bootstrap registry may
+not reach the registry address themselves. Seen on harvlab2 (one node):
+the address is held on the node, and a connection from the node to it
+times out. containerd then falls back to the origin registry. Wire the
+Harvester nodes to a registry they can reach: a client registry, or the
+bootstrap registry of another Harvester cluster. Check from a node with
+`curl -k https://<registry>/v2/` (401 expected).
+
 ## Recovering from a half-done shutdown
 
 If the script was killed (Ctrl-C, lost SSH, ...) and some nodes are off while others are still up:

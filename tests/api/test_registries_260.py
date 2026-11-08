@@ -72,11 +72,10 @@ def test_one_bootstrap_registry_mirrors_its_origins_and_cuts_the_fallback_when_a
     assert files[-1] == {"path": "/etc/rancher/rke2/config.yaml.d/50-harvester-ops-registry.yaml",
                          "owner": "root:root", "permissions": "0600",
                          "content": "disable-default-registry-endpoint: true\n"}
-    auth, ca, nodes = secrets
+    # 2.8.0 (m-14) : plus de `-auth` ; marque d'usage sur le Secret des nœuds
+    ca, nodes = secrets
     assert nodes["metadata"]["name"] == "web-registries"
-    assert auth["metadata"] == {"name": "web-registry-amorcage-auth", "namespace": "web",
-                                "labels": {cc.GENERATED: "true", rg.LABEL: "amorcage"}}
-    assert auth["stringData"] == {"username": "pull-amorcage", "password": PULL_PW}
+    assert nodes["metadata"]["labels"] == {cc.GENERATED: "true", rg.used_label("amorcage"): "used"}
     assert ca["type"] == "Opaque" and ca["stringData"] == {"ca.crt": ca_pem}       # jamais kubernetes.io/tls
     assert "insecure" not in json.dumps(prc)
 
@@ -122,13 +121,14 @@ def test_a_charts_only_registry_stays_out_of_the_node_configuration():
     prc, _, secrets = rg.rke2_config(["ch", "img"], decls, CLUSTER, creds("img"))
     assert list(prc["configs"]) == ["img.example:443"]
     assert all("ch." not in e for m in prc["mirrors"].values() for e in m["endpoint"])
-    assert [s["metadata"]["name"] for s in secrets] == ["web-registry-img-auth", "web-registries"]
+    assert [s["metadata"]["name"] for s in secrets] == ["web-registries"]
+    assert secrets[0]["metadata"]["labels"] == {cc.GENERATED: "true", rg.used_label("img"): "used"}
 
 
 def test_a_registry_without_ca_uses_the_system_cas_and_insecure_only_when_declared():
     prc, _, secrets = rg.rke2_config(["a"], {"a": decl("a")}, CLUSTER, creds("a"))
     assert prc["configs"]["a.example:443"] == {"auth": {"username": "pull-a", "password": PULL_PW}}
-    assert [s["metadata"]["name"] for s in secrets] == ["web-registry-a-auth", "web-registries"]
+    assert [s["metadata"]["name"] for s in secrets] == ["web-registries"]
     prc, _, _ = rg.rke2_config(["a"], {"a": decl("a", insecure_skip_verify=True)}, CLUSTER, creds("a"))
     assert prc["configs"]["a.example:443"]["tls"] == {"insecure_skip_verify": True}
 
@@ -167,8 +167,9 @@ def secret(user, pw):
 def test_child_clusters_get_the_read_account_from_the_harvester_cluster():
     kube = FakeKube({"a-pull": secret("pull", PULL_PW), "a-push": secret("push", PUSH_PW)})
     pc = rg.pull_creds_for(kube, ["a"])
-    _, _, secrets = rg.rke2_config(["a"], {"a": decl("a")}, CLUSTER, pc)
-    assert secrets[0]["stringData"] == {"username": "pull", "password": PULL_PW}
+    doc, _, secrets = rg.rke2_config(["a"], {"a": decl("a")}, CLUSTER, pc)
+    assert doc["configs"]["a.example:443"]["auth"] == {"username": "pull", "password": PULL_PW}
+    assert json.loads(secrets[0]["stringData"]["registries.yaml"]) == doc
     with pytest.raises(KeyError):
         rg.pull_creds_for(FakeKube({"b-push": secret("push", PUSH_PW)}), ["b"])
 
@@ -433,7 +434,8 @@ def test_two_registries_with_a_ca_each_keep_both_configs_on_the_nodes(ca_pem):
         "172.16.2.76": {"auth": {"username": "pull-amorcage", "password": PULL_PW},
                         "tls": {"ca_file": "/etc/rancher/rke2/tls/harvester-ops/amorcage/ca.crt"}}}
     nodes = next(s for s in secrets if s["metadata"]["name"] == "web-registries")
-    assert nodes["type"] == "Opaque" and nodes["metadata"]["labels"] == {cc.GENERATED: "true"}
+    assert nodes["type"] == "Opaque" and nodes["metadata"]["labels"] == {
+        cc.GENERATED: "true", rg.used_label("client"): "used", rg.used_label("amorcage"): "used"}
     assert json.loads(nodes["stringData"]["registries.yaml"]) == doc
     assert nodes["stringData"]["ca-client.crt"] == ca_pem and nodes["stringData"]["ca-amorcage.crt"] == ca_pem + "\n"
     by_path = {f["path"]: f for f in files}

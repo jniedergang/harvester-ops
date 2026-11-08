@@ -283,3 +283,23 @@ def used_namespaces(spec):
     les crée : ils doivent exister dans le cluster enfant (revue 1-3 m6)."""
     made = set(team_namespaces(spec))
     return sorted({x["namespace"] for x in spec["roles"] + spec["accounts"]} - made)
+
+
+# ---------------------------------------------------------------------------
+# 2.8.0 : groupe administrateur OIDC (point 229)
+# ---------------------------------------------------------------------------
+ADMIN_BINDING = "hops-oidc-admins"
+
+
+def admin_binding(groups_prefix, admin_group):
+    """La SEULE `ClusterRoleBinding` vers `cluster-admin` que la console
+    livre : sujet `Group <préfixe><groupe>` du fournisseur OIDC du cluster
+    enfant. Rendue depuis l'option `oidc` du cluster (annotation posée à la
+    création), jamais depuis une demande ni un paquet ; None sans groupe."""
+    if not admin_group:
+        return None
+    return {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+            "metadata": {"name": ADMIN_BINDING},
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "cluster-admin"},
+            "subjects": [{"apiGroup": "rbac.authorization.k8s.io", "kind": "Group",
+                          "name": f"{groups_prefix}{admin_group}"}]}

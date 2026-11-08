@@ -58,6 +58,28 @@ lose data. The higher-level surfaces are conventional API clients.
   client), the HTTP counter that serves disks to CDI in
   `bin/lib/vm_transfer_serve.py`, and the Longhorn allocatable space it
   shares with the console in `bin/lib/longhorn_room.py`.
+- `harvester-capi.py`, `harvester-registry.py` and `harvester-artefacts.py`
+  drive Cluster API, the registries and the artefact packages. 2.8.0 adds
+  six pure modules (standard library, no cluster access, tested alone):
+  - `bin/lib/rancher_import.py`: names, body and marks of the import into
+    an external Rancher, the manifest path, the agent image probes, the
+    Rancher leftovers;
+  - `bin/lib/child_oidc.py`: the `oidc` option, the
+    `AuthenticationConfiguration` and the kubeconfig of the people;
+  - `bin/lib/child_gitops.py`: GitOps entries, tool choice, Flux objects,
+    Fleet objects, lockdown values;
+  - `bin/lib/flux_artifact.py`: the deterministic Flux artefact of a
+    `gitops` item;
+  - `bin/lib/capi_renew.py`: template rotation, progress of a renewal,
+    its mark;
+  - `bin/lib/rke2_offline.py`: the `rke2` kind and the commands of a
+    child cluster bootstrapped without the Internet.
+- New subcommands in 2.8.0: `harvester-capi rancher-import |
+  rancher-unimport | rancher-status | oidc-kubeconfig | gitops-check |
+  gitops-deploy | gitops-remove | gitops-status | renew`;
+  `harvester-registry renew-cert | harvester-nodes`;
+  `harvester-artefacts pack --rke2`. The GitOps tab of Cluster API is
+  `web/static/js/capi-gitops.js`.
 - Same `STEP_EVENT` contract as the bash scripts, so the console streams
   them through the identical SSE path. The console spawns this script
   rather than reimplementing the install, which is what keeps the CLI and

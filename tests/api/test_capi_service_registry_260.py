@@ -253,3 +253,32 @@ def test_remove_takes_the_service_secrets_away(cli, monkeypatch):
     assert cli.cmd_service_remove(argparse.Namespace(name="web/podinfo", timeout=60)) == cli.EXIT_OK
     assert ("secrets", "web", "web-chart-amorcage") in kube.deleted
     assert ("secrets", "web", "web-registry-amorcage-ca") not in kube.deleted, "the cluster CA stays"
+
+
+@pytest.mark.parametrize("asked", [None, "default", "outils"])
+def test_the_flux_service_is_locked_and_lives_in_flux_system(cli, world, asked):
+    """2.8.0 (point 224, banc) : le service `flux` porte le verrouillage
+    multi-locataire et sa release va dans `flux-system`, quel que soit le
+    namespace demandé (elle allait dans `default`)."""
+    world()
+    raw = {"cluster": "web/web", "source": SRC, "name": "flux"}
+    if asked:
+        raw["namespace"] = asked
+    resolved, found, _ = cli.service_source(_kube(cli), sv.normalize(raw), "harvlab2")
+    assert found == [] and resolved["namespace"] == "flux-system"
+    assert yaml.safe_load(resolved["values"])["multitenancy"]["defaultServiceAccount"] == "hops-gitops"
+    other, _f, _ = cli.service_source(_kube(cli), sv.normalize({"cluster": "web/web", "source": SRC}), "harvlab2")
+    assert other["namespace"] == "default"
+
+
+def test_a_flux_release_already_posed_keeps_its_namespace(cli, world):
+    """Banc 2.8.0 : CAAPH ne déplace pas une release ; la mise à jour d'un
+    service `flux` posé dans `default` (chart d'un paquet en 2.7) vers
+    `flux-system` restait bloquée. Le namespace de la release posée reste."""
+    world()
+    kube = _kube(cli)
+    kube.objs[(cli.sv.K_HCP, "web", "flux")] = {"metadata": {"name": "flux", "namespace": "web"},
+                                                "spec": {"namespace": "default"}}
+    resolved, found, _ = cli.service_source(kube, sv.normalize({"cluster": "web/web", "source": SRC,
+                                                                "name": "flux"}), "harvlab2")
+    assert found == [] and resolved["namespace"] == "default"

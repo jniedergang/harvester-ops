@@ -605,6 +605,124 @@ quand on le relance.
 Tout ce que l'exécution a créé est parti. Relancez le plan pour le recréer ;
 un défaire ne se défait jamais.
 
+## Accès aux clusters enfants, GitOps, renouvellement et registres (2.8.0)
+
+### L'import dans Rancher dit « rancher-agent-image-missing »
+
+Le manifeste d'enregistrement tire l'agent de Rancher (par exemple
+`registry.rancher.com/rancher/rancher-agent:<version>` avec Rancher
+Prime). La console le
+sonde d'abord dans les registres du cluster enfant. Quand le cluster coupe
+le repli vers Internet et qu'aucun registre ne porte l'image, l'import est
+refusé avant toute application. Miroitez `registry.rancher.com` dans un
+registre du cluster, publiez un paquet qui porte l'image de l'agent, puis
+relancez l'import. Repli ouvert, le même cas n'est qu'un avertissement
+(`rancher-agent-image-fallback`).
+
+### Une entrée GitOps reste pas prête : la Kustomization échoue
+
+Lisez l'état dans le cluster enfant :
+
+```
+kubectl -n hops-gitops get kustomization,ocirepository,gitrepository
+kubectl -n hops-gitops describe kustomization <entrée>
+```
+
+- Une source pas prête : le registre, sa CA ou les identifiants Git. Une
+  source `oci` dont l'artefact manque échoue au bout du délai (l'étiquette
+  n'est pas contrôlée avant) ; publiez de nouveau le paquet.
+- **Un `ClusterRole` (ou tout objet de portée cluster) dans une entrée
+  `namespace` est refusé au compte usurpé.** C'est le verrouillage à
+  l'œuvre, voulu : le compte `hops-gitops-<entrée>` n'écrit que dans son
+  namespace d'équipe. Passez l'objet dans un élément manifeste, ou demandez
+  `privileges: cluster` à un administrateur.
+- `gitops-flux-not-locked` : le service `flux` a été installé sans les
+  valeurs de verrouillage. Appliquez de nouveau l'élément chart `flux`
+  depuis la console.
+
+### Tous les objets Flux d'un cluster enfant ont disparu d'un coup
+
+Les CRD de Flux viennent avec le chart `flux2`. Quand CAAPH réinstalle la
+release (vu sur le banc lors d'un changement de son namespace), les CRD
+sont retirées puis recréées, et chaque `OCIRepository`, `GitRepository`
+et `Kustomization` part avec elles. Le `ClusterResourceSet` d'une entrée
+ne réapplique pas son contenu tant que sa liaison porte la même
+empreinte : l'entrée finit alors en délai dépassé.
+
+- Depuis la 2.8.0, une release `flux` déjà posée garde son namespace : la
+  console ne demande jamais à CAAPH de la déplacer.
+- Pour réparer, faites réappliquer les entrées par Cluster API : supprimez
+  le `ClusterResourceSetBinding` du cluster enfant sur le cluster Harvester
+  (`kubectl -n <ns> delete clusterresourcesetbinding <c>`), puis touchez
+  l'un de ses `ClusterResourceSet` (une annotation suffit). Les objets
+  reviennent en quelques secondes.
+
+### Un renouvellement est refusé : « renew-busy » ou « renew-plan-running »
+
+- `renew-busy` : un renouvellement précédent de ce cluster enfant n'a pas
+  fini (délai, console arrêtée), ou un autre renouvellement tient le
+  cluster Harvester. Sa marque reste sur le `Cluster`. **Finir le
+  renouvellement** (`harvester-capi renew --name NS/C --finish`) attend de
+  nouveau et fait le ménage. **Abandonner** (`--abandon`, administrateurs)
+  retire seulement la marque : les anciens gabarits et Secrets sont gardés
+  et nommés.
+- `renew-plan-running` : un plan (console ou `harvester-plans`) tient le
+  cluster Harvester. Attendez sa fin.
+- À l'inverse, `renew-running` : un renouvellement tient le cluster
+  Harvester, donc les plans, le Défaire et la désinstallation de Turtles
+  sont refusés jusqu'à sa fin (au plus son délai, 3 h au maximum).
+
+### Renouveler un certificat dit « registry-ca-transition-pending »
+
+Une nouvelle CA est en transition et des copies ne lui font pas encore
+confiance. Le refus liste chaque copie avec sa raison. Lancez
+`harvester-capi renew --name NS/C --what ca` sur chaque cluster enfant
+listé (`nodes`, `rke2-fetch`, `service-ca`), `renew --finish` pour
+`renewing`, redéployez les entrées Flux listées `flux:<entrée>`, et
+relancez `harvester-nodes` pour `harvester-nodes`. Puis relancez
+`renew-cert`. Les entrées Fleet ne sont pas dans la liste (avertissement
+`registry-ca-fleet-unchecked`) : redéployez-les avant la bascule.
+
+### La construction d'un paquet échoue en HTTP 403
+
+Certains sites de téléchargement refusent l'agent de Python par défaut
+(`get.rke2.io` pour `pack --rke2`). Depuis la 2.8.0, les outils envoient
+un `User-Agent`. Avec un `harvester-artefacts` plus ancien, prenez celui
+de la 2.8.0 sur la machine connectée.
+
+### Nœuds Harvester est refusé : « harvester-nodes-other-auth »
+
+Un autre registre du réglage Harvester `containerd-registry` garde un mot
+de passe dans Harvester (un Secret `rke.cattle.io/auth-config` de
+`fleet-local`). Quand les miroirs changent, Harvester 1.9 réécrit ces
+Secrets depuis le réglage avec l'hôte seul, et effacerait ce mot de passe.
+Rien n'a été écrit. Retirez d'abord ces identifiants dans Harvester
+(Réglages > containerd-registry), lancez Nœuds Harvester, puis saisissez-les
+de nouveau dans Harvester ensuite.
+
+
+### Un cluster enfant sans Internet reste à 10 %
+
+CAPHV (v0.10.1) écrit `package_update: true` et `packages: [iptables]` dans
+le cloud-init de chaque machine. Sans Internet, zypper attend l'expiration
+de chaque dépôt de l'image (environ 5 minutes chacun, vu sur harvlab2 avec
+Leap 15.6) avant que les commandes RKE2 ne passent. Lisez la console de la
+machine (`kubectl -n <ns>-vms logs <pod virt-launcher> -c
+guest-console-log`) : lignes `Timeout exceeded when accessing ...`.
+Employez une image dont les dépôts visent un miroir que les machines
+joignent, ou qui n'en a aucun. La création sans Internet de bout en bout
+n'est pas vérifiée en réel en 2.8.0 pour cette raison.
+
+### Nœuds Harvester posé, mais les images viennent encore de l'origine
+
+Les nœuds du cluster Harvester qui porte un registre d'amorçage peuvent ne
+pas joindre eux-mêmes l'adresse du registre. Vu sur harvlab2 (un nœud) :
+l'adresse est portée par le nœud, et une connexion du nœud vers elle
+expire. containerd se replie alors sur le registre d'origine. Branchez les
+nœuds Harvester sur un registre qu'ils joignent : un registre du client, ou
+le registre d'amorçage d'un autre cluster Harvester. Contrôle depuis un
+nœud : `curl -k https://<registre>/v2/` (401 attendu).
+
 ## Reprendre une extinction interrompue
 
 Si le script a été tué (Ctrl-C, perte SSH, ...) avec certains nodes éteints et d'autres encore up :

@@ -187,14 +187,15 @@ def test_the_real_templates_carry_the_registries_on_both_roles(generated, entrie
     serverconf = next(d for d in docs if d["kind"] == "RKE2ControlPlaneTemplate")["spec"]["template"]["spec"]
     assert serverconf["serverConfig"]["cni"] == "calico", "the generator's own fields are kept"
     secrets = [d for d in docs if d["kind"] == "Secret" and "-registry-" in d["metadata"]["name"]]
-    assert len(secrets) == len(decls) + sum(1 for d in decls.values() if d.get("ca_pem"))
+    # 2.8.0 (m-14) : plus de `-auth`, un `-ca` par registre à CA
+    assert len(secrets) == sum(1 for d in decls.values() if d.get("ca_pem"))
     for s in secrets:
         assert s["metadata"]["labels"][cc.GENERATED] == "true"
         assert s["metadata"]["namespace"] == "web" and s["type"] == "Opaque"
     blob = json.dumps(docs)
-    # compte de lecture : un Secret -auth par registre, plus registries.yaml
-    # (JSON dans le Secret des nœuds, guillemets échappés)
-    assert PUSH_PW not in blob and blob.count(PULL_PW) == 2 * len(decls)
+    # compte de lecture : rangé une seule fois, dans registries.yaml (JSON
+    # dans le Secret des nœuds) ; plus de `-auth` (2.8.0, revue finale 2.6.0 m-14)
+    assert PUSH_PW not in blob and blob.count(PULL_PW) == len(decls)
 
 
 def test_existing_files_of_a_template_are_kept():
@@ -307,7 +308,7 @@ def test_cli_render_masks_the_registry_secrets(cli, state, monkeypatch, capsys):
                               kubeconfig=str(kc), harvester_name="harvlab2")
     assert cli.cmd_render(args) == cli.EXIT_OK
     out = capsys.readouterr().out
-    assert "web-registries" in out and "web-registry-amorcage-auth" in out
+    assert "web-registries" in out and "web-registry-amorcage-auth" not in out       # 2.8.0 (m-14)
     assert PULL_PW not in out
 
 
@@ -345,8 +346,7 @@ def test_deleting_one_of_two_clusters_in_a_namespace_removes_its_registry_secret
                                                                    "labels": {cc.GENERATED: "true"}}}
     assert cli.remove_cluster(kube, "shared", deleted, 60, sleep=lambda s: None) == cli.EXIT_OK
     left = sorted(n for (k, _, n) in kube.objs if k == "secrets")
-    assert left == sorted(["capi-shared", f"{kept}-registries", f"{kept}-registry-a-auth",
-                           f"{kept}-registry-a-ca", f"{kept}-chart-a"])
+    assert left == sorted(["capi-shared", f"{kept}-registries", f"{kept}-registry-a-ca", f"{kept}-chart-a"])
     assert ("namespaces", None, "shared") in kube.objs
 
 

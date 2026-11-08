@@ -55,7 +55,20 @@ FINDING_CODES = ["plan-invalid", "template-missing", "var-missing", "var-invalid
                  "manifest-system-namespace", "manifest-object-taken", "manifest-too-big", "manifest-sa-token-refused",
                  "manifest-crb-admin", "manifest-duplicate", "manifest-no-name", "manifest-too-many",
                  "artefact-name-too-long", "artefact-name-reserved", "artefact-item-not-manifest",
-                 "team-namespace-taken", "team-namespace-missing", "manifest-cluster-missing"]
+                 "team-namespace-taken", "team-namespace-missing", "manifest-cluster-missing",
+                 # 2.8.0 : phase GitOps (console et gitops-check), accès des modèles, sans Internet
+                 "gitops-var-missing", "gitops-secret-missing", "gitops-privileges-admin-only",
+                 "gitops-fleet-admin-only", "gitops-fleet-not-confined", "gitops-fleet-needs-rancher",
+                 "gitops-source-unsupported", "gitops-flux-in-plan", "gitops-flux-missing", "gitops-flux-not-locked",
+                 "gitops-later", "gitops-package-not-published", "gitops-check-failed", "gitops-taken",
+                 "gitops-cluster-unknown", "gitops-namespace-not-team", "gitops-name-too-long", "gitops-invalid",
+                 "gitops-cluster-missing", "rancher-session-needed", "rancher-import-conflict", "rancher-name-invalid",
+                 "rancher-name-taken", "rancher-agent-image-missing", "rancher-agent-image-unmirrored",
+                 "rancher-agent-image-fallback", "oidc-invalid", "oidc-issuer-invalid", "oidc-audience-invalid",
+                 "oidc-claim-invalid", "oidc-prefix-required", "oidc-prefix-system", "oidc-ca-unreadable",
+                 "oidc-admin-group-invalid", "oidc-version-too-old", "oidc-with-rancher", "offline-needs-no-fallback",
+                 "offline-rke2-missing", "offline-rke2-version-mismatch",
+                 "rancher-session-in-chain"]  # revue finale 2.8.0 I-3
 
 
 # --- onglet, historique, page d'hôte (source) ----------------------------------

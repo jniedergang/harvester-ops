@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Paquets d'artefacts signés : construire, signer, vérifier, importer.
 
-    harvester-artefacts pack    DESCRIPTION [--out DIR] [--sign-key FICHIER] [--creds FICHIER]
-                                [--platform os/arch] [--plain-http HÔTE]...
+    harvester-artefacts pack    [DESCRIPTION] [--rke2 VERSION [--cni C]] [--out DIR] [--sign-key FICHIER]
+                                [--creds FICHIER] [--platform os/arch] [--plain-http HÔTE]...
     harvester-artefacts sign    PAQUET --key FICHIER
     harvester-artefacts verify  PAQUET [--signers FICHIER]
     harvester-artefacts inspect PAQUET [--signers FICHIER]
@@ -69,7 +69,9 @@ EXIT_OK, EXIT_FAIL, EXIT_REFUSED, EXIT_ACK = 0, 1, 2, 3
 INDEX_MAX = 64 << 20                # index.yaml d'un dépôt Helm (certains font des dizaines de Mo)
 CHART_MAX = 64 << 20
 TOP_KEYS = {"name", "version", "description", "items"}
-ITEM_KEYS = {"name", "kind", "version", "description", "chart", "values", "images", "files"}
+ITEM_KEYS = {"name", "kind", "version", "description", "chart", "values", "images", "files", "rke2"}
+RKE2_KEYS = {"version", "cni"}
+RKE2_MAX = 1 << 30                  # rke2.linux-amd64.tar.gz : 41 Mo en v1.34.11
 CHART_KEYS = {"repo", "name", "version"}
 FILE_RE = re.compile(r"^[A-Za-z0-9._-]+\.ya?ml$")
 
@@ -165,6 +167,18 @@ def check_description(doc):
                 item["chart"] = dict(c)
         elif "chart" in it:
             errors.append(f"{where}: chart is for a chart")
+        if kind == "rke2":
+            # 2.8.0 : RKE2 et ses images système, récupérés côté connecté
+            import rke2_offline as ro
+            r = it.get("rke2")
+            if not isinstance(r, dict) or set(r) - RKE2_KEYS or not ro.VERSION_RE.match(str(r.get("version") or "")):
+                errors.append(f"{where}.rke2: {{version: v1.34.11+rke2r1, cni: calico}}")
+            elif r.get("cni", "calico") not in ro.CNI_WORDS:
+                errors.append(f"{where}.rke2.cni: one of {', '.join(ro.CNI_WORDS)}")
+            else:
+                item["rke2"] = {"version": r["version"], "cni": r.get("cni", "calico")}
+        elif "rke2" in it:
+            errors.append(f"{where}: rke2 is for an rke2 item")
         imgs = []
         for j, x in enumerate(it.get("images") or []):
             ref, as_ = (x, None) if isinstance(x, str) else (x.get("ref"), x.get("as")) if isinstance(x, dict) \
@@ -187,7 +201,7 @@ def check_description(doc):
         if imgs:
             item["images"] = imgs
         files = it.get("files")
-        if kind in art.MANIFEST_KINDS or (kind in art.LATER_KINDS and files is not None):
+        if kind in art.MANIFEST_KINDS + ("gitops",) or (kind in art.LATER_KINDS and files is not None):
             if not isinstance(files, list) or not files or not all(isinstance(f, str) and FILE_RE.match(Path(f).name)
                                                                   for f in files):
                 errors.append(f"{where}.files: .yaml files, one at least")
@@ -302,6 +316,9 @@ def _http_opener():
     for handler in (urllib.request.ProxyHandler(), urllib.request.HTTPHandler(), urllib.request.HTTPSHandler(),
                     urllib.request.HTTPDefaultErrorHandler(), op._NoRedirect(), urllib.request.HTTPErrorProcessor()):
         opener.add_handler(handler)
+    # get.rke2.io refuse l'agent par défaut de Python (HTTP 403, vu sur le
+    # banc 2.8.0) : l'outil se nomme.
+    opener.addheaders = [("User-Agent", "harvester-ops")]
     return opener
 
 
@@ -440,6 +457,9 @@ def pack(desc, base_dir, out_dir, sources, platform=ol.DEFAULT_PLATFORM):
         index = {"name": desc["name"], "version": desc["version"], "description": desc["description"], "items": []}
         layout = ol.Layout(root / "images").init()
         wanted, copied, done = {}, {}, 0
+        for it in desc["items"]:
+            if it["kind"] == "rke2":
+                it["images"] = fetch_rke2(sources, it, root)
         all_images = [im for it in desc["items"] for im in it.get("images") or []]
         for im in all_images:
             wanted[im["name"]] = im
@@ -487,6 +507,10 @@ def pack(desc, base_dir, out_dir, sources, platform=ol.DEFAULT_PLATFORM):
                 entry["chart"] = f"charts/{it['chart']['name']}-{it['chart']['version']}.tgz"
             if it.get("images"):
                 entry["images"] = list(dict.fromkeys(im["name"] for im in it["images"]))
+            if it["kind"] == "rke2":
+                import rke2_offline as ro
+                entry["version"] = it["rke2"]["version"]
+                entry["files"] = ro.files_of(it["rke2"]["version"])
             if it.get("files"):
                 d = root / "manifests" / it["name"]
                 d.mkdir(parents=True, exist_ok=True)
@@ -514,6 +538,30 @@ def pack(desc, base_dir, out_dir, sources, platform=ol.DEFAULT_PLATFORM):
         shutil.rmtree(build, ignore_errors=True)
 
 
+def fetch_rke2(sources, it, root):
+    """2.8.0 : les fichiers d'une version de RKE2 (archive, sommes, script
+    d'installation) écrits dans `rke2/<version>/`, l'archive contrôlée
+    contre `sha256sum-amd64.txt` ; rend les images système de la CNI
+    choisie (rke2-images-all filtrée) pour la copie des images."""
+    import rke2_offline as ro
+    v, cni = it["rke2"]["version"], it["rke2"]["cni"]
+    d = root / "rke2" / v
+    d.mkdir(parents=True, exist_ok=True)
+    urls = ro.download_urls(v)
+    step("rke2", "running", f"RKE2 {v}: files")
+    for f in ro.FILES:
+        _fetch(urls[f], d / f, None, RKE2_MAX, timeout=600, plain=sources.plain)
+    listing, _h = _fetch(urls["rke2-images-all.linux-amd64.txt"], None, None, 1 << 20, plain=sources.plain)
+    want = next((ln.split()[0] for ln in (d / "sha256sum-amd64.txt").read_text().splitlines()
+                 if ln.strip().endswith(" rke2.linux-amd64.tar.gz") or ln.strip().endswith("*rke2.linux-amd64.tar.gz")),
+                None)
+    if want is None or want != ol.sha256_file(d / "rke2.linux-amd64.tar.gz"):
+        raise ValueError(f"RKE2 {v}: rke2.linux-amd64.tar.gz does not match sha256sum-amd64.txt")
+    refs = ro.images_for(listing.decode(), cni)
+    step("rke2", "done", f"RKE2 {v}: 3 file(s), {len(refs)} system image(s) for {cni}")
+    return [{"ref": r, "as": None, "name": stored_name(r)} for r in refs]
+
+
 def sign(package, key):
     """`ssh-keygen -Y sign` avec l'espace de noms des artefacts : écrit
     `<paquet>.sig`."""
@@ -532,9 +580,25 @@ def sign(package, key):
 # ---------------------------------------------------------------------------
 # Sous-commandes
 # ---------------------------------------------------------------------------
+def rke2_description(version, cni="calico"):
+    """Description d'un paquet `rke2-<version>` (pack --rke2) : un élément."""
+    return {"name": "rke2", "version": version.lstrip("v").replace("+", "-"),
+            "description": f"RKE2 {version} and its system images ({cni})",
+            "items": [{"name": "rke2", "kind": "rke2", "rke2": {"version": version, "cni": cni}}]}
+
+
 def cmd_pack(args):
     try:
-        doc = read_description(args.description)
+        if args.rke2:
+            doc = rke2_description(args.rke2, args.cni)
+            if args.description:
+                # l'élément rke2 rejoint la description donnée
+                given = read_description(args.description)
+                doc = dict(given, items=list(given.get("items") or []) + doc["items"])
+        elif not args.description:
+            raise ValueError("a description, or --rke2 VERSION")
+        else:
+            doc = read_description(args.description)
     except (OSError, ValueError) as e:
         step("describe", "error", str(e))
         return EXIT_REFUSED
@@ -545,7 +609,8 @@ def cmd_pack(args):
         return EXIT_REFUSED
     try:
         sources = Sources(read_creds(args.creds), args.plain_http)
-        path, res = pack(desc, Path(args.description).resolve().parent, args.out, sources, args.platform)
+        base = Path(args.description).resolve().parent if args.description else Path.cwd()
+        path, res = pack(desc, base, args.out, sources, args.platform)
         if args.sign_key:
             step("sign", "running", path.name)
             sign(path, args.sign_key)
@@ -695,11 +760,18 @@ def publication(pkg, items=None):
     if unknown:
         raise Refused([_finding("publish-item-unknown", items=", ".join(unknown))])
     chosen = [known[n] for n in (items or known)]
-    images, charts, skipped = [], [], []
+    images, charts, skipped, gitops = [], [], [], []
+    rke2 = []
     for it in chosen:
         if it["kind"] in art.LATER_KINDS:
             skipped.append({"item": it["name"], "why": "coming"})
             continue
+        if it["kind"] == "gitops":
+            # 2.8.0 : contenu publié en artefact Flux (bin/lib/flux_artifact.py)
+            gitops.append(it)
+        if it["kind"] == "rke2":
+            # 2.8.0 : fichiers de RKE2 en blobs (bin/lib/rke2_offline.py)
+            rke2.append(it)
         for n in it.get("images") or []:
             if n not in images:
                 images.append(n)
@@ -707,18 +779,59 @@ def publication(pkg, items=None):
             charts.append(it["chart"])
         elif it["kind"] in art.MANIFEST_KINDS:
             skipped.append({"item": it["name"], "why": "manifest"})
-    return images, charts, skipped
+    return images, charts, skipped, gitops + rke2
 
 
-def plan_publication(pkg, decl, dst, images, charts, work):
+def rke2_artifact(pkg, it):
+    """(dépôt, étiquette, {fichier: (chemin, empreinte, taille)}, manifeste)
+    de l'artefact RKE2 d'un élément `rke2`."""
+    import rke2_offline as ro
+    root = Path(pkg["path"]).resolve()
+    files = {}
+    for rel in it.get("files") or []:
+        p = (root / rel).resolve()
+        if root not in p.parents or not p.is_file():
+            raise Refused([_finding("publish-rke2-file-missing", item=it["name"], file=rel)])
+        files[Path(rel).name] = (p, "sha256:" + ol.sha256_file(p), p.stat().st_size)
+    body = ro.manifest({f: v[1] for f, v in files.items()}, {f: v[2] for f, v in files.items()})
+    return ro.REPO, ro.tag_of(it["version"]), files, body
+
+
+def gitops_artifact(pkg, it):
+    """(dépôt, étiquette, construit) de l'artefact Flux d'un élément
+    `gitops` ; Refused si son contenu enfreint les règles des manifestes
+    (capi_manifests.check : pas de CRD, de webhook, de namespace système...)."""
+    import capi_manifests as mf
+    import flux_artifact as fa
+    root = Path(pkg["path"]).resolve()
+    files = {}
+    for rel in it.get("files") or []:
+        p = (root / rel).resolve()
+        if root not in p.parents or not p.is_file():
+            raise Refused([_finding("publish-gitops-file-missing", item=it["name"], file=rel)])
+        files[rel] = p.read_text()
+    try:
+        objs = mf.parse(files)
+    except ValueError as e:
+        raise Refused([_finding("publish-gitops-refused", item=it["name"], reason=str(e)[:200])]) from None
+    bad = [f for f in mf.check(objs, "-") if f["level"] == "block" and f["code"] != "manifest-kind-unknown"]
+    if bad:
+        raise Refused([_finding("publish-gitops-refused", item=it["name"],
+                                reason=f"{bad[0]['code']} {json.dumps(bad[0]['facts'])}"[:200])])
+    built = fa.build(files, it["name"], pkg["index"]["version"], source=f"{pkg['index']['name']}/{it['name']}")
+    return fa.repo_of(pkg["index"]["name"], it["name"]), pkg["index"]["version"], built
+
+
+def plan_publication(pkg, decl, dst, images, charts, work, gitops=()):
     """Constats avant écriture et liste de ce qui partira : un tag d'une
     autre empreinte (`publish-tag-differs`, lu par HEAD), un registre qui ne
     sert pas cet usage (`registry-no-usage`)."""
     findings, todo = [], []
     usage = decl.get("usage") or []
-    if images and "images" not in usage:
+    if (images or [g for g in gitops if g["kind"] == "rke2"]) and "images" not in usage:
         findings.append(_finding("registry-no-usage", registry=decl["name"], usage="images"))
-    if charts and "charts" not in usage:
+    if (charts or [g for g in gitops if g["kind"] == "gitops"]) and "charts" not in usage:
+        # un artefact Flux est un artefact OCI comme un chart
         findings.append(_finding("registry-no-usage", registry=decl["name"], usage="charts"))
     lay = ol.Layout(Path(pkg["path"]) / "images")
     for n in images:
@@ -734,6 +847,16 @@ def plan_publication(pkg, decl, dst, images, charts, work):
         repo, tag = ol.chart_repo(meta["name"], meta["version"])
         todo.append({"kind": "chart", "name": f"{meta['name']}:{meta['version']}", "layout": clay,
                      "entry": clay.find(f"{meta['name']}:{meta['version']}"), "repo": repo, "tag": tag})
+    import flux_artifact as fa
+    for it in [g for g in gitops if g["kind"] == "rke2"]:
+        repo, tag, files, body = rke2_artifact(pkg, it)
+        todo.append({"kind": "rke2", "name": f"rke2:{tag}", "repo": repo, "tag": tag, "files": files, "body": body,
+                     "entry": {"digest": fa.digest_of(body)}})
+    gitops = [g for g in gitops if g["kind"] != "rke2"]
+    for it in gitops:
+        repo, tag, built = gitops_artifact(pkg, it)
+        todo.append({"kind": "gitops", "name": f"{it['name']}:{tag}", "repo": repo, "tag": tag, "built": built,
+                     "entry": {"digest": fa.digest_of(built[2])}})
     for t in todo:
         try:
             have = dst.manifest_digest(t["repo"], t["tag"])
@@ -752,14 +875,15 @@ def plan_publication(pkg, decl, dst, images, charts, work):
 
 def publish(pkg, decl, dst, items=None, dry_run=False, work=None):
     """Publie (ou liste, `dry_run`) ; rend le résultat sans identifiant."""
-    images, charts, skipped = publication(pkg, items)
+    images, charts, skipped, gitops = publication(pkg, items)
     for s in skipped:
-        step("publish", "running", f"{s['item']}: skipped ({'coming in 2.8' if s['why'] == 'coming' else 'manifests are not published'})")
-    findings, todo = plan_publication(pkg, decl, dst, images, charts, work)
+        step("publish", "running", f"{s['item']}: skipped ({'coming later' if s['why'] == 'coming' else 'manifests are not published'})")
+    findings, todo = plan_publication(pkg, decl, dst, images, charts, work, gitops)
     if dry_run or [f for f in findings if f["level"] == "block"]:
         return {"findings": findings, "blocked": bool(findings),
                 "todo": [{k: t[k] for k in ("kind", "name", "repo", "tag", "state")} for t in todo]}
-    res = {"images": 0, "charts": 0, "pushed_blobs": 0, "skipped_blobs": 0, "mounted_blobs": 0, "bytes": 0}
+    res = {"images": 0, "charts": 0, "gitops": 0, "pushed_blobs": 0, "skipped_blobs": 0, "mounted_blobs": 0,
+           "bytes": 0}
     mounts = {}
     sent = {"n": 0, "last": 0}
 
@@ -779,6 +903,26 @@ def publish(pkg, decl, dst, items=None, dry_run=False, work=None):
             res["mounted_blobs"] += r["mounted"]
         if part:
             step(f"{kind}s", "done", f"{len(part)} {kind}(s) in {decl['name']}")
+    import flux_artifact as fa
+    part = [t for t in todo if t["kind"] == "gitops"]
+    for i, t in enumerate(part, 1):
+        step("gitops", "running", f"gitops {i}/{len(part)}: {t['name']}")
+        fa.push(dst, t["repo"], t["tag"], t["built"])
+        res["gitops"] += 1
+    if part:
+        step("gitops", "done", f"{len(part)} Flux artefact(s) in {decl['name']}")
+    part = [t for t in todo if t["kind"] == "rke2"]
+    res["rke2"] = 0
+    for t in part:
+        step("rke2", "running", f"{t['name']}: {len(t['files'])} file(s)")
+        empty = b"{}"
+        dst.push_blob(t["repo"], fa.digest_of(empty), empty)
+        for f, (path, digest, size) in t["files"].items():
+            dst.push_blob_file(t["repo"], digest, path, size, on_bytes=progress)      # sauté s'il est là
+        dst.put_manifest(t["repo"], t["tag"], t["body"], "application/vnd.oci.image.manifest.v1+json")
+        res["rke2"] += 1
+    if part:
+        step("rke2", "done", f"{len(part)} RKE2 artefact(s) in {decl['name']}")
     res["bytes"] = sent["n"]
     return res
 
@@ -847,7 +991,7 @@ def cmd_publish(args):
             except dp.PlanConflict:
                 if attempt:
                     raise
-        step("publish", "done", f"{res['images']} image(s), {res['charts']} chart(s); "
+        step("publish", "done", f"{res['images']} image(s), {res['charts']} chart(s), {res['gitops']} gitops; "
                                 f"{res['pushed_blobs']} blob(s) sent, {res['skipped_blobs'] + res['mounted_blobs']} "
                                 "already there")
     except Refused as e:
@@ -869,7 +1013,9 @@ def parser():
     p.add_argument("--state-dir", help="console state directory (default HARVESTER_OPS_STATE_DIR)")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("pack", allow_abbrev=False, help="build a package from a description")
-    s.add_argument("description")
+    s.add_argument("description", nargs="?")
+    s.add_argument("--rke2", metavar="VERSION", help="add RKE2 VERSION (v1.34.11+rke2r1) and its system images")
+    s.add_argument("--cni", default="calico", help="CNI whose images go with --rke2 (default calico)")
     s.add_argument("--out", default=".")
     s.add_argument("--sign-key")
     s.add_argument("--creds", help="private JSON file {host: {username, password}}")

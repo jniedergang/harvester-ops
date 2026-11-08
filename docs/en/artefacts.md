@@ -1,4 +1,4 @@
-# Artefact packages and registries (2.6.0), artefacts on child clusters (2.7.0)
+# Artefact packages and registries (2.6.0), artefacts on child clusters (2.7.0), registries finished (2.8.0)
 
 Child clusters made by Cluster API often run where the Internet is not
 reachable. 2.6.0 brings what is needed to give them their images and
@@ -19,6 +19,13 @@ the console removes itself, a base of policies and automation accounts with
 short tokens. See "Artefacts on child clusters (2.7.0)" below. The Registry
 and Artefacts phases of the plans, and undoing a deployment, are described
 in [bare-metal.md](bare-metal.md).
+
+2.8.0 adds two package kinds: `gitops` (a Flux artefact, see
+[gitops.md](gitops.md)) and `rke2` (RKE2 itself, for a child cluster
+bootstrapped without the Internet). It finishes the registries: the read
+password leaves its separate Secret, the CA of a bootstrap registry is
+kept and its certificate can be renewed, and a registry can be merged into
+the Harvester nodes. See "Registries finished (2.8.0)" below.
 
 ## The package
 
@@ -48,9 +55,24 @@ extracts the archive. A file missing from the list, or with another
 checksum, refuses the whole package.
 
 Item kinds: `chart`, `images`, `manifest`, `policy` (a manifest of
-policies, delivered like a manifest since 2.7.0). One more kind, `gitops`,
-is kept in the package and shown "coming (2.8)"; it is never applied nor
-published. Manifests and policies are not published in a registry.
+policies, delivered like a manifest since 2.7.0), and since 2.8.0
+`gitops` and `rke2`. Manifests and policies are not published in a
+registry.
+
+- **`gitops`**: YAML files (`files`, required), published as a **Flux
+  artefact**: one layer `application/vnd.cncf.flux.content.v1.tar+gzip`
+  (deterministic tar.gz), repository
+  `<registry>/harvester-ops/gitops/<package>/<item>`, tag = the version of
+  the package. It is posed by a GitOps entry, never by Apply
+  (`artefact-kind-gitops`). Its content is judged by the rules of the
+  manifests at publication (`publish-gitops-refused`): each namespaced
+  object must carry `metadata.namespace` (found on the bench). See
+  [gitops.md](gitops.md).
+- **`rke2`**: an exact RKE2 version (`v1.34.11+rke2r1`), its three files
+  `rke2/<version>/{rke2.linux-amd64.tar.gz, sha256sum-amd64.txt,
+  install.sh}`, and the system images of this version for one CNI. It
+  serves a child cluster created with `offline: true` (see
+  [operating-procedure.md](operating-procedure.md), Cluster API).
 
 ### Building a package: `harvester-artefacts pack`
 
@@ -99,6 +121,18 @@ harvester-artefacts pack socle.json --out dist/ --sign-key ~/.ssh/artefacts_ed25
   spoken to in clear (test setups). Any `http://` source needs it, even
   without credentials.
 - **`--sign-key FILE`** signs the package at the end (see below).
+- **`--rke2 VERSION [--cni calico]`** (2.8.0) builds a package
+  `rke2-<x.y.z-rke2rN>` with one `rke2` item, without a description; given
+  with a description, the item joins it. The archive is checked against
+  `sha256sum-amd64.txt`. The system images are the list
+  `rke2-images-all.linux-amd64.txt` of the version, filtered by the CNI
+  (`calico`, `canal`, `cilium`, `flannel`, `none`), copied like any image.
+  Downloads send a `User-Agent` (`get.rke2.io` refuses the default one of
+  Python with HTTP 403).
+
+```bash
+harvester-artefacts pack --rke2 v1.34.11+rke2r1 --cni calico --out dist/ --sign-key ~/.ssh/artefacts_ed25519
+```
 
 Exit codes: 0 built, 1 failure (source unreachable, chart not found,
 checksum wrong), 2 description refused (unknown key, invalid name,
@@ -396,11 +430,12 @@ bootstrap registry. The setting is read at each gesture, without restart.
 
 - **TLS always.** The console generates a CA (10 years) and a server
   certificate (2 years), or takes your certificate (`--cert`, `--key`,
-  `--ca`). **The generated CA key is erased after the deployment: the
-  certificate cannot be renewed.** Deploying again gives a new CA, and the
-  child clusters keep the old one on their nodes (registries are set at
-  creation only, see below). Plan for it: with the generated CA, the
-  registry has two years.
+  `--ca`). Up to 2.7.x the generated CA key was erased after the
+  deployment. **Since 2.8.0 it is kept** in the Secret `<name>-ca-key`, and
+  the CA carries a critical `nameConstraints` limited to the address of the
+  registry (and its DNS name when given). The certificate can then be
+  renewed: see "Registries finished (2.8.0)". Deploying again still gives
+  a new CA.
 - **Two accounts**, `push` and `pull`, with random passwords (32 bytes).
   They exist only in Secrets of the Harvester cluster. There is never an
   anonymous access.
@@ -450,6 +485,18 @@ An image `<host>/<path>:<tag>` is published as
 Two images with the same path on two hosts never mix. Charts go under
 `<registry>/charts/<chart>:<version>` (a `+` in the version becomes `_`).
 
+Since 2.8.0:
+
+- a `gitops` item goes to
+  `<registry>/harvester-ops/gitops/<package>/<item>:<version>`, a Flux
+  artefact (configuration `application/vnd.cncf.flux.config.v1+json`,
+  layer `application/vnd.cncf.flux.content.v1.tar+gzip`);
+- an `rke2` item goes to `<registry>/harvester-ops/rke2`: each of the
+  three files as a blob, plus an OCI manifest of artifact type
+  `application/vnd.harvester-ops.rke2.v1+json` (empty configuration, one
+  titled layer per file). The tag is the version with `+` replaced by `_`
+  (OCI tags refuse `+`), for example `v1.34.11_rke2r1`.
+
 ## Publishing
 
 **Publish** on a package of the Artefacts tab (operators): choose a
@@ -466,8 +513,12 @@ then publish.
   already in the registry is not sent again (or is mounted from another
   repository of the same registry). An interrupted publication is resumed
   by publishing again.
-- Images first, then charts; manifests and the "coming" kinds are skipped.
-  The progress shows `images 3/14` and the MiB sent.
+- Images first, then charts, then the `gitops` and `rke2` artefacts
+  (2.8.0); manifests are skipped. The progress shows `images 3/14` and the
+  MiB sent.
+- A `gitops` item needs a registry that serves charts (a Flux artefact is
+  an OCI artefact, like a chart); an `rke2` item needs one that serves
+  images (`registry-no-usage` otherwise).
 - The declaration of the registry keeps the list of packages published
   (names, versions, date, person).
 
@@ -483,9 +534,11 @@ holds an ordered list of registries, declared and attached to this Harvester
 cluster (a registry not attached is shown but cannot be chosen). Cluster
 templates and plan entries take the same list, with `{{variables}}`.
 
-- **Set at creation only.** RKE2 reads its registry configuration when it
-  starts. Changing the registries of an existing cluster is not offered in
-  2.6.0.
+- **Set at creation, changed by a renewal.** RKE2 reads its registry
+  configuration when it starts. Since 2.8.0, the registries of an existing
+  cluster change by renewing its machines (`harvester-capi renew --what
+  registries`, see [operating-procedure.md](operating-procedure.md),
+  Cluster API).
 - **Order**: for each mirrored origin, the registries that serve it are
   tried in the order of the list; the first is preferred, the next ones are
   its fallbacks.
@@ -501,12 +554,15 @@ templates and plan entries take the same list, with `{{variables}}`.
   same file (seen on the bench, see "Seen for real").
 - **Secrets** in the namespace of the cluster on Harvester:
   `<cluster>-registries` (`registries.yaml` and one `ca-<registry>.crt`
-  per registry, read by the nodes at their first boot),
-  `<cluster>-registry-<registry>-auth` (the read account) and
-  `<cluster>-registry-<registry>-ca` (`Opaque`, `ca.crt` only), the last
-  two labelled with the registry name (they tell which clusters use a
-  registry). All are labelled to be removed with the cluster. **Only the
-  read account reaches the nodes**; the write account never does.
+  per registry, read by the nodes at their first boot) and
+  `<cluster>-registry-<registry>-ca` (`Opaque`, `ca.crt` only). Since
+  2.8.0 the read password is stored once, in `<cluster>-registries`; the
+  label `harvester-ops.io/registry-<registry>: used` on that Secret tells
+  which clusters use a registry. Up to 2.7.x a third Secret,
+  `<cluster>-registry-<registry>-auth`, held the read account again (see
+  "Registries finished (2.8.0)"). All are labelled to be removed with the
+  cluster. **Only the read account reaches the nodes**; the write account
+  never does.
 - **The read password ends up in the cloud-init of the VMs.** CAPRKE2
   inlines `registries.yaml`, read password included, into the bootstrap
   Secret of each Machine, and CAPHV copies it into the cloud-init Secret
@@ -711,6 +767,112 @@ kubeconfig, 0600, erased at the end) go to `HARVESTER_OPS_WORK_DIR`, or
 `<state>/work` (0700); never the bare `/tmp` (a sub-directory given by the
 variable is accepted, owner and mode checked).
 
+## Registries finished (2.8.0)
+
+### Read password stored once (m-14)
+
+Up to 2.7.x a child cluster kept its read account twice: in
+`<c>-registries` (read by the nodes) and in `<c>-registry-<r>-auth`.
+
+- Since 2.8.0 the password is stored once, in `<c>-registries`. The label
+  `harvester-ops.io/registry-<r>: used` on that Secret is the mark of use.
+- The old form is still read (which clusters use a registry, the mirror
+  check of a service, the CA switch, the deletion).
+- It is removed at the first registries renewal of the cluster, once the
+  machines are replaced, or with the cluster.
+
+### Kept CA key and certificate renewal
+
+A bootstrap registry posed from 2.8.0 keeps its CA key in the Secret
+`harvester-ops-registry/<r>-ca-key`. Its CA carries a critical
+`nameConstraints`: the address of the registry, and its DNS name when
+given. The Registries tab shows when the certificate expires.
+
+**Renew the certificate** (administrators), or on the command line:
+
+```
+harvester-registry renew-cert NAME --cluster C [--days 730] [--dry-run]
+```
+
+- A new server certificate signed by the same CA, valid `--days` (1 to
+  3 650, 730 by default).
+- The TLS Secret is replaced and the pod restarted. The console waits for
+  `/v2/` and says how long reads were cut (a few seconds).
+- No file of the nodes changes: the child clusters keep trusting the
+  same CA.
+
+A registry posed before 2.8.0 has no kept key: `status` says
+`registry-ca-key-missing` (information), and `renew-cert` refuses without
+`--new-ca`.
+
+### New CA for a registry posed before 2.8.0
+
+`--new-ca` changes the CA in three steps, so that no child cluster ever
+loses trust in its registry:
+
+1. `renew-cert NAME --cluster C --new-ca` makes a new CA, kept in
+   `<r>-ca-next`. From then on, what the console writes for this registry
+   trusts both CAs (old and new).
+2. Bring the new CA to every copy. Run `harvester-capi renew --name NS/C
+   --what ca` on each child cluster that uses the registry. Deploy again
+   the Flux entries that pull from it, and run `harvester-nodes` again if
+   it is merged into the Harvester nodes.
+3. Run `renew-cert NAME --cluster C` again. While a copy still lacks the
+   new CA, it is refused (`registry-ca-transition-pending`) with the list
+   of copies and their reason. Once the list is empty, the server
+   certificate is signed by the new CA, which becomes `<r>-ca-key`.
+
+The reasons in the list:
+
+| Reason | Copy | What to do |
+|---|---|---|
+| `renewing` | a renewal of the child cluster is not finished | `renew --finish` |
+| `nodes` | the nodes Secret named by the current templates | `renew --what ca` |
+| `rke2-fetch` | `<c>-rke2-fetch` of a cluster without Internet | `renew --what ca` |
+| `service-ca` | `<c>-registry-<r>-ca` read by the services | `renew --what ca` |
+| `flux:<entry>` | a Flux entry whose source is in the registry | deploy the entry again |
+| `harvester-nodes` | the `additional-ca` setting of the Harvester nodes | `harvester-nodes` again |
+
+- Fleet entries live in Rancher and are not read by `harvester-registry`.
+  The switch only emits the warning step `registry-ca-fleet-unchecked`:
+  deploy the Fleet entries that pull from the registry again before.
+- From the command line, run one `--new-ca` at a time. The console blocks
+  a second one on the same registry.
+- A transition in progress resumes without `--new-ca`. It never signs
+  with the old key meanwhile. If the next CA was lost halfway,
+  `registry-ca-signer-missing` refuses cleanly.
+
+### Harvester nodes
+
+**Harvester nodes** (administrators) lets the Harvester nodes themselves
+pull from a registry:
+
+```
+harvester-registry harvester-nodes NAME --cluster C [--remove] [--dry-run] [--wait 60]
+```
+
+- The mirrors and the read account of the registry are merged into the
+  Harvester setting `containerd-registry`. The other entries are kept. An
+  origin already mirrored through another registry is refused
+  (`harvester-nodes-mirror-conflict`).
+- Its CA (and the next CA during a transition) is merged into the setting
+  `additional-ca`.
+- **Harvester restarts RKE2 on every node** to apply it
+  (`harvester-rke2-restart`). The window asks to tick this restart.
+- The write goes through a private file, never through the command line.
+  Harvester then moves the read password into a Secret of type
+  `rke.cattle.io/auth-config` in `fleet-local`, and removes it from the
+  setting. The console checks this within `--wait` seconds (60 by
+  default): `harvester-nodes-auth-inline` otherwise (exit 1).
+- **Refused when another registry of the setting keeps a password in
+  Harvester** (`harvester-nodes-other-auth`). When the mirrors change,
+  Harvester 1.9 rewrites those Secrets from the setting with the host
+  only: it would erase that password. Remove those credentials in
+  Harvester first, then enter them again afterwards.
+- The previous value is returned masked, in the result of the action.
+  It cannot give the passwords back.
+- `--remove` takes out the entry of this registry only.
+
 ## Roles
 
 | Gesture | Role |
@@ -722,6 +884,7 @@ variable is accepted, owner and mode checked).
 | Attach a client registry to a Harvester cluster, check a registry | operator |
 | Publish a package | operator |
 | Choose registries when creating a child cluster, deploy a service from a registry | operator |
+| Renew the certificate of a bootstrap registry, merge a registry into the Harvester nodes (2.8.0) | admin |
 
 Writes on the Harvester cluster are made with the identity of the person,
 as in 2.5.0.
@@ -741,6 +904,8 @@ harvester-registry leftovers   --cluster C
 harvester-registry delete  NAME --cluster C [--delete-data]
 harvester-registry write-access [NAME] --cluster C
 harvester-registry settings [--write-sources A,B | --clear]
+harvester-registry renew-cert NAME --cluster C [--days 730] [--new-ca] [--timeout S] [--dry-run]
+harvester-registry harvester-nodes NAME --cluster C [--remove] [--dry-run] [--wait 60]
 ```
 
 `attach` reads `{"push": {"username", "password"}, "pull": {...}}` on
@@ -750,24 +915,37 @@ sets the networks of the console allowed on the write port; `write-access`
 brings the bootstrap registries of a cluster (or the one named) to it. Exit codes: 0
 success, 1 failure, 2 refused (a blocking finding, a registry in use...).
 
-## Not in 2.7.0
+## Not in 2.8.0
 
-- **GitOps** items (Fleet, Flux) and OIDC of the API of the child
-  clusters: 2.8.0. The `gitops` kind stays "coming (2.8)".
-- Renewing the certificate of a bootstrap registry (its CA is not kept),
-  restricting the port 5443 to the address of the console beyond 2.6.1,
-  the format of the registry Secrets (m-14): later.
-- A child cluster bootstrapped **entirely without Internet** (RKE2 itself
-  and its system images from the registry, a prepared VM image): later.
-- **Changing the registries of an existing cluster**: later, by renewing
-  the machines.
 - A Harbor registry posed by the console. A client Harbor works as a client
   registry; it was not tried for real.
-- Pointing the `containerd-registry` setting of the Harvester nodes at the
-  declared registries: the setting stays a manual gesture (Settings).
+- Argo CD as a GitOps tool: Flux and Fleet only.
+- The Kubernetes upgrade of the child clusters.
+- Restricting the port 5443 to the address of the console beyond 2.6.1.
 - Garbage collection and resizing of a bootstrap registry.
-- The probe from the VM network and the write port reserved to the
-  console came in 2.6.1 (see above).
+
+**Seen for real (2.8.0).** On harvlab2, with a bootstrap registry laid by 2.7.1 and a child cluster
+created by 2.7.1:
+
+- A registries renewal by 2.8.0 (mirror without fallback added) replaced
+  both machines in 15 min (API cut about 85 s, single control plane),
+  removed the old `-auth` Secret and labelled the new nodes Secret; the new
+  nodes pull through the registry, no fallback in `hosts.toml`.
+- `renew-cert --new-ca`: refused with the copies listed (`nodes`,
+  `service-ca`), `renew --what ca` on the child, then the switch (reads cut
+  5.3 s); an image pulled after it. Then `renew-cert` with the kept key
+  (reads cut 6.3 s, nodes untouched, image still pulled).
+- `pack --rke2 v1.34.11+rke2r1` (57 images, 2.6 GB) and its publication.
+- `harvester-nodes`: refused while another registry keeps a password in
+  Harvester; with the guard bypassed on the bench, Harvester did erase
+  that password, as the source says. Merge and removal otherwise as
+  documented (setting and `additional-ca` back to their value, auth Secret
+  pruned by Harvester).
+
+Not verified for real: images pulled through the merged registry by the
+Harvester nodes (the node that holds the registry address could not reach
+it, containerd fell back to the origin), a Harbor or token-only registry,
+the CA switch with an offline child and a Flux entry at once.
 
 **Seen for real (2.6.0).** Bench harvlab2 (Harvester v1.9.0, one nested
 node, 32 GiB), console of this release, 7 November 2026.

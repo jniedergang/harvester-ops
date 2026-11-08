@@ -487,6 +487,7 @@ const BMProfiles = (() => {
       if (!confirm(tr('bmp.confirmStart', { n: body.rows.length, cluster: body.cluster_name }))) return;
       res.textContent = '…';
       const r2 = await api('POST', `/api/baremetal/profiles/${encodeURIComponent(name)}/batch`, body);
+      if (r2.ok && planPick && planPick.clearSecrets) planPick.clearSecrets();   // secrets Git jamais gardés
       if (r2.ok) {
         res.innerHTML = `<span style="color:var(--accent)">${icon('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${r2.d.plan && window.BMPlans
           ? BMPlans.actionLink(r2.d.action_id) : esc(r2.d.action_id)}</span>`;

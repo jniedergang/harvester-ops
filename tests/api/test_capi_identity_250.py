@@ -374,7 +374,7 @@ class Kube:
 
 def _args(**kw):
     a = dict(spec="-", components=None, json=False, dry_run=False, timeout=60, no_wait=True,
-             identity="restricted", origin="", cluster=None, kubeconfig=None)
+             identity="restricted", origin="", cluster=None, kubeconfig=None, by="")
     a.update(kw)
     return argparse.Namespace(**a)
 
@@ -393,7 +393,7 @@ def sim(cli, monkeypatch, tmp_path):
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
     seen = {}
 
-    def render(spec, kc, origin=None, registries=None):
+    def render(spec, kc, origin=None, registries=None, offline=None):
         p = Path(kc)
         seen["path"] = p
         seen["mode"] = stat.S_IMODE(p.stat().st_mode)
@@ -433,7 +433,7 @@ def test_create_sets_up_the_identity_before_rendering_and_erases_the_file(cli, s
 
 def test_console_identity_renders_with_the_console_kubeconfig(cli, sim, monkeypatch):
     seen = {}
-    monkeypatch.setattr(cli, "render", lambda spec, kc, origin=None, registries=None: seen.update(kc=kc, spec=spec) or [])
+    monkeypatch.setattr(cli, "render", lambda spec, kc, origin=None, registries=None, offline=None: seen.update(kc=kc, spec=spec) or [])
     kube = Kube()
     assert _create(cli, kube, monkeypatch, identity="console") == cli.EXIT_OK
     assert seen["kc"] == "/console/kubeconfig" and seen["spec"]["target_namespace"] == "default"
@@ -809,7 +809,7 @@ def test_preview_renders_like_create(cli, monkeypatch, capsys, tmp_path, identit
          "ip_pool": "capi-vm-pool", "dns": ["172.16.3.6"]}))
     seen = {}
 
-    def render(spec, kc, origin=None, registries=None):
+    def render(spec, kc, origin=None, registries=None, offline=None):
         seen["ns"] = spec["target_namespace"]
         seen["kc"] = Path(kc).read_text() if kc != "/console/kubeconfig" else kc
         seen["path"] = kc

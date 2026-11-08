@@ -6037,3 +6037,43 @@ html[data-mode="dark"] .tbl-scroll { --tbl-shade: rgba(0, 0, 0, 0.42); }
 .reg-row.selected { background: var(--bg-hover, rgba(127, 127, 127, .12)); }
 .art-todo { margin: 6px 0; padding-left: 18px; }
 .art-todo li { overflow-wrap: anywhere; }
+
+/* 2.8.0 registries : quatre gestes dans l'en-tête du détail, valeurs du réglage des nœuds */
+#registries-detail > .card-header { flex-wrap: wrap; gap: 6px; }
+#registries-detail .reg-actions { justify-content: flex-end; flex: 1 1 auto; min-width: 0; }
+.reg-modal .reg-setting { white-space: pre-wrap; word-break: break-all; max-height: 180px; overflow: auto; }
+.reg-modal .reg-newca-help ol { margin: 4px 0 8px 18px; padding: 0; }
+
+/* 2.8.0 plans gitops : entrées de la phase GitOps, secrets Git de la fenêtre Déployer */
+.bmpl-gops { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 10px; }
+.bmpl-gop { padding: 8px 0; border-bottom: 1px dashed var(--border); }
+.bmpl-gop-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+.bmpl-gop-line input:not([type="checkbox"]), .bmpl-gop-line select { flex: 1 1 140px; min-width: 0; width: auto; }
+.bmpl-gop-line .btn-sm { padding: 2px 6px; line-height: 1; flex: none; }
+.capi-form .bmpl-gop-line label.bmpl-gop-num { flex-direction: row; align-items: center; gap: 6px; flex: none; white-space: nowrap; }
+.bmpl-gop-line input[data-k="url"] { flex: 3 1 260px; }
+@media (max-width: 600px) { .bmpl-gop-line input:not([type="checkbox"]), .bmpl-gop-line select { flex-basis: 100%; } }
+.bmpl-gop-num input { width: 80px; flex: none; }
+.bmpl-gop-tool { flex: none; }
+.dpw-gop-secret { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 6px 12px;
+  padding: 6px 0; border-bottom: 1px dashed var(--border); }
+.dpw-gop-secret h5 { grid-column: 1 / -1; margin: 0; font-size: 13px; }
+.dpw-gop-secret textarea { font-family: var(--font-mono, monospace); font-size: 12px; }
+@media (max-width: 900px) {
+  #registries-body .art-layout { grid-template-columns: minmax(0, 1fr); }
+  #registries-body .art-list { overflow-x: auto; }
+}
+
+/* 2.8.0 capi access, OIDC and renewal */
+.capi-create [data-x-wrap][hidden], .capi-oidc[hidden], .capi-renew-win [data-w-box][hidden],
+.capi-renew-win [data-reg-editor][hidden] { display: none; }
+.capi-access-win [data-win-pane][hidden], .capi-renew-win [data-win-pane][hidden] { display: none; }
+.capi-oidc .capi-oidc-wide { grid-column: 1 / -1; }
+.capi-oidc .is-invalid { border-color: var(--danger); }
+.capi-oidc-err { color: var(--danger); font-size: 12px; }
+.capi-oidc-err[hidden] { display: none; }
+.capi-access-mode.is-disabled { opacity: .6; }
+.capi-access-modes .tf-desc { margin: 4px 0 0; }
+.capi-access-facts { margin: 4px 0 10px; }
+.capi-ren-change { margin: 6px 0; }
+.capi-ren-change .bm-paths { margin: 4px 0 0 12px; }

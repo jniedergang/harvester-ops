@@ -7781,6 +7781,13 @@ def api_baremetal_install():
     # 2.4.0 : plan enchaîné, hors des données de l'installation
     plan_name = data.pop("plan", None)
     plan_vars = data.pop("plan_variables", None)
+    # revue 5-8 I-10 : secrets Git de la phase GitOps du plan, hors des
+    # données de l'installation, gardés par le magasin du déroulé
+    gsec, gerr = _deploy_gitops_secrets(data.pop("gitops_secrets", None))
+    if gerr:
+        return jsonify({"error": gerr, "fields": ["gitops_secrets"]}), 400
+    if gsec and not plan_name:
+        return jsonify({"error": "gitops_secrets: only with a plan", "fields": ["gitops_secrets"]}), 400
     if plan_name:
         if not isinstance(plan_name, str) or not _dpl.NAME_RE.match(plan_name):
             return jsonify({"error": "invalid plan name", "fields": ["plan"]}), 400
@@ -7797,7 +7804,7 @@ def api_baremetal_install():
         cluster = data.get("cluster_name") if mode == "create" else data.get("cluster")
         vip = data.get("vip") if mode == "create" else \
             (re.match(r"https://\[?([^\]/:]+)", str(data.get("server_url") or "")) or [None, ""])[1]
-        refused = _deploy_install_precheck(plan_name, plan_vars, cluster, vip)
+        refused = _deploy_install_precheck(plan_name, plan_vars, cluster, vip, gitops_secrets=gsec)
         if refused:
             return refused
     # 2.2.0 : une machine qui semble porter un système ne s'installe que si
@@ -7814,7 +7821,8 @@ def api_baremetal_install():
                             "running": busy.id, "running_action": busy.action}), 409
         record = {"kind": "single", "profile": None, "concurrency": None, "batch": None}
         body, status = _deploy_with_install(plan_name, plan_vars, cluster, vip, [data], "single", record,
-                                            user=current_user() or "")
+                                            user=current_user() or "", gitops_secrets=gsec)
+        gsec = None
         if status != 202:
             return jsonify(body), status
         return jsonify({"action_id": body["action_id"], "hostname": data["hostname"],
@@ -8487,6 +8495,12 @@ def api_bm_profile_batch(name):
     if prof is None:
         return jsonify({"error": "no such profile"}), 404
     data = request.get_json(force=True, silent=True) or {}
+    # revue 5-8 I-10 : secrets Git du plan enchaîné, jamais dans la série
+    gsec, gerr = _deploy_gitops_secrets(data.pop("gitops_secrets", None))
+    if gerr:
+        return jsonify({"error": gerr, "fields": ["gitops_secrets"]}), 400
+    if gsec and not data.get("plan"):
+        return jsonify({"error": "gitops_secrets: only with a plan", "fields": ["gitops_secrets"]}), 400
     err = _bm_apply_import(data)
     if err:
         return err
@@ -8504,7 +8518,7 @@ def api_bm_profile_batch(name):
         if _dpl.load_plan(_deploy_state(), plan_name) is None:
             return jsonify({"error": "no such plan", "fields": ["plan"]}), 404
         refused = _deploy_install_precheck(plan_name, data.get("plan_variables"), batch.get("cluster_name"),
-                                           batch.get("vip"))
+                                           batch.get("vip"), gitops_secrets=gsec)
         if refused:
             return refused
         plan, errors, machines = _bm_batch_prepare(prof, batch, secrets_, _bm_batch_confirms(data))
@@ -8515,7 +8529,8 @@ def api_bm_profile_batch(name):
         record = _deploy_install_record(name, batch, [], concurrency)
         body, status = _deploy_with_install(plan_name, data.get("plan_variables"), batch["cluster_name"],
                                             batch["vip"], plan, "batch", record, concurrency,
-                                            user=current_user() or "")
+                                            user=current_user() or "", gitops_secrets=gsec)
+        gsec = None
         if status != 202:
             return jsonify(body), status
         return jsonify({"action_id": body["action_id"], "cluster": batch["cluster_name"],
@@ -19373,6 +19388,33 @@ def _session_rancher(cluster):
         return kc, None
 
 
+def _child_rancher_cid(cluster, child):
+    """2.8.0 (tâche 9) : identifiant Rancher (`c-m-...`) d'un cluster enfant
+    importé dans le Rancher de la session, pour la fenêtre Membres. Lu par
+    `harvester-capi rancher-status` (marque du cluster Cluster API) et refusé
+    si l'import vise un autre Rancher ou n'y existe plus : (cid, None) ou
+    (None, réponse)."""
+    ref, err = _child_ref(child)
+    if err:
+        return None, err
+    cmd, err = _capi_base(cluster, "rancher-status")
+    if err:
+        return None, err
+    res, err = _capi_run_json(cmd + ["--name", "/".join(ref), "--json"], timeout=60)
+    if err:
+        return None, err
+    out = res[0] or {}
+    row = next((x for x in out.get("clusters") or [] if (x.get("namespace"), x.get("cluster")) == tuple(ref)), None)
+    if not row or not row.get("imported") or not out.get("session") or row.get("rancher") != out.get("session") \
+            or not row.get("present") or not _CHILD_CID_RE.match(str(row.get("cid") or "")):
+        return None, (jsonify({"error": f"{'/'.join(ref)} is not imported in the Rancher of your session",
+                               "code": "child-not-imported"}), 409)
+    return row["cid"], None
+
+
+_CHILD_CID_RE = re.compile(r"^c-[a-z0-9]([-a-z0-9]{0,40}[a-z0-9])?$")
+
+
 @app.route("/api/rancher-members/<cluster>")
 @requires_auth
 def api_rancher_members(cluster):
@@ -19382,12 +19424,20 @@ def api_rancher_members(cluster):
     if r is None:
         return jsonify({"managed": False, "members": [], "roles": []})
     scope = request.args.get("scope") or "cluster"
+    cid = r["cid"]
+    if request.args.get("child"):
+        # 2.8.0 : membres d'un cluster enfant importé (scope cluster seul)
+        if scope != "cluster":
+            return jsonify({"error": "child: cluster scope only"}), 400
+        cid, err = _child_rancher_cid(cluster, request.args.get("child"))
+        if err:
+            return err
     try:
         if scope == "project":
             target = f"{r['cid']}:{_hpj.check_pid(request.args.get('project'))}"
             path = f"/v3/projectroletemplatebindings?projectId={target}"
         elif scope == "cluster":
-            path = f"/v3/clusterroletemplatebindings?clusterId={r['cid']}"
+            path = f"/v3/clusterroletemplatebindings?clusterId={cid}"
         else:
             raise ValueError("scope: cluster or project")
     except ValueError as e:
@@ -19471,6 +19521,15 @@ def api_rancher_members_do(cluster, action):
             label = f"member:remove:{scope}"
     except (ValueError, TypeError) as e:
         return jsonify({"error": str(e)}), 400
+    if b.get("child"):
+        # 2.8.0 : membres d'un cluster enfant importé (scope cluster seul)
+        if scope != "cluster":
+            return jsonify({"error": "child: cluster scope only"}), 400
+        cid, err = _child_rancher_cid(cluster, b.get("child"))
+        if err:
+            return err
+        args += ["--cid", cid]
+        label += ":child"
     run, err = _res_cli(cluster, kc, label, args)
     return _res_reply(run, err, action=action)
 
@@ -22007,7 +22066,10 @@ def _capi_artefact_request(cluster, check=False):
     if kind == "images":
         return None, _artefact_error("images are published by the Registry phase", 400, "artefact-kind-images")
     if kind in _artm.LATER_KINDS:
-        return None, _artefact_error(f"{kind}: coming in 2.8", 400, "artefact-kind-later")
+        return None, _artefact_error(f"{kind}: coming later", 400, "artefact-kind-later")
+    if kind == "gitops":
+        # 2.8.0 : posé par une entrée GitOps (POST /api/capi/<c>/gitops)
+        return None, _artefact_error("a gitops item is applied by a GitOps entry", 400, "artefact-kind-gitops")
     if not _mf.item_name_ok(item):
         return None, _artefact_error(f"{item}: 42 characters at most to be applied", 400, "artefact-name-too-long")
     ns, child = ref
@@ -22213,6 +22275,332 @@ def api_capi_token(cluster):
     return resp
 
 
+# ---------------------------------------------------------------------------
+# 2.8.0 : accès humain aux clusters enfants (import dans le Rancher de la
+# session, OIDC de l'API) et GitOps. Tout passe par harvester-capi (parité) ;
+# Rancher n'est écrit qu'avec le jeton de la session de la personne (points
+# 221 et 222) : un compte local reçoit `rancher-session-needed` (409), comme
+# Projets et Membres.
+# ---------------------------------------------------------------------------
+def _rancher_session_refusal(cluster, what):
+    kc, r = _session_rancher(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if r is None:
+        return jsonify({"error": f"{what} lives in Rancher", "code": "rancher-session-needed",
+                        "hint": "sign in to the console through Rancher"}), 409
+    return None
+
+
+@app.route("/api/capi/<cluster>/rancher-import", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_capi_rancher_import(cluster):
+    """Importe un cluster enfant dans le Rancher de la session : action
+    suivie `capi-rancher-import:` (création dans Rancher, manifeste appliqué
+    par la console, attente de `Active`)."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - {"cluster"}):
+        return _artefact_error(f"{k}: unknown key", 400)
+    ref, err = _child_ref(body.get("cluster"))
+    if err:
+        return err
+    refusal = _rancher_session_refusal(cluster, "the import")
+    if refusal:
+        return refusal
+    ns, child = ref
+    cmd, err = _capi_child_base(cluster, "rancher-import", ns, child)
+    if err:
+        return err
+    run, err = _capi_action(cluster, f"capi-rancher-import:{ns}/{child}",
+                            cmd + ["--name", f"{ns}/{child}", "--by", current_user() or ""])
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{ns}/{child}"}), 202
+
+
+@app.route("/api/capi/<cluster>/rancher-import/<namespace>/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_capi_rancher_unimport(cluster, namespace, name):
+    """Retire l'import : cluster supprimé dans Rancher, restes connus
+    supprimés dans le cluster enfant après jugement du serveur."""
+    if not all(_K8S_NAME_RE.match(x) for x in (namespace, name)):
+        return _artefact_error("invalid name", 400)
+    refusal = _rancher_session_refusal(cluster, "the import")
+    if refusal:
+        return refusal
+    cmd, err = _capi_child_base(cluster, "rancher-unimport", namespace, name)
+    if err:
+        return err
+    run, err = _capi_action(cluster, f"capi-rancher-unimport:{namespace}/{name}",
+                            cmd + ["--name", f"{namespace}/{name}"])
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}"}), 202
+
+
+@app.route("/api/capi/<cluster>/rancher-status")
+@requires_auth
+def api_capi_rancher_status(cluster):
+    """Clusters enfants importés et leur état chez le Rancher de la session."""
+    cmd, err = _capi_base(cluster, "rancher-status")
+    if err:
+        return err
+    res, err = _capi_run_json(cmd + ["--json"], timeout=60)
+    if err:
+        return err
+    return jsonify(res[0])
+
+
+@app.route("/api/capi/<cluster>/oidc-kubeconfig/<namespace>/<name>")
+@requires_auth
+def api_capi_oidc_kubeconfig(cluster, namespace, name):
+    """Kubeconfig OIDC des personnes (greffon kubelogin, aucun identifiant),
+    pour qui a le droit d'administrer le cluster enfant (point 230)."""
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["operator"]:
+        return jsonify({"error": "forbidden", "required": "operator"}), 403
+    if not all(_K8S_NAME_RE.match(x) for x in (namespace, name)):
+        return _artefact_error("invalid name", 400)
+    cmd, err = _capi_child_base(cluster, "oidc-kubeconfig", namespace, name)
+    if err:
+        return err
+    res, err = _capi_run_json(cmd + ["--name", f"{namespace}/{name}", "--json"], timeout=60)
+    if err:
+        return err
+    out, rc = res
+    if rc != 0:
+        return jsonify(out), 409
+    resp = jsonify(out)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+GITOPS_KEYS = {"cluster", "entry", "secrets", "dry_run"}
+
+
+@app.route("/api/capi/<cluster>/gitops", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_gitops(cluster):
+    """Pose une entrée GitOps sur un cluster enfant (Fleet s'il est importé,
+    Flux sinon) : action suivie `capi-gitops:`. Les secrets saisis partent
+    dans la demande privée de l'outil, jamais rangés."""
+    import child_gitops as _cg
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - GITOPS_KEYS):
+        return _artefact_error(f"{k}: unknown key", 400)
+    ref, err = _child_ref(body.get("cluster"))
+    if err:
+        return err
+    try:
+        entry = _cg.normalize(body.get("entry"))
+    except ValueError as e:
+        return _artefact_error(str(e), 400)
+    secrets = body.get("secrets") or {}
+    if not isinstance(secrets, dict) or not all(isinstance(v, dict) for v in secrets.values()):
+        return _artefact_error("secrets: {name: {identity, known_hosts} | {username, password}}", 400)
+    ns, child = ref
+    if body.get("dry_run") is True:
+        # 2.8.0, tâche 9 : la vérification de la fenêtre avant son bouton
+        # (`gitops-check`, lecture seule) ; le droit sur le cluster enfant y
+        # devient un constat, comme pour Appliquer. Les secrets ne servent
+        # qu'à leur nom : seules les clés partent.
+        cmd, err = _capi_base(cluster, "gitops-check")
+        if err:
+            return err
+        spec = {"cluster": f"{ns}/{child}", "entry": entry, "secrets": {k: {} for k in secrets},
+                "role": current_role() or "viewer", "by": current_user() or ""}
+        res, err = _capi_run_json(cmd + ["--spec", "-"], spec=spec, timeout=60)
+        if err:
+            return err
+        out, rc = res
+        found = list(out.get("findings") or [])
+        ok, why = _child_admin_allowed(_kubectl_for_cluster(cluster), ns, child)
+        if not ok and not any(f.get("code") == CHILD_ADMIN_REQUIRED for f in found):
+            found.append({"code": CHILD_ADMIN_REQUIRED if ok is False else "child-admin-unknown",
+                          "level": "block", "facts": {"cluster": f"{ns}/{child}", "message": why}})
+        return jsonify(dict(out, findings=found, blocked=rc != 0 or bool(out.get("blocked")) or not ok))
+    if entry["privileges"] == "cluster" and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return _artefact_error("privileges cluster: administrators only", 403, "gitops-privileges-admin-only")
+    cmd, err = _capi_child_base(cluster, "gitops-deploy", ns, child)
+    if err:
+        return err
+    spec = {"cluster": f"{ns}/{child}", "entry": entry, "secrets": secrets,
+            "role": current_role() or "viewer", "by": current_user() or ""}
+    run, err = _capi_action(cluster, f"capi-gitops:{ns}/{child}:{entry['name']}", cmd, spec=spec)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{ns}/{child}", "entry": entry["name"]}), 202
+
+
+@app.route("/api/capi/<cluster>/gitops/<namespace>/<name>/<entry>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_gitops_remove(cluster, namespace, name, entry):
+    import child_gitops as _cg
+    if not all(_K8S_NAME_RE.match(x) for x in (namespace, name)) or not _cg.REF_RE.match(entry or ""):
+        return _artefact_error("invalid name", 400)
+    cmd, err = _capi_child_base(cluster, "gitops-remove", namespace, name)
+    if err:
+        return err
+    # tâche 9, constat 1 : l'outil refuse une entrée Fleet à qui n'est pas
+    # administrateur (le rôle part avec la commande, Flux reste aux opérateurs)
+    run, err = _capi_action(cluster, f"capi-gitops-remove:{namespace}/{name}:{entry}",
+                            cmd + ["--name", f"{namespace}/{name}/{entry}", "--role", current_role() or "viewer"])
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "entry": entry}), 202
+
+
+@app.route("/api/capi/<cluster>/gitops")
+@requires_auth
+def api_capi_gitops_list(cluster):
+    """Entrées GitOps posées (Flux, et Fleet avec une session Rancher)."""
+    cmd, err = _capi_base(cluster, "gitops-status")
+    if err:
+        return err
+    res, err = _capi_run_json(cmd + ["--json"], timeout=60)
+    if err:
+        return err
+    return jsonify(res[0])
+
+
+RENEW_KEYS = {"what", "registries", "oidc", "dry_run", "timeout", "mode"}
+RENEW_PREFIX = "capi-renew:"
+RENEW_ABANDON_PREFIX = "capi-renew-abandon:"
+RENEW_MODES = ("finish", "abandon")
+
+
+def _renew_running(cluster):
+    """Renouvellement de machines en cours sur ce cluster Harvester (cette
+    console, hors essai), ou None. Ne pas appeler sous ACTIONS_LOCK."""
+    with ACTIONS_LOCK:
+        return next((r for r in ACTIONS.values()
+                     if r.cluster == cluster and not r.dry_run and r.status in ("starting", "running")
+                     and str(r.action).startswith((RENEW_PREFIX, RENEW_ABANDON_PREFIX))), None)
+
+
+def _renew_refusal(cluster):
+    """(corps, 409) si ce cluster Harvester est tenu : déroulé de plan (cette
+    console, ou verrou de fichier d'un autre processus : ligne de commande),
+    retrait de la pile, autre renouvellement (revue 5-8 I-9) ; sinon None.
+    L'outil relit le même verrou."""
+    busy = _deploy_busy(cluster)
+    if busy is not None:
+        return {"error": "a deployment plan is running on this cluster", "code": "renew-plan-running",
+                "running": busy.id}, 409
+    run = _renew_running(cluster)
+    if run is not None:
+        return {"error": "a machine renewal is already running on this cluster", "code": "renew-busy",
+                "running": run.id}, 409
+    refused = _capi_uninstall_refusal(cluster)
+    if refused:
+        return refused
+    holder = _deploy_lock_holder(cluster)
+    if holder:
+        if holder.get("action") == "capi-renew":
+            return {"error": "a machine renewal is already running on this cluster", "code": "renew-busy",
+                    "running": holder.get("run") or ""}, 409
+        return _capi_uninstall_refusal(cluster, holder) or (
+            {"error": "a deployment plan is running on this cluster", "code": "renew-plan-running",
+             "running": holder.get("run") or "", "plan": holder.get("plan") or ""}, 409)
+    return None
+
+
+def _capi_lock_refusal(cluster, holder=None):
+    """Refus d'un déroulé ou d'un défaire : retrait de la pile (2.7.1) ou
+    renouvellement de machines en cours (revue 5-8 I-9), de cette console ou
+    d'un autre processus (`holder`, note du verrou de fichier) ; sinon None."""
+    refused = _capi_uninstall_refusal(cluster, holder)
+    if refused:
+        return refused
+    run = _renew_running(cluster)
+    rid = run.id if run is not None else ((holder or {}).get("run") if (holder or {}).get("action")
+                                          == "capi-renew" else None)
+    if rid is None:
+        return None
+    return {"error": "a machine renewal of a child cluster is running on this cluster", "code": "renew-running",
+            "running": rid}, 409
+
+
+@app.route("/api/capi/<cluster>/renew/<namespace>/<name>", methods=["POST"])
+@requires_auth
+@_rate_limit("6/minute")
+def api_capi_renew(cluster, namespace, name):
+    """Renouvelle les machines d'un cluster enfant (2.8.0, point 233) :
+    registres, OIDC ou CA en transition. Essai (`dry_run`) : la différence,
+    rien d'écrit ; sinon action suivie `capi-renew:<ns>/<c>`. Revue 5-8 :
+    `mode: finish` reprend un renouvellement pas fini (opérateur), `mode:
+    abandon` retire sa marque sans rien supprimer (administrateurs, action
+    `capi-renew-abandon:`). Refusé pendant un déroulé de plan, un retrait de
+    la pile ou un autre renouvellement sur ce cluster (I-9)."""
+    import capi_renew as _cr
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - RENEW_KEYS):
+        return _artefact_error(f"{k}: unknown key", 400)
+    if not all(_K8S_NAME_RE.match(x) for x in (namespace, name)):
+        return _artefact_error("invalid name", 400)
+    mode = body.get("mode")
+    if mode is not None and mode not in RENEW_MODES:
+        return _artefact_error(f"mode: one of {', '.join(RENEW_MODES)}", 400)
+    try:
+        timeout = int(body.get("timeout") or _cr.TIMEOUT[2])
+        if not _cr.TIMEOUT[0] <= timeout <= _cr.TIMEOUT[1]:
+            raise ValueError(f"timeout: {_cr.TIMEOUT[0]} to {_cr.TIMEOUT[1]} seconds")
+        if mode:
+            if set(body) & {"what", "registries", "oidc", "dry_run"}:
+                raise ValueError("mode takes neither what, registries, oidc nor dry_run")
+            whats = []
+        else:
+            what = body.get("what")
+            whats = _cr.check_whats(",".join(what) if isinstance(what, list) else what)
+    except (ValueError, TypeError) as e:
+        return _artefact_error(str(e), 400)
+    if mode == "abandon" and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return _artefact_error("abandoning a renewal: administrators only", 403, "renew-abandon-admin-only")
+    spec = {k: body[k] for k in ("registries", "oidc") if k in body}
+    if "registries" in spec and "registries" not in whats or "oidc" in spec and "oidc" not in whats:
+        return _artefact_error("registries and oidc are given with the matching what", 400)
+    cmd, err = _capi_child_base(cluster, "renew", namespace, name)
+    if err:
+        return err
+    args = ["--name", f"{namespace}/{name}", "--timeout", str(timeout)]
+    args += [f"--{mode}"] if mode else ["--what", ",".join(whats)]
+    if body.get("dry_run") is True:
+        refused = _renew_refusal(cluster)
+        if refused:
+            return jsonify(refused[0]), refused[1]
+        res, err = _capi_run_json(cmd + args + ["--dry-run"] + (["--spec", "-"] if spec else []),
+                                  spec=spec if spec else None, timeout=120)
+        if err:
+            return err
+        out, rc = res
+        return jsonify(dict(out or {}, blocked=rc != 0)), 200
+    label = f"{RENEW_ABANDON_PREFIX if mode == 'abandon' else RENEW_PREFIX}{namespace}/{name}"
+    with _DEPLOY_LAUNCH_LOCK:
+        refused = _renew_refusal(cluster)
+        if refused:
+            return jsonify(refused[0]), refused[1]
+        run, err = _cli_action(cluster, label, cmd + args, "harvester-capi", spec=spec if spec else None,
+                               after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None), id_arg=True,
+                               setup=(lambda r: setattr(r, "required_role", "admin")) if mode == "abandon"
+                               else None,
+                               busy_match=lambda r: r.cluster == cluster and (
+                                   str(r.action).startswith((RENEW_PREFIX, RENEW_ABANDON_PREFIX, DEPLOY_PREFIX))
+                                   or r.action == f"{CAPI_UNINSTALL_PREFIX}{cluster}"))
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}", "what": whats,
+                    **({"mode": mode} if mode else {})}), 202
+
+
 @app.route("/api/capi/<cluster>/artefacts/applied")
 @requires_auth
 def api_capi_artefacts_applied(cluster):
@@ -22270,6 +22658,7 @@ def api_capi_cluster_create(cluster):
     comp = _capi_components_dir()
     if comp:
         cmd += ["--components", str(comp)]
+    cmd += ["--by", current_user() or ""]
     run, err = _capi_action(cluster, f"capi-cluster-create:{spec['namespace']}/{spec['name']}",
                             cmd, spec=spec)
     if err:
@@ -22282,12 +22671,17 @@ def api_capi_cluster_create(cluster):
 @_rate_limit("6 per minute")
 def api_capi_cluster_delete(cluster, namespace, name):
     """Supprime un cluster créé par Cluster API et suit le retrait de ses
-    machines ; retire aussi son espace de noms s'il a été créé pour lui."""
+    machines ; retire aussi son espace de noms s'il a été créé pour lui.
+    2.8.0 (revue 1-4 I-2) : `?forget_rancher=1`, administrateur seulement,
+    oublie l'import dans un Rancher disparu ou injoignable."""
+    forget = request.args.get("forget_rancher") in ("1", "true")
+    if forget and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return jsonify({"error": "forbidden", "required": "admin", "code": "rancher-forget-admin"}), 403
     cmd, err = _capi_base(cluster, "delete")
     if err:
         return err
     run, err = _capi_action(cluster, f"capi-cluster-delete:{namespace}/{name}",
-                            cmd + ["--name", f"{namespace}/{name}"])
+                            cmd + ["--name", f"{namespace}/{name}"] + (["--forget-rancher"] if forget else []))
     if err:
         return err
     return jsonify({"action_id": run.id, "deleting": f"{namespace}/{name}"}), 201
@@ -22381,6 +22775,33 @@ def api_capi_cluster_kubeconfig(cluster, namespace, name):
                     headers={"Content-Disposition": f'attachment; filename="{name}.kubeconfig.yaml"'})
 
 
+def _capi_oidc_of_templates(kc_run, namespace, cl):
+    """Réglages OIDC complets d'un cluster enfant, lus dans le gabarit du
+    plan de contrôle que désigne sa ClusterClass (child_oidc.of_template),
+    ou None si la lecture échoue."""
+    import capi_renew as _cr
+    import child_oidc as _co
+    cname = _cr.class_name_of(cl)
+    if not cname:
+        return None
+    rc, out, _e = kc_run("-n", namespace, "get", _cr.K_CLASS, cname, "-o", "json")
+    if rc != 0:
+        return None
+    try:
+        refs = [x for role, x in _cr.template_refs(json.loads(out)) if role == "controlPlane"]
+    except ValueError:
+        return None
+    if not refs or not _K8S_NAME_RE.match(str(refs[0].get("name") or "")):
+        return None
+    rc, out, _e = kc_run("-n", namespace, "get", _cr.K_CP_TEMPLATE, refs[0]["name"], "-o", "json")
+    if rc != 0:
+        return None
+    try:
+        return _co.of_template(json.loads(out), cl)
+    except ValueError:
+        return None
+
+
 @app.route("/api/capi/<cluster>/cluster/<namespace>/<name>/details")
 @requires_auth
 def api_capi_cluster_details(cluster, namespace, name):
@@ -22432,10 +22853,19 @@ def api_capi_cluster_details(cluster, namespace, name):
                 identity = "restricted"
         except ValueError:
             pass
+    # 2.8.0 (tâche 9) : réglages OIDC posés à la création (aucun secret),
+    # pour les fenêtres Accès et Renouveler. Revue 5-8 I-3 : relus dans le
+    # fichier du gabarit du plan de contrôle (revendications, préfixes, CA de
+    # l'émetteur), l'annotation publique seule en perdait une partie.
+    import child_oidc as _co
+    oidc = _co.of_cluster(cl)
+    if oidc is not None:
+        oidc = _capi_oidc_of_templates(kc_run, namespace, cl) or oidc
     return jsonify({
         "name": name,
         "namespace": namespace,
         "identity": identity,
+        "oidc": oidc,
         "phase": cl.get("status", {}).get("phase", ""),
         # v1.48.0 : le cœur de Turtles répond en v1beta2 (plus de
         # `status.controlPlaneReady`)
@@ -22635,7 +23065,7 @@ def _capi_uninstall_turtles(cluster, data):
         busy = _deploy_busy(cluster)
         holder = {"run": busy.id, "plan": (busy.result or {}).get("plan")} if busy else _deploy_lock_holder(cluster)
         if holder:
-            refused = _capi_uninstall_refusal(cluster, holder)
+            refused = _capi_lock_refusal(cluster, holder)
             if refused:
                 return jsonify(refused[0]), refused[1]
             return jsonify({"error": "a plan deployment holds this cluster", "code": "capi-plan-running",
@@ -22644,7 +23074,8 @@ def _capi_uninstall_turtles(cluster, data):
                                after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None),
                                setup=lambda r: setattr(r, "required_role", "admin"), id_arg=True,
                                busy_match=lambda r: r.cluster == cluster
-                               and str(r.action).startswith(CAPI_GESTURE_PREFIXES))
+                               and str(r.action).startswith(CAPI_GESTURE_PREFIXES
+                                                            + (RENEW_PREFIX, RENEW_ABANDON_PREFIX)))
     if err:
         return err
     return jsonify({"action_id": run.id, "mode": "turtles", "dry_run": dry, "remove_images": images}), 201
@@ -32884,6 +33315,13 @@ DEPLOY_FINDING_LEVELS = {
     "artefact-invalid": "blocking", "artefact-not-published": "blocking", "artefact-taken": "blocking",
     "artefact-check-failed": "blocking", "artefact-var-missing": "blocking", "caaph-missing": "blocking",
     "child-admin-required": "blocking", "artefact-later": "info",
+    # 2.8.0 : phase GitOps
+    "gitops-invalid": "blocking", "gitops-secret-missing": "blocking", "gitops-flux-missing": "blocking",
+    "gitops-fleet-needs-rancher": "blocking", "gitops-source-unsupported": "blocking",
+    "gitops-privileges-admin-only": "blocking", "gitops-fleet-admin-only": "blocking",
+    "rancher-session-in-chain": "blocking",
+    "gitops-package-not-published": "blocking", "gitops-taken": "blocking", "gitops-check-failed": "blocking",
+    "gitops-var-missing": "blocking", "gitops-later": "info", "gitops-flux-in-plan": "info",
 }
 # Constats de `harvester-capi check --many` repris dans la phase clusters :
 # niveau de l'outil -> niveau d'un lancement
@@ -33084,7 +33522,7 @@ def _deploy_values(plan, variables, cluster, vip):
 
 
 def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=False, update_differing=False,
-                    role=None):
+                    role=None, gitops_secrets=()):
     """Contrôles d'un lancement, lecture seule. Rend (constats, résumé,
     contexte) ; le contexte porte de quoi lancer : plan, modèles, valeurs,
     ressources rendues. `install` : le cluster sera créé par la chaîne (ni
@@ -33183,14 +33621,33 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
     capi = _deploy_capi_prepare(kc, plan, values, install, findings, role=role, later=reg["created_here"])
     later = {s["name"] for s in capi["summary"] if not s.get("exists")}
     arts = _deploy_artefacts_prepare(kc, plan, values, install, findings, capi["entries"], cluster, later)
+    gops = _deploy_gitops_prepare(kc, plan, values, install, findings, capi["entries"], arts["rows"], cluster,
+                                  later, gitops_secrets, role)
+    if install:
+        # revue finale 2.8.0 I-3 : une chaîne qui installe le cluster Harvester
+        # n'a ni session Rancher (kubeconfig de la console) ni cluster connu
+        # de ce Rancher : l'import externe et Fleet échoueraient des heures
+        # plus tard ; refusés au lancement.
+        for e in capi["entries"]:
+            if e["spec"].get("rancher_external"):
+                findings.append(_deploy_finding(
+                    "rancher-session-in-chain", "clusters",
+                    f"{e['name']}: an external Rancher import needs a Harvester cluster known to your Rancher "
+                    "session, not possible in a chain that installs it"))
+        for r in gops["summary"]:
+            if r.get("tool") == "fleet":
+                findings.append(_deploy_finding(
+                    "rancher-session-in-chain", "gitops",
+                    f"{r['entry']} on {r['ref']}: Fleet needs a Harvester cluster known to your Rancher session, "
+                    "not possible in a chain that installs it"))
     estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) \
-        + (30 if install else 0) + reg["estimate"] + capi["estimate"] + arts["estimate"]
+        + (30 if install else 0) + reg["estimate"] + capi["estimate"] + arts["estimate"] + gops["estimate"]
     summary = {"declarations": decls, "estimate_minutes": estimate, "capi": capi["capi"],
                "clusters": capi["summary"], "registries": reg["summary"], "publish": reg["publish"],
-               "artefacts": arts["summary"]}
+               "artefacts": arts["summary"], "gitops": gops["summary"]}
     ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
            "update_differing": bool(update_differing), "clusters": capi["entries"],
-           "registries": reg["entries"], "artefacts": arts["rows"]}
+           "registries": reg["entries"], "artefacts": arts["rows"], "gitops": gops["rows"]}
     return findings, summary, ctx
 
 
@@ -34063,20 +34520,24 @@ def _deploy_clusters_phase(run, cluster, kc_ref, dctx):
             if prev.get("created"):
                 # créé par une exécution précédente de la même chaîne de reprises
                 data.update({k: prev[k] for k in ("created", "undo", "namespace_created") if k in prev})
+            if prev.get("undo_more"):
+                data["undo_more"] = prev["undo_more"]
             st = b.get("state") or {}
             if st.get("failed"):
                 return _dch.ItemOutcome("error", "cluster-failed", data=data)
             if st.get("ready"):
-                return _dch.ItemOutcome("done", "already present, adopted", data=data)
+                return import_after(kc, b, ref, data, "already present, adopted")
             if dry:
                 return _dch.ItemOutcome("done", "present, not available yet (dry run)", data=data)
             status, msg = wait_adopted(ctx, kc, name)
+            if status == "done":
+                return import_after(kc, _deploy_cluster_brief(kc, name) or b, ref, data, msg)
             return _dch.ItemOutcome(status, msg, data=data)
         if not dry:
             data["namespace_created"] = not b.get("namespace_present", False)
         args = _deploy_capi_args() + ["--identity", "restricted", "--origin",
                                       f"plan={plan['name']},template={e['template']},run={run.id}",
-                                      "--timeout", str(timeout_s)]
+                                      "--timeout", str(timeout_s), "--by", (run.result or {}).get("by") or ""]
         if dry:
             args.append("--dry-run")
         child, err = _capi_launch(cluster, kc, "create", args, spec=e["spec"], parent=run.id,
@@ -34096,18 +34557,43 @@ def _deploy_clusters_phase(run, cluster, kc_ref, dctx):
         if after and after.get("present") and (after.get("origin") or {}).get("run") == run.id:
             data["created"] = True
             data["undo"] = {"kind": "capi-cluster", "ref": ref}
+            if e["spec"].get("rancher_external") and after.get("rancher"):
+                # 2.8.0 : `create` a importé le cluster dans le Rancher de la
+                # session (point 223) ; le Défaire retire l'import avant lui
+                data["undo_more"] = [{"kind": "rancher-import", "ref": ref}]
         if status == "done" and after and after.get("present") and (after.get("state") or {}).get("ready"):
             return _dch.ItemOutcome("done", "created", data=data)
         if status == "cancelled":
             return _dch.ItemOutcome("error", f"creation cancelled (action {child.id})", data=data)
         return _dch.ItemOutcome("error", f"creation failed (action {child.id})", data=data)
 
+    def import_after(kc, b, ref, data, msg):
+        """2.8.0 : cluster repris disponible dont le modèle demande
+        `rancher_external` sans import posé (création interrompue après la
+        disponibilité) : l'import est fait ici, marqué de cette exécution."""
+        e = entries[ref.split("/")[1]]
+        if dry or not e["spec"].get("rancher_external") or b.get("rancher"):
+            return _dch.ItemOutcome("done", msg, data=data)
+        child, err = _capi_launch(cluster, kc, "rancher-import",
+                                  ["--name", ref, "--by", (run.result or {}).get("by") or "", "--run", run.id],
+                                  parent=run.id, cluster_user=run.cluster_user, label=f"capi-rancher-import:{ref}")
+        if err:
+            return _dch.ItemOutcome("error", str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        status, _c = _deploy_wait_child(child.id)
+        if (_deploy_cluster_brief(kc, e["name"]) or {}).get("rancher"):
+            data["undo_more"] = [{"kind": "rancher-import", "ref": ref}]
+        if status != "done":
+            return _dch.ItemOutcome("error", f"import into Rancher failed (action {child.id})", data=data)
+        return _dch.ItemOutcome("done", f"{msg}; imported into Rancher", data=data)
+
     def verify_item(ctx, state, prev):
         e = entries.get(prev.get("cluster"))
         if e is None:
             return False
         b = _deploy_cluster_brief(kc_ref(), e["name"])
-        return bool(b and b.get("present") and ours(b, e) and (b.get("state") or {}).get("ready"))
+        return bool(b and b.get("present") and ours(b, e) and (b.get("state") or {}).get("ready")
+                    and (b.get("rancher") or not e["spec"].get("rancher_external")))
     items = [_dch.Item(e["name"], tuple(d for d in e["depends_on"] if d in entries)) for e in entries.values()]
     return _dch.Phase("clusters", items=items, run_item=run_item, verify_item=verify_item, before=before,
                       item_key="cluster", item_step="k8s-")
@@ -34650,6 +35136,313 @@ def _deploy_artefacts_phase(run, cluster, kc_ref, dctx):
                       item_key="id", item_step="", after_failure_of=("clusters",))
 
 
+# --- 2.8.0 : phase GitOps (tâche 5) -------------------------------------------
+GITOPS_SECRET_KEYS = ("identity", "known_hosts", "username", "password")
+
+
+def _deploy_gitops_secrets(raw):
+    """(secrets du plan pour la phase GitOps, None) ou (None, message) :
+    {nom: {identity[, known_hosts]} | {username, password}}, saisis au
+    lancement et redemandés à la reprise (décision 129), jamais rangés."""
+    import child_gitops as _cg
+    if raw in (None, {}):
+        return {}, None
+    if not isinstance(raw, dict) or len(raw) > _dpl.MAX_GITOPS_ENTRIES:
+        return None, "gitops_secrets: {name: {identity, known_hosts} | {username, password}}"
+    out = {}
+    for name, v in raw.items():
+        if not isinstance(name, str) or not _cg.REF_RE.match(name):
+            return None, "gitops_secrets: names are RFC 1123"
+        if not isinstance(v, dict) or set(v) - set(GITOPS_SECRET_KEYS) \
+                or not all(isinstance(x, str) and len(x) <= 65536 for x in v.values()) \
+                or not (v.get("identity") or (v.get("username") and v.get("password"))):
+            return None, f"gitops_secrets.{name}: {{identity, known_hosts}} or {{username, password}}"
+        out[name] = {k: x for k, x in v.items() if x}
+    return out, None
+
+
+def _deploy_gitops_secrets_put(store, run_id, secrets_):
+    for name, v in (secrets_ or {}).items():
+        for k, x in v.items():
+            store.put(_dch.SECRET_CLASS, f"{run_id}/gitops/{name}", k, x)
+
+
+def _deploy_gitops_secret_get(store, run_id, name):
+    out = {}
+    for k in GITOPS_SECRET_KEYS:
+        try:
+            out[k] = store.get(_sst.make_ref(_dch.SECRET_CLASS, f"{run_id}/gitops/{name}", k))
+        except (_sst.SecretMissing, ValueError):
+            pass
+    return out
+
+
+def _deploy_gitops_rows(plan, values, cluster_entries, art_rows, findings):
+    """Rangées de la phase GitOps : une par (entrée, cluster), dans l'ordre
+    des entrées. Outil prévu d'un cluster de la phase Clusters (`fleet` si
+    son modèle demande `rancher_external`, point 223), sinon lu au contrôle.
+    Dépendances : `clusters:<c>` et, pour Flux, l'élément chart `flux` du
+    même cluster s'il est dans la phase Artefacts."""
+    import child_gitops as _cg
+    rendered = {e["raw_name"]: e["name"] for e in cluster_entries or []}
+    specs = {e["name"]: e.get("spec") or {} for e in cluster_entries or []}
+    clusters_on = bool((plan["phases"].get("clusters") or {}).get("enabled"))
+    flux_rows = {r["ref"]: r["id"] for r in art_rows or [] if r["type"] == "chart" and r["item"] == _cg.SERVICE}
+    rows = []
+    for i, e in enumerate(_dpl.plan_gitops(plan)):
+        where = f"phases.gitops.entries[{i}]"
+        try:
+            refs = _dpl.render_artefact_clusters(plan, e["clusters"], values, rendered, phase="gitops")
+            src = dict(e["source"])
+            if src.get("registry"):
+                src["registry"] = _dpl.render_artefact_registry(src["registry"], values, f"{where}.source.registry")
+        except _dpl.ProfileError as ex:
+            for w, why in ex.errors:
+                findings.append(_deploy_finding("gitops-var-missing" if "missing variable" in why else "var-invalid",
+                                                "gitops", f"{e['name']}: {w}: {why}"))
+            continue
+        entry = {k: e[k] for k in ("name", "tool", "privileges", "prune", "interval_minutes")}
+        entry.update(namespace=e["target_namespace"], source=src)
+        for ref, planc in refs:
+            ns, c = ref.split("/")
+            tool = None
+            if planc:
+                try:
+                    tool = _cg.choose(e["tool"], bool(specs.get(planc, {}).get("rancher_external")))
+                except _cg.GitopsError as ex:
+                    findings.append(_deploy_finding(ex.code if ex.code in DEPLOY_FINDING_LEVELS else "gitops-invalid",
+                                                    "gitops", f"{e['name']} on {ref}: {ex}"))
+                    continue
+            deps = [f"clusters:{planc}"] if planc and clusters_on else []
+            if tool != "fleet" and ref in flux_rows:
+                deps.append(f"artefacts:{flux_rows[ref]}")
+            rows.append({"id": f"gitops-{c if ns == c else f'{ns}-{c}'}-{e['name']}", "ref": ref,
+                         "plan_cluster": planc, "entry": entry, "tool": tool, "depends_on": deps,
+                         "flux_in_plan": ref in flux_rows})
+    return rows
+
+
+def _deploy_gitops_entry(kc, cluster, ref, name, with_session=False):
+    """(entrée posée ou None, None) ou (None, erreur) : `gitops-status`
+    d'un cluster enfant (Flux, et Fleet avec la session). `with_session` :
+    (entrée, session lue ou non, erreur) ; sans session, une entrée Fleet ne
+    se voit pas (revue 5-8 I-8)."""
+    out, _rc, err = _deploy_capi_json(kc, "gitops-status", ["--name", ref, "--json", f"--harvester-name={cluster}"],
+                                      timeout=60)
+    if err or not isinstance(out, dict):
+        return (None, False, err or "unreadable") if with_session else (None, err or "unreadable")
+    ns, c = ref.split("/")
+    cur = next((x for x in out.get("entries") or [] if (x.get("namespace"), x.get("cluster"), x.get("entry"))
+                == (ns, c, name)), None)
+    return (cur, bool(out.get("session")), None) if with_session else (cur, None)
+
+
+def _deploy_gitops_ours(cur, plan_name):
+    """Une entrée posée est reprise par ce plan si son origine nomme CE
+    plan : Flux (origine du CRS) comme Fleet (annotation `plan` de l'objet
+    de Rancher, revue 5-8 I-11 : avant, toute exécution d'un plan comptait)."""
+    o = (cur or {}).get("origin") or {}
+    return bool(plan_name) and o.get("plan") == plan_name
+
+
+def _deploy_gitops_spec(row, plan, run_id, by, role, secrets_, origin_run=None):
+    # banc 2.8.0 : le contrôle d'avant lancement n'a pas encore d'exécution ;
+    # `run: None` était refusé par l'outil (« invalid value for 'run' ») et
+    # bloquait toute entrée sur un cluster enfant existant
+    run = origin_run or run_id
+    return {"cluster": row["ref"], "entry": row["entry"], "secrets": secrets_, "role": role or "admin",
+            "origin": dict({"plan": plan["name"]}, **({"run": run} if run else {})), "by": by}
+
+
+def _deploy_gitops_checks(kc, rows, plan, later_clusters, secret_names, role, cluster_name, live=True):
+    """Constats des rangées (préparation et `before` de la phase) : secret
+    du plan absent, droits (privilèges du cluster, Fleet), source refusée
+    par l'outil prévu, Flux absent (ni dans le plan ni posé), paquet publié
+    (ou publié par la phase Registre du plan), puis, pour un cluster enfant
+    existant, `gitops-check` (outil réel, Flux prêt et verrouillé, namespace)
+    et le droit de la personne sur `<c>-kubeconfig`."""
+    import child_gitops as _cg
+    findings = []
+    pubs = {(p["package"], p["version"], p["registry"]) for p in _dpl.plan_publications(plan)}
+    state = _deploy_state()
+    admin = role is None or ROLE_RANK.get(role, 0) >= ROLE_RANK["admin"]
+    for r in rows:
+        e, src, where = r["entry"], r["entry"]["source"], f"{r['entry']['name']} on {r['ref']}"
+        ns, child = r["ref"].split("/")
+        if src.get("secret") and src["secret"] not in set(secret_names or ()):
+            findings.append(_deploy_finding("gitops-secret-missing", "gitops",
+                                            f"{where}: the secret {src['secret']} is asked at launch"))
+        if e["privileges"] == "cluster" and not admin:
+            findings.append(_deploy_finding("gitops-privileges-admin-only", "gitops", f"{where}: privileges cluster"))
+        if r["tool"] == "fleet" and not admin:
+            findings.append(_deploy_finding("gitops-fleet-admin-only", "gitops",
+                                            f"{where}: Fleet deploys with its agent, cluster administrator"))
+        if (r["tool"], src["type"]) in (("fleet", "oci"), ("flux", "chart")):
+            findings.append(_deploy_finding("gitops-source-unsupported", "gitops",
+                                            f"{where}: {r['tool']} does not take a {src['type']} source"))
+        later = r["plan_cluster"] in later_clusters or not kc
+        if r["tool"] == "flux" and later:
+            findings.append(_deploy_finding("gitops-flux-in-plan" if r["flux_in_plan"] else "gitops-flux-missing",
+                                            "gitops", f"{where}: " + ("Flux is installed by the Artefacts phase"
+                                                                      if r["flux_in_plan"] else
+                                                                      "no flux chart item for this cluster in the "
+                                                                      "Artefacts phase")))
+        published_by_plan = (src.get("package"), src.get("version"), src.get("registry")) in pubs
+        if src["type"] in ("oci", "chart"):
+            d = _rg.load(state, src["registry"])
+            published = bool(d) and any((p.get("package"), p.get("version")) == (src["package"], src["version"])
+                                        for p in d.get("published") or [])
+            if not published and published_by_plan and not live:
+                findings.append(_deploy_finding("gitops-later", "gitops",
+                                                f"{where}: published by the Registry phase of this plan"))
+            elif not published:
+                findings.append(_deploy_finding("gitops-package-not-published", "gitops",
+                                                f"{where}: {src['package']}-{src['version']} is not published in "
+                                                f"{src['registry']}"))
+            elif cluster_name not in (d.get("clusters") or []):
+                findings.append(_deploy_finding("gitops-package-not-published", "gitops",
+                                                f"{where}: {src['registry']} is not attached to {cluster_name}"))
+        if later:
+            continue
+        ok, why = _child_admin_allowed(kc, ns, child)
+        if ok is None:
+            findings.append(_deploy_finding("gitops-check-failed", "gitops", f"{where}: {why}"))
+            continue
+        if not ok:
+            findings.append(_deploy_finding(CHILD_ADMIN_REQUIRED, "gitops", f"{where}: reading the Secret "
+                                            f"{child}-kubeconfig in {ns} is needed (administrator of the child "
+                                            "cluster)"))
+            continue
+        cur, err = _deploy_gitops_entry(kc, cluster_name, r["ref"], e["name"])
+        if err:
+            findings.append(_deploy_finding("gitops-check-failed", "gitops", f"{where}: {err}"))
+            continue
+        if cur is not None and not _deploy_gitops_ours(cur, plan["name"]):
+            findings.append(_deploy_finding("gitops-taken", "gitops", f"{where}: the entry exists and was not "
+                                            "applied by this plan"))
+            continue
+        spec = _deploy_gitops_spec(r, plan, None, "", role, {n: {} for n in secret_names or ()})
+        out, _rc, err = _deploy_capi_json(kc, "gitops-check", ["--spec", "-"], spec=spec, timeout=120)
+        if err:
+            findings.append(_deploy_finding("gitops-check-failed", "gitops", f"{where}: {err}"))
+            continue
+        skip = {"gitops-secret-missing", "gitops-privileges-admin-only", "gitops-fleet-admin-only"}
+        if r["flux_in_plan"] and not live:
+            # chart posé par la phase Artefacts de ce plan : relu au début de la phase
+            skip |= {"gitops-flux-missing", "gitops-flux-not-locked"}
+        if published_by_plan and not live:
+            skip.add("gitops-package-not-published")
+        if r["tool"] is None and out.get("tool") == "fleet" and not admin:
+            findings.append(_deploy_finding("gitops-fleet-admin-only", "gitops",
+                                            f"{where}: Fleet deploys with its agent, cluster administrator"))
+        findings += [f for f in _deploy_tool_findings(out, "gitops", f"{where}: ") if f["code"] not in skip]
+    return findings
+
+
+def _deploy_gitops_prepare(kc, plan, values, install, findings, cluster_entries, art_rows, cluster_name, later,
+                           secret_names, role):
+    """Constats et contexte de la phase GitOps (2.8.0), lecture seule.
+    Rend {"summary", "rows", "estimate"} ; aucun secret n'y entre."""
+    out = {"summary": [], "rows": [], "estimate": 0}
+    if not (plan["phases"].get("gitops") or {}).get("enabled"):
+        return out
+    rows = _deploy_gitops_rows(plan, values, cluster_entries, art_rows, findings)
+    out["rows"] = rows
+    out["summary"] = [{"id": r["id"], "ref": r["ref"], "entry": r["entry"]["name"], "tool": r["tool"],
+                       "source": r["entry"]["source"]["type"]} for r in rows]
+    out["estimate"] = 2 * len(rows)
+    findings += _deploy_gitops_checks(None if install else kc, rows, plan, later, secret_names, role, cluster_name,
+                                      live=False)
+    return out
+
+
+def _deploy_gitops_phase(run, cluster, kc_ref, dctx, store=None):
+    """Phase GitOps (2.8.0, tâche 5) : un élément par (entrée, cluster),
+    `harvester-capi gitops-deploy` en action fille, secrets Git relus dans
+    le magasin du déroulé au dernier moment (jamais dans le résultat).
+    Entrée posée par ce plan reprise (son exécution d'origine gardée) ;
+    `created` et `undo` seulement pour ce qui porte CETTE exécution. Les
+    éléments d'un cluster en échec sont sautés, les autres vont au bout."""
+    plan = dctx["plan"]
+    rows = {r["id"]: r for r in dctx.get("gitops") or []}
+    timeout_s = int((plan["phases"].get("gitops") or {}).get("timeout_minutes")
+                    or _dpl.GITOPS_TIMEOUT[2]) * 60
+    dry = bool(run.dry_run)
+    by = (run.result or {}).get("by") or ""
+    store = store if store is not None else _sst.store()
+    names = _dpl.gitops_secret_names(plan)
+
+    def before(ctx, state):
+        live = [r for r in rows.values() if all(_dch.done_elsewhere(state, d) for d in r["depends_on"])]
+        # revue 5-8 m-4 : les secrets réellement dans le magasin du déroulé
+        have = [n for n in names if _deploy_gitops_secret_get(store, run.id, n)]
+        found = _deploy_gitops_checks(kc_ref(), live, plan, set(), have, run.launch_role, cluster)
+        blocking = _deploy_blocking(found)
+        if blocking:
+            return _dch.PhaseOutcome("error", message="blocked by the pre-check: " + ", ".join(
+                sorted({f["code"] for f in blocking})), data={"blocked_by": [
+                    {"code": f["code"], "detail": f["detail"]} for f in blocking][:20]})
+        return None
+
+    def run_item(ctx, state, item):
+        r = rows[item.id]
+        e = r["entry"]
+        data = {"cluster": r["ref"], "entry": e["name"], "source": e["source"]["type"], "created": False,
+                "actions": []}
+        prev = next((it for it in ((state.get("previous") or {}).get("items") or []) if it.get("id") == item.id), {})
+        kc = kc_ref()
+        cur, err = _deploy_gitops_entry(kc, cluster, r["ref"], e["name"])
+        if err:
+            return _dch.ItemOutcome("error", "entries unreadable", data=data)
+        if cur is not None and not _deploy_gitops_ours(cur, plan["name"]):
+            return _dch.ItemOutcome("error", "gitops-taken", data=data)
+        if prev.get("created"):
+            data.update({k: prev[k] for k in ("created", "undo") if k in prev})
+        if dry:
+            return _dch.ItemOutcome("done", "checked (dry run): would be applied" if cur is None
+                                    else "checked (dry run): present, would be updated", data=data)
+        origin_run = ((cur or {}).get("origin") or {}).get("run")
+        secrets_ = {}
+        if e["source"].get("secret"):
+            secrets_[e["source"]["secret"]] = _deploy_gitops_secret_get(store, run.id, e["source"]["secret"])
+            if not secrets_[e["source"]["secret"]]:
+                # revue 5-8 m-3 : jamais un secret vide (Flux retirerait le
+                # sien, Fleet écrirait un compte vide sur un compte qui marche)
+                return _dch.ItemOutcome("error", "gitops-secret-missing: the Git secret "
+                                                 f"{e['source']['secret']} is asked again on resume", data=data)
+        spec = _deploy_gitops_spec(r, plan, run.id, by, run.launch_role, secrets_, origin_run)
+        secrets_ = None
+        child, err = _capi_launch(cluster, kc, "gitops-deploy", ["--timeout", str(timeout_s)], spec=spec,
+                                  parent=run.id, cluster_user=run.cluster_user,
+                                  label=f"capi-gitops:{r['ref']}:{e['name']}")
+        spec = None
+        if err:
+            return _dch.ItemOutcome("error", str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        status, _c = _deploy_wait_child(child.id)
+        after, _e = _deploy_gitops_entry(kc, cluster, r["ref"], e["name"])
+        if after is not None and (after.get("origin") or {}).get("run") == run.id:
+            data["created"] = True
+            data["undo"] = {"kind": "gitops", "ref": f"{r['ref']}/{e['name']}", "tool": after.get("tool")}
+        data["tool"] = (after or {}).get("tool")
+        if status == "done":
+            return _dch.ItemOutcome("done", "applied" if cur is None else "already present, updated", data=data)
+        return _dch.ItemOutcome("error", f"apply failed (action {child.id})", data=data)
+
+    def verify_item(ctx, state, prev):
+        r = rows.get(prev.get("id"))
+        if r is None:
+            return False
+        cur, err = _deploy_gitops_entry(kc_ref(), cluster, r["ref"], r["entry"]["name"])
+        if err or cur is None or not _deploy_gitops_ours(cur, plan["name"]):
+            return False
+        st = cur.get("state") or {}
+        return bool(st.get("ready") if cur.get("tool") == "fleet" else st.get("applied"))
+    items = [_dch.Item(r["id"], tuple(r["depends_on"])) for r in rows.values()]
+    return _dch.Phase("gitops", items=items, run_item=run_item, verify_item=verify_item, before=before,
+                      item_key="id", item_step="", after_failure_of=("clusters", "artefacts"))
+
+
 def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=None, store=None):
     """Phases du déroulé, branchées sur les mécanismes existants."""
     plan = dctx["plan"]
@@ -34679,6 +35472,8 @@ def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=
             phases.append(_deploy_clusters_phase(run, cluster, kc_ref, dctx))
         elif pid == "artefacts":
             phases.append(_deploy_artefacts_phase(run, cluster, kc_ref, dctx))
+        elif pid == "gitops":
+            phases.append(_deploy_gitops_phase(run, cluster, kc_ref, dctx, store))
     return phases
 
 
@@ -34753,12 +35548,14 @@ def _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, in
 
 def _deploy_start(cluster, kc, dctx, dry_run=False, user="", cluster_user=None, previous=None,
                   resumes=None, install=None, run_id=None, store=None, required_role="operator",
-                  lock_fd=None, role=None):
+                  lock_fd=None, role=None, gitops_secrets=None):
     """Crée l'action `deploy:<cluster>` et lance son fil ; rend son
     identifiant. L'appelant a fait les contrôles (constats bloquants,
     occupation, garde 132) dans la requête."""
     run_id = run_id or uuid.uuid4().hex[:12]
     store = store if store is not None else _sst.store()
+    # 2.8.0 : secrets Git du plan, effacés à la fin du déroulé (deploy_chain)
+    _deploy_gitops_secrets_put(store, run_id, gitops_secrets)
     run = ActionRun(run_id, f"{DEPLOY_PREFIX}{cluster}", cluster, [], dry_run=bool(dry_run))
     run.cluster_user = cluster_user
     run.required_role = required_role
@@ -34811,13 +35608,16 @@ def _deploy_previous(action_id):
 
 def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, cluster_user,
                            previous=None, resumes=None, install=None, vip=None, run_id=None,
-                           store=None, required_role="operator", update_differing=False, role=None):
+                           store=None, required_role="operator", update_differing=False, role=None,
+                           gitops_secrets=None):
     """Contrôles puis lancement, sous le verrou de lancement : (corps,
     statut). Partagé par les routes et la ligne de commande. `role` : rôle
-    de qui lance, figé pour toute la chaîne (None : ligne de commande)."""
+    de qui lance, figé pour toute la chaîne (None : ligne de commande).
+    2.8.0 : `gitops_secrets` {nom: valeurs}, secrets du plan de la phase
+    GitOps (décision 129), rangés dans le magasin du déroulé seulement."""
     findings, summary, dctx = _deploy_prepare(cluster, plan_name, variables, kc=kc, vip=vip,
                                               install=bool(install), update_differing=update_differing,
-                                              role=role)
+                                              role=role, gitops_secrets=sorted(gitops_secrets or {}))
     if findings is None:
         return {"error": "no such plan", "fields": ["plan"]}, 404
     if previous is not None and dctx is not None \
@@ -34836,7 +35636,7 @@ def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, clu
         if busy:
             return {"error": "a deployment is already running on this cluster", "code": "deploy-running",
                     "running": busy.id}, 409
-        refused = _capi_uninstall_refusal(cluster)
+        refused = _capi_lock_refusal(cluster)
         if refused:
             return refused
         with ACTIONS_LOCK:
@@ -34860,15 +35660,17 @@ def _deploy_launch_checked(cluster, kc, plan_name, variables, dry_run, user, clu
             lock_fd, holder = _deploy_cluster_lock(cluster, run_id, dctx["plan"]["name"])
         if lock_fd is None:
             # un déroulé de l'autre processus (console ou ligne de commande),
-            # ou le retrait de la pile Turtles par l'outil (2.7.1)
-            return _capi_uninstall_refusal(cluster, holder) or (
+            # le retrait de la pile Turtles par l'outil (2.7.1) ou un
+            # renouvellement de machines (revue 5-8 I-9)
+            return _capi_lock_refusal(cluster, holder) or (
                 {"error": "a deployment is already running on this cluster", "code": "deploy-running",
                  "running": holder.get("run") or ""}, 409)
         try:
             action_id = _deploy_start(cluster, kc, dctx, dry_run=dry_run, user=user,
                                       cluster_user=cluster_user, previous=previous, resumes=resumes,
                                       install=install, run_id=run_id, store=store,
-                                      required_role=required_role, lock_fd=lock_fd, role=role)
+                                      required_role=required_role, lock_fd=lock_fd, role=role,
+                                      gitops_secrets=gitops_secrets)
         except BaseException:
             _flock_release(lock_fd)
             raise
@@ -35128,9 +35930,12 @@ def api_deploy_check(cluster):
     data = _deploy_body()
     if not _deploy_name_ok(data.get("plan")):
         return jsonify({"error": "invalid plan name", "fields": ["plan"]}), 400
+    gsec, gerr = _deploy_gitops_secrets(data.get("gitops_secrets"))
+    if gerr:
+        return jsonify({"error": gerr, "fields": ["gitops_secrets"]}), 400
     findings, summary, _ctx = _deploy_prepare(cluster, data["plan"], data.get("variables"), kc=kc,
                                               update_differing=data.get("update_differing") is True,
-                                              role=current_role())
+                                              role=current_role(), gitops_secrets=sorted(gsec))
     if findings is None:
         return jsonify({"error": "no such plan", "fields": ["plan"]}), 404
     return jsonify({"findings": findings, "summary": summary,
@@ -35148,10 +35953,13 @@ def api_deploy_start(cluster):
     data = _deploy_body()
     if not _deploy_name_ok(data.get("plan")):
         return jsonify({"error": "invalid plan name", "fields": ["plan"]}), 400
+    gsec, gerr = _deploy_gitops_secrets(data.get("gitops_secrets"))
+    if gerr:
+        return jsonify({"error": gerr, "fields": ["gitops_secrets"]}), 400
     body, status = _deploy_launch_checked(
         cluster, kc, data["plan"], data.get("variables"), bool(data.get("dry_run")),
         current_user() or "", (current_cluster_identity() or {}).get("user"),
-        update_differing=data.get("update_differing") is True, role=current_role())
+        update_differing=data.get("update_differing") is True, role=current_role(), gitops_secrets=gsec)
     return jsonify(body), status
 
 
@@ -35244,6 +36052,10 @@ def api_deploy_resume(cluster):
     result = prev["result"] or {}
     install, store, run_id = None, None, None
     kc = None
+    # 2.8.0 : secrets Git de la phase GitOps redemandés (décision 129)
+    gsec, gerr = _deploy_gitops_secrets(data.get("gitops_secrets"))
+    if gerr:
+        return jsonify({"error": gerr, "fields": ["gitops_secrets"]}), 400
     if result.get("install"):
         if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
             return jsonify({"error": "forbidden", "role": current_role(), "required": "admin",
@@ -35270,7 +36082,7 @@ def api_deploy_resume(cluster):
         cluster, kc, result.get("plan") or "", result.get("variables") or {}, False,
         current_user() or "", cluster_user, previous=result, resumes=data["action_id"],
         install=install, vip=vip, run_id=run_id, store=store, required_role=required,
-        update_differing=result.get("update_differing") is True, role=current_role())
+        update_differing=result.get("update_differing") is True, role=current_role(), gitops_secrets=gsec)
     if status != 202 and store is not None:
         store.delete_tree(_dch.SECRET_CLASS, run_id)
     return jsonify(body), status
@@ -35355,6 +36167,9 @@ def _undo_collect(cluster, action_id):
     return prev, undos, None
 
 
+UNDO_NEEDS_RANCHER = "needs-rancher"
+
+
 def _undo_target(kc, cluster, u, runs, services=None):
     """État de ce que désigne l'élément : (« absent » | « ours » |
     « foreign », exécution lue) ou (None, None) si la lecture échoue
@@ -35391,6 +36206,28 @@ def _undo_target(kc, cluster, u, runs, services=None):
         if err:
             return None, None
         return judge(bool((out or {}).get("present")), (out or {}).get("origin"))
+    if kind == "gitops":
+        # 2.8.0 : entrée Flux (origine du CRS) ou Fleet (exécution écrite
+        # sur l'objet de Rancher, lue avec la session)
+        ns, c, entry = ref.split("/")
+        cur, session, err = _deploy_gitops_entry(kc, cluster, f"{ns}/{c}", entry, with_session=True)
+        if err:
+            return None, None
+        if cur is None and not session and u.get("tool") != "flux":
+            # revue 5-8 I-8 : sans session Rancher, une entrée Fleet ne se
+            # voit pas ; jamais prise pour « partie »
+            return UNDO_NEEDS_RANCHER, None
+        return judge(cur is not None, (cur or {}).get("origin"))
+    if kind == "rancher-import":
+        out, _rc, err = _deploy_capi_json(kc, "rancher-status", ["--name", ref, "--json"], timeout=60)
+        if err:
+            return None, None
+        row = next(iter((out or {}).get("clusters") or []), None)
+        if not (row or {}).get("imported"):
+            return "absent", None
+        if row.get("present") is None:
+            return None, None                  # Rancher de l'import hors de la session : rien jugé
+        return judge(row["present"], row.get("origin"))
     if kind == "registry":
         name = ref.split("/", 1)[1]
         st, _rc, err = _deploy_registry_json(kc, "registry:status", [name, "--cluster", cluster])
@@ -35443,6 +36280,16 @@ def _undo_details(kc, cluster, u, services):
                 "refused": out.get("refused") or [], "cluster_present": out.get("cluster_present", True)}
     if kind == "capi-cluster":
         out, _rc, err = _deploy_capi_json(kc, "delete", ["--name", ref, "--dry-run"], timeout=120)
+        return {"error": err} if err else out
+    if kind == "gitops":
+        ns, c, entry = ref.split("/")
+        cur, err = _deploy_gitops_entry(kc, cluster, f"{ns}/{c}", entry)
+        if err:
+            return {"error": err}
+        return {"present": cur is not None, "tool": (cur or {}).get("tool"), "name": (cur or {}).get("name")}
+    if kind == "rancher-import":
+        out, _rc, err = _deploy_capi_json(kc, "rancher-unimport", ["--name", ref, "--dry-run",
+                                                                   f"--harvester-name={cluster}"], timeout=180)
         return {"error": err} if err else out
     if kind == "registry":
         name = ref.split("/", 1)[1]
@@ -35553,6 +36400,9 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
         kind, ref = u["kind"], u["ref"]
         data = {"kind": kind, "ref": ref, "actions": []}
         seen, run_id = _undo_target(kc, cluster, u, runs)
+        if seen == UNDO_NEEDS_RANCHER:
+            return _dch.ItemOutcome("error", "rancher-session-needed: not removed, a Fleet entry is removed with a "
+                                             "Rancher session", data=data)
         if seen is None:
             return _dch.ItemOutcome("error", "state unreadable", data=data)
         if seen == "absent":
@@ -35575,6 +36425,20 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
         elif kind == "capi-cluster":
             child, err = capi("delete", ["--name", ref, "--timeout", str(UNDO_CLUSTER_TIMEOUT)] + expect,
                               f"capi-cluster-delete:{ref}")
+            timeout = None
+        elif kind == "gitops":
+            # 2.8.0 : Flux, comme un élément (Kustomization d'abord) ; Fleet,
+            # l'objet de Rancher et ses Secrets
+            ns, c, entry = ref.split("/")
+            child, err = capi("gitops-remove", ["--name", ref] + expect, f"capi-gitops-remove:{ns}/{c}:{entry}")
+            timeout = UNDO_CHART_TIMEOUT        # Flux élague avant que son compte parte
+        elif kind == "rancher-import":
+            if any(x["kind"] == "capi-cluster" and x["ref"] == ref for x in by_id.values()):
+                # revue 5-8 m-1 : son cluster part dans le même défaire ; sa
+                # suppression retire l'import sans rien lire dans le cluster
+                # enfant (un enfant mort ne bloque pas le défaire)
+                return _dch.ItemOutcome("done", "left to the removal of its cluster", data=data)
+            child, err = capi("rancher-unimport", ["--name", ref] + expect, f"capi-rancher-unimport:{ref}")
             timeout = None
         elif kind == "registry":
             name = ref.split("/", 1)[1]
@@ -35727,7 +36591,7 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
         if busy:
             return {"error": "a deployment is running on this cluster", "code": "deploy-running",
                     "running": busy.id}, 409
-        refused = _capi_uninstall_refusal(cluster)
+        refused = _capi_lock_refusal(cluster)
         if refused:
             return refused
         run_id = uuid.uuid4().hex[:12]
@@ -35740,7 +36604,7 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
             time.sleep(0.05)
             lock_fd, holder = _deploy_cluster_lock(cluster, run_id, label)
         if lock_fd is None:
-            return _capi_uninstall_refusal(cluster, holder) or (
+            return _capi_lock_refusal(cluster, holder) or (
                 {"error": "a deployment or an undo is running on this cluster", "code": "deploy-running",
                  "running": holder.get("run") or ""}, 409)
         try:
@@ -35803,14 +36667,15 @@ def _deploy_install_record(prof_name, batch, hostnames, concurrency, kind="batch
                       "iso": batch.get("iso"), "rows": rows}}
 
 
-def _deploy_install_precheck(plan_name, plan_variables, cluster, vip):
+def _deploy_install_precheck(plan_name, plan_variables, cluster, vip, gitops_secrets=None):
     """Constats bloquants d'un plan enchaîné à une installation, AVANT toute
     lecture de BMC (revue m5 : c'est bon marché, une lecture de BMC ne l'est
-    pas) : réponse 400, ou None."""
+    pas) : réponse 400, ou None. `gitops_secrets` (revue 5-8 I-10) : seuls
+    leurs noms servent ici."""
     if not isinstance(cluster, str) or not cluster:
         return None                             # refusé ensuite par les contrôles de la série
     findings, summary, _ctx = _deploy_prepare(cluster, plan_name, plan_variables, vip=vip or "", install=True,
-                                              role=current_role())
+                                              role=current_role(), gitops_secrets=sorted(gitops_secrets or {}))
     if findings and _deploy_blocking(findings):
         return jsonify({"error": "the plan cannot start", "code": "blocking-findings",
                         "findings": findings, "summary": summary}), 400
@@ -35818,10 +36683,12 @@ def _deploy_install_precheck(plan_name, plan_variables, cluster, vip):
 
 
 def _deploy_with_install(plan_name, plan_variables, cluster, vip, rows, kind, record, concurrency=None,
-                         user=""):
+                         user="", gitops_secrets=None):
     """Chaîne avec installation : lignes déjà préparées dans la requête
     (garde 132 faite) ; secrets retirés des lignes et gardés par le magasin
-    du déroulé. (corps, statut)."""
+    du déroulé. Revue 5-8 I-10 : les secrets Git de la phase GitOps vont au
+    même magasin en mémoire (jamais sur le disque ni dans actions.db),
+    effacés à la fin du déroulé. (corps, statut)."""
     store = _sst.store()
     run_id = uuid.uuid4().hex[:12]
     hostnames = [o.get("hostname") for o in rows]
@@ -35832,7 +36699,7 @@ def _deploy_with_install(plan_name, plan_variables, cluster, vip, rows, kind, re
     body, status = _deploy_launch_checked(cluster, None, plan_name, plan_variables, False,
                                           user, None, install=install, vip=vip,
                                           run_id=run_id, store=store, required_role="admin",
-                                          role=current_role())
+                                          role=current_role(), gitops_secrets=gitops_secrets)
     if status != 202:
         store.delete_tree(_dch.SECRET_CLASS, run_id)
         rows.clear()
@@ -36725,6 +37592,78 @@ def api_registry_bootstrap_delete(cluster, name):
     if err:
         return err
     return jsonify({"action_id": run.id, "registry": name, "data_kept": not delete_data}), 202
+
+
+# 2.8.0 : certificat du registre d'amorçage (point 235) et réglage
+# containerd-registry des nœuds Harvester (point 236), administrateur
+# (_artefacts_required_role) ; gestes de harvester-registry (parité CLI).
+def _registry_gesture(name, sub, allowed, label_of, extra_of):
+    if not _registry_name_ok(name):
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "a JSON object is expected"}), 400
+    for k in sorted(set(body) - allowed):
+        return jsonify({"error": f"{k}: unknown key"}), 400
+    cluster = body.get("cluster")
+    if not isinstance(cluster, str) or not _valid_k8s_name(cluster):
+        return jsonify({"error": "cluster: a Harvester cluster name", "fields": ["cluster"]}), 400
+    d = _rg.load(_bm_profiles_state(), name)
+    if d is None:
+        return jsonify({"error": "no such registry", "code": "registry-unknown"}), 404
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    cmd = _registry_cmd(sub)
+    if cmd is None:
+        return jsonify({"error": f"{REGISTRY_SCRIPT} not deployed"}), 503
+    try:
+        extra = extra_of(body)
+    except (TypeError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+    cmd += [name, "--cluster", cluster, "--kubeconfig", kc] + extra
+    if body.get("dry_run") is True:
+        res, err = _capi_run_json(cmd + ["--dry-run"], timeout=120)
+        if err:
+            return err
+        out, rc = res
+        return jsonify(dict(out or {}, blocked=rc != 0)), 200
+    # le résultat JSON de l'outil (valeur précédente masquée, fin de validité)
+    # reste dans l'action : retour arrière du réglage des nœuds
+    run, err = _cli_action(cluster, label_of(cluster), cmd, "harvester-registry", capture=True,
+                           setup=lambda r: setattr(r, "required_role", "admin"))
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "registry": name, "cluster": cluster}), 202
+
+
+@app.route("/api/registries/<name>/renew-cert", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_registry_renew_cert(name):
+    """Renouvelle le certificat serveur d'un registre d'amorçage (CA gardée,
+    ou `new_ca` en deux temps pour un registre d'avant 2.8.0) : action suivie
+    `registry-renew-cert:<cluster>/<nom>`."""
+    def extra(b):
+        days = int(b.get("days", 730))
+        if not 1 <= days <= 3650:
+            raise ValueError("days: 1 to 3650")
+        return ["--days", str(days)] + (["--new-ca"] if b.get("new_ca") is True else [])
+    return _registry_gesture(name, "renew-cert", {"cluster", "days", "new_ca", "dry_run"},
+                             lambda c: f"registry-renew-cert:{c}/{name}", extra)
+
+
+@app.route("/api/registries/<name>/harvester-nodes", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_registry_harvester_nodes(name):
+    """Fusionne le registre dans le réglage containerd-registry des nœuds
+    Harvester (`remove` : le retire) ; Harvester redémarre RKE2 sur chaque
+    nœud. Action suivie `registry-harvester-nodes:<cluster>/<nom>` ; sa
+    valeur précédente, masquée, reste dans le résultat (retour arrière)."""
+    return _registry_gesture(name, "harvester-nodes", {"cluster", "remove", "dry_run"},
+                             lambda c: f"registry-harvester-nodes:{c}/{name}",
+                             lambda b: ["--remove"] if b.get("remove") is True else [])
 
 
 if __name__ == "__main__":

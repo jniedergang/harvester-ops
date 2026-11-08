@@ -2780,9 +2780,56 @@ Internet. Référence complète : **[artefacts.md](artefacts.md)**.
 - Ligne de commande : `harvester-artefacts pack | sign | verify | inspect |
   import | list | remove | publish`, `harvester-registry declare | attach |
   check | list | show | forget | deploy | status | delete`.
-- **Pas encore** : les éléments GitOps (2.8), un cluster enfant
-  amorcé entièrement sans Internet, changer les registres d'un cluster
-  existant, le ramasse-miettes d'un registre d'amorçage.
+- **Pas encore** : un registre Harbor posé par la console, Argo CD, la
+  montée de version de Kubernetes des clusters enfants, le ramasse-miettes
+  d'un registre d'amorçage.
+
+### Accès aux clusters enfants, GitOps, renouvellement, sans Internet (2.8.0)
+
+Références complètes : **[gitops.md](gitops.md)**, la partie Cluster API
+de **[procedure-operationnelle.md](procedure-operationnelle.md)**
+(section 18) et **[artefacts.md](artefacts.md)**.
+
+- **Import dans le Rancher externe de la session.** Fenêtre Accès d'un
+  cluster enfant (ou `rancher_external: true` à la création) : l'import
+  générique de Rancher, écrit avec le jeton de votre session ; refusé pour
+  un compte local (`rancher-session-needed`) et avec l'import par le
+  Turtles intégré (`rancher-import-conflict`). L'image de l'agent est
+  d'abord sondée dans les registres du cluster. L'onglet Membres gère les
+  membres de l'enfant importé. Retirer l'import ne retire que les restes
+  qui portent une marque de Rancher (`kept-not-rancher` sinon). Supprimer
+  un enfant importé le retire de Rancher sans rien lire dans l'enfant ;
+  `delete --forget-rancher` (admin) quand ce Rancher a disparu.
+- **OIDC de l'API de l'enfant.** Option `oidc` (émetteur `https`,
+  audience, revendications, préfixes jamais vides ni `system:`, CA,
+  `admin_group` lié à `cluster-admin` par `hops-oidc-admins`), écrite en
+  `AuthenticationConfiguration` (v1 sur Kubernetes 1.34). **Télécharger le
+  kubeconfig OIDC** : greffon exec kubelogin, aucun identifiant. Rancher et
+  OIDC ensemble : avertissement `oidc-with-rancher`.
+- **Onglet GitOps.** Flux (chart `flux2` d'un paquet, service `flux` aux
+  valeurs de verrouillage imposées) ou Fleet (clusters importés,
+  administrateurs seulement) ; sources `oci`, `git`, `chart` ; objets dans
+  `hops-gitops`, visant un namespace d'équipe ; identifiants Git saisis au
+  lancement, jamais rangés.
+- **Renouveler les machines.** `registries`, `oidc`, `ca` : seuls les
+  gabarits qui changent sont copiés en `-r<N>`, seules leurs machines sont
+  remplacées ; une marque sur le Cluster, **Finir** (opérateur) et
+  **Abandonner** (admin) ; le renouvellement tient le verrou du cluster
+  Harvester.
+- **Sans Internet.** Option `offline: true` : RKE2 récupéré du registre par
+  empreinte (sorte de paquet `rke2`, `harvester-artefacts pack --rke2`),
+  contrôlé avant que `/opt/install.sh` soit posé.
+- **Registres achevés.** Mot de passe de lecture rangé une fois (étiquette
+  sur `<c>-registries`), clé de CA gardée pour les registres d'amorçage
+  posés à partir de la 2.8.0, **Renouveler le certificat** (même CA, ou
+  `--new-ca` en trois temps pour les registres plus anciens), **Nœuds
+  Harvester** (fusion dans `containerd-registry` et `additional-ca` ;
+  refusée tant qu'un autre registre garde un mot de passe dans Harvester).
+- **Rôles.** Lire : lecteur. Importer, retirer l'import, entrées Flux,
+  renouveler : opérateur **et** droit d'administrer le cluster enfant
+  **et**, pour Rancher, une session Rancher. Entrées Fleet, `privileges:
+  cluster`, renew-cert, harvester-nodes, `renew --abandon`, `delete
+  --forget-rancher` : admin.
 
 ### Paquets et CLI
 
@@ -2793,7 +2840,9 @@ Internet. Référence complète : **[artefacts.md](artefacts.md)**.
   render | create | delete | state | services | service-check |
   service-deploy | service-remove`, 2.7.0 `uninstall`, `manifest-check |
   manifest-deploy | manifest-remove | manifest-verify | manifests |
-  policy-render | token`, chacune avec `--cluster` ou
+  policy-render | token`, 2.8.0 `rancher-import | rancher-unimport |
+  rancher-status | oidc-kubeconfig | gitops-check | gitops-deploy |
+  gitops-remove | gitops-status | renew`, chacune avec `--cluster` ou
   `--kubeconfig` ; `create` et `service-deploy` sortent en 2 quand le
   contrôle préalable bloque. 2.5.0 : `create --identity restricted|console`
   (restreinte par défaut), `create --origin`, `check --many` (une liste
@@ -3024,6 +3073,16 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   n'a pas pu partir garde le contenu Terraform. Ligne de commande :
   `harvester-plans undo`.
 
+- **Phase GitOps dans les plans (2.8.0)** : la dernière phase pose des
+  entrées GitOps (16 entrées, 64 éléments) sur les clusters enfants ;
+  secrets Git saisis au lancement, jamais rangés, redemandés à la reprise.
+  Les modèles de cluster prennent les options d'accès `rancher_external`,
+  `oidc`, `offline`, `offline_artifacts`. Le Défaire retire aussi les
+  entrées GitOps et les imports (ordre gitops, artefacts, rancher-import,
+  clusters, registre, terraform). Un plan enchaîné à une installation de
+  Harvester refuse un import Rancher externe et Fleet
+  (`rancher-session-in-chain`). Détails dans [bare-metal.md](bare-metal.md).
+
 - **Une machine qui porte déjà un système est gardée (2.2.0)** : la
   fenêtre d'installation liste ce que montre le BMC (entrées de démarrage
   UEFI d'un chargeur sur une partition de disque, tête de l'ordre de
@@ -3158,6 +3217,11 @@ un workspace Terraform.
   politiques et ses comptes, et émettre un jeton demandent operator **et**
   le droit de lire le Secret du kubeconfig administrateur de ce cluster
   enfant, contrôlé par le serveur avec l'identité de la personne (2.7.0).
+  De même pour importer un cluster enfant dans Rancher (plus une session
+  Rancher), les entrées Flux et les renouvellements (2.8.0) ; les entrées
+  Fleet, `privileges: cluster`, le renouvellement du certificat d'un
+  registre, la fusion d'un registre dans les nœuds Harvester, l'abandon
+  d'un renouvellement et `delete --forget-rancher` sont admin.
   Les plans de déploiement et leurs modèles s'écrivent par un
   admin ; un opérateur applique un plan à un cluster existant, sauf s'il
   crée ces objets réservés à l'admin.

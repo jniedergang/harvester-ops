@@ -73,17 +73,21 @@ def make_package(dirpath, files=None, top="socle-2026.11", name=None, sums=None,
 # ---------------------------------------------------------------------------
 # Index
 # ---------------------------------------------------------------------------
-def test_a_good_index_is_read_and_later_kinds_are_kept_marked():
+def test_a_good_index_is_read_and_gitops_needs_files():
     doc = json.loads(json.dumps(INDEX))
     doc["items"].append({"name": "pol", "kind": "policy", "files": ["manifests/pol/p.yaml"]})
     idx, errors = art.check_index(doc, image_names=["ghcr.io/stefanprodan/podinfo:6.9.2"])
     assert errors == [] and idx["name"] == "socle" and idx["version"] == "2026.11"
-    # 2.7.0 : `policy` est un manifeste applicable ; seul `gitops` reste « à venir »
+    # 2.7.0 : `policy` est un manifeste applicable ; 2.8.0 : `gitops` se lit
+    # comme un manifeste (fichiers exigés), sans marque « à venir »
     assert idx["items"][2] == {"name": "pol", "kind": "policy", "files": ["manifests/pol/p.yaml"]}
     assert "later" not in idx["items"][0]
     doc["items"].append({"name": "git", "kind": "gitops"})
     idx, errors = art.check_index(doc, image_names=["ghcr.io/stefanprodan/podinfo:6.9.2"])
-    assert errors == [] and idx["items"][3] == {"name": "git", "kind": "gitops", "later": True}
+    assert errors == ["items[3].files: manifests/git/<file>.yaml, one at least"]
+    doc["items"][3]["files"] = ["manifests/git/k.yaml"]
+    idx, errors = art.check_index(doc, image_names=["ghcr.io/stefanprodan/podinfo:6.9.2"])
+    assert errors == [] and idx["items"][3] == {"name": "git", "kind": "gitops", "files": ["manifests/git/k.yaml"]}
 
 
 def test_a_policy_needs_its_files_like_a_manifest():

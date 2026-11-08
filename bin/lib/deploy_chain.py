@@ -70,7 +70,8 @@ import secret_store
 # 2.6.0 (point 189) : Registre après Terraform (une classe de stockage qu'il
 # crée peut servir) et avant Cluster API (les clusters ont besoin de leurs
 # registres à la création). La reprise repère les phases par `id`.
-ORDER = ("install", "readiness", "terraform", "registry", "capi", "clusters", "artefacts")
+# 2.8.0 : GitOps en dernier (le chart de Flux est un artefact, plan 2.8.0 point 223).
+ORDER = ("install", "readiness", "terraform", "registry", "capi", "clusters", "artefacts", "gitops")
 # phases du format pas encore livrées (aucune depuis la 2.7.0)
 COMING = ()
 CHECKED_MESSAGE = "already done (checked)"

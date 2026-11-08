@@ -398,7 +398,7 @@ def test_console_deploy_launch_names_an_uninstall_holding_the_file_lock(wapp, mo
 
 
 def test_console_undo_checks_the_uninstall_under_the_launch_lock():
-    """Le Défaire passe par la même garde que le déroulé, sous le verrou de
+    """Le Défaire passe par la même garde que le déroulé (retrait de la pile, et renouvellement depuis la revue 5-8 I-9), sous le verrou de
     lancement (lecture de la source : le lancer demanderait une chaîne
     entière)."""
     src = (ROOT / "web" / "app.py").read_text()
@@ -406,5 +406,5 @@ def test_console_undo_checks_the_uninstall_under_the_launch_lock():
     body = body[:body.index("\ndef ")]
     i = body.index("with _DEPLOY_LAUNCH_LOCK:")
     j = body.index("_deploy_cluster_lock(", i)
-    assert "_capi_uninstall_refusal(cluster)" in body[i:j]          # avant de prendre le verrou
-    assert "_capi_uninstall_refusal(cluster, holder)" in body[body.index("lock_fd is None", j):]
+    assert "_capi_lock_refusal(cluster)" in body[i:j]          # avant de prendre le verrou
+    assert "_capi_lock_refusal(cluster, holder)" in body[body.index("lock_fd is None", j):]

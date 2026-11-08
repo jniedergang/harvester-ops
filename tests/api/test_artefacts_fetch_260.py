@@ -134,3 +134,39 @@ def test_redirections_are_bounded(tool, servers):
     other.routes["/loop"] = (302, "/loop")
     with pytest.raises(ValueError, match="redirections"):
         tool._fetch(f"http://{other.host}/loop", None, None, 1 << 20, plain=[other.host])
+
+
+class UaServer:
+    """Refuse l'agent par défaut de Python, comme get.rke2.io (vu sur le banc
+    2.8.0 : `pack --rke2` échouait en HTTP 403 alors que curl passait)."""
+
+    def __init__(self):
+        srv = self
+        self.agents = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                ua = self.headers.get("User-Agent") or ""
+                srv.agents.append(ua)
+                code = 403 if ua.startswith("Python-urllib") else 200
+                self.send_response(code)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.httpd.server_port}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+
+def test_downloads_name_the_tool_not_python(tool):
+    srv = UaServer()
+    try:
+        body, _h = tool._fetch(srv.url + "/install.sh", None, None, 10, plain=("127.0.0.1:%d" % srv.httpd.server_port,))
+    finally:
+        srv.httpd.shutdown()
+    assert body == b"ok"
+    assert srv.agents and srv.agents[0].startswith("harvester-ops")

@@ -62,7 +62,7 @@ TEMPLATE_DIR = "tf-templates.d"
 # l'entrée du plan et de la règle du namespace (décision 164)
 CAPI_TEMPLATE_DIR = "capi-templates.d"
 CAPI_TEMPLATE_FORBIDDEN = ("name", "namespace", "target_namespace")
-PHASES = ("readiness", "terraform", "registry", "capi", "clusters", "artefacts")
+PHASES = ("readiness", "terraform", "registry", "capi", "clusters", "artefacts", "gitops")
 AVAILABLE = PHASES
 BUILTIN_VARS = ("cluster", "vip")
 MAX_TEMPLATES = 32
@@ -89,7 +89,16 @@ ARTEFACTS_TIMEOUT = (1, 60, 15)
 MAX_ARTEFACT_ENTRIES = 32
 MAX_ARTEFACT_UNITS = 128
 ARTEFACT_KINDS = ("chart", "manifest", "policy")
-ARTEFACT_REFUSED_KINDS = {"images": "published by the Registry phase", "gitops": "coming in 2.8"}
+ARTEFACT_REFUSED_KINDS = {"images": "published by the Registry phase", "gitops": "applied by a GitOps entry",
+                          "rke2": "published by the Registry phase"}
+# 2.8.0 : phase GitOps (Contraintes communes) : entrées, éléments une fois
+# les clusters dépliés, délai par élément (minutes) ; une entrée devient
+# l'élément `art-gitops-<nom>` d'un cluster (child_gitops.NAME_MAX)
+GITOPS_TIMEOUT = (1, 60, 15)
+MAX_GITOPS_ENTRIES = 16
+MAX_GITOPS_UNITS = 64
+GITOPS_ENTRY_KEYS = {"name", "tool", "clusters", "target_namespace", "source", "privileges",
+                     "interval_minutes", "prune"}
 
 # Noms de clés qui désignent un objet public ou le NOM d'un Secret, pas un
 # secret : la clé publique d'une ressource ssh_key, les clés d'une VM
@@ -480,6 +489,32 @@ def _child_ref_shape_ok(ref):
     return bool(_cc.K8S_NAME_RE.match(ns)) and bool(_cc.K8S_NAME_RE.match(name))
 
 
+def _cluster_refs(raw, w, cluster_names, known, errors, code="artefact-cluster-unknown"):
+    """Clusters d'une entrée (phases Artefacts et GitOps) : un cluster de la
+    phase Clusters (nom tel qu'écrit) ou un cluster enfant existant
+    `<ns>/<nom>`, variables du plan permises, sans doublon."""
+    if not isinstance(raw, list) or not raw:
+        errors.append((w, "a list of clusters, one at least"))
+        return []
+    out = []
+    for j, c in enumerate(raw):
+        if c in (cluster_names or ()):
+            pass
+        elif not _child_ref_shape_ok(c):
+            errors.append((f"{w}[{j}]", f"{code}: {str(c)[:60]} is neither a cluster of "
+                                        "the Clusters phase nor <namespace>/<name>"))
+            continue
+        bad = [v for v in _bmp.VAR_RE.findall(c) if v not in known]
+        if bad:
+            errors.append((f"{w}[{j}]", f"undeclared variable {bad[0]}"))
+            continue
+        if c in out:
+            errors.append((f"{w}[{j}]", f"{c} listed twice"))
+            continue
+        out.append(c)
+    return out
+
+
 def _values_refusals(values, where):
     """Règles de secrets du plan sur les valeurs d'un chart : une clé qui
     désigne un secret (règle de `scrub`) ou une adresse à identifiants est
@@ -526,26 +561,7 @@ def _check_artefacts_phase(ph, errors, variables, cluster_names, item_kind=None)
     units = 0
 
     def clusters_of(raw, w):
-        if not isinstance(raw, list) or not raw:
-            errors.append((w, "a list of clusters, one at least"))
-            return []
-        out = []
-        for j, c in enumerate(raw):
-            if c in (cluster_names or ()):
-                pass
-            elif not _child_ref_shape_ok(c):
-                errors.append((f"{w}[{j}]", f"artefact-cluster-unknown: {str(c)[:60]} is neither a cluster of "
-                                            "the Clusters phase nor <namespace>/<name>"))
-                continue
-            bad = [v for v in _bmp.VAR_RE.findall(c) if v not in known]
-            if bad:
-                errors.append((f"{w}[{j}]", f"undeclared variable {bad[0]}"))
-                continue
-            if c in out:
-                errors.append((f"{w}[{j}]", f"{c} listed twice"))
-                continue
-            out.append(c)
-        return out
+        return _cluster_refs(raw, w, cluster_names, known, errors)
     pols_in = ph.get("policies") or []
     if not isinstance(pols_in, list):
         errors.append((f"{where}.policies", "not a list"))
@@ -660,7 +676,96 @@ def plan_artefacts(plan):
     return list(ph.get("policies") or []), list(ph.get("items") or [])
 
 
-def render_artefact_clusters(plan, names, values, rendered_plan_clusters):
+def _check_gitops_phase(ph, errors, variables, cluster_names):
+    """Phase gitops (2.8.0, tâche 5) : {enabled, timeout_minutes, entries:
+    [{name, tool, clusters, target_namespace, source, privileges,
+    interval_minutes, prune}]}. Une entrée suit child_gitops.normalize (le
+    namespace visé s'écrit `target_namespace`) ; `clusters` comme la phase
+    Artefacts ; variables du plan permises dans les clusters et dans le
+    registre d'une source ; `source.secret` nomme un secret du plan, saisi
+    au lancement et jamais rangé (décision 129)."""
+    import child_gitops as _cg
+    where = "phases.gitops"
+    unknown = sorted(set(ph) - {"enabled", "timeout_minutes", "entries"})
+    errors.extend((f"{where}.{k}", "unknown key") for k in unknown)
+    timeout = _check_timeout(ph, where, GITOPS_TIMEOUT, errors)
+    known = set(BUILTIN_VARS) | set(variables or [])
+    raw = ph.get("entries") or []
+    if not isinstance(raw, list):
+        errors.append((f"{where}.entries", "not a list"))
+        raw = []
+    if len(raw) > MAX_GITOPS_ENTRIES:
+        errors.append((f"{where}.entries", f"{MAX_GITOPS_ENTRIES} entries at most"))
+        raw = []
+    out, seen, units = [], [], 0
+    for i, e in enumerate(raw):
+        w = f"{where}.entries[{i}]"
+        if not isinstance(e, dict):
+            errors.append((w, "not a mapping"))
+            continue
+        bad_keys = sorted(set(e) - GITOPS_ENTRY_KEYS)
+        errors.extend((f"{w}.{k}", "unknown key") for k in bad_keys)
+        if bad_keys:
+            continue
+        name = e.get("name")
+        if not isinstance(name, str) or not _cg.NAME_RE.match(name):
+            errors.append((f"{w}.name", f"RFC 1123, {_cg.NAME_MAX} characters at most"))
+            continue
+        if name in seen:
+            errors.append((f"{w}.name", f"{name} listed twice"))
+            continue
+        cl = _cluster_refs(e.get("clusters"), f"{w}.clusters", cluster_names, known, errors,
+                           code="gitops-cluster-unknown")
+        if not cl:
+            continue
+        src = e.get("source")
+        reg = src.get("registry") if isinstance(src, dict) else None
+        if isinstance(reg, str) and _bmp.VAR_RE.search(reg):
+            bad = [v for v in _bmp.VAR_RE.findall(reg) if v not in known]
+            if bad:
+                errors.append((f"{w}.source.registry", f"undeclared variable {bad[0]}"))
+                continue
+        elif reg is not None and (not isinstance(reg, str) or not _cc.REGISTRY_NAME_RE.match(reg)):
+            errors.append((f"{w}.source.registry", "a registry name"))
+            continue
+        trial = {k: v for k, v in e.items() if k not in ("clusters", "target_namespace")}
+        trial["namespace"] = e.get("target_namespace")
+        if isinstance(src, dict) and isinstance(reg, str):
+            trial["source"] = dict(src, registry=_bmp.VAR_RE.sub("a", reg))
+        try:
+            norm = _cg.normalize(trial)
+        except ValueError as ex:
+            field, _, why = str(ex).partition(": ")
+            field = field.removeprefix("gitops.").replace("namespace", "target_namespace", 1) \
+                if field.startswith("gitops.namespace") else field.removeprefix("gitops.")
+            errors.append((f"{w}.{field}" if why else w, why or str(ex)))
+            continue
+        if isinstance(src, dict) and isinstance(reg, str):
+            norm["source"]["registry"] = reg
+        entry = {k: v for k, v in norm.items() if k != "namespace"}
+        entry.update(target_namespace=norm["namespace"], clusters=cl)
+        seen.append(name)
+        units += len(cl)
+        out.append(entry)
+    if units > MAX_GITOPS_UNITS:
+        errors.append((f"{where}.entries", f"{units} items once the clusters are unfolded, "
+                                           f"{MAX_GITOPS_UNITS} at most"))
+    return {"enabled": ph.get("enabled", True) is not False, "timeout_minutes": timeout, "entries": out}
+
+
+def plan_gitops(plan):
+    """Entrées de la phase GitOps d'un plan ([] si absente)."""
+    return list(((plan.get("phases") or {}).get("gitops") or {}).get("entries") or [])
+
+
+def gitops_secret_names(plan):
+    """Noms des secrets du plan que la phase GitOps demande au lancement."""
+    if not ((plan.get("phases") or {}).get("gitops") or {}).get("enabled"):
+        return []
+    return sorted({e["source"]["secret"] for e in plan_gitops(plan) if e["source"].get("secret")})
+
+
+def render_artefact_clusters(plan, names, values, rendered_plan_clusters, phase="artefacts"):
     """Clusters d'une entrée rendus : un nom de la phase Clusters devient
     `<nom rendu>/<nom rendu>` (namespace = nom, règle 164), une référence
     `<ns>/<nom>` est rendue avec les valeurs du lancement. Rend [(ref,
@@ -673,11 +778,11 @@ def render_artefact_clusters(plan, names, values, rendered_plan_clusters):
             continue
         missing = [v for v in _bmp.VAR_RE.findall(c) if v not in (values or {})]
         if missing:
-            errors.append((f"artefacts.clusters[{c}]", f"missing variable {missing[0]}"))
+            errors.append((f"{phase}.clusters[{c}]", f"missing variable {missing[0]}"))
             continue
         ref = _bmp.VAR_RE.sub(lambda m: str(values[m.group(1)]), c)
         if not _child_ref_shape_ok(ref) or _bmp.VAR_RE.search(ref):
-            errors.append((f"artefacts.clusters[{c}]", f"rendered {ref[:60]} is not <namespace>/<name>"))
+            errors.append((f"{phase}.clusters[{c}]", f"rendered {ref[:60]} is not <namespace>/<name>"))
             continue
         out.append((ref, None))
     if errors:
@@ -685,14 +790,14 @@ def render_artefact_clusters(plan, names, values, rendered_plan_clusters):
     return out
 
 
-def render_artefact_registry(reg, values):
-    """Registre d'une entrée rendu ; ProfileError."""
+def render_artefact_registry(reg, values, where="artefacts.registry"):
+    """Registre d'une entrée rendu (phases Artefacts et GitOps) ; ProfileError."""
     missing = [v for v in _bmp.VAR_RE.findall(reg) if v not in (values or {})]
     if missing:
-        raise ProfileError([("artefacts.registry", f"missing variable {missing[0]}")], "missing variable")
+        raise ProfileError([(where, f"missing variable {missing[0]}")], "missing variable")
     out = _bmp.VAR_RE.sub(lambda m: str(values[m.group(1)]), reg)
     if not _cc.REGISTRY_NAME_RE.match(out):
-        raise ProfileError([("artefacts.registry", f"rendered {out[:40]} is not a registry name")], "invalid")
+        raise ProfileError([(where, f"rendered {out[:40]} is not a registry name")], "invalid")
     return out
 
 
@@ -776,6 +881,8 @@ def registry_users(state, name):
             if isinstance(it, dict):
                 names |= _entry_names(it.get("registries"))
         names |= {it.get("registry") for it in _phase(doc, "artefacts").get("items") or [] if isinstance(it, dict)}
+        names |= {(e.get("source") or {}).get("registry") for e in _phase(doc, "gitops").get("entries") or []
+                  if isinstance(e, dict) and isinstance(e.get("source"), dict)}
         if name in names:
             out.append(f"plan:{stem}")
         elif any(isinstance(n, str) and _bmp.VAR_RE.search(n) for n in names):
@@ -796,12 +903,14 @@ def registry_users(state, name):
 
 def package_users(state, name, version):
     """Plans enregistrés qui publient ce paquet (phase Registre) ou en
-    appliquent un élément (phase Artefacts, 2.7.0)."""
+    appliquent un élément (phase Artefacts, 2.7.0 ; source d'une entrée
+    GitOps, 2.8.0)."""
     out = []
     for stem, doc in _plan_docs(state):
         if any(isinstance(p, dict) and p.get("package") == name and str(p.get("version")) == str(version)
                for p in list(_phase(doc, "registry").get("publish") or [])
-               + list(_phase(doc, "artefacts").get("items") or [])):
+               + list(_phase(doc, "artefacts").get("items") or [])
+               + [e.get("source") for e in _phase(doc, "gitops").get("entries") or [] if isinstance(e, dict)]):
             out.append(stem)
     return out
 
@@ -957,8 +1066,8 @@ def check_plan_warnings(doc, known_templates=None, item_kind=None):
             continue
         cl_raw = phases_in.get("clusters") or {}
         cluster_names = [c["name"] for c in _check_clusters_phase(cl_raw, [], variables)["items"]] \
-            if pid == "artefacts" and isinstance(cl_raw, dict) else []
-        if pid in ("capi", "clusters", "registry", "artefacts") and not enabled:
+            if pid in ("artefacts", "gitops") and isinstance(cl_raw, dict) else []
+        if pid in ("capi", "clusters", "registry", "artefacts", "gitops") and not enabled:
             # Plan écrit en 2.4.0 : la phase désactivée y gardait des clés
             # libres (format non figé alors). Acceptée, clés inconnues
             # ignorées et retirées au prochain enregistrement, avec un
@@ -968,6 +1077,7 @@ def check_plan_warnings(doc, known_templates=None, item_kind=None):
                            else _check_registry_phase(ph, sub, variables) if pid == "registry"
                            else _check_artefacts_phase(ph, sub, variables, cluster_names, item_kind)
                            if pid == "artefacts"
+                           else _check_gitops_phase(ph, sub, variables, cluster_names) if pid == "gitops"
                            else _check_clusters_phase(ph, sub, variables))
             phases[pid]["enabled"] = False
             for where, why in sub:
@@ -984,6 +1094,9 @@ def check_plan_warnings(doc, known_templates=None, item_kind=None):
             continue
         if pid == "artefacts":
             phases[pid] = _check_artefacts_phase(ph, errors, variables, cluster_names, item_kind)
+            continue
+        if pid == "gitops":
+            phases[pid] = _check_gitops_phase(ph, errors, variables, cluster_names)
             continue
         if pid == "readiness":
             unknown = sorted(set(ph) - {"enabled", "timeout_minutes"})
@@ -1438,6 +1551,16 @@ def check_capi_template(doc):
                 clean[k] = v
             else:
                 errors.append((f"spec.{k}", "a list of registry names or {registry, mirrors, no_fallback}"))
+        elif k == "oidc" and v not in (None, "", {}):
+            # 2.8.0 : réglages OIDC de l'API (child_oidc), des chaînes
+            # seulement, variables admises ; contrôlés plus bas une fois fixes
+            import child_oidc as _co
+            if not isinstance(v, dict) or not all(isinstance(x, str) for x in v.values()):
+                errors.append((f"spec.{k}", "an object of strings (issuer_url, audience, ...)"))
+            elif set(v) - set(_co.KEYS):
+                errors.append((f"spec.{k}.{sorted(set(v) - set(_co.KEYS))[0]}", "unknown key"))
+            else:
+                clean[k] = v
         elif not (isinstance(v, (str, int, bool)) or v is None
                   or isinstance(v, list) and all(isinstance(x, str) for x in v)):
             errors.append((f"spec.{k}", "a string, a number, a boolean or a list of strings"))
@@ -1456,6 +1579,15 @@ def check_capi_template(doc):
                 errors.append((f"spec.{k}", why))
     except ValueError as e:                    # entier illisible (`cpu: deux`)
         errors.append(("spec", str(e)))
+    if "oidc" in fixed:
+        import child_oidc as _co
+        version = fixed.get("k8s_version")
+        for f in _co.blocking(_co.check(fixed["oidc"], version or "v1.34.0")[1]):
+            if f["code"] != "oidc-version-too-old" or version:
+                errors.append(("spec.oidc", f["code"]))
+    if fixed.get("rancher_import") and fixed.get("rancher_external"):
+        errors.append(("spec.rancher_external", "rancher-import-conflict: the embedded Rancher import "
+                                                "(rancher_import) and an external Rancher exclude each other"))
     if errors:
         raise ProfileError(errors, "invalid cluster template")
     return {"description": desc, "variables": variables, "spec": clean}

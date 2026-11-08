@@ -598,3 +598,213 @@ clusters"; the plan phase and the undo: [bare-metal.md](bare-metal.md).
    address and its own IP pool, reserved in the IP management and the DNS
    before use. Never borrow the address of another bench: with both benches
    up, two kube-vip LoadBalancers would answer ARP for the same address.
+
+## 18. Child cluster access, GitOps, renewal and offline bootstrap (2.8.0)
+
+Full references: GitOps in [gitops.md](gitops.md); package kinds and
+registries in [artefacts.md](artefacts.md); the plan phase and the undo in
+[bare-metal.md](bare-metal.md). Each child cluster of Cluster API >
+Clusters gets two more buttons: **Access** and **Renew**.
+
+### Import into the external Rancher of your session
+
+The child cluster is imported into the Rancher that manages your session,
+by the generic import of Rancher. The Rancher embedded in Harvester is
+never aimed at by this path.
+
+1. **Sign in through Rancher.** A local account of the console is refused
+   (`rancher-session-needed`, 409), as for Projects and Members.
+2. **Access window, Rancher tab.** It shows the import state, the Rancher
+   of your session and the run of a plan that imported it. **Import into Rancher**
+   (operator **and** the right to administer the child cluster) is greyed
+   with the reason when it cannot run. At creation, the **Access** menu
+   offers the same as "External Rancher of the session"; a cluster
+   template takes `rancher_external: true`.
+3. What the console does, as a tracked action
+   `capi-rancher-import:<ns>/<c>`:
+   - creates an empty `provisioning.cattle.io` cluster in `fleet-default`
+     of Rancher with the token of your session, named `<harvester>-<c>`
+     (`<harvester>-<ns>-<c>` when the namespace differs from the name);
+   - reads the registration manifest in that Rancher (10 MiB at most),
+     applies it in the child cluster, then erases it: it carries a token
+     and is never stored, never in a step nor a log;
+   - probes the image of the Rancher agent in the registries of the child
+     cluster first. Missing while the fallback to the Internet is cut:
+     `rancher-agent-image-missing`, blocking. Mirror `registry.rancher.com`
+     in a registry of the cluster;
+   - waits until the cluster is active (900 s by default, 60 to 3 600),
+     then marks the `Cluster` (`harvester-ops.io/rancher-external`).
+4. **Exclusive of the embedded Turtles import** (`rancher_import`): both
+   together are refused (`rancher-import-conflict`). Two agents would
+   fight over `cattle-system`.
+5. **Members tab.** The members of the imported child cluster in Rancher,
+   cluster scope only, as in the Members window of a Harvester cluster
+   (`child-not-imported` when it is not imported in your Rancher).
+6. **Remove the import** (`capi-rancher-unimport:`): the cluster is deleted
+   in Rancher and waited for (600 s). Then the leftovers Rancher keeps in
+   the child cluster (cluster roles and bindings, CRDs of
+   `management.cattle.io` and others, the namespace `local`) are removed,
+   each judged by the server first. Only an object that carries a mark of
+   Rancher goes (a `cattle.io` label, annotation or owner). Any other is
+   kept and named (`kept-not-rancher`).
+7. **Delete an imported child cluster.** The cluster is removed from
+   Rancher first, without reading the child cluster (a dead child stays
+   deletable). If Rancher is unreachable or you have no session, the
+   deletion is refused. When that Rancher is gone for good, an
+   administrator drops the import mark with `harvester-capi delete
+   --forget-rancher` (API: `?forget_rancher=1`, `rancher-forget-admin`
+   otherwise). The cluster may then stay listed in that Rancher.
+
+### OIDC of the child API
+
+Without Rancher, people sign in to the API of the child cluster through
+the identity provider of your organisation. The `oidc` option is set at
+creation (Access menu, OIDC block) or by a renewal:
+
+| Key | Rule |
+|---|---|
+| `issuer_url` | `https://` only, no credentials, no query |
+| `audience` | the client id at the provider, 1 to 256 characters |
+| `username_claim`, `groups_claim` | `email` and `groups` by default |
+| `username_prefix`, `groups_prefix` | `oidc:` by default; never empty, never starting with `system:` |
+| `ca_pem` | optional CA of the provider |
+| `admin_group` | optional group bound to `cluster-admin` |
+
+- The console writes an `AuthenticationConfiguration` into the control
+  plane template only: the file
+  `/etc/rancher/rke2/hops-auth/authentication-config.yaml` (root, 0600)
+  and the argument `authentication-config` of the API server. Version
+  `apiserver.config.k8s.io/v1` on Kubernetes 1.34 and later, `v1beta1`
+  from 1.30 to 1.33, refused before (`oidc-version-too-old`). The
+  `--oidc-*` flags are never used.
+- No secret: the API needs only the audience.
+- **`admin_group`** is bound to `cluster-admin` by the
+  `ClusterRoleBinding` `hops-oidc-admins`, subject `<groups_prefix><admin_group>`,
+  in the base of policies of the cluster (`hops-policies`).
+- **Download the OIDC kubeconfig** (Access window, OIDC tab; operator and
+  the right to administer the child cluster): server and CA of the child
+  cluster, user `oidc` through the kubelogin exec plugin (`kubectl
+  oidc-login get-token`). It holds no credential.
+- Rancher import and OIDC together are allowed, with the warning
+  `oidc-with-rancher`.
+
+### Renew the machines of a child cluster
+
+The registries, the OIDC settings and the registry CA live in the RKE2
+templates and are read at the first boot of a node. **Renew** replaces the
+machines that need it:
+
+```
+harvester-capi renew --name NS/C --what registries,oidc,ca [--spec F]
+                     [--timeout 60-10800] [--dry-run]
+harvester-capi renew --name NS/C --finish
+harvester-capi renew --name NS/C --abandon
+```
+
+1. **Renew window, Parameters**: what to renew (registries: read the
+   declarations again or replace the list; OIDC: the current settings are
+   filled in, untick to remove OIDC; new registry CA), the time limit.
+2. **Difference**: the dry run, read on the cluster without writing. Renew
+   stays greyed until a fresh difference with changes, no blocking
+   finding, and the confirmation ticked.
+3. What happens:
+   - only the templates that change are copied to `<name>-r<N>` with the
+     new content (annotation `harvester-ops.io/template-revision`), and the
+     ClusterClass is repointed;
+   - only the machines of those templates are replaced, and only they are
+     waited for. One more address of the IP pool is taken during the
+     rollout (`renew-pool-short` blocks when there is none). With a
+     single control plane, the API is cut for about a minute;
+   - a mark `harvester-ops.io/renewal` on the `Cluster` names the
+     revision, the replaced templates, the old machines and the Secrets to
+     remove;
+   - once every machine of these roles is new: old templates and Secrets
+     removed, mark removed. Past the time limit nothing old is removed.
+4. **An unfinished renewal** (time limit, console stopped) leaves its mark.
+   A new renewal is refused (`renew-busy`). **Finish the renewal**
+   (`--finish`, operator) waits again and cleans up. **Abandon**
+   (`--abandon`, administrators) removes the mark only and lists what is
+   kept.
+5. **Administrator group.** A change of `admin_group` alone replaces no
+   machine: it changes the annotation and delivers the binding again.
+   After each OIDC renewal, the binding `hops-oidc-admins` follows the new
+   settings (changed, added or removed).
+6. **Lock.** The renewal holds the lock of the Harvester cluster, the same
+   as plans. Meanwhile plans, undo, the Turtles uninstall and other
+   renewals on the same Harvester cluster are refused (`renew-running`,
+   `renew-busy`), up to the time limit: 1 h by default, 3 h at most. A
+   renewal is refused while a plan runs (`renew-plan-running`).
+
+`--what ca` brings the next CA of a registry to the cluster during a CA
+change (see [artefacts.md](artefacts.md), "Registries finished (2.8.0)").
+It also refreshes the CA of `<c>-rke2-fetch` of a cluster without
+Internet.
+
+### Child cluster without Internet
+
+A child cluster can be bootstrapped with RKE2 itself coming from a
+registry: option `offline: true` (creation window, Registries menu,
+**Without Internet**; or a cluster template).
+
+1. **On a connected machine:** `harvester-artefacts pack --rke2
+   v1.34.11+rke2r1 --cni calico`, import the package, publish it to a
+   registry that serves images.
+2. **Create the cluster** with that registry. Required:
+   - a registry that mirrors `docker.io` with **No fallback to Internet**
+     (`offline-needs-no-fallback`);
+   - the `rke2` item of the Kubernetes version of the template published
+     in a registry of the cluster (`offline-rke2-missing`,
+     `offline-rke2-version-mismatch`). The `rke2rN` release is not
+     compared.
+3. What the nodes do, in both templates:
+   - a file `/etc/rancher/rke2/hops-fetch.netrc` (0600) with the read
+     account, from the Secret `<c>-rke2-fetch`, never in a command;
+   - `curl` with this netrc fetches the three files by digest into
+     `/opt/rke2-artifacts`. Each sha256 is checked, then
+     `sha256sum-amd64.txt`. On a mismatch everything is removed and the
+     boot fails;
+   - `/opt/install.sh` is placed only after these checks, and CAPRKE2
+     runs it (`agentConfig.airGapped: true`).
+4. `offline_artifacts: image`: the VM image already carries these files.
+   Nothing is fetched.
+
+Limits: the fetch uses Basic authentication. A registry that only accepts
+token authentication on its blobs (Harbor, ghcr style) is not checked.
+Give workers a 20 GiB disk at least: at 10 GiB the bench reached 78 % with
+the agent and Flux, and the image garbage collection failed.
+
+### Roles (2.8.0)
+
+| Gesture | Role |
+|---|---|
+| Read imports, OIDC settings, GitOps entries | viewer |
+| Import, remove the import, pose or remove a Flux entry, renew, finish a renewal, download the OIDC kubeconfig | operator **and** the right to administer the child cluster (and a Rancher session for Rancher) |
+| Fleet entries, `privileges: cluster`, abandon a renewal, `delete --forget-rancher`, `renew-cert`, `harvester-nodes` | admin |
+
+### Seen for real (2.8.0)
+
+On harvlab2 with a bench Dex (OIDC) and the external Rancher 2.14.1:
+
+- OIDC: a member of the administrator group is `cluster-admin`
+  (`kubectl auth whoami`, `auth can-i '*' '*'`); another person has only
+  what the team role gives (`view` in `equipe-a`); a token of another
+  audience is refused (401). The OIDC kubeconfig holds no credential.
+- Import at creation: `Active` in 142 s, Members shows the importer
+  (`cluster-owner`); Remove import: the cluster leaves Rancher, 36
+  leftovers deleted in the child, 11 kept without a mark of Rancher
+  (`kept-not-rancher`), the Rancher cluster list identical to before.
+- Renew `--what oidc` (username prefix and administrator group changed):
+  only the control plane machine replaced, workers kept; the binding
+  `hops-oidc-admins` moved to the new group. Stopped with `--timeout 60`,
+  then `--finish` cleaned up. `--abandon`, then the next renewal removed
+  the templates and the nodes Secret left behind.
+- The lock: `harvester-plans apply` refused during a renewal
+  (`renew-running`), and a renewal refused during a plan
+  (`renew-plan-running`).
+
+Not verified for real: a client identity provider other than Dex
+(Keycloak, Entra ID), Rancher 2.15, a Rancher in airgap with
+`system-default-registry`, the child cluster without Internet end to end
+(stopped by the package update CAPHV asks of cloud-init, see
+troubleshooting), a plan chained to a real Harvester install with a Git
+secret, more than two child clusters, harv4 (two clusters in one run).

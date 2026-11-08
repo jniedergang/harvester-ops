@@ -18,6 +18,14 @@
     harvester-capi manifests       --cluster C [--json]
     harvester-capi policy-render   --spec FICHIER
     harvester-capi token     --cluster C --name ns/cluster --account ns/compte [--seconds N] [--by P]
+    harvester-capi rancher-import   --cluster C --name ns/cluster [--timeout 900] [--by P] [--run ID] [--dry-run]
+    harvester-capi rancher-unimport --cluster C --name ns/cluster [--timeout 600] [--expect-run ID] [--dry-run]
+    harvester-capi rancher-status   --cluster C [--name ns/cluster] [--json]
+    harvester-capi oidc-kubeconfig  --cluster C --name ns/cluster [--json]
+    harvester-capi gitops-check     --cluster C --spec FICHIER
+    harvester-capi gitops-deploy    --cluster C --spec FICHIER [--timeout S]
+    harvester-capi gitops-remove    --cluster C --name ns/cluster/entrée [--expect-run ID] [--dry-run]
+    harvester-capi gitops-status    --cluster C [--name ns/cluster] [--json]
 
 Le cluster Harvester sert lui-même de cluster de gestion : Harvester 1.9
 embarque Rancher Turtles et son cœur Cluster API. `install` y déclare les
@@ -48,6 +56,18 @@ d'un compte d'automatisation, écrit sur la sortie standard seulement. Le
 cluster enfant est atteint par son Secret `<cluster>-kubeconfig`, lu avec
 l'identité passée par `--kubeconfig` (bin/lib/child_access.py).
 
+2.8.0 : accès humain aux clusters enfants. `rancher-import` importe un
+cluster enfant dans le Rancher de la session de la personne (le kubeconfig
+passé par la console vise le mandataire de Rancher ; un compte local est
+refusé, `rancher-session-needed`), par l'import générique
+(bin/lib/rancher_import.py) ; `create` l'enchaîne quand l'option
+`rancher_external` est posée, `delete` retire l'import avant le cluster.
+L'option `oidc` pose la configuration d'authentification structurée de
+l'API (bin/lib/child_oidc.py) ; `oidc-kubeconfig` rend le kubeconfig des
+personnes, sans identifiant. Les gestes `gitops-*` posent une entrée
+GitOps (bin/lib/child_gitops.py) : Fleet si le cluster est importé, Flux
+sinon.
+
 Progression sur stderr au format STEP_EVENT|<étape>|<statut>|<message>, lue
 par la console. Codes de sortie : 0 succès, 1 échec, 2 refus du contrôle
 préalable, 3 annulation.
@@ -75,12 +95,14 @@ sys.path.insert(0, str(HERE / "lib"))
 import capi_cluster as cc  # noqa: E402
 import capi_manifests as mf  # noqa: E402
 import child_access as ca  # noqa: E402
+import child_gitops as cg  # noqa: E402
 import child_policies as cp  # noqa: E402
 import capi_identity as ci  # noqa: E402
 import capi_stack as cs  # noqa: E402
 import capi_services as sv  # noqa: E402
 import longhorn_room as lr  # noqa: E402
 import node_images  # noqa: E402
+import rancher_import as ri  # noqa: E402
 import registries as rg  # noqa: E402
 import work_dir  # noqa: E402
 from kube import Kube, KubeError, cluster_config, is_missing_type  # noqa: E402
@@ -393,9 +415,10 @@ def amount(spec, overcommit=None):
 # Manifestes
 # ---------------------------------------------------------------------------
 
-def render(spec, identity_kubeconfig, origin=None, registries=None):
+def render(spec, identity_kubeconfig, origin=None, registries=None, offline=None):
     """Les documents du cluster, corrigés (liste de dict) ; `registries` :
-    configuration de registres de RKE2 (`registry_config`)."""
+    configuration de registres de RKE2 (`registry_config`) ; `offline` :
+    amorçage sans Internet (`offline_config`, 2.8.0)."""
     argv = ["bash", str(GENERATOR)] + cc.to_argv(spec, identity_kubeconfig)
     p = subprocess.run(argv, capture_output=True, text=True, timeout=60)
     if p.returncode != 0:
@@ -406,7 +429,7 @@ def render(spec, identity_kubeconfig, origin=None, registries=None):
     if y.returncode != 0:
         raise RuntimeError("cannot parse the generated manifests: " + y.stderr.strip()[:200])
     docs = [json.loads(line) for line in y.stdout.splitlines() if line.strip() not in ("", "null")]
-    out = cc.postprocess(docs, spec, origin, registries)
+    out = cc.postprocess(docs, spec, origin, registries, offline)
     for d in out:
         if d.get("kind") == "Namespace":
             d.setdefault("metadata", {}).setdefault("labels", {})[cs.MANAGED] = "true"
@@ -737,7 +760,7 @@ def _vm_probe_cached(state, cluster, kube, network, endpoints, image):
 VM_PROBE = _vm_probe_cached     # remplacé par les tests
 
 
-def registry_config(kube, spec, harvester, hidden=False):
+def registry_config(kube, spec, harvester, hidden=False, nodes_secret=None):
     """{config, files, secrets} pour capi_cluster.postprocess, None sans
     registre. Compte de lecture lu dans le Secret `-pull` du cluster
     Harvester (jamais le compte d'écriture, point 188) ; `hidden` (aperçu,
@@ -757,9 +780,73 @@ def registry_config(kube, spec, harvester, hidden=False):
         except KeyError as e:
             raise ValueError(f"cluster-registry-not-attached: {e.args[0]} on {harvester}") from None
     doc, files, secrets = rg.rke2_config(spec["registries"], decls,
-                                         {"name": spec["name"], "namespace": spec["namespace"]}, creds)
+                                         {"name": spec["name"], "namespace": spec["namespace"]}, creds,
+                                         nodes_secret=nodes_secret)
     return {"files": files, "secrets": secrets, "mirrors": sorted(doc.get("mirrors") or {}),
             "no_fallback": any(f["path"] == rg.NO_FALLBACK_FILE for f in files)}
+
+
+def _offline_published(spec):
+    """{registre: [éléments rke2 publiés]} des registres de la demande, lus
+    dans les paquets publiés de chaque déclaration."""
+    import artefacts as art
+    import rke2_offline as ro
+    out = {}
+    for e in spec.get("registries") or []:
+        d = rg.load(_state(), e["registry"])
+        pkgs = []
+        for p in (d or {}).get("published") or []:
+            try:
+                pkgs.append(art.load_package(_state(), p.get("package"), p.get("version")))
+            except (art.ArtefactError, TypeError):
+                continue
+        out[e["registry"]] = ro.published_rke2(pkgs)
+    return out
+
+
+def offline_findings(spec):
+    """2.8.0 (point 237) : constats de l'option `offline` (rke2_offline)."""
+    import rke2_offline as ro
+    if not spec.get("offline"):
+        return []
+    # une seule décision de repli par cluster (registries.fallback_asked)
+    cut = rg.fallback_asked(spec.get("registries") or [])
+    entries = [dict(e, decl=rg.load(_state(), e["registry"]), no_fallback=cut) for e in spec.get("registries") or []]
+    return ro.findings(spec, _offline_published(spec), entries)
+
+
+def offline_config(kube, spec, hidden=False):
+    """{files, preRKE2Commands, secrets} de l'option `offline`, None sans
+    elle ; mode `image` : {} (airGapped seul). Empreintes = sha256 des
+    fichiers du paquet (celles des blobs publiés) ; compte de lecture dans
+    le Secret `<c>-rke2-fetch` (netrc), jamais dans une commande."""
+    import artefacts as art
+    import rke2_offline as ro
+    if not spec.get("offline"):
+        return None
+    if spec.get("offline_artifacts") == "image":
+        return {}
+    got = ro.chosen(spec, _offline_published(spec))
+    if got is None:
+        raise ValueError("offline-rke2-missing: no RKE2 item of this version in the registries of the cluster")
+    reg, it = got
+    d = rg.load(_state(), reg)
+    pkg = art.load_package(_state(), it["package"], it["pkg_version"])
+    import oci_layout as ol
+    digests = {Path(rel).name: "sha256:" + ol.sha256_file(Path(pkg["path"]) / rel) for rel in ro.files_of(it["version"])}
+    creds = dict(HIDDEN_CREDS) if hidden else rg.read_creds(kube, reg, "pull")
+    if not creds:
+        raise ValueError(f"cluster-registry-not-attached: no read account of {reg}")
+    name = f"{spec['name']}-rke2-fetch"
+    data = {"netrc": ro.netrc(d["endpoint"], creds["username"], creds["password"])}
+    if d.get("ca_pem"):
+        data["ca.crt"] = rg.ca_bundle(d)
+    patch = ro.template_patch(d["endpoint"], digests, name, ca=bool(d.get("ca_pem")))
+    secret = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
+              "metadata": {"name": name, "namespace": spec["namespace"],
+                           "labels": {cc.GENERATED: "true", rg.LABEL: reg}},
+              "stringData": data}
+    return dict(patch, secrets=[secret])
 
 
 def registries_step(spec, regs):
@@ -773,7 +860,8 @@ def _check(kube, spec, desc, identity="console", harvester=None):
     if inv.get("unreachable"):
         findings = [cc.finding("cluster-unreachable", "block")]
         return {"findings": findings, "blocked": True, "amount": amount(spec), "spec": spec}
-    findings = cc.check(spec, facts_from(inv)) + registry_findings(kube, spec, harvester)
+    findings = cc.check(spec, facts_from(inv)) + registry_findings(kube, spec, harvester) + \
+        _session_findings(kube, spec) + offline_findings(spec)
     version = ci.caphv_version(inv.get("stack"), desc)
     if identity == "restricted":
         findings += ci.findings(spec, version, identity, _cloud_provider_bindings(kube, spec["name"]),
@@ -837,7 +925,8 @@ def _check_many(kube, specs, desc, identity="restricted", harvester=None):
     reviews, extra = [], []
     for s in specs:
         reviews += cc.manifest_reviews(s)
-        extra += [dict(f, cluster=f"{s['namespace']}/{s['name']}") for f in registry_findings(kube, s, harvester)]
+        extra += [dict(f, cluster=f"{s['namespace']}/{s['name']}")
+                  for f in registry_findings(kube, s, harvester) + _session_findings(kube, s) + offline_findings(s)]
         if identity == "restricted":
             extra += [dict(f, cluster=f"{s['namespace']}/{s['name']}")
                       for f in ci.findings(s, version, identity, _cloud_provider_bindings(kube, s["name"]),
@@ -914,7 +1003,8 @@ def cmd_render(args):
     rkc = _work_file(DRY_RUN_KUBECONFIG) if restricted else kc
     try:
         # aperçu : les comptes des registres ne sont jamais lus (masqués)
-        docs = render(spec, rkc, registries=registry_config(kube, spec, _harvester(args), hidden=True))
+        docs = render(spec, rkc, registries=registry_config(kube, spec, _harvester(args), hidden=True),
+                      offline=offline_config(kube, spec, hidden=True))
     finally:
         if restricted:
             Path(rkc).unlink(missing_ok=True)
@@ -1041,6 +1131,10 @@ def cmd_create(args):
     origin = cc.parse_origin(args.origin)
     restricted = args.identity == "restricted"
     spec = ci.force_target_namespace(spec_from(args.spec), args.identity)
+    # banc 2.8.0 : la personne qui crée est écrite dans Rancher quand le
+    # cluster y est importé (`applied-by`) ; elle restait vide
+    _check_by(args.by)
+    spec["by"] = args.by
     desc = components_from(args.components)
     out = _check(kube, spec, desc, args.identity, _harvester(args))
     blockers = cc.blocking(out["findings"])
@@ -1054,7 +1148,8 @@ def cmd_create(args):
     if args.dry_run:
         dry_kc = _work_file(DRY_RUN_KUBECONFIG) if restricted else kc
         try:
-            docs = render(spec, dry_kc, origin, registries=registry_config(kube, spec, _harvester(args), hidden=True))
+            docs = render(spec, dry_kc, origin, registries=registry_config(kube, spec, _harvester(args), hidden=True),
+                          offline=offline_config(kube, spec, hidden=True))
         finally:
             if restricted:
                 Path(dry_kc).unlink(missing_ok=True)
@@ -1081,7 +1176,7 @@ def cmd_create(args):
             if restricted:
                 ns_created = _ensure_namespace(kube, ns)
                 ident = identity_up(kube, spec, out["caphv_version"])
-            docs = render(spec, ident or kc, origin, registries=regs)
+            docs = render(spec, ident or kc, origin, registries=regs, offline=offline_config(kube, spec))
         finally:
             if ident:
                 Path(ident).unlink(missing_ok=True)
@@ -1094,6 +1189,9 @@ def cmd_create(args):
         st = wait_ready(kube, ns, name, args.timeout)
         step("provision", "done", f"control plane {st['cp'][0]}/{st['cp'][1]}, "
                                   f"workers {st['workers'][0]}/{st['workers'][1]} (100%)")
+        code = _after_create(kube, spec, _harvester(args), origin, args.timeout)
+        if code != EXIT_OK:
+            return code
         step("done", "done", f"{ns}/{name} is available")
         return EXIT_OK
     except Cancelled:
@@ -1113,6 +1211,32 @@ def cmd_create(args):
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
         signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+
+def _after_create(kube, spec, harvester, origin, timeout):
+    """2.8.0 : accès humain posé une fois le cluster disponible. Groupe
+    administrateur OIDC (point 229) : socle `hops-policies` qui ne porte que
+    la liaison rendue par la console ; import dans le Rancher de la session
+    (point 223, juste après la création). Un échec laisse le cluster en
+    place : le geste se rejoue seul."""
+    ns, name = spec["namespace"], spec["name"]
+    cfg = spec.get("oidc") or {}
+    if cfg.get("admin_group"):
+        admin = _admin_binding_of(kube, ns, name)
+        code = deliver(kube, ns, name, cp.ITEM, POLICIES_PACKAGE, POLICIES_VERSION, [admin], origin,
+                       spec.get("by") or "", min(timeout, 900))
+        if code != EXIT_OK:
+            step("access", "error", f"{ns}/{name} is available; the OIDC administrator group was not delivered")
+            return code
+        step("access", "done", f"OIDC administrator group {cfg['admin_group']} bound to cluster-admin")
+    if spec.get("rancher_external"):
+        code = rancher_import(kube, ns, name, harvester, spec.get("by") or "", origin.get("run"),
+                              min(max(timeout, ri.WAIT_MIN), ri.WAIT_MAX))
+        if code != EXIT_OK:
+            step("access", "error", f"{ns}/{name} is available; the import into Rancher failed "
+                                    "(harvester-capi rancher-import resumes it)")
+            return code
+    return EXIT_OK
 
 
 def _undo(kube, ns, name, ns_created, applied, timeout=2400):
@@ -1246,12 +1370,20 @@ def _registry_secrets_of(generated, ns, name):
     (`<c>-registries`, et pour chaque registre étiqueté `-registry-<r>-auth`,
     `-registry-<r>-ca`, `-chart-<r>`) : un cluster `web2` n'emporte rien de
     `web`."""
-    wanted = {rg.nodes_secret_name(name)}
+    wanted = {(s.get("metadata") or {}).get("name") for s in generated
+              if rg.is_nodes_secret_of((s.get("metadata") or {}).get("name"), name)}
+    regs = set()
     for s in generated:
-        reg = ((s.get("metadata") or {}).get("labels") or {}).get(rg.LABEL)
-        if reg:
-            wanted |= set(rg.child_secret_names(name, reg).values())
-            wanted.add(sv.registry_secret_names({"cluster": f"{ns}/{name}"}, reg)["auth"])
+        labels = (s.get("metadata") or {}).get("labels") or {}
+        if labels.get(rg.LABEL):
+            regs.add(labels[rg.LABEL])
+        if (s.get("metadata") or {}).get("name") in wanted:
+            # 2.8.0 (m-14) : marques d'usage du Secret des nœuds
+            regs |= set(rg.cluster_registry_names(s))
+    for reg in regs:
+        wanted |= set(rg.child_secret_names(name, reg).values())
+        wanted.add(sv.registry_secret_names({"cluster": f"{ns}/{name}"}, reg)["auth"])
+    wanted.add(f"{name}-rke2-fetch")                     # 2.8.0 : sans Internet
     return [s for s in generated if (s.get("metadata") or {}).get("name") in wanted]
 
 
@@ -1320,6 +1452,27 @@ def cmd_delete(args):
     if refused:
         step("delete", "error", refused)
         return EXIT_BLOCKED
+    if ri.mark_of(cl) is not None and getattr(args, "forget_rancher", False):
+        # revue 1-4 (I-2) : Rancher disparu ou injoignable, geste
+        # d'administrateur (la console le réserve) : la marque seule part
+        have = ri.mark_of(cl)
+        kube.patch(cs.K_CLUSTER, ns, name, {"metadata": {"annotations": {ri.A_MARK: None}}})
+        step("unimport", "done", f"rancher-forgotten: the import mark of {ns}/{name} is dropped; "
+                                 f"{have['name']} may stay in {have['server']}")
+    elif ri.mark_of(cl) is not None:
+        # 2.8.0 (point 232) : l'import part avant le cluster. Revue 1-4 :
+        # rien n'est lu dans le cluster enfant qui part (I-2), et la marque
+        # d'exécution n'est comparée qu'au cluster (m-2 : un import fait à
+        # la main sur un cluster d'un plan ne bloque pas son Défaire)
+        try:
+            code = rancher_unimport(kube, ns, name, _harvester(args), "", cleanup=False)
+        except RuntimeError as e:
+            step("unimport", "error", str(e)[:200])
+            code = EXIT_FAIL
+        if code != EXIT_OK:
+            step("delete", "error", f"{ns}/{name} is still imported in Rancher: nothing deleted "
+                                    "(an administrator can drop the import with --forget-rancher)")
+            return code
     if cl is None:
         # Cluster déjà parti, identité restée (suppression précédente qui a
         # échoué sur un droit) : la reprise finit le nettoyage
@@ -1341,6 +1494,8 @@ def cluster_brief(kube, ns, name):
     if cl is not None:
         out["origin"] = cc.origin_of(cl)
         out["state"] = cc.cluster_state(cl)
+        # 2.8.0 : import dans un Rancher externe (serveur, nom, identifiant)
+        out["rancher"] = ri.mark_of(cl)
     else:
         # absent : le namespace existe-t-il déjà (consigné par un plan, qui
         # dit ainsi s'il l'a créé) ; seconde lecture, pour ce cas seulement
@@ -1490,6 +1645,19 @@ def service_source(kube, spec, harvester, read_creds=False):
     try:
         meta = ol.chart_meta(Path(pkg["path"]) / item["chart"])
         resolved = sv.resolve_source(spec, decl["endpoint"], meta, item.get("values") or {})
+        if spec["name"] == cg.SERVICE:
+            # 2.8.0 (point 225) : le service `flux` porte toujours le
+            # verrouillage multi-locataire, imposé par-dessus les valeurs
+            import yaml
+            resolved["values"] = yaml.safe_dump(cg.flux_values(yaml.safe_load(resolved["values"] or "") or {}),
+                                                sort_keys=False)
+            # banc 2.8.0 : la release allait dans `default` (namespace par
+            # défaut d'un service) ; Flux vit dans `flux-system`. Une release
+            # déjà posée garde son namespace : CAAPH ne déplace pas une
+            # release, la mise à jour restait bloquée (vu sur harvlab2)
+            ns_, _, child_ = spec["cluster"].partition("/")
+            have = kube.get(sv.K_HCP, ns_, cg.SERVICE)
+            resolved["namespace"] = ((have or {}).get("spec") or {}).get("namespace") or cg.FLUX_NAMESPACE
     except ValueError as e:
         return spec, found + [sv.finding("invalid-values", "block", message=str(e)[:200])], None
     if not any((p.get("package"), p.get("version")) == (src["package"], src["version"])
@@ -1497,7 +1665,7 @@ def service_source(kube, spec, harvester, read_creds=False):
         found.append(sv.finding("service-chart-not-published", "warn", registry=reg, package=ref))
     ns, _, child = spec["cluster"].partition("/")
     try:
-        mirrored = kube.get("secrets", ns, rg.child_secret_names(child, reg)["auth"]) is not None
+        mirrored = rg.cluster_uses(kube, ns, child, reg)
     except KubeError:
         mirrored = False
     if not mirrored:
@@ -1708,6 +1876,17 @@ def manifest_spec_from(path):
     return out
 
 
+def _with_admin(kube, spec):
+    """2.8.0 (point 229) : le socle d'un cluster créé avec un groupe
+    administrateur OIDC porte la liaison `hops-oidc-admins`, rendue depuis
+    l'annotation du Cluster (jamais depuis la demande)."""
+    if "policies" in spec:
+        admin = _admin_binding_of(kube, spec["namespace"], spec["cluster"])
+        if admin:
+            spec = dict(spec, admin_binding=admin)
+    return spec
+
+
 def manifest_objects(spec):
     """(objets, constats) de l'élément demandé : rendus pour le socle, lus
     dans le paquet du répertoire d'état sinon."""
@@ -1716,8 +1895,9 @@ def manifest_objects(spec):
     if not mf.item_name_ok(item):
         return [], [mf.finding("artefact-name-too-long", item=item, max=42)]
     if "policies" in spec:
-        objs = cp.objects(spec["policies"])
-        return objs, mf.check(objs, spec["cluster"], item)
+        admin = spec.get("admin_binding")
+        objs = cp.objects(spec["policies"]) + ([admin] if admin else [])
+        return objs, mf.check(objs, spec["cluster"], item, allow=[admin] if admin else ())
     ref = f"{spec['package']}-{spec['version']}"
     if item == cp.ITEM or spec["package"] == POLICIES_PACKAGE:
         # revue 1-3, m3 : le socle de la console ne se confond avec aucun
@@ -1804,7 +1984,8 @@ def _child_findings(kube, spec, objs):
     with ca.session(kube, ns, cluster) as path:
         child = Kube(path)
         scopes = mf.parse_api_resources(child.api_resources())
-        found = mf.check(objs, cluster, item, scopes=scopes)
+        admin = spec.get("admin_binding")
+        found = mf.check(objs, cluster, item, scopes=scopes, allow=[admin] if admin else ())
         if not mf.blocking(found):
             found += _taken(child, objs, item, cluster)
         if "policies" in spec:
@@ -1822,7 +2003,7 @@ def _static_findings(kube, spec):
 
 def cmd_manifest_check(args):
     kube, _, _ = kube_from(args)
-    spec = manifest_spec_from(args.spec)
+    spec = _with_admin(kube, manifest_spec_from(args.spec))
     objs, found = _static_findings(kube, spec)
     if objs and not mf.blocking(found):
         try:
@@ -1901,14 +2082,41 @@ def _prune(child, todo, sid):
     return len(todo)
 
 
-def _wait_binding(kube, ns, cluster, cm_doc, timeout, now=time.time, sleep=time.sleep):
-    """Attend que le binding du cluster porte l'empreinte du ConfigMap."""
+FLUX_PRUNE_WAIT = 300
+FLUX_SOURCE_KINDS = ("GitRepository", "OCIRepository")
+
+
+def _prune_gitops(child, todo, sid, timeout=None, now=None, sleep=None):
+    """Revue 1-4 (I-3) : retrait d'une entrée Flux. La `Kustomization`
+    d'abord, attendue jusqu'à sa disparition (son finaliseur élague ce
+    qu'elle a posé avec le compte `hops-gitops-<nom>`), puis la source, puis
+    le compte, ses liaisons et ses Secrets. Délai dépassé : le reste est
+    gardé (Flux réessaie avec son compte) et l'erreur le dit."""
+    now, sleep = now or time.time, sleep or time.sleep
+    timeout = FLUX_PRUNE_WAIT if timeout is None else timeout
+    first = [t for t in todo if t[1][1] == "Kustomization"]
+    sources = [t for t in todo if t[1][1] in FLUX_SOURCE_KINDS]
+    rest = [t for t in todo if t not in first and t not in sources]
+    _prune(child, first, sid)
+    deadline = now() + timeout
+    for res, ref, where in first:
+        while child.get(res, ref[2] or None, ref[3]) is not None:
+            if now() > deadline:
+                raise TimeoutError(f"{where} still there after {timeout} s (Flux is pruning what it applied); "
+                                   "its account is kept, run the removal again")
+            sleep(5)
+    return len(first) + _prune(child, sources, sid) + _prune(child, rest, sid)
+
+
+def _wait_binding(kube, ns, cluster, cm_doc, timeout, now=time.time, sleep=time.sleep, secret_doc=None):
+    """Attend que le binding du cluster porte l'empreinte du ConfigMap (et
+    du Secret `resource-set`, 2.8.0)."""
     deadline, last = now() + timeout, None
     name = cm_doc["metadata"]["name"]
     while True:
         crs = kube.get(mf.K_CRS, ns, name)
         binding = kube.get(mf.K_CRSB, ns, cluster)
-        st = mf.state(crs, [binding] if binding else [], cm_doc)
+        st = mf.state(crs, [binding] if binding else [], cm_doc, secret_doc)
         if st["applied"]:
             return st
         if st["message"] != last:
@@ -1919,38 +2127,41 @@ def _wait_binding(kube, ns, cluster, cm_doc, timeout, now=time.time, sleep=time.
         sleep(5)
 
 
-def cmd_manifest_deploy(args):
-    """Déclare ConfigMap et CRS, sélectionne le cluster, attend le binding à
-    l'empreinte du nouveau contenu, puis retire du cluster enfant les objets
-    sortis du contenu qui portent encore les étiquettes de la console."""
-    kube, _, _ = kube_from(args)
-    spec = manifest_spec_from(args.spec)
-    ns, cluster, item = spec["namespace"], spec["cluster"], spec["item"]
-    objs, found = _static_findings(kube, spec)
-    if not mf.blocking(found):
-        # toujours dans le cluster enfant : droit de la personne (m1), sortes
-        # servies (I1), objets déjà présents (I2), namespaces d'équipe (207)
-        found = [f for f in found if not f["code"].startswith("manifest-")] + _child_findings(kube, spec, objs)
-    if mf.blocking(found):
-        for f in mf.blocking(found):
-            step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
-        return EXIT_BLOCKED
-    step("check", "done", f"{item} ({spec['package']} {spec['version']}): {len(objs)} object(s) for {ns}/{cluster}")
+def deliver(kube, ns, cluster, item, package, version, objs, origin, by, timeout, secrets=()):
+    """Déclare ConfigMap (et Secret `resource-set`) et CRS, sélectionne le
+    cluster, attend le binding à l'empreinte du nouveau contenu, puis retire
+    du cluster enfant les objets sortis du contenu qui portent encore les
+    étiquettes de la console. Partagé par les manifestes, le socle et les
+    entrées GitOps (2.8.0)."""
     old_cm = kube.get("configmaps", ns, mf.name_of(item))
+    old_secret = kube.get("secrets", ns, mf.name_of(item))
+    lab = ((old_secret or {}).get("metadata") or {}).get("labels") or {}
+    if old_secret is not None and (lab.get(mf.L_ITEM) != item or lab.get(mf.L_CLUSTER) != cluster):
+        # revue 1-4 (m-1) : un Secret du même nom qui n'est pas celui de cet
+        # élément n'est ni lu ni supprimé (comme cmd_manifest_remove)
+        old_secret = None
     # I3 : ce qui sort du contenu est écrit AVANT l'application ; un
-    # déploiement arrêté le retire à la reprise
-    pending = mf.pending_after(old_cm, objs)
-    docs = mf.docs(ns, cluster, item, spec["package"], spec["version"], objs, spec["origin"], spec["by"])
+    # déploiement arrêté le retire à la reprise (Secrets du cluster enfant
+    # compris, 2.8.0)
+    new = list(objs) + list(secrets)
+    pending = mf.pending_after(old_cm, new)
+    pending += [r for r in mf.removed(mf.secret_objects(old_secret), new) if r not in pending]
+    docs = mf.docs(ns, cluster, item, package, version, objs, origin, by, secrets=secrets)
     docs[0] = mf.with_pending(docs[0], pending)
     kube.apply(docs)
     kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"labels": {mf.label_of(item): "on"}}})
     step("apply", "done", f"{mf.name_of(item)} declared, cluster {cluster} selected")
+    secret_doc = next((d for d in docs if d.get("kind") == "Secret"), None)
     try:
-        _wait_binding(kube, ns, cluster, docs[0], args.timeout)
+        _wait_binding(kube, ns, cluster, docs[0], timeout, secret_doc=secret_doc)
     except TimeoutError as e:
-        step("reconcile", "error", f"not applied after {args.timeout} s: {e}")
+        step("reconcile", "error", f"not applied after {timeout} s: {e}")
         return EXIT_FAIL
     step("reconcile", "done", f"{mf.name_of(item)} applied to {cluster}")
+    if secret_doc is None and old_secret is not None:
+        # plus aucun identifiant : le Secret d'avant part (la liste en
+        # attente porte déjà ses objets)
+        kube.delete("secrets", ns, mf.name_of(item))
     if not pending:
         step("prune", "done", "no object left the content")
         return EXIT_OK
@@ -1964,6 +2175,26 @@ def cmd_manifest_deploy(args):
     kube.patch("configmaps", ns, mf.name_of(item), {"metadata": {"annotations": {mf.A_PENDING: None}}})
     step("prune", "done", f"{n} object(s) that left the content deleted from {cluster}")
     return EXIT_OK
+
+
+def cmd_manifest_deploy(args):
+    """Contrôles (dans le cluster enfant, avec l'identité de la personne),
+    puis `deliver`."""
+    kube, _, _ = kube_from(args)
+    spec = _with_admin(kube, manifest_spec_from(args.spec))
+    ns, cluster, item = spec["namespace"], spec["cluster"], spec["item"]
+    objs, found = _static_findings(kube, spec)
+    if not mf.blocking(found):
+        # toujours dans le cluster enfant : droit de la personne (m1), sortes
+        # servies (I1), objets déjà présents (I2), namespaces d'équipe (207)
+        found = [f for f in found if not f["code"].startswith("manifest-")] + _child_findings(kube, spec, objs)
+    if mf.blocking(found):
+        for f in mf.blocking(found):
+            step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
+        return EXIT_BLOCKED
+    step("check", "done", f"{item} ({spec['package']} {spec['version']}): {len(objs)} object(s) for {ns}/{cluster}")
+    return deliver(kube, ns, cluster, item, spec["package"], spec["version"], objs, spec["origin"], spec["by"],
+                   args.timeout)
 
 
 def cmd_manifest_remove(args):
@@ -1991,8 +2222,12 @@ def cmd_manifest_remove(args):
     if refused:
         step("remove", "error", refused)
         return EXIT_BLOCKED
-    # I3 : ce qu'un déploiement interrompu n'a pas encore retiré compte aussi
-    objs = mf.objects_of(cmap)
+    # I3 : ce qu'un déploiement interrompu n'a pas encore retiré compte aussi ;
+    # 2.8.0 : Secrets livrés par la ressource `resource-set` aussi
+    secret = kube.get("secrets", ns, name)
+    if secret is not None and (((secret.get("metadata") or {}).get("labels") or {}).get(mf.L_ITEM) != item):
+        secret = None
+    objs = mf.objects_of(cmap) + mf.secret_objects(secret)
     refs = [mf.ref_of(o) for o in objs]
     refs += [r for r in mf.pending_of(cmap) if r not in refs]
     present = kube.get(cs.K_CLUSTER, ns, cluster) is not None
@@ -2030,13 +2265,22 @@ def cmd_manifest_remove(args):
             step("remove", "running", f"ClusterResourceSet {ns}/{name} deleted")
         if present:
             kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"labels": {mf.label_of(item): None}}})
-            n = _prune(child, todo, "remove") if child else 0
+            if child and item.startswith(cg.ITEM_PREFIX):
+                try:
+                    n = _prune_gitops(child, todo, "remove")
+                except TimeoutError as e:
+                    step("remove", "error", str(e)[:300])
+                    return EXIT_FAIL
+            else:
+                n = _prune(child, todo, "remove") if child else 0
             step("remove", "running", f"{n} object(s) deleted from {cluster}")
         else:
             step("remove", "running", f"cluster {ns}/{cluster} is gone: its objects left with it")
-    if cmap is not None:
+    for kind, o in (("configmaps", cmap), ("secrets", secret)):
+        if o is None:
+            continue
         try:
-            kube.delete("configmaps", ns, name)
+            kube.delete(kind, ns, name)
         except KubeError as e:
             if not _not_found(e):
                 raise
@@ -2145,7 +2389,1302 @@ def cmd_token(args):
     return EXIT_OK
 
 
-CHILD_COMMANDS = ("manifest-check", "manifest-deploy", "manifest-remove", "manifest-verify", "token")
+# ---------------------------------------------------------------------------
+# 2.8.0 : import dans un Rancher externe (bin/lib/rancher_import.py)
+# ---------------------------------------------------------------------------
+RANCHER_WAIT_ID, RANCHER_WAIT_TOKEN, CLEANUP_WAIT = 120, 120, 180
+
+
+def _session_of(kubeconfig):
+    """Rancher de la session (mandataire `/k8s/clusters/<id>` + jeton), lu
+    dans le kubeconfig passé par la console ; None pour un compte local."""
+    import hv_projects as hpj
+    try:
+        return hpj.rancher_of(Path(kubeconfig).read_text())
+    except (OSError, TypeError):
+        return None
+
+
+class RancherApi:
+    """API de Rancher avec le jeton de la session de la personne (points 221
+    et 222). Le jeton est lu à chaque appel (renouvelé par la console) et
+    n'apparaît dans aucune étape."""
+
+    def __init__(self, r):
+        import web_loader
+        rs = web_loader.load("rancher_sso")
+        if rs is None:
+            raise RuntimeError("rancher_sso module not found")
+        self.r = r
+        self.http = rs.Http(ca_file=r.get("ca_file"), insecure=bool(r.get("insecure")), timeout=30)
+        self.unreachable = rs.SSOError
+        self.server = ri.server_id(r["url"])
+
+    def _token(self):
+        return (Path(self.r["token_file"]).read_text().strip() if self.r.get("token_file")
+                else self.r.get("token") or "")
+
+    def call(self, method, path, body=None):
+        try:
+            return self.http.request(method, self.r["url"] + path,
+                                     headers={"Authorization": f"Bearer {self._token()}",
+                                              "Accept": "application/json"},
+                                     data=json.dumps(body) if body is not None else None)
+        except self.unreachable as e:
+            raise RuntimeError(f"rancher-unreachable: {str(e)[:200]}") from None
+
+    def fetch(self, path):
+        """Texte d'un chemin du Rancher de la session, 10 Mio au plus."""
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(self.r["url"] + path, headers={"Authorization": f"Bearer {self._token()}"})
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            # revue 1-4 (m-7) : le jeton de la session ne suit jamais une
+            # redirection (urllib recopie l'en-tête Authorization)
+            def redirect_request(self, *a, **k):
+                return None
+        opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=self.http.ctx))
+        try:
+            with opener.open(req, timeout=60) as resp:
+                data = resp.read(ri.MANIFEST_MAX + 1)
+        except (urllib.error.URLError, OSError) as e:
+            raise RuntimeError(f"rancher-unreachable: registration manifest not read "
+                               f"({type(e).__name__})") from None
+        ri.check_size(len(data))
+        return data.decode()
+
+
+RANCHER = RancherApi          # remplacé par les tests
+
+
+def _redact(text, secrets):
+    for s in secrets:
+        if s:
+            text = text.replace(s, "<hidden>")
+    return text
+
+
+def _session_findings(kube, spec):
+    """`rancher_external` sans session Rancher : refusé avant tout geste."""
+    if spec.get("rancher_external") and _session_of(kube.kubeconfig) is None:
+        return [cc.finding("rancher-session-needed", "block")]
+    return []
+
+
+def _registries_doc(kube, ns, cluster):
+    """`registries.yaml` du cluster enfant (Secret `<c>-registries`), CA par
+    registre, et repli coupé ou non (fichier config.yaml.d des gabarits)."""
+    cps = kube.list("rke2controlplanetemplates.controlplane.cluster.x-k8s.io", ns)
+    # 2.8.0 : après un renouvellement, `<c>-registries-r<N>`
+    sec = kube.get("secrets", ns, rg.nodes_secret_from(cps) or rg.nodes_secret_name(cluster))
+    if sec is None:
+        return {}, {}, False
+    data = {k: base64.b64decode(v).decode() for k, v in (sec.get("data") or {}).items()}
+    try:
+        doc = json.loads(data.get("registries.yaml") or "{}")
+    except ValueError:
+        import yaml
+        doc = yaml.safe_load(data.get("registries.yaml") or "") or {}
+    cas = {k[3:-4]: v for k, v in data.items() if k.startswith("ca-") and k.endswith(".crt")}
+    no_fallback = any(f.get("path") == rg.NO_FALLBACK_FILE
+                      for t in cps
+                      for f in ((((t.get("spec") or {}).get("template") or {}).get("spec") or {}).get("files") or []))
+    return doc, cas, no_fallback
+
+
+REGISTRY_CLASS = None         # remplacé par les tests
+
+
+def _agent_images_found(kube, ns, cluster, images):
+    """(constats, {image: trouvée}) : chaque image de l'agent sondée dans les
+    miroirs du cluster enfant (HEAD du manifeste avec le compte de lecture)."""
+    import oci_push as op
+    doc, cas, no_fallback = _registries_doc(kube, ns, cluster)
+    configs = doc.get("configs") or {}
+    cls = REGISTRY_CLASS or op.Registry
+    found = {}
+    for img in images:
+        for host, repo, tag in ri.probe_targets(img, doc):
+            conf = configs.get(host) or {}
+            ca_name = ((conf.get("tls") or {}).get("ca_file") or "").split("/")[-2:-1]
+            try:
+                reg = cls(host, conf.get("auth") or None, ca_pem=cas.get(ca_name[0]) if ca_name else None,
+                          timeout=20)
+                if reg.manifest_digest(repo, tag):
+                    found[img] = True
+                    break
+            except (op.RegistryError, OSError, ValueError):
+                continue
+        found.setdefault(img, False)
+    return ri.image_findings(images, doc, found, no_fallback), found
+
+
+def _wait_for(fn, timeout, what, sleep=None, now=None):
+    sleep, now = sleep or time.sleep, now or time.time
+    deadline = now() + timeout
+    while True:
+        got = fn()
+        if got:
+            return got
+        if now() > deadline:
+            raise TimeoutError(what)
+        sleep(5)
+
+
+def rancher_import(kube, ns, cluster, harvester, by="", run=None, timeout=ri.WAIT_DEFAULT, dry=False):
+    """Import du cluster enfant dans le Rancher de la session. Étapes :
+    session, create, token, images, apply, wait. Le jeton d'enregistrement
+    et le manifeste ne sont jamais écrits dans une étape ni rangés."""
+    if not harvester:
+        raise ValueError("--harvester-name: the name of the Harvester cluster in the console")
+    r = _session_of(kube.kubeconfig)
+    if r is None:
+        step("session", "error", "rancher-session-needed: sign in to the console through Rancher to import")
+        return EXIT_BLOCKED
+    cl = kube.get(cs.K_CLUSTER, ns, cluster)
+    if cl is None:
+        step("session", "error", f"cluster-missing: {ns}/{cluster}")
+        return EXIT_BLOCKED
+    if ((cl.get("metadata") or {}).get("labels") or {}).get(cc.AUTO_IMPORT) == "true":
+        step("session", "error", "rancher-import-conflict: the cluster is imported in Harvester's embedded "
+                                 "Rancher (Turtles)")
+        return EXIT_BLOCKED
+    ca.read(kube, ns, cluster)          # droit d'administrer le cluster enfant, avant toute écriture
+    api = RANCHER(r)
+    st, schema = api.call("GET", ri.SCHEMA)
+    if st != 200 or not ri.can_create(schema):
+        step("session", "error", f"rancher-forbidden: creating a cluster in {api.server} is not allowed")
+        return EXIT_BLOCKED
+    name = ri.rancher_name(harvester, ns, cluster)
+    have = ri.mark_of(cl)
+    if have and (have["server"], have["name"]) != (api.server, name):
+        step("session", "error", f"rancher-import-elsewhere: already imported as {have['name']} in {have['server']}")
+        return EXIT_BLOCKED
+    st, prov = api.call("GET", f"{ri.API_V1}/{ri.NAMESPACE}/{name}")
+    if st == 200:
+        if not ri.ours(prov, harvester, ns, cluster):
+            step("session", "error", f"rancher-name-taken: {name} exists in {api.server} for something else")
+            return EXIT_BLOCKED
+    elif st == 404:
+        prov = None
+    else:
+        raise RuntimeError(f"Rancher answered {st} for {name}")
+    step("session", "done", f"{api.server}: {name} {'already there, resumed' if prov else 'to create'}")
+    if dry:
+        print(json.dumps({"rancher": api.server, "name": name, "exists": prov is not None}))
+        return EXIT_OK
+    if prov is None:
+        st, prov = api.call("POST", ri.API_V1, ri.cluster_body(name, harvester, ns, cluster, by, run))
+        if st == 403:
+            step("create", "error", f"rancher-forbidden: Rancher refused to create {name}")
+            return EXIT_BLOCKED
+        if st not in (200, 201):
+            raise RuntimeError(f"Rancher answered {st} creating {name}: {str((prov or {}).get('message'))[:200]}")
+    cid = _wait_for(lambda: ri.cluster_id(api.call("GET", f"{ri.API_V1}/{ri.NAMESPACE}/{name}")[1]),
+                    RANCHER_WAIT_ID, f"{name}: no cluster id from Rancher")
+    # marque posée tout de suite : un import arrêté plus loin se retire
+    kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"annotations": {ri.A_MARK: ri.mark(api.server, name, cid)}}})
+    step("create", "done", f"{name} ({cid}) in {api.server}")
+
+    def manifest_url():
+        st2, toks = api.call("GET", f"/v3/clusterregistrationtokens?clusterId={cid}")
+        try:
+            return ri.registration_manifest_url(toks) if st2 == 200 else None
+        except ri.RancherImportError:
+            return None
+    try:
+        url = _wait_for(manifest_url, RANCHER_WAIT_TOKEN, "no registration manifest")
+    except TimeoutError:
+        step("token", "error", "rancher-token-unreadable: no registration manifest address with its token")
+        return EXIT_FAIL
+    path = ri.manifest_path(url, r.get("url"))
+    del url
+    step("token", "done", "registration manifest ready")
+    text = api.fetch(path)
+    hidden = ri.secret_values(text, path)
+    images = ri.manifest_images(text)
+    found, _ = _agent_images_found(kube, ns, cluster, images)
+    for f in found:
+        step("images", "running" if f["level"] == "warn" else "error", f"{f['code']}: {f['facts']['image']}")
+    if cc.blocking(found):
+        return EXIT_BLOCKED
+    step("images", "done", f"{len(images)} image(s) of the agent: {', '.join(images)[:200]}")
+    mpath = work_dir.private_file(text, prefix="hops-rancher-", suffix=".yaml")
+    del text
+    try:
+        with ca.session(kube, ns, cluster) as kpath:
+            Kube(kpath).run("apply", "-f", mpath, timeout=120)
+    except KubeError as e:
+        raise KubeError(_redact(str(e), hidden)[:300]) from None
+    finally:
+        Path(mpath).unlink(missing_ok=True)
+    step("apply", "done", f"Rancher agent applied in {ns}/{cluster}")
+
+    def active():
+        _, p = api.call("GET", f"{ri.API_V1}/{ri.NAMESPACE}/{name}")
+        _, m = api.call("GET", f"/v3/clusters/{cid}")
+        return ri.ready(p, m)
+    try:
+        _wait_for(active, timeout, f"{name} not active")
+    except TimeoutError:
+        step("wait", "error", f"{name} not active in {api.server} after {timeout} s (left in place)")
+        return EXIT_FAIL
+    step("wait", "done", f"{name} active in {api.server}")
+    return EXIT_OK
+
+
+def _leftover_judge(child, refs, sid):
+    """(à supprimer, refusés, gardés) parmi les restes de Rancher : un
+    namespace qui porte autre chose, une CRD qui a encore des objets sont
+    gardés (`kept-in-use`) ; chaque suppression jugée par le serveur."""
+    todo, refused, kept = [], [], []
+    for kind, _ns, name in refs:
+        where = f"{kind} {name}"
+        if kind == "Namespace":
+            try:
+                kinds = mf.scan_resources(child.api_resources(namespaced=True, verbs="list").split())
+                others = mf.foreign(child.list(",".join(kinds), name, missing_ok=False) if kinds else [], "", "")
+            except KubeError as e:
+                others = [str(e)]
+            if others:
+                step(sid, "running", f"kept-in-use: {where} kept, it holds {len(others)} object(s)")
+                kept.append({"object": where, "code": "kept-in-use"})
+                continue
+        if kind == "CustomResourceDefinition":
+            try:
+                inside = child.list(name, None, missing_ok=False)
+            except KubeError:
+                inside = ["?"]
+            if inside:
+                step(sid, "running", f"kept-in-use: {where} kept, {len(inside)} object(s) of it remain")
+                kept.append({"object": where, "code": "kept-in-use"})
+                continue
+        try:
+            child.delete(kind, None, name, dry_run=True)
+        except KubeError as e:
+            if not _not_found(e):
+                refused.append(f"{where}: {str(e)[:160]}")
+            continue
+        todo.append((kind, name, where))
+    return todo, refused, kept
+
+
+def _leftovers_of(child, sid="unimport"):
+    """Restes de Rancher marqués (revue 1-4 I-1) ; un nom qui suit un motif
+    sans marque de Rancher est gardé et dit (`kept-not-rancher`)."""
+    objs, unmarked = [], []
+    for kind in ("Namespace", "ClusterRole", "ClusterRoleBinding", "CustomResourceDefinition"):
+        objs += [dict(o, kind=kind) for o in child.list(kind, None)]
+    out = ri.leftovers(objs, unmarked)
+    for kind, _ns, name in unmarked:
+        step(sid, "running", f"kept-not-rancher: {kind} {name} kept, it carries no mark of Rancher")
+    return out
+
+
+def _rancher_delete(api, name, cid, timeout, sleep=None, now=None):
+    """Cluster supprimé dans Rancher, attente de sa disparition."""
+    st2, _ = api.call("DELETE", f"{ri.API_V1}/{ri.NAMESPACE}/{name}")
+    if st2 == 403:
+        step("unimport", "error", f"rancher-forbidden: Rancher refused to delete {name}")
+        return EXIT_BLOCKED
+    try:
+        _wait_for(lambda: api.call("GET", f"{ri.API_V1}/{ri.NAMESPACE}/{name}")[0] == 404
+                  and api.call("GET", f"/v3/clusters/{cid}")[0] == 404,
+                  timeout, f"{name} still in Rancher", sleep, now)
+    except TimeoutError:
+        step("unimport", "error", f"{name} still in {api.server} after {timeout} s")
+        return EXIT_FAIL
+    step("unimport", "running", f"{name} removed from {api.server}")
+    return EXIT_OK
+
+
+def rancher_unimport(kube, ns, cluster, harvester, expect_run="", timeout=ri.UNIMPORT_WAIT, dry=False,
+                     sleep=None, now=None, cleanup=True):
+    """Retrait de l'import (point 232) : cluster supprimé dans Rancher,
+    attente de sa disparition, puis restes connus supprimés dans le cluster
+    enfant après jugement du serveur ; marque retirée. Marque relue juste
+    avant d'écrire (`expect_run`). `cleanup=False` (suppression du cluster,
+    revue 1-4 I-2) : rien n'est lu ni retiré dans le cluster enfant, qui
+    part ; un cluster enfant cassé reste supprimable."""
+    if not harvester:
+        raise ValueError("--harvester-name: the name of the Harvester cluster in the console")
+    cl = kube.get(cs.K_CLUSTER, ns, cluster)
+    have = ri.mark_of(cl)
+    if have is None:
+        step("unimport", "done", f"{ns}/{cluster} is not imported in an external Rancher")
+        return EXIT_OK
+    r = _session_of(kube.kubeconfig)
+    if r is None:
+        step("unimport", "error", "rancher-session-needed: sign in to the console through Rancher to remove the import")
+        return EXIT_BLOCKED
+    api = RANCHER(r)
+    if have["server"] != api.server:
+        step("unimport", "error", f"rancher-other-server: imported in {have['server']}, session on {api.server}")
+        return EXIT_BLOCKED
+    name, cid = have["name"], have["cid"]
+    st, prov = api.call("GET", f"{ri.API_V1}/{ri.NAMESPACE}/{name}")
+    if st == 200 and not ri.ours(prov, harvester, ns, cluster, expect_run):
+        code = "undo-not-ours" if ri.ours(prov, harvester, ns, cluster) else "rancher-name-taken"
+        step("unimport", "error", f"{code}: {name} in {api.server} is not this import, left untouched")
+        return EXIT_BLOCKED
+    if st not in (200, 404):
+        raise RuntimeError(f"Rancher answered {st} for {name}")
+    if not cleanup:
+        if dry:
+            print(json.dumps({"rancher": api.server, "name": name, "present": st == 200}))
+            return EXIT_OK
+        if st == 200:
+            code = _rancher_delete(api, name, cid, timeout, sleep, now)
+            if code != EXIT_OK:
+                return code
+        kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"annotations": {ri.A_MARK: None}}})
+        step("unimport", "done", f"{ns}/{cluster} no longer imported in {api.server} (the cluster goes: "
+                                 "nothing removed inside it)")
+        return EXIT_OK
+    with ca.session(kube, ns, cluster) as kpath:
+        child = Kube(kpath)
+        if dry:
+            todo, refused, kept = _leftover_judge(child, _leftovers_of(child), "unimport")
+            print(json.dumps({"rancher": api.server, "name": name, "present": st == 200,
+                              "delete": [w for _k, _n, w in todo], "kept": kept, "refused": refused}))
+            return EXIT_OK
+        if st == 200:
+            code = _rancher_delete(api, name, cid, timeout, sleep, now)
+            if code != EXIT_OK:
+                return code
+        # le Job de nettoyage de Rancher (cattle-cleanup-*) tient ses propres
+        # rôles : on attend sa fin avant de juger les restes
+        try:
+            _wait_for(lambda: not any((j.get("metadata") or {}).get("name", "").startswith("cattle-cleanup-")
+                                      for j in child.list("jobs", "default")),
+                      CLEANUP_WAIT, "cleanup job", sleep, now)
+        except TimeoutError:
+            step("unimport", "running", "Rancher's cleanup job still runs: its leftovers are judged now")
+        todo, refused, kept = _leftover_judge(child, _leftovers_of(child), "unimport")
+        if refused:
+            step("unimport", "error", "the server refuses: " + "; ".join(refused[:4]))
+            return EXIT_FAIL
+        for kind, n, where in todo:
+            try:
+                child.delete(kind, None, n)
+            except KubeError as e:
+                if not _not_found(e):
+                    raise
+        step("unimport", "running", f"{len(todo)} leftover(s) of Rancher deleted, {len(kept)} kept")
+    kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"annotations": {ri.A_MARK: None}}})
+    step("unimport", "done", f"{ns}/{cluster} no longer imported in {api.server}")
+    return EXIT_OK
+
+
+def cmd_rancher_import(args):
+    kube, _, _ = kube_from(args)
+    ns, cluster = _child_name(args.name)
+    if not ri.WAIT_MIN <= args.timeout <= ri.WAIT_MAX:
+        raise ValueError(f"--timeout: {ri.WAIT_MIN} to {ri.WAIT_MAX} seconds")
+    _check_by(args.by)
+    return rancher_import(kube, ns, cluster, _harvester(args), args.by, args.run or None, args.timeout, args.dry_run)
+
+
+def cmd_rancher_unimport(args):
+    kube, _, _ = kube_from(args)
+    ns, cluster = _child_name(args.name)
+    return rancher_unimport(kube, ns, cluster, _harvester(args), args.expect_run, args.timeout, args.dry_run)
+
+
+def cmd_rancher_status(args):
+    """Clusters enfants marqués importés et, avec une session Rancher, leur
+    état chez lui ; lecture seule."""
+    kube, _, _ = kube_from(args)
+    r = _session_of(kube.kubeconfig)
+    api = RANCHER(r) if r else None
+    out = []
+    for cl in kube.list(cs.K_CLUSTER):
+        md = cl.get("metadata") or {}
+        if args.name and f"{md.get('namespace')}/{md.get('name')}" != args.name:
+            continue
+        have = ri.mark_of(cl)
+        row = {"namespace": md.get("namespace"), "cluster": md.get("name"), "imported": have is not None,
+               "turtles": (md.get("labels") or {}).get(cc.AUTO_IMPORT) == "true"}
+        if have:
+            row.update(rancher=have["server"], name=have["name"], cid=have["cid"], state=None, ready=None)
+            if api and api.server == have["server"]:
+                st, p = api.call("GET", f"{ri.API_V1}/{ri.NAMESPACE}/{have['name']}")
+                _, m = api.call("GET", f"/v3/clusters/{have['cid']}")
+                row.update(state=(m or {}).get("state"), ready=ri.ready(p, m), present=st == 200)
+                if st == 200:
+                    # 2.8.0 : exécution d'un plan qui l'a importé (Défaire)
+                    row["origin"] = {"run": ((p.get("metadata") or {}).get("annotations") or {}).get(ri.A_RUN)}
+        out.append(row)
+    print(json.dumps({"session": api.server if api else None, "clusters": out}))
+    return EXIT_OK
+
+
+def _check_by(by):
+    if len(by) > BY_MAX or any(c in by for c in "\n\r|"):
+        raise ValueError(f"--by: one line, {BY_MAX} characters at most, no '|'")
+
+
+# ---------------------------------------------------------------------------
+# 2.8.0 : OIDC de l'API du cluster enfant (bin/lib/child_oidc.py)
+# ---------------------------------------------------------------------------
+def _admin_binding_of(kube, ns, cluster):
+    import child_oidc as co
+    o = co.of_cluster(kube.get(cs.K_CLUSTER, ns, cluster))
+    return cp.admin_binding(o.get("groups_prefix") or "", o.get("admin_group")) if o else None
+
+
+def cmd_oidc_kubeconfig(args):
+    """Kubeconfig OIDC des personnes (greffon kubelogin) sur la sortie
+    standard ; aucun identifiant. Exige le droit d'administrer le cluster
+    enfant (lecture de son Secret kubeconfig, pour le serveur et la CA)."""
+    import child_oidc as co
+    kube, _, _ = kube_from(args)
+    ns, cluster = _child_name(args.name)
+    cfg = co.of_cluster(kube.get(cs.K_CLUSTER, ns, cluster))
+    if cfg is None:
+        step("oidc", "error", f"oidc-not-configured: {ns}/{cluster} was not created with OIDC")
+        if args.json:
+            print(json.dumps({"code": "oidc-not-configured", "error": f"{ns}/{cluster} was not created with OIDC"}))
+        return EXIT_BLOCKED
+    server, ca_b64 = co.server_of(ca.read(kube, ns, cluster))
+    text = co.kubeconfig(cfg, server, ca_b64, cluster)
+    sys.stdout.write(json.dumps({"kubeconfig": text, "issuer_url": cfg["issuer_url"]}) + "\n" if args.json else text)
+    step("oidc", "done", f"OIDC kubeconfig of {ns}/{cluster} ({cfg['issuer_url']})")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# 2.8.0 : GitOps des clusters enfants (bin/lib/child_gitops.py)
+# ---------------------------------------------------------------------------
+GITOPS_KEYS = {"cluster", "entry", "origin", "by", "role", "secrets"}
+GITOPS_PACKAGE, GITOPS_GIT_VERSION = "harvester-ops", "git"
+ROLES = ("viewer", "operator", "admin")
+FLEET_PATH = "/k8s/clusters/local/apis/" + cg.FLEET_API + "/namespaces/" + cg.FLEET_NAMESPACE
+FLEET_SECRETS = "/k8s/clusters/local/api/v1/namespaces/" + cg.FLEET_NAMESPACE + "/secrets"
+
+
+def gitops_spec_from(path):
+    """Demande des gestes GitOps : `cluster` <ns>/<c>, `entry` (une entrée de
+    la phase gitops, child_gitops.normalize), `secrets` {nom: {...}} saisis
+    au lancement (jamais rangés), `role` de la personne dans la console,
+    `origin` et `by` facultatifs."""
+    raw = json.load(sys.stdin) if path == "-" else json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        raise ValueError("the request is not an object")
+    for k in sorted(set(raw) - GITOPS_KEYS):
+        raise ValueError(f"unknown key: {k}")
+    ns, cluster = _child_name(raw.get("cluster"))
+    entry = cg.normalize(raw.get("entry"))
+    role = raw.get("role") or "operator"
+    if role not in ROLES:
+        raise ValueError(f"role: one of {', '.join(ROLES)}")
+    secrets = raw.get("secrets") or {}
+    if not isinstance(secrets, dict) or not all(isinstance(v, dict) for v in secrets.values()):
+        raise ValueError("secrets: {name: {identity, known_hosts} | {username, password}}")
+    origin = raw.get("origin") or {}
+    if not isinstance(origin, dict):
+        raise ValueError("origin: an object")
+    by = raw.get("by", "")
+    _check_by(by)
+    return {"namespace": ns, "cluster": cluster, "entry": entry, "role": role, "secrets": secrets,
+            "origin": cc.parse_origin(",".join(f"{k}={v}" for k, v in origin.items())), "by": by}
+
+
+def _flux_service(kube, ns, cluster):
+    """(prêt, verrouillé) du service `flux` de ce cluster enfant (CAAPH)."""
+    import yaml
+    hcp = kube.get(sv.K_HCP, ns, cg.SERVICE)
+    rel = _release_of(kube, ns, cg.SERVICE, cluster) if hcp else None
+    ready = bool(rel and any(c.get("type") == "Ready" and c.get("status") == "True"
+                             for c in (rel.get("status") or {}).get("conditions") or []))
+    try:
+        values = yaml.safe_load((hcp or {}).get("spec", {}).get("valuesTemplate") or "") or {}
+    except yaml.YAMLError:
+        values = {}
+    return ready, cg.flux_locked(values)
+
+
+def _gitops_source(kube, spec, read_creds=False):
+    """(déclaration du registre, publié, compte de lecture) d'une source oci
+    ou chart ; (None, False, None) pour git."""
+    src = spec["entry"]["source"]
+    if src["type"] == "git":
+        return None, False, None
+    decl = rg.load(_state(), src["registry"])
+    if decl is None:
+        return None, False, None
+    published = any((p.get("package"), p.get("version")) == (src["package"], src["version"])
+                    for p in decl.get("published") or [])
+    if published and src["type"] == "oci":
+        # revue 1-4 (m-6) : l'élément existe et est de sorte gitops (un
+        # paquet publié avant 2.8.0 n'a pas d'artefact Flux)
+        import artefacts as art
+        try:
+            idx = art.load_package(_state(), src["package"], src["version"])["index"]
+            it = next((i for i in idx.get("items") or [] if i.get("name") == src["item"]), {})
+        except (art.ArtefactError, TypeError):
+            it = {}
+        published = it.get("kind") == "gitops"
+    creds = None
+    if read_creds:
+        try:
+            creds = rg.read_creds(kube, src["registry"], "pull")
+        except KubeError:
+            creds = None
+    return decl, published, creds
+
+
+def gitops_findings(kube, spec):
+    """(outil choisi, constats) ; lecture seule."""
+    ns, cluster, entry = spec["namespace"], spec["cluster"], spec["entry"]
+    cl = kube.get(cs.K_CLUSTER, ns, cluster)
+    if cl is None:
+        return None, [cg.finding("gitops-cluster-missing", cluster=f"{ns}/{cluster}")]
+    try:
+        tool = cg.choose(entry["tool"], ri.mark_of(cl) is not None)
+    except cg.GitopsError as e:
+        return None, [cg.finding(e.code, tool=entry["tool"])]
+    ready, locked = _flux_service(kube, ns, cluster) if tool == "flux" else (True, True)
+    _, published, _ = _gitops_source(kube, spec)
+    found = cg.check(entry, {"tool": tool, "flux_ready": ready, "role": spec["role"],
+                             "secrets": set(spec["secrets"]), "published": published})
+    if tool == "flux" and ready and not locked:
+        found.append(cg.finding("gitops-flux-not-locked", service=cg.SERVICE))
+    if tool == "fleet" and _session_of(kube.kubeconfig) is None:
+        found.append(cg.finding("rancher-session-needed"))
+    return tool, found
+
+
+def cmd_gitops_check(args):
+    kube, _, _ = kube_from(args)
+    spec = gitops_spec_from(args.spec)
+    tool, found = gitops_findings(kube, spec)
+    blocked = bool(cg.blocking(found))
+    print(json.dumps({"blocked": blocked, "tool": tool, "findings": found, "entry": spec["entry"]["name"]}))
+    return EXIT_BLOCKED if blocked else EXIT_OK
+
+
+def _flux_render(kube, spec):
+    """(objets, Secrets, liaisons admises, paquet, version, révision) d'une
+    entrée Flux ; identifiants lus au dernier moment."""
+    import flux_artifact as fa
+    entry, src = spec["entry"], spec["entry"]["source"]
+    secrets = {}
+    if src["type"] == "oci":
+        decl, _, creds = _gitops_source(kube, spec, read_creds=True)
+        if decl is None or creds is None:
+            raise ValueError(f"gitops-registry-not-attached: {src['registry']}")
+        url = f"oci://{decl['endpoint']}/{fa.repo_of(src['package'], src['item'])}"
+        secrets["pull"] = {"host": decl["endpoint"], "username": creds["username"], "password": creds["password"]}
+        if decl.get("ca_pem"):
+            # revue 5-8 I-6 : pendant une transition, l'ancienne et la nouvelle
+            secrets["ca"] = rg.ca_bundle(decl)
+        package, version, revision = src["package"], src["version"], src["version"]
+    else:
+        url = src["url"]
+        if src.get("secret"):
+            secrets["git"] = spec["secrets"][src["secret"]]
+        package, version, revision = GITOPS_PACKAGE, GITOPS_GIT_VERSION, None
+    objs, secs = cg.flux_objects(entry, url, secrets)
+    allow = [cg.cluster_binding(entry)] if entry["privileges"] == "cluster" else []
+    return objs, secs, allow, package, version, revision
+
+
+def _flux_deploy(kube, spec, timeout):
+    ns, cluster, entry = spec["namespace"], spec["cluster"], spec["entry"]
+    item = cg.item_of(entry["name"])
+    objs, secs, allow, package, version, revision = _flux_render(kube, spec)
+    with ca.session(kube, ns, cluster) as path:
+        child = Kube(path)
+        # sortes de Flux jugées contre le cluster enfant (CRD du chart)
+        found = mf.check(objs + secs, cluster, item, scopes=mf.parse_api_resources(child.api_resources()),
+                         allow=allow)
+        if mf.blocking(found):
+            for f in mf.blocking(found):
+                step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
+            return EXIT_BLOCKED
+        if child.get("Namespace", None, entry["namespace"]) is None:
+            step("check", "error", f"gitops-namespace-missing: {entry['namespace']} does not exist in {cluster}")
+            return EXIT_BLOCKED
+        taken = _taken(child, objs + secs, item, cluster)
+        if taken:
+            step("check", "error", f"manifest-object-taken {json.dumps(taken[0]['facts'])}")
+            return EXIT_BLOCKED
+        step("check", "done", f"{entry['name']}: Flux, {entry['source']['type']} source, to {entry['namespace']}")
+        # namespace de la console, hors CRS : plusieurs entrées s'y logent
+        child.apply([{"apiVersion": "v1", "kind": "Namespace",
+                      "metadata": {"name": cg.NAMESPACE, "labels": {mf.MANAGED: "true"}}}])
+    code = deliver(kube, ns, cluster, item, package, version, objs, spec["origin"], spec["by"], timeout,
+                   secrets=secs)
+    if code != EXIT_OK:
+        return code
+
+    def ready():
+        with ca.session(kube, ns, cluster) as path:
+            child = Kube(path)
+            kind = "ocirepositories" if entry["source"]["type"] == "oci" else "gitrepositories"
+            src = child.get(f"{kind}.source.toolkit.fluxcd.io", cg.NAMESPACE, entry["name"])
+            ks = child.get("kustomizations.kustomize.toolkit.fluxcd.io", cg.NAMESPACE, entry["name"])
+        st = cg.state_flux(src, ks, revision)
+        return st if st["ready"] else None
+    try:
+        st = _wait_for(ready, timeout, "not ready")
+    except TimeoutError:
+        step("wait", "error", f"{entry['name']} not ready after {timeout} s (left in place)")
+        return EXIT_FAIL
+    step("wait", "done", f"{entry['name']} applied revision {st['revision']}")
+    return EXIT_OK
+
+
+def _fleet_secret_ours(api, name, labels):
+    """(présent, à nous) d'un Secret de `fleet-default` : à nous s'il porte
+    toutes les étiquettes de l'entrée (revue 1-4 I-5)."""
+    st, cur = api.call("GET", f"{FLEET_SECRETS}/{name}")
+    if st != 200:
+        return False, True
+    have = ((cur or {}).get("metadata") or {}).get("labels") or {}
+    return True, all(have.get(k) == v for k, v in labels.items())
+
+
+def _fleet_secret(api, name, labels, data, stype):
+    """Écrit un Secret de l'entrée ; sa propriété est jugée par
+    `_fleet_deploy` avant tout geste."""
+    body = {"apiVersion": "v1", "kind": "Secret", "type": stype,
+            "metadata": {"name": name, "namespace": cg.FLEET_NAMESPACE, "labels": labels}, "stringData": data}
+    present = api.call("GET", f"{FLEET_SECRETS}/{name}")[0] == 200
+    st2, out = api.call("PUT" if present else "POST", f"{FLEET_SECRETS}/{name}" if present else FLEET_SECRETS,
+                        body)
+    if st2 not in (200, 201):
+        raise RuntimeError(f"Rancher answered {st2} writing the secret {name}")
+
+
+def _fleet_deploy(kube, spec, harvester, timeout):
+    import oci_layout as ol
+    import artefacts as art
+    ns, cluster, entry, src = spec["namespace"], spec["cluster"], spec["entry"], spec["entry"]["source"]
+    api = RANCHER(_session_of(kube.kubeconfig))
+    have = ri.mark_of(kube.get(cs.K_CLUSTER, ns, cluster))
+    if have["server"] != api.server:
+        step("check", "error", f"rancher-other-server: imported in {have['server']}, session on {api.server}")
+        return EXIT_BLOCKED
+    labels = cg.fleet_labels(harvester, ns, cluster, entry)
+    name = cg.fleet_name(harvester, ns, cluster, entry)
+    plural = "gitrepos" if src["type"] == "git" else "helmops"
+    # revue 1-4 (I-5) : propriété jugée AVANT toute écriture (objet et Secrets)
+    st, cur = api.call("GET", f"{FLEET_PATH}/{plural}/{name}")
+    if st == 200 and not cg.fleet_ours(cur, harvester, ns, cluster, entry):
+        step("check", "error", f"gitops-name-taken: {name} exists in Fleet for something else")
+        return EXIT_BLOCKED
+    have_plan = (((cur or {}).get("metadata") or {}).get("annotations") or {}).get(cg.A_PLAN) if st == 200 else None
+    if spec["origin"].get("plan") and have_plan != spec["origin"]["plan"] and st == 200:
+        # revue 5-8 I-11 : posée par un autre plan (ou hors plan), jamais reprise
+        step("check", "error", f"gitops-taken: {name} was set by {('plan ' + have_plan) if have_plan else 'hand'}, "
+                               f"not by plan {spec['origin']['plan']}")
+        return EXIT_BLOCKED
+    for suffix in ("-auth", "-pull"):
+        if not _fleet_secret_ours(api, f"{name}{suffix}", labels)[1]:
+            step("check", "error", f"gitops-name-taken: the secret {name}{suffix} exists in Fleet for something else")
+            return EXIT_BLOCKED
+    secret_name, chart = None, None
+    if src["type"] == "git" and src.get("secret"):
+        s = spec["secrets"][src["secret"]]
+        secret_name = f"{name}-auth"
+        if s.get("identity"):
+            _fleet_secret(api, secret_name, labels, {"ssh-privatekey": s["identity"],
+                                                     "known_hosts": s.get("known_hosts") or ""},
+                          "kubernetes.io/ssh-auth")
+        else:
+            _fleet_secret(api, secret_name, labels, {"username": s.get("username") or "",
+                                                     "password": s.get("password") or ""},
+                          "kubernetes.io/basic-auth")
+    if src["type"] == "chart":
+        decl, _, creds = _gitops_source(kube, spec, read_creds=True)
+        if decl is None or creds is None:
+            step("check", "error", f"gitops-registry-not-attached: {src['registry']}")
+            return EXIT_BLOCKED
+        pkg = art.load_package(_state(), src["package"], src["version"])
+        it = next((i for i in pkg["index"].get("items") or [] if i.get("name") == src["item"]), None)
+        if it is None or it.get("kind") != "chart":
+            step("check", "error", f"gitops-item-not-chart: {src['item']}")
+            return EXIT_BLOCKED
+        meta = ol.chart_meta(Path(pkg["path"]) / it["chart"])
+        repo, _tag = ol.chart_repo(meta["name"], meta["version"])
+        chart = (f"oci://{decl['endpoint']}/{repo}", meta["version"])
+        secret_name = f"{name}-pull"
+        data = {"username": creds["username"], "password": creds["password"]}
+        if decl.get("ca_pem"):
+            data["cacerts"] = rg.ca_bundle(decl)              # revue 5-8 I-6 : transition comprise
+        _fleet_secret(api, secret_name, labels, data, "Opaque")
+    obj = cg.fleet_object(entry, have["name"], harvester, ns, cluster, chart=chart,
+                          secret_name=secret_name, by=spec["by"], run=spec["origin"].get("run"),
+                          plan=spec["origin"].get("plan"))
+    if st == 200:
+        obj["metadata"]["resourceVersion"] = (cur.get("metadata") or {}).get("resourceVersion")
+        st2, out = api.call("PUT", f"{FLEET_PATH}/{plural}/{name}", obj)
+    else:
+        st2, out = api.call("POST", f"{FLEET_PATH}/{plural}", obj)
+    if st2 not in (200, 201):
+        step("apply", "error", f"Rancher answered {st2} for {obj['kind']} {name}: "
+                               f"{str((out or {}).get('message'))[:200]}")
+        return EXIT_FAIL
+    step("apply", "done", f"{obj['kind']} {name} in {api.server} for {have['name']}")
+
+    def ready():
+        st = cg.state_fleet(api.call("GET", f"{FLEET_PATH}/{plural}/{name}")[1])
+        return st if st["ready"] else None
+    try:
+        st = _wait_for(ready, timeout, "not ready")
+    except TimeoutError:
+        step("wait", "error", f"{name} not ready after {timeout} s (left in place)")
+        return EXIT_FAIL
+    step("wait", "done", f"{name}: {st['message']}")
+    return EXIT_OK
+
+
+def cmd_gitops_deploy(args):
+    kube, _, _ = kube_from(args)
+    spec = gitops_spec_from(args.spec)
+    tool, found = gitops_findings(kube, spec)
+    if cg.blocking(found):
+        for f in cg.blocking(found):
+            step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
+        return EXIT_BLOCKED
+    if tool == "flux":
+        return _flux_deploy(kube, spec, args.timeout)
+    if not _harvester(args):
+        raise ValueError("--harvester-name: the name of the Harvester cluster in the console")
+    step("check", "done", f"{spec['entry']['name']}: Fleet, {spec['entry']['source']['type']} source")
+    return _fleet_deploy(kube, spec, _harvester(args), args.timeout)
+
+
+def _fleet_entries(api, harvester, ns=None, cluster=None):
+    sel = f"{mf.MANAGED}=true,harvester-ops.io/harvester={harvester}"
+    if ns:
+        sel += f",harvester-ops.io/child-namespace={ns},harvester-ops.io/child={cluster}"
+    out = []
+    for plural in ("gitrepos", "helmops"):
+        st, lst = api.call("GET", f"{FLEET_PATH}/{plural}?labelSelector={sel}")
+        if st == 200:
+            out += [(plural, o) for o in (lst or {}).get("items") or []]
+    return out
+
+
+def cmd_gitops_remove(args):
+    """Retire une entrée : Flux, comme un élément (CRS, ConfigMap, Secret,
+    puis objets du cluster enfant) ; Fleet, l'objet de Rancher (marque
+    relue avant) et son Secret."""
+    kube, _, _ = kube_from(args)
+    ns, cluster, entry_name = _child_name(args.name, 3)
+    item = cg.item_of(entry_name)
+    if kube.get(mf.K_CRS, ns, mf.name_of(item)) is not None or kube.get("configmaps", ns, mf.name_of(item)):
+        sub = argparse.Namespace(**dict(vars(args), name=f"{ns}/{cluster}/{item}"))
+        return cmd_manifest_remove(sub)
+    r = _session_of(kube.kubeconfig)
+    harvester = _harvester(args)
+    if r is None or not harvester:
+        step("remove", "error", f"gitops-entry-missing: no Flux entry {entry_name} on {ns}/{cluster}"
+                                + ("" if r else " (a Fleet entry needs a Rancher session)"))
+        return EXIT_BLOCKED
+    if args.role != "admin":
+        # tâche 9, constat 1 : retirer une entrée Fleet est réservé à
+        # l'administrateur, comme la poser (revue 1-4 I-4)
+        step("remove", "error", "gitops-fleet-admin-only: removing a Fleet entry is for administrators")
+        return EXIT_BLOCKED
+    api = RANCHER(r)
+    entry = {"name": entry_name}
+    for plural, obj in _fleet_entries(api, harvester, ns, cluster):
+        if (obj.get("metadata") or {}).get("labels", {}).get(cg.L_ENTRY) != entry_name:
+            continue
+        name = obj["metadata"]["name"]
+        st, cur = api.call("GET", f"{FLEET_PATH}/{plural}/{name}")      # relue juste avant d'écrire
+        if st != 200 or not cg.fleet_ours(cur, harvester, ns, cluster, entry, args.expect_run):
+            step("remove", "error", f"undo-not-ours: {name} is not this entry, left untouched")
+            return EXIT_BLOCKED
+        if args.dry_run:
+            print(json.dumps({"fleet": name, "kind": cur.get("kind"), "rancher": api.server}))
+            return EXIT_OK
+        st_d, _b = api.call("DELETE", f"{FLEET_PATH}/{plural}/{name}")
+        if st_d not in (200, 202, 204, 404):
+            # revue finale m-1 : un refus de Rancher n'est jamais « retiré »
+            step("remove", "error", f"gitops-fleet-remove-failed: Rancher answered {st_d} for {name}")
+            return EXIT_FAIL
+        # banc 2.8.0 (Fleet 0.15.1) : le GitRepo ou le HelmOp parti, son Bundle
+        # restait, et la release avec lui dans le cluster enfant ; les Bundles
+        # de cet objet sont retirés aussi (Fleet désinstalle alors la release)
+        label = cg.FLEET_BUNDLE_LABELS[cur.get("kind")]
+        _stb, bl = api.call("GET", f"{FLEET_PATH}/bundles?labelSelector={label}={name}")
+        for b in (bl or {}).get("items") or []:
+            if ((b.get("metadata") or {}).get("labels") or {}).get(label) == name:
+                api.call("DELETE", f"{FLEET_PATH}/bundles/{b['metadata']['name']}")
+        for suffix in ("-auth", "-pull"):
+            sname = f"{name}{suffix}"
+            st2, s = api.call("GET", f"{FLEET_SECRETS}/{sname}")
+            if st2 == 200 and ((s.get("metadata") or {}).get("labels") or {}).get(cg.L_ENTRY) == entry_name:
+                api.call("DELETE", f"{FLEET_SECRETS}/{sname}")
+        step("remove", "done", f"{cur.get('kind')} {name} removed from {api.server}")
+        return EXIT_OK
+    step("remove", "error", f"gitops-entry-missing: no entry {entry_name} on {ns}/{cluster}")
+    return EXIT_BLOCKED
+
+
+def cmd_gitops_status(args):
+    """Entrées GitOps posées : Flux (CRS de la console, binding) et, avec une
+    session Rancher, Fleet (résumé de l'objet). Lecture seule."""
+    kube, _, _ = kube_from(args)
+    want = _child_name(args.name) if args.name else None
+    out = []
+    bindings = {}
+    for b in kube.list(mf.K_CRSB):
+        bindings.setdefault(b["metadata"].get("namespace"), []).append(b)
+    for crs in kube.list(mf.K_CRS, selector=mf.L_ITEM):
+        md = crs["metadata"]
+        lab, item = md.get("labels") or {}, (md.get("labels") or {}).get(mf.L_ITEM) or ""
+        if not item.startswith(cg.ITEM_PREFIX):
+            continue
+        if want and (md.get("namespace"), lab.get(mf.L_CLUSTER)) != tuple(want):
+            continue
+        cmap = kube.get("configmaps", md["namespace"], md["name"])
+        sec = kube.get("secrets", md["namespace"], md["name"])
+        out.append({"tool": "flux", "namespace": md["namespace"], "cluster": lab.get(mf.L_CLUSTER),
+                    "entry": item[len(cg.ITEM_PREFIX):], "origin": cc.origin_of(crs),
+                    "state": mf.state(crs, bindings.get(md["namespace"], []), cmap, sec)})
+    r = _session_of(kube.kubeconfig)
+    if r and _harvester(args):
+        api = RANCHER(r)
+        for plural, obj in _fleet_entries(api, _harvester(args), *(want or (None, None))):
+            lab = (obj.get("metadata") or {}).get("labels") or {}
+            ann = (obj.get("metadata") or {}).get("annotations") or {}
+            out.append({"tool": "fleet", "namespace": lab.get("harvester-ops.io/child-namespace"),
+                        "cluster": lab.get("harvester-ops.io/child"), "entry": lab.get(cg.L_ENTRY),
+                        "kind": obj.get("kind"), "name": obj["metadata"]["name"], "state": cg.state_fleet(obj),
+                        "origin": {k: v for k, v in (("run", ann.get(ri.A_RUN)), ("plan", ann.get(cg.A_PLAN)))
+                                   if v}})
+    print(json.dumps({"entries": out, "session": bool(r)}))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# 2.8.0 : renouvellement des machines (bin/lib/capi_renew.py)
+# ---------------------------------------------------------------------------
+RENEW_KEYS = {"registries", "oidc"}
+RENEW_POLL = 15
+
+
+def _renew_request(path):
+    """Demande facultative de `renew` : {registries: [...], oidc: {...} | null}."""
+    if not path:
+        return {}
+    raw = json.load(sys.stdin) if path == "-" else json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        raise ValueError("the request is not an object")
+    for k in sorted(set(raw) - RENEW_KEYS):
+        raise ValueError(f"unknown key: {k}")
+    return raw
+
+
+def _cluster_var(cl, name):
+    for v in ((((cl or {}).get("spec") or {}).get("topology") or {}).get("variables")) or []:
+        if v.get("name") == name:
+            return v.get("value")
+    return None
+
+
+def _renew_entries(kube, ns, cluster, cur):
+    """Registres actuels du cluster (les deux formes de marque d'usage, revue
+    finale 2.6.0 m-14), miroirs de chaque entrée relus dans `registries.yaml`
+    du Secret des nœuds (revue 5-8 I-4) et repli coupé ou non, lus sur le
+    cluster Harvester."""
+    cps = [d for _r, d in cur["templates"] if d.get("kind") == "RKE2ControlPlaneTemplate"]
+    sname = rg.nodes_secret_from(cps)
+    sec = kube.get("secrets", ns, sname) if sname else None
+    auth = [x for x in kube.list("secrets", ns, selector=f"{cc.GENERATED}=true")
+            if (x.get("metadata") or {}).get("name", "").startswith(f"{cluster}-registry-")
+            and x["metadata"]["name"].endswith("-auth")]
+    names = rg.cluster_registry_names(sec, auth)
+    decls = {n: rg.load(_state(), n) for n in names}
+    decls = {n: d for n, d in decls.items() if d}
+    names = rg.cluster_registry_names(sec, auth, decls)
+    cut = any(f.get("path") == rg.NO_FALLBACK_FILE for t in cps
+              for f in ((((t.get("spec") or {}).get("template") or {}).get("spec") or {}).get("files") or []))
+    entries = rg.entries_from_nodes_secret(sec, names, decls)
+    if entries and cut:
+        entries[0]["no_fallback"] = True
+    return entries, sname, sec, auth
+
+
+def _secret_data(sec):
+    out = {}
+    for k, v in ((sec or {}).get("data") or {}).items():
+        try:
+            out[k] = base64.b64decode(v).decode()
+        except ValueError:
+            out[k] = v
+    out.update((sec or {}).get("stringData") or {})
+    return out
+
+
+RENEW_ACTION = "capi-renew"
+
+
+def _renew_lock(args, ns, cluster):
+    """(descripteur, None) : verrou du cluster Harvester pris pour ce
+    renouvellement (le même que les déroulés et le retrait de la pile, revue
+    5-8 I-9) ; (None, message de refus) s'il est tenu ; (None, None) sans
+    nom de cluster (rien à verrouiller)."""
+    fd, holder = hold_cluster_lock(_harvester(args), {"run": getattr(args, "id", "") or RENEW_ACTION, "plan": "",
+                                                      "action": RENEW_ACTION, "child": f"{ns}/{cluster}"})
+    if holder is None:
+        return fd, None
+    return None, _renew_holder_refusal(holder)
+
+
+def _renew_holder_refusal(holder):
+    if holder.get("action") == RENEW_ACTION:
+        return (f"renew-busy: a renewal of {holder.get('child') or '?'} is running on this cluster "
+                f"(action {holder.get('run') or '?'})")
+    if holder.get("action") == UNINSTALL_ACTION:
+        return (f"capi-uninstall-running: the Cluster API providers of this cluster are being removed "
+                f"(action {holder.get('run') or '?'})")
+    return (f"renew-plan-running: a deployment plan holds this cluster (plan {holder.get('plan') or '?'}, "
+            f"run {holder.get('run') or '?'})")
+
+
+def _renew_machines(kube, ns, cluster):
+    import capi_renew as cr
+    return [m for m in kube.list(cr.K_MACHINE, ns)
+            if ((m.get("metadata") or {}).get("labels") or {}).get(cr.L_CLUSTER) == cluster]
+
+
+def _renew_ca_users(kube, ns):
+    """Secrets que désigne un HelmChartProxy du namespace (services CAAPH) :
+    une CA de registre qu'un service emploie n'est jamais retirée (revue 5-8
+    I-5)."""
+    out = {}
+    for h in kube.list(sv.K_HCP, ns):
+        for n in sv.secrets_of(h):
+            out.setdefault(n, []).append((h.get("metadata") or {}).get("name"))
+    return out
+
+
+def _renew_fetch_refresh(kube, ns, cluster):
+    """Cluster sans Internet : la CA du Secret `<c>-rke2-fetch` suit celle du
+    registre (ancienne et nouvelle pendant une transition) ; les nouvelles
+    machines la lisent au démarrage (revue 5-8 I-6). Le netrc n'est pas
+    relu : seule la clé `ca.crt` est écrite. Rend le nom du registre mis à
+    jour, ou None."""
+    name = f"{cluster}-rke2-fetch"
+    sec = kube.get("secrets", ns, name)
+    reg = (((sec or {}).get("metadata") or {}).get("labels") or {}).get(rg.LABEL)
+    d = rg.load(_state(), reg) if reg else None
+    if sec is None or not d or not d.get("ca_pem"):
+        return None
+    want = rg.ca_bundle(d)
+    have = _secret_data(sec).get("ca.crt")
+    if have == want:
+        return None
+    kube.patch("secrets", ns, name, {"stringData": {"ca.crt": want}})
+    return reg
+
+
+def cmd_renew(args):
+    """Renouvelle les machines d'un cluster enfant (point 233) : gabarits
+    RKE2 qui changent copiés en `-r<N>` avec le nouveau contenu (registres,
+    OIDC, CA en transition), ClusterClass repointée, attente du remplacement
+    des machines des rôles touchés, anciens gabarits et Secrets retirés
+    ensuite. `--dry-run` rend la différence ; `--finish` reprend un
+    renouvellement pas fini, `--abandon` retire sa marque. Le verrou du
+    cluster Harvester est tenu de bout en bout (revue 5-8 I-9)."""
+    import capi_renew as cr
+    ns, cluster = _child_name(args.name)
+    if args.finish and args.abandon:
+        raise ValueError("--finish and --abandon are exclusive")
+    if (args.finish or args.abandon) and (args.what or args.spec or args.dry_run):
+        raise ValueError("--finish and --abandon take neither --what, --spec nor --dry-run")
+    if not cr.TIMEOUT[0] <= args.timeout <= cr.TIMEOUT[1]:
+        raise ValueError(f"--timeout: {cr.TIMEOUT[0]} to {cr.TIMEOUT[1]} seconds")
+    whats = None if (args.finish or args.abandon) else cr.check_whats(args.what)
+    req = _renew_request(args.spec) if whats else {}
+    kube, _kc, _ = kube_from(args)
+    lock_fd = None
+    if args.dry_run:
+        holder = deploy_holder(_harvester(args))
+        if holder:
+            step("check", "error", _renew_holder_refusal(holder))
+            return EXIT_BLOCKED
+    else:
+        lock_fd, refused = _renew_lock(args, ns, cluster)
+        if refused:
+            step("check", "error", refused)
+            return EXIT_BLOCKED
+    try:
+        if args.abandon:
+            return _renew_abandon(kube, ns, cluster)
+        if args.finish:
+            cl = kube.get(cs.K_CLUSTER, ns, cluster)
+            mark = cr.marker_of(cl)
+            if cl is None or mark is None:
+                step("check", "error", f"renew-not-running: no renewal of {ns}/{cluster} to finish")
+                return EXIT_BLOCKED
+            if mark.get("unreadable"):
+                step("check", "error", "renew-marker-unreadable: the renewal mark cannot be read; "
+                                       "renew --abandon (administrators) clears it")
+                return EXIT_BLOCKED
+            try:
+                cur = cr.current(kube, ns, cluster)
+            except cr.RenewError as e:
+                step("check", "error", f"{e.code}: {e}")
+                return EXIT_BLOCKED
+            # une bascule arrêtée avant la ClusterClass la finit (idempotent)
+            patch = cr.class_patch(cur["class"], mark["names"])
+            if patch["spec"]:
+                kube.patch(cr.K_CLASS, ns, cur["class"]["metadata"]["name"], patch)
+                step("class", "done", f"ClusterClass {cur['class']['metadata']['name']} points at revision "
+                                      f"{mark['revision']}")
+            step("check", "done", f"{ns}/{cluster}: finishing the renewal of revision {mark['revision']}")
+            return _renew_wait_finish(kube, ns, cluster, mark, args.timeout)
+        return _renew_start(args, kube, ns, cluster, whats, req)
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+
+
+def _renew_abandon(kube, ns, cluster):
+    import capi_renew as cr
+    cl = kube.get(cs.K_CLUSTER, ns, cluster)
+    mark = cr.marker_of(cl)
+    if cl is None or mark is None:
+        step("check", "error", f"renew-not-running: no renewal of {ns}/{cluster} to abandon")
+        return EXIT_BLOCKED
+    kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"annotations": {cr.A_RENEWAL: None}}})
+    kept = sorted(set(mark["names"]) | set(mark["secrets"]))
+    step("done", "done", f"{ns}/{cluster}: renewal of revision {mark['revision']} abandoned; nothing removed "
+                         f"(kept: {', '.join(kept) or '-'}); Cluster API goes on with the templates in place")
+    return EXIT_OK
+
+
+def _renew_start(args, kube, ns, cluster, whats, req):
+    import capi_renew as cr
+    import child_oidc as co
+    try:
+        cur = cr.current(kube, ns, cluster)
+    except cr.RenewError as e:
+        step("check", "error", f"{e.code}: {e}")
+        return EXIT_BLOCKED
+    cl, cls = cur["cluster"], cur["class"]
+    tdocs = [d for _r, d in cur["templates"]]
+    mark = cr.marker_of(cl)
+    if mark is not None:
+        step("check", "error", f"renew-busy: the renewal of revision {mark.get('revision') or '?'} is not finished; "
+                               "renew --finish resumes it, renew --abandon (administrators) clears its mark")
+        return EXIT_BLOCKED
+    version = (((cl.get("spec") or {}).get("topology") or {}).get("version")) or ""
+    spec = {"name": cluster, "namespace": ns, "k8s_version": version}
+    revision = cur["revision"] + 1
+    regs_same = regs_new = None
+    sname = sec = None
+    auth = []
+    if {"registries", "ca"} & set(whats):
+        entries, sname, sec, auth = _renew_entries(kube, ns, cluster, cur)
+        if "registries" in whats and "registries" in req:
+            entries = cc.normalize_registry_entries(req["registries"])
+            errs = [m for k, m in cc.validate(cc.normalize(dict(spec, registries=entries, k8s_version="v1.34.0")))
+                    if k == "registries"]
+            if errs:
+                raise ValueError(f"registries: {errs[0]}")
+        spec["registries"] = entries
+        found = [f for f in registry_findings(kube, dict(spec), _harvester(args)) if f["level"] == "block"]
+        if found:
+            for f in found:
+                step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
+            return EXIT_BLOCKED
+        regs_same = registry_config(kube, spec, _harvester(args), nodes_secret=sname) if entries else None
+        regs_new = registry_config(kube, spec, _harvester(args),
+                                   nodes_secret=f"{cluster}-registries-r{revision}") if entries else None
+    if "oidc" in whats:
+        if "oidc" in req:
+            new_oidc = req.get("oidc")
+        else:
+            # revue 5-8 I-3 : sans demande, les réglages actuels, relus dans le
+            # fichier du gabarit (revendications, préfixes, CA de l'émetteur)
+            cps = [d for _r, d in cur["templates"] if d.get("kind") == "RKE2ControlPlaneTemplate"]
+            new_oidc = co.of_template(cps[0] if cps else None, cl)
+        if new_oidc is not None:
+            cfg, found = co.check(new_oidc, version)
+            if co.blocking(found):
+                step("check", "error", f"{co.blocking(found)[0]['code']}: the oidc option is refused")
+                return EXIT_BLOCKED
+            spec["oidc"] = new_oidc
+    try:
+        wanted_same = cc.renew_templates(tdocs, spec, whats, regs_same)
+    except ValueError as e:
+        step("check", "error", str(e)[:300])
+        return EXIT_BLOCKED
+    changes = cr.diff(tdocs, wanted_same)
+    current_secrets = {sname: _secret_data(sec)} if sec is not None else {}
+    if regs_same:
+        secrets_changed = any(x["metadata"]["name"] == sname and x.get("stringData") != current_secrets.get(sname)
+                              for x in regs_same["secrets"])
+    else:
+        secrets_changed = sec is not None and {"registries", "ca"} & set(whats) != set()
+    # revue finale I-2 : un groupe administrateur changé seul ne touche aucun
+    # gabarit (il n'est pas dans le fichier de l'API) mais change l'annotation
+    # et la liaison livrée : renouvellement sans machine remplacée
+    ann_new = (co.public(co.check(spec["oidc"], version)[0]) if spec.get("oidc") else None) \
+        if "oidc" in whats else None
+    ann_changed = "oidc" in whats and ann_new != ((cl.get("metadata") or {}).get("annotations") or {}).get(co.ANNOTATION)
+    if not changes and not secrets_changed and not ann_changed:
+        step("check", "error", "renew-nothing: the templates and the registry secrets already hold this content")
+        if args.dry_run:
+            print(json.dumps({"cluster": f"{ns}/{cluster}", "changes": [], "secrets_changed": False}))
+        return EXIT_BLOCKED
+    pool = kube.get("ippools.loadbalancer.harvesterhci.io", None, _cluster_var(cl, "ipPoolRef") or "") \
+        if _cluster_var(cl, "ipPoolRef") else None
+    free_cpu, free_mem = _free_capacity(kube)
+    room = cr.room_findings(cc.pool_info(pool) if pool else None, free_cpu, free_mem,
+                            int(_cluster_var(cl, "cpuCount") or 0), cc._bytes(_cluster_var(cl, "memorySize") or "0Mi"),
+                            _overcommit(kube), cc.VM_MEMORY_OVERHEAD)
+    for f in room:
+        step("check", "error" if f["level"] == "block" else "running", f"{f['code']} {json.dumps(f['facts'])}")
+    if [f for f in room if f["level"] == "block"]:
+        return EXIT_BLOCKED
+    step("check", "done", f"{ns}/{cluster}: {', '.join(whats)}; {len(changes)} template(s) differ"
+                          + ("; registry secrets differ" if secrets_changed else ""))
+    if args.dry_run:
+        print(json.dumps({"cluster": f"{ns}/{cluster}", "revision": revision, "changes": changes,
+                          "secrets_changed": secrets_changed, "access_changed": ann_changed, "findings": room}))
+        return EXIT_OK
+    wanted = cc.renew_templates(tdocs, spec, whats, regs_new)
+    # revue 5-8 I-1 : seuls les gabarits qui changent sont copiés, seuls
+    # leurs rôles sont attendus
+    moving = cr.changed(cur["templates"], wanted)
+    new_docs = cr.rotated([w for _r, _c, w in moving], revision)
+    names = {c["metadata"]["name"]: n["metadata"]["name"] for (_r, c, _w), n in zip(moving, new_docs)}
+    roles = [r for r, _c, _w in moving]
+    if regs_new:
+        kube.apply(regs_new["secrets"], timeout=120)
+        step("secrets", "done", f"{len(regs_new['secrets'])} registry secret(s) of revision {revision}")
+    if {"registries", "ca"} & set(whats):
+        reg = _renew_fetch_refresh(kube, ns, cluster)
+        if reg:
+            step("secrets", "done", f"{cluster}-rke2-fetch trusts the CA of {reg}")
+    if new_docs:
+        kube.apply(new_docs, timeout=120)
+        step("templates", "done", ", ".join(names.values()))
+    old_secrets = []
+    if {"registries", "ca"} & set(whats):
+        # ancien Secret des nœuds, ancienne forme `-auth` (m-14) et CA des
+        # registres sortis de la liste : retirés à la fin, si plus rien ne
+        # les lit
+        kept = {e["registry"] for e in spec.get("registries") or []}
+        before = rg.cluster_registry_names(sec, auth)
+        old_secrets = ([sname] if sname and sname != f"{cluster}-registries-r{revision}" else []) \
+            + [a["metadata"]["name"] for a in auth] \
+            + [rg.child_secret_names(cluster, r)["ca"] for r in before if r not in kept]
+        # banc 2.8.0 : un renouvellement abandonné laisse le Secret des nœuds
+        # de sa révision d'avant ; le suivant le retire aussi à la fin (plus
+        # aucune machine ne le lit alors)
+        old_secrets += sorted(
+            n for n in (x["metadata"]["name"] for x in kube.list("secrets", ns, selector=f"{cc.GENERATED}=true"))
+            if rg.is_nodes_secret_of(n, cluster) and n not in (sname, f"{cluster}-registries-r{revision}")
+            and n not in old_secrets)
+    # machines d'avant la bascule relevées par leur UID AVANT de repointer
+    # la ClusterClass (revue 5-8 I-2 : aucune horloge comparée)
+    old = [cr.machine_id(m) for m in _renew_machines(kube, ns, cluster) if cr.in_roles(m, roles, cl)]
+    mark = cr.marker(revision, names, roles, old, old_secrets)
+    ann = {cr.A_RENEWAL: cr.marker_value(mark)}
+    if "oidc" in whats:
+        ann[co.ANNOTATION] = ann_new
+    kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"annotations": ann}})
+    if names:
+        kube.patch(cr.K_CLASS, ns, cls["metadata"]["name"], cr.class_patch(cls, names))
+        step("class", "done", f"ClusterClass {cls['metadata']['name']} points at revision {revision}")
+    return _renew_wait_finish(kube, ns, cluster, mark, args.timeout)
+
+
+def _renew_wait_finish(kube, ns, cluster, mark, timeout):
+    """Attente bornée du remplacement des machines des rôles de la marque,
+    puis ménage (gabarits remplacés, Secrets que plus rien ne lit) et
+    retrait de la marque. Délai dépassé : rien retiré, la marque reste
+    (`renew --finish` reprend, `renew --abandon` la retire)."""
+    import capi_renew as cr
+    deadline = time.monotonic() + timeout
+    while True:
+        cl = kube.get(cs.K_CLUSTER, ns, cluster)
+        p = cr.progress(_renew_machines(kube, ns, cluster), mark, cl)
+        if p["done"]:
+            break
+        if time.monotonic() > deadline:
+            step("wait", "error", f"not renewed after {timeout} s ({p['message']}); the old templates and "
+                                  "secrets are kept; renew --finish resumes the wait, renew --abandon "
+                                  "(administrators) clears the mark")
+            return EXIT_FAIL
+        step("wait", "running", p["message"])
+        time.sleep(RENEW_POLL)
+    step("wait", "done", p["message"])
+    gone = []
+    cls_name = cr.class_name_of(cl)
+    cls = kube.get(cr.K_CLASS, ns, cls_name) if cls_name else None
+    designated = [x.get("name") for _r, x in cr.template_refs(cls)]
+    listed = [x for k in (cr.K_CP_TEMPLATE, cr.K_CONFIG_TEMPLATE) for x in kube.list(k, ns)]
+    for d in cr.old_templates(listed, list(mark["names"].values()), replaced=list(mark["names"]),
+                              designated=designated):
+        try:
+            kube.delete(cr.KINDS[d["kind"]], ns, d["metadata"]["name"])
+            gone.append(d["metadata"]["name"])
+        except KubeError as e:
+            if not _not_found(e):
+                raise
+    users = _renew_ca_users(kube, ns) if mark["secrets"] else {}
+    for n in mark["secrets"]:
+        if users.get(n):
+            step("cleanup", "running", f"{n} kept: used by the service(s) {', '.join(sorted(users[n]))}")
+            continue
+        try:
+            kube.delete("secrets", ns, n)
+            gone.append(n)
+        except KubeError as e:
+            if not _not_found(e):
+                raise
+    if _renew_admin_binding(kube, ns, cluster, max(60, min(900, int(deadline - time.monotonic())))) != EXIT_OK:
+        step("access", "error", "the OIDC administrator group of the cluster was not delivered; the mark is kept "
+                                "(renew --finish retries)")
+        return EXIT_FAIL
+    kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"annotations": {cr.A_RENEWAL: None}}})
+    step("done", "done", f"{ns}/{cluster} renewed (revision {mark['revision']}); removed: {', '.join(gone) or '-'}")
+    return EXIT_OK
+
+
+def _renew_admin_binding(kube, ns, cluster, timeout):
+    """Revue finale 2.8.0 I-2 : la liaison `hops-oidc-admins` du socle suit
+    l'annotation OIDC du cluster (groupe administrateur changé, ajouté,
+    retiré, préfixe changé). Le reste du socle est relivré tel quel ; rien
+    n'est écrit quand la liaison livrée est déjà la bonne."""
+    want = _admin_binding_of(kube, ns, cluster)
+    cm = kube.get("configmaps", ns, mf.name_of(cp.ITEM))
+    objs = mf.objects_of(cm)
+
+    def is_admin(o):
+        return o.get("kind") == "ClusterRoleBinding" and (o.get("metadata") or {}).get("name") == cp.ADMIN_BINDING
+    have = next((o for o in objs if is_admin(o)), None)
+    if (have or {}).get("subjects") == (want or {}).get("subjects") and bool(have) == bool(want):
+        return EXIT_OK
+    keep = [o for o in objs if not is_admin(o)]
+    sec = kube.get("secrets", ns, mf.name_of(cp.ITEM))
+    meta = mf.artefact_of(cm) or {}
+    code = deliver(kube, ns, cluster, cp.ITEM, meta.get("package") or POLICIES_PACKAGE,
+                   meta.get("version") or POLICIES_VERSION, keep + ([want] if want else []),
+                   meta.get("origin") or {}, meta.get("by") or "", timeout,
+                   secrets=mf.secret_objects(sec) if mf.artefact_of(sec) else ())
+    if code == EXIT_OK:
+        step("access", "done", f"OIDC administrator group {want['subjects'][0]['name']} bound to cluster-admin"
+             if want else "OIDC administrator binding removed")
+    return code
+
+
+CHILD_COMMANDS = ("manifest-check", "manifest-deploy", "manifest-remove", "manifest-verify", "token",
+                  "rancher-import", "rancher-unimport", "oidc-kubeconfig", "gitops-check", "gitops-deploy",
+                  "gitops-remove", "renew")
 
 
 def _exit_cancelled(signum, frame):
@@ -2173,7 +3712,7 @@ def main(argv=None):
             ("inventory", cmd_inventory, ("components", "json")),
             ("check", cmd_check, ("spec", "components", "json", "identity")),
             ("render", cmd_render, ("spec", "secrets", "identity")),
-            ("create", cmd_create, ("spec", "components", "json", "dry", "timeout", "identity")),
+            ("create", cmd_create, ("spec", "components", "json", "dry", "timeout", "identity", "createby")),
             ("delete", cmd_delete, ("name", "timeout", "dry")),
             ("state", cmd_state, ("name", "json")),
             ("services", cmd_services, ("json",)),
@@ -2186,7 +3725,16 @@ def main(argv=None):
             ("manifest-verify", cmd_manifest_verify, ("mname",)),
             ("manifests", cmd_manifests, ("json",)),
             ("policy-render", cmd_policy_render, ("pspec",)),
-            ("token", cmd_token, ("token",))):
+            ("token", cmd_token, ("token",)),
+            ("rancher-import", cmd_rancher_import, ("name", "dry", "rimport")),
+            ("rancher-unimport", cmd_rancher_unimport, ("name", "dry", "runimport")),
+            ("rancher-status", cmd_rancher_status, ("json", "optname")),
+            ("oidc-kubeconfig", cmd_oidc_kubeconfig, ("name", "json")),
+            ("gitops-check", cmd_gitops_check, ("gspec",)),
+            ("gitops-deploy", cmd_gitops_deploy, ("gspec", "timeout")),
+            ("gitops-remove", cmd_gitops_remove, ("mname", "dry")),
+            ("gitops-status", cmd_gitops_status, ("json", "optname")),
+            ("renew", cmd_renew, ("name", "dry", "renew"))):
         sp = sub.add_parser(name, allow_abbrev=False)
         common(sp)
         sp.set_defaults(fn=fn)
@@ -2214,12 +3762,19 @@ def main(argv=None):
             sp.add_argument("--id", default="", help="console action id, written in the cluster lock")
         if "timeout" in extra:
             sp.add_argument("--timeout", type=int,
-                            default=900 if name.startswith(("service", "manifest")) else 2400)
+                            default=900 if name.startswith(("service", "manifest", "gitops")) else 2400)
             if name == "create":
                 sp.add_argument("--no-wait", action="store_true")
-        if name in ("delete", "service-remove", "manifest-remove"):
+        if name == "gitops-remove":
+            sp.add_argument("--role", default="admin", choices=("viewer", "operator", "admin"),
+                            help="role of the person in the console (a Fleet entry is removed by an administrator)")
+        if name in ("delete", "service-remove", "manifest-remove", "rancher-unimport", "gitops-remove"):
             sp.add_argument("--expect-run", default="", metavar="ID",
                             help="refuse unless the object carries this plan run (the undo of a plan)")
+        if name == "delete":
+            sp.add_argument("--forget-rancher", action="store_true",
+                            help="drop the import mark without Rancher (Rancher gone or unreachable; "
+                                 "administrators only in the console)")
         if "name" in extra:
             sp.add_argument("--name", required=True, help="namespace/name of the cluster")
         if "sname" in extra:
@@ -2228,7 +3783,33 @@ def main(argv=None):
             sp.add_argument("--spec", required=True, help="JSON request (cluster, package, version, item "
                                                           "or policies), '-' for stdin")
         if "mname" in extra:
-            sp.add_argument("--name", required=True, help="namespace/cluster/item")
+            sp.add_argument("--name", required=True, help="namespace/cluster/item" if name.startswith("manifest")
+                            else "namespace/cluster/entry")
+        if "optname" in extra:
+            sp.add_argument("--name", default="", help="namespace/cluster of one child cluster (default: all)")
+        if "gspec" in extra:
+            sp.add_argument("--spec", required=True, help="JSON request (cluster, entry, secrets, role, origin, by), "
+                                                          "'-' for stdin")
+        if "rimport" in extra:
+            sp.add_argument("--timeout", type=int, default=ri.WAIT_DEFAULT,
+                            help=f"seconds to wait for the cluster to be active ({ri.WAIT_MIN} to {ri.WAIT_MAX})")
+            sp.add_argument("--by", default="", help="person who imports (annotation in Rancher)")
+            sp.add_argument("--run", default="", metavar="ID", help="plan run written in Rancher (undo of a plan)")
+        if "createby" in extra:
+            sp.add_argument("--by", default="", help="person who creates (written in Rancher when imported)")
+        if "runimport" in extra:
+            sp.add_argument("--timeout", type=int, default=ri.UNIMPORT_WAIT,
+                            help="seconds to wait for the cluster to leave Rancher")
+        if "renew" in extra:
+            sp.add_argument("--what", default="", help="registries, oidc, ca (comma-separated)")
+            sp.add_argument("--spec", default="", help="JSON request {registries, oidc}, '-' for stdin")
+            sp.add_argument("--timeout", type=int, default=3600, help="seconds to wait (60 to 10800)")
+            sp.add_argument("--finish", action="store_true",
+                            help="resume an unfinished renewal: wait for the machines, then clean up")
+            sp.add_argument("--abandon", action="store_true",
+                            help="clear the mark of an unfinished renewal, removing nothing "
+                                 "(administrators only in the console)")
+            sp.add_argument("--id", default="", help="console action id, written in the cluster lock")
         if "pspec" in extra:
             sp.add_argument("--spec", required=True, help="JSON policies request, '-' for stdin")
         if "token" in extra:
@@ -2265,7 +3846,14 @@ def main(argv=None):
     except ca.ChildAccessError as e:
         step(args.cmd, "error", f"{e.code}: {str(e)[:300]}")
         return EXIT_BLOCKED
+    except (ri.RancherImportError, cg.GitopsError) as e:
+        step(args.cmd, "error", f"{e.code}: {str(e)[:300]}")
+        return EXIT_FAIL
     except KubeError as e:
+        step(args.cmd, "error", str(e)[:300])
+        return EXIT_FAIL
+    except RuntimeError as e:
+        # 2.8.0 : Rancher injoignable ou réponse inattendue (rancher-unreachable)
         step(args.cmd, "error", str(e)[:300])
         return EXIT_FAIL
 

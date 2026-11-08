@@ -984,8 +984,8 @@ phases:
 - Un chart exige `registry` (un registre où le paquet est publié, ou publié
   par la phase Registre du plan) ; un manifeste refuse `registry` et
   `values`. Les `values` suivent les règles de secrets des plans. Les sortes
-  `images` (« publiée par la phase Registre ») et `gitops` (« à venir en
-  2.8 ») sont refusées.
+  `images` et `rke2` (« publiée par la phase Registre ») et `gitops`
+  (« appliqué par une entrée GitOps », 2.8.0) sont refusées.
 - 32 entrées et 128 éléments une fois les clusters dépliés, au plus.
 - Dans chaque cluster : `pol-<cluster>` (socle, rôles, comptes) d'abord,
   puis les manifestes et politiques, puis les charts, dans l'ordre des
@@ -1009,6 +1009,83 @@ phases:
 - La 2.7.0 marque aussi les déclarations Terraform qu'une exécution crée
   (`origin.run`, `created`, `undo`), pour que le Défaire prouve ce qu'il
   détruit.
+
+### Plans de déploiement : phase GitOps (2.8.0)
+
+La dernière phase de la chaîne, après Artefacts, pose des entrées GitOps
+sur les clusters enfants. Ce qu'écrit une entrée, Flux et Fleet, les
+sources et le verrouillage sont décrits dans [gitops.md](gitops.md).
+
+```yaml
+phases:
+  gitops:
+    enabled: true
+    timeout_minutes: 15            # par élément, 1 à 60
+    entries:
+      - name: apps                 # RFC 1123, 34 caractères au plus
+        tool: auto                 # auto | flux | fleet
+        clusters: ["{{cluster}}-apps", "tools/tools"]
+        target_namespace: team-a
+        source: {type: oci, package: socle, version: "2026.11",
+                 item: apps, registry: "{{registry}}"}
+        privileges: namespace      # namespace | cluster (admin)
+        interval_minutes: 10
+        prune: true
+      - name: infra
+        clusters: ["{{cluster}}-apps"]
+        target_namespace: team-a
+        source: {type: git, url: "ssh://git@git.example/infra.git",
+                 branch: main, path: ./deploy, secret: infra-key}
+```
+
+- 16 entrées et 64 éléments une fois les clusters dépliés, au plus.
+- `clusters` : comme dans la phase Artefacts (un cluster de la phase
+  Clusters, ou un `<ns>/<nom>` existant ; `gitops-cluster-unknown` sinon).
+  Les variables sont permises dans `clusters` et dans `source.registry`.
+- `source.secret` nomme un secret du plan. Il est saisi au lancement dans
+  la fenêtre Déployer (ou `gitops_secrets` dans le fichier de secrets de
+  `harvester-plans`, `--secrets-file` ou `--secrets-stdin`), jamais rangé,
+  et redemandé à la reprise. S'il manque, c'est bloquant
+  (`gitops-secret-missing`).
+- Un élément dépend de son cluster (`clusters:<c>`). Un élément Flux attend
+  aussi l'élément chart `flux` du même cluster dans la phase Artefacts du
+  plan (`gitops-flux-in-plan`, information). Quand ni le plan ni le
+  cluster n'a Flux : `gitops-flux-missing`.
+- Avant la phase, la console rejoue les contrôles de chaque élément : outil
+  et source, Fleet et `privileges: cluster` réservés aux administrateurs
+  (`gitops-fleet-admin-only`, `gitops-privileges-admin-only`), artefact ou
+  chart publié (`gitops-package-not-published`), entrée posée par une autre
+  origine (`gitops-taken`), et `gitops-check` sur un cluster enfant
+  existant.
+- Une action fille par élément : `capi-gitops:<ns>/<c>:<entrée>`. Une
+  entrée n'est marquée `created` que si elle porte l'exécution de cette
+  chaîne ; une entrée posée par ce plan est reprise et garde l'exécution
+  qui l'a créée. Une reprise contrôle les éléments faits par
+  `gitops-status`.
+- Une phase désactivée qui porte des entrées ne fait qu'avertir : le plan
+  a été écrit avant.
+
+**Une chaîne qui installe Harvester.** Un plan enchaîné à une installation
+de Harvester (installation seule ou série) refuse au lancement un import
+dans un Rancher externe (`rancher_external` dans un modèle de cluster) et
+toute entrée Fleet : `rancher-session-in-chain`, bloquant. Un Harvester
+tout juste installé n'est pas connu de votre session Rancher. Les fenêtres
+d'installation et de série demandent les secrets Git du plan choisi, et
+les effacent une fois envoyés.
+
+**Options d'accès des modèles de cluster (2.8.0).** Un modèle de cluster
+accepte les options d'accès de la fenêtre de création (voir
+[procedure-operationnelle.md](procedure-operationnelle.md), Cluster API) :
+
+- `rancher_external: true` : le cluster enfant est importé dans le Rancher
+  de la session qui lance le plan. Avec `rancher_import` (Turtles intégré)
+  c'est refusé (`rancher-import-conflict`). Un cluster repris sans import
+  est importé par l'exécution.
+- `oidc` : un objet de chaînes (`issuer_url`, `audience`, revendications,
+  préfixes, `ca_pem`, `admin_group`), contrôlé quand ses valeurs sont
+  fixées.
+- `offline: true` et `offline_artifacts` (`fetch` ou `image`) : un cluster
+  enfant amorcé sans Internet.
 
 ### Défaire un déploiement (2.7.0)
 
@@ -1049,7 +1126,24 @@ Le Défaire est une action `deploy-undo:<cluster>` sous le même verrou de
 cluster que `deploy:` (un déroulé et un défaire ne tournent jamais ensemble
 sur un cluster), avec les actions filles `capi-service-remove:`,
 `capi-manifest-remove:`, `capi-cluster-delete:`, `registry-delete:` et
-`tf-destroy:`.
+`tf-destroy:`, et depuis la 2.8.0 `capi-gitops-remove:` et
+`capi-rancher-unimport:`.
+
+**2.8.0 : entrées GitOps et imports.** Deux sortes de plus : `gitops` (une
+entrée posée par l'exécution) et `rancher-import` (un import dans le
+Rancher externe fait par l'exécution). L'ordre devient : gitops,
+artefacts, rancher-import, clusters, registre, terraform.
+
+- Les artefacts et l'import d'un cluster attendent ses entrées GitOps ; le
+  cluster attend ses entrées GitOps, ses artefacts et son import. Le chart
+  Flux part après les entrées de son cluster.
+- Quand le cluster d'un import est défait aussi, l'étape de l'import
+  s'achève « laissé à la suppression de son cluster » : la suppression
+  retire l'import sans rien lire dans le cluster enfant.
+- Une entrée Fleet demande une session Rancher. Sans elle, son élément
+  échoue avec `rancher-session-needed`, jamais « déjà parti ».
+- Le Défaire est refusé pendant un renouvellement de machines sur le
+  cluster Harvester (`renew-running`).
 
 - **Ordre et dépendances.** Un cluster enfant attend le retrait de ses
   artefacts ; le registre attend tous les clusters choisis ; chaque

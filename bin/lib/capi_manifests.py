@@ -224,6 +224,18 @@ def objects_of(cm):
     return [json.loads(chunk) for chunk in text.split("---\n") if chunk.strip()]
 
 
+def secret_objects(secret):
+    """Objets rangés dans un Secret `resource-set` (2.8.0) : `stringData`
+    tel qu'écrit par `docs`, ou `data` en base64 relu sur le cluster."""
+    import base64
+    if not secret:
+        return []
+    raw = (secret.get("stringData") or {}).get(DATA_KEY)
+    if raw is None and (secret.get("data") or {}).get(DATA_KEY):
+        raw = base64.b64decode(secret["data"][DATA_KEY]).decode()
+    return objects_of({"data": {DATA_KEY: raw or ""}})
+
+
 def parse_api_resources(text):
     """Sortie de `kubectl api-resources --no-headers` -> {(groupe, sorte):
     namespacée ?}. Colonnes lues depuis la droite (KIND, NAMESPACED,
@@ -251,13 +263,25 @@ def scope_of(obj, scopes=None):
     return None
 
 
-def check(objs, cluster, item=None, scopes=None):
+def _same(a, b):
+    """Même objet, étiquettes mises à part (la console les ajoute)."""
+    def strip(o):
+        c = copy.deepcopy(o)
+        (c.get("metadata") or {}).pop("labels", None)
+        return c
+    return strip(a) == strip(b)
+
+
+def check(objs, cluster, item=None, scopes=None, allow=()):
     """Constats bloquants sur les objets d'un élément. `item` donné : la
     taille est mesurée sur le contenu réellement rangé (étiquettes
     comprises). `scopes` : découverte du cluster enfant
     (`parse_api_resources`) ; sans elle, une sorte hors des tables
     intégrées est inconnue (`manifest-kind-unknown`, jugée au déploiement
-    contre le cluster enfant)."""
+    contre le cluster enfant). `allow` (2.8.0, point 229) : objets rendus
+    par la console elle-même (groupe administrateur OIDC), exemptés de
+    `manifest-crb-admin` seulement s'ils sont identiques ; jamais ce qui
+    vient d'un paquet."""
     found = []
     if len(objs) > MAX_OBJECTS:
         found.append(finding("manifest-too-many", count=len(objs), max=MAX_OBJECTS))
@@ -292,7 +316,7 @@ def check(objs, cluster, item=None, scopes=None):
             found.append(finding("manifest-system-namespace", object=where, namespace=target_ns))
         if kind == "Secret" and o.get("type") == SA_TOKEN_TYPE:
             found.append(finding("manifest-sa-token-refused", object=where))
-        if kind == "ClusterRoleBinding":
+        if kind == "ClusterRoleBinding" and not any(_same(o, a) for a in allow or ()):
             role = (o.get("roleRef") or {}).get("name") or ""
             subjects = [str(s.get("name") or "") for s in o.get("subjects") or [] if isinstance(s, dict)]
             if role == "cluster-admin" or any(s.startswith("system:") for s in subjects):
@@ -361,21 +385,33 @@ def artefact_of(obj):
             "cluster": lab.get(L_CLUSTER) or "", "by": ann.get(A_BY) or "", "origin": cc.origin_of(obj)}
 
 
-def docs(ns, cluster, item, package, version, objs, origin=None, by=""):
-    """[ConfigMap, ClusterResourceSet] d'un élément appliqué à `<ns>/<cluster>`."""
+# 2.8.0 (point 227) : identifiants livrés au cluster enfant par une
+# ressource Secret du CRS, jamais par le ConfigMap. Vu sur harvlab2 (plan
+# 2.8.0, « Essais préalables (tâche 1) », point 4) : appliquée telle quelle.
+SECRET_TYPE = "addons.cluster.x-k8s.io/resource-set"
+
+
+def docs(ns, cluster, item, package, version, objs, origin=None, by="", secrets=()):
+    """[ConfigMap, (Secret,) ClusterResourceSet] d'un élément appliqué à
+    `<ns>/<cluster>`. `secrets` : objets Secret du cluster enfant (lecture
+    d'un registre, d'un dépôt Git) rangés dans un Secret de type
+    `resource-set` du même nom ; le ConfigMap n'en porte jamais."""
     labels, annotations = meta_of(item, package, version, cluster, origin, by)
     name = name_of(item)
 
     def meta():
         return {"name": name, "namespace": ns, "labels": dict(labels), "annotations": dict(annotations)}
-    return [
-        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(),
-         "data": data_of(stamp(objs, item, cluster))},
-        {"apiVersion": CRS_API, "kind": "ClusterResourceSet", "metadata": meta(),
-         "spec": {"clusterSelector": {"matchLabels": {label_of(item): "on"}},
-                  "resources": [{"kind": "ConfigMap", "name": name}],
-                  "strategy": "Reconcile"}},
-    ]
+    out = [{"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(),
+            "data": data_of(stamp(objs, item, cluster))}]
+    resources = [{"kind": "ConfigMap", "name": name}]
+    if secrets:
+        out.append({"apiVersion": "v1", "kind": "Secret", "type": SECRET_TYPE, "metadata": meta(),
+                    "stringData": data_of(stamp(list(secrets), item, cluster))})
+        resources.append({"kind": "Secret", "name": name})
+    out.append({"apiVersion": CRS_API, "kind": "ClusterResourceSet", "metadata": meta(),
+                "spec": {"clusterSelector": {"matchLabels": {label_of(item): "on"}},
+                         "resources": resources, "strategy": "Reconcile"}})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -487,8 +523,18 @@ def resource_of(ref):
 def content_hash(cm):
     """Empreinte d'un ConfigMap comme la calcule Cluster API pour le
     binding : sha256 des valeurs, clés triées (exp/addons/internal/controllers,
-    `computeHash` et `normalizeData`, CAPI v1.13)."""
+    `computeHash` et `normalizeData`, CAPI v1.13). 2.8.0 : pour un Secret,
+    les valeurs DÉCODÉES (`stringData` tel quel, `data` en base64) ; vu sur
+    harvlab2, même empreinte que le binding."""
+    import base64
     h = hashlib.sha256()
+    if (cm or {}).get("kind") == "Secret":
+        data = {k: str(v).encode() for k, v in ((cm.get("stringData") or {}).items())}
+        for k, v in (cm.get("data") or {}).items():
+            data.setdefault(k, base64.b64decode(v))
+        for k in sorted(data):
+            h.update(data[k])
+        return "sha256:" + h.hexdigest()
     data = (cm or {}).get("data") or {}
     for k in sorted(data):
         h.update(str(data[k]).encode())
@@ -503,12 +549,14 @@ def _binding_entries(binding, crs_name):
     return None
 
 
-def state(crs, bindings, cm):
+def state(crs, bindings, cm, secret=None):
     """État d'un élément appliqué : {"applied", "hash", "clusters":
     [{"cluster", "applied", "hash"}], "message"}. `applied` : chaque binding
-    qui cite le CRS porte l'empreinte du ConfigMap actuel."""
+    qui cite le CRS porte l'empreinte du ConfigMap actuel (et du Secret
+    `resource-set` quand l'élément en a un, 2.8.0)."""
     name = ((crs or cm or {}).get("metadata") or {}).get("name") or ""
     want = content_hash(cm) if cm else None
+    want_secret = content_hash(secret) if secret else None
     clusters = []
     for b in bindings or []:
         entries = _binding_entries(b, name)
@@ -517,8 +565,11 @@ def state(crs, bindings, cm):
         cluster = ((b.get("spec") or {}).get("clusterName")
                    or (b.get("metadata") or {}).get("name") or "")
         e = next((x for x in entries if x.get("kind") == "ConfigMap" and x.get("name") == name), {})
-        clusters.append({"cluster": cluster, "applied": bool(e.get("applied")) and e.get("hash") == want,
-                         "hash": e.get("hash")})
+        ok = bool(e.get("applied")) and e.get("hash") == want
+        if secret is not None:
+            es = next((x for x in entries if x.get("kind") == "Secret" and x.get("name") == name), {})
+            ok = ok and bool(es.get("applied")) and es.get("hash") == want_secret
+        clusters.append({"cluster": cluster, "applied": ok, "hash": e.get("hash")})
     if crs is None:
         msg = "no ClusterResourceSet"
     elif cm is None:

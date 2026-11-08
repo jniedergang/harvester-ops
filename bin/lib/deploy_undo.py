@@ -10,9 +10,11 @@ porte `created: true` et `undo: {kind, ref}`. Une ressource reprise sans
 marque (« already present, adopted ») n'est jamais touchée. Jamais
 l'installation de Harvester, jamais la pile Cluster API (128).
 
-Ordre de retrait (point 211), l'inverse de l'application : artefacts
-(charts, puis manifestes, puis politiques), clusters enfants, registre
-d'amorçage, contenu Terraform. Les artefacts d'un cluster enfant passent
+Ordre de retrait (point 211), l'inverse de l'application : entrées GitOps
+(2.8.0), artefacts (charts, puis manifestes, puis politiques), import dans
+le Rancher de la session (2.8.0), clusters enfants, registre d'amorçage,
+contenu Terraform. L'import part AVANT son cluster : sinon Rancher garde un
+cluster mort (plan 2.8.0, tâche 5). Les artefacts d'un cluster enfant passent
 avant ce cluster : un retrait d'artefact en échec garde son cluster (la
 raison est dite), le reste continue. Le registre attend tous les clusters
 choisis, le contenu Terraform attend clusters et registre (revue 4-8 I2) :
@@ -31,12 +33,17 @@ Voir docs/design/2026-11-07-artefacts-complets-defaire-270-plan.md.
 
 import deploy_chain as dch
 
-KINDS_ORDER = ("chart", "manifest", "policies", "capi-cluster", "registry", "tf-declaration")
+KINDS_ORDER = ("gitops", "chart", "manifest", "policies", "rancher-import", "capi-cluster", "registry",
+               "tf-declaration")
 # phase du défaire de chaque sorte (moteur de deploy_chain)
-PHASE_OF = {"chart": "artefacts", "manifest": "artefacts", "policies": "artefacts",
-            "capi-cluster": "clusters", "registry": "registry", "tf-declaration": "terraform"}
-ORDER = ("artefacts", "clusters", "registry", "terraform")
+PHASE_OF = {"gitops": "gitops", "chart": "artefacts", "manifest": "artefacts", "policies": "artefacts",
+            "rancher-import": "rancher-import", "capi-cluster": "clusters", "registry": "registry",
+            "tf-declaration": "terraform"}
+ORDER = ("gitops", "artefacts", "rancher-import", "clusters", "registry", "terraform")
 ARTEFACT_KINDS = ("chart", "manifest", "policies")
+# sortes portées par un cluster enfant : `<ns>/<c>/<élément>` (GitOps et
+# artefacts) ou `<ns>/<c>` (import, cluster)
+ITEM_KINDS = ("gitops",) + ARTEFACT_KINDS
 MAX_CHAIN = 32
 NOT_PROVEN = "creation by this run not proven"
 MODIFIED = "changed since it was applied"
@@ -76,12 +83,30 @@ def undo_id(kind, ref):
 
 
 def cluster_of(u):
-    """`<ns>/<c>` du cluster enfant d'un artefact ou d'un cluster, sinon None."""
-    if u["kind"] in ARTEFACT_KINDS:
+    """`<ns>/<c>` du cluster enfant d'une entrée GitOps, d'un artefact, d'un
+    import ou d'un cluster, sinon None."""
+    if u["kind"] in ITEM_KINDS:
         return u["ref"].rsplit("/", 1)[0]
-    if u["kind"] == "capi-cluster":
+    if u["kind"] in ("capi-cluster", "rancher-import"):
         return u["ref"]
     return None
+
+
+def _collect_one(found, it, u, res):
+    """Marque `undo` d'un élément créé : dernier état gagnant, mais « créé
+    par » reste le premier maillon (une reprise ne fait que recopier la
+    marque)."""
+    if not (it.get("created") and u.get("kind") in KINDS_ORDER and isinstance(u.get("ref"), str)):
+        return
+    key = (u["kind"], u["ref"])
+    first = (found.get(key) or {}).get("run") if (found.get(key) or {}).get("proven") else None
+    found[key] = {"id": undo_id(*key), "kind": u["kind"], "ref": u["ref"],
+                  "phase": PHASE_OF[u["kind"]], "run": first or res["_run"], "proven": True,
+                  "default": u["kind"] != "registry",
+                  "note": REGISTRY_NOTE if u["kind"] == "registry" else "",
+                  "revision_applied": it.get("revision_applied")}
+    if u["kind"] == "gitops" and u.get("tool") in ("flux", "fleet"):
+        found[key]["tool"] = u["tool"]        # revue 5-8 I-8 : Fleet ne se voit qu'avec une session
 
 
 def collect(results, tf_lookup=None, plan=None, cluster=None):
@@ -100,18 +125,13 @@ def collect(results, tf_lookup=None, plan=None, cluster=None):
             for it in ph.get("items") or []:
                 if ph.get("id") == "clusters" and (it.get("ref") or it.get("cluster")):
                     carriers.add(it.get("ref") or f"{it['cluster']}/{it['cluster']}")
-                u = it.get("undo") or {}
-                if it.get("created") and u.get("kind") in KINDS_ORDER and isinstance(u.get("ref"), str):
-                    key = (u["kind"], u["ref"])
-                    # dernier état gagnant, mais « créé par » reste le premier
-                    # maillon : une reprise ne fait que recopier la marque
-                    first = (found.get(key) or {}).get("run") if (found.get(key) or {}).get("proven") else None
-                    found[key] = {"id": undo_id(*key), "kind": u["kind"], "ref": u["ref"],
-                                  "phase": PHASE_OF[u["kind"]], "run": first or res["_run"], "proven": True,
-                                  "default": u["kind"] != "registry",
-                                  "note": REGISTRY_NOTE if u["kind"] == "registry" else "",
-                                  "revision_applied": it.get("revision_applied")}
-                elif ph.get("id") == "terraform" and it.get("declaration_id") and not it.get("created") \
+                _collect_one(found, it, it.get("undo") or {}, res)
+                # 2.8.0 : un cluster porte aussi son import (`undo_more`), posé
+                # seulement quand la chaîne l'a fait, même sur un cluster repris
+                for x in it.get("undo_more") or []:
+                    if isinstance(x, dict):
+                        _collect_one(found, dict(it, created=True), x, res)
+                if ph.get("id") == "terraform" and it.get("declaration_id") and not it.get("created") \
                         and tf_lookup is not None:
                     key = ("tf-declaration", it["declaration_id"])
                     d = tf_lookup(it["declaration_id"])
@@ -142,10 +162,14 @@ def plan(undos, include=None):
     clusters et du registre."""
     chosen = [u for u in undos if (u["default"] if include is None else u["id"] in include)]
     chosen.sort(key=lambda u: KINDS_ORDER.index(u["kind"]))
-    by_cluster = {}
+    by_cluster, gitops_of, import_of = {}, {}, {}
     for u in chosen:
         if u["kind"] in ARTEFACT_KINDS:
             by_cluster.setdefault(cluster_of(u), []).append(u["id"])
+        elif u["kind"] == "gitops":
+            gitops_of.setdefault(cluster_of(u), []).append(u["id"])
+        elif u["kind"] == "rancher-import":
+            import_of[u["ref"]] = u["id"]
     # point 211 et revue 4-8 I2 (décision du propriétaire du produit) : le
     # registre attend les clusters, le contenu Terraform (réseau, classe de
     # stockage, image) attend les clusters et le registre qu'il peut porter ;
@@ -155,8 +179,17 @@ def plan(undos, include=None):
     out = []
     for u in chosen:
         deps = []
-        if u["kind"] == "capi-cluster":
-            deps = [f"artefacts:{i}" for i in by_cluster.get(u["ref"], [])]
+        if u["kind"] in ARTEFACT_KINDS:
+            # 2.8.0 : le chart de Flux reste tant qu'une entrée GitOps du
+            # cluster n'est pas retirée
+            deps = [f"gitops:{i}" for i in gitops_of.get(cluster_of(u), [])]
+        elif u["kind"] == "rancher-import":
+            # une entrée Fleet vit dans le Rancher de l'import
+            deps = [f"gitops:{i}" for i in gitops_of.get(u["ref"], [])]
+        elif u["kind"] == "capi-cluster":
+            deps = [f"gitops:{i}" for i in gitops_of.get(u["ref"], [])] \
+                + [f"artefacts:{i}" for i in by_cluster.get(u["ref"], [])] \
+                + ([f"rancher-import:{import_of[u['ref']]}"] if u["ref"] in import_of else [])
         elif u["kind"] == "registry":
             deps = list(clusters)
         elif u["kind"] == "tf-declaration":

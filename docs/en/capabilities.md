@@ -2539,9 +2539,54 @@ Internet. Full reference: **[artefacts.md](artefacts.md)**.
 - Command line: `harvester-artefacts pack | sign | verify | inspect |
   import | list | remove | publish`, `harvester-registry declare | attach |
   check | list | show | forget | deploy | status | delete`.
-- **Not yet**: GitOps items (2.8), a child cluster
-  bootstrapped entirely without Internet, changing the registries of an
-  existing cluster, garbage collection of a bootstrap registry.
+- **Not yet**: a Harbor registry posed by the console, Argo CD, the
+  Kubernetes upgrade of child clusters, garbage collection of a bootstrap
+  registry.
+
+### Child cluster access, GitOps, renewal, offline (2.8.0)
+
+Full references: **[gitops.md](gitops.md)**, the Cluster API part of
+**[operating-procedure.md](operating-procedure.md)** (section 18) and
+**[artefacts.md](artefacts.md)**.
+
+- **Import into the external Rancher of the session.** Access window of a
+  child cluster (or `rancher_external: true` at creation): the generic
+  import of Rancher, written with the token of your session; refused for
+  a local account (`rancher-session-needed`) and together with the
+  embedded Turtles import (`rancher-import-conflict`). The agent image is
+  probed in the registries of the cluster first. The Members tab manages
+  the members of the imported child. Removing the import removes only
+  leftovers that carry a mark of Rancher (`kept-not-rancher` otherwise).
+  Deleting an imported child removes it from Rancher without reading the
+  child; `delete --forget-rancher` (admin) when that Rancher is gone.
+- **OIDC of the child API.** Option `oidc` (issuer `https`, audience,
+  claims, prefixes never empty nor `system:`, CA, `admin_group` bound to
+  `cluster-admin` by `hops-oidc-admins`), written as an
+  `AuthenticationConfiguration` (v1 on Kubernetes 1.34). **Download the
+  OIDC kubeconfig**: kubelogin exec plugin, no credential. Rancher and
+  OIDC together: warning `oidc-with-rancher`.
+- **GitOps tab.** Flux (chart `flux2` from a package, service `flux` with
+  imposed lockdown values) or Fleet (imported clusters, administrators
+  only); sources `oci`, `git`, `chart`; objects in `hops-gitops`, aimed
+  at a team namespace; Git credentials entered at launch, never stored.
+- **Renew the machines.** `registries`, `oidc`, `ca`: only the templates
+  that change are copied to `-r<N>`, only their machines are replaced; a
+  mark on the Cluster, **Finish** (operator) and **Abandon** (admin); the
+  renewal holds the lock of the Harvester cluster.
+- **Without Internet.** Option `offline: true`: RKE2 fetched from the
+  registry by digest (package kind `rke2`, `harvester-artefacts pack
+  --rke2`), checked before `/opt/install.sh` is placed.
+- **Registries finished.** Read password stored once (label on
+  `<c>-registries`), CA key kept for bootstrap registries posed from
+  2.8.0, **Renew the certificate** (same CA, or `--new-ca` in three steps
+  for older registries), **Harvester nodes** (merge into
+  `containerd-registry` and `additional-ca`; refused while another
+  registry keeps a password in Harvester).
+- **Roles.** Read: viewer. Import, remove the import, Flux entries,
+  renew: operator **and** the right to administer the child cluster
+  **and**, for Rancher, a Rancher session. Fleet entries, `privileges:
+  cluster`, renew-cert, harvester-nodes, `renew --abandon`, `delete
+  --forget-rancher`: admin.
 
 ### Bundles and CLI
 
@@ -2551,7 +2596,9 @@ Internet. Full reference: **[artefacts.md](artefacts.md)**.
   render | create | delete | state | services | service-check |
   service-deploy | service-remove`, 2.7.0 `uninstall`, `manifest-check |
   manifest-deploy | manifest-remove | manifest-verify | manifests |
-  policy-render | token`, each with `--cluster` or
+  policy-render | token`, 2.8.0 `rancher-import | rancher-unimport |
+  rancher-status | oidc-kubeconfig | gitops-check | gitops-deploy |
+  gitops-remove | gitops-status | renew`, each with `--cluster` or
   `--kubeconfig`; `create` and `service-deploy` exit 2 when the pre-check
   blocks. 2.5.0: `create --identity restricted|console` (restricted by
   default), `create --origin`, `check --many` (a JSON list of requests,
@@ -2765,6 +2812,16 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   is left and named. A cluster or registry that could not be removed keeps
   the Terraform content. CLI: `harvester-plans undo`.
 
+- **GitOps phase in plans (2.8.0)**: the last phase poses GitOps entries
+  (16 entries, 64 items) on the child clusters; Git secrets entered at
+  launch, never stored, asked again on resume. Cluster templates take the
+  access options `rancher_external`, `oidc`, `offline`,
+  `offline_artifacts`. Undo removes GitOps entries and imports too
+  (order gitops, artefacts, rancher-import, clusters, registry,
+  terraform). A plan chained to a Harvester install refuses an external
+  Rancher import and Fleet (`rancher-session-in-chain`). Details in
+  [bare-metal.md](bare-metal.md).
+
 - **A machine that already carries a system is guarded (2.2.0)**: the
   install window lists what the BMC shows (UEFI boot entries of a loader
   on a disk partition, the head of the boot order, logical drives) and,
@@ -2886,7 +2943,11 @@ Terraform workspace.
   child cluster, its policies and accounts, and issuing a token need
   operator **and** the right to read the admin kubeconfig Secret of that
   child cluster, checked by the server with the identity of the person
-  (2.7.0). Deployment plans and
+  (2.7.0). The same goes for importing a child cluster into Rancher (plus
+  a Rancher session), Flux entries and renewals (2.8.0); Fleet entries,
+  `privileges: cluster`, renewing a registry certificate, merging a
+  registry into the Harvester nodes, abandoning a renewal and
+  `delete --forget-rancher` are admin. Deployment plans and
   their templates are written by an admin; an operator applies a plan to an
   existing cluster unless it creates those admin-only objects.
 - **Enforced centrally, deny by default.** Any request that changes

@@ -11,6 +11,7 @@ import os
 import re
 import select
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -108,9 +109,25 @@ class Kube:
     def replace(self, obj):
         return json.loads(self.run("replace", "-f", "-", "-o", "json", input=json.dumps(obj)))
 
-    def patch(self, kind, ns, name, patch, dry_run=False):
+    def patch(self, kind, ns, name, patch, dry_run=False, secret=False):
+        """Patch de fusion. `secret` (revue 2.8.0 5-8 I-7) : le corps porte un
+        secret ; il passe par un fichier privé (0600) effacé aussitôt, jamais
+        par la ligne de commande (visible dans /proc/<pid>/cmdline)."""
         extra = ["--dry-run=server"] if dry_run else []
-        self.run("patch", kind, name, *self._ns(ns), "--type", "merge", "-p", json.dumps(patch), *extra)
+        if not secret:
+            self.run("patch", kind, name, *self._ns(ns), "--type", "merge", "-p", json.dumps(patch), *extra)
+            return
+        fd, path = tempfile.mkstemp(prefix="hops-patch-", suffix=".json")
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(patch, f)
+            self.run("patch", kind, name, *self._ns(ns), "--type", "merge", "--patch-file", path, *extra)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     def apply(self, docs, field_manager="harvester-ops", timeout=None):
         """Application côté serveur d'une liste d'objets (JSON). Rend la
