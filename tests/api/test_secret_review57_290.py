@@ -211,3 +211,21 @@ def test_offline_copy_routes_refused_outside_b1(appenv):
     with w.app.test_client() as c:
         r = c.post("/api/secrets/offline-copy/export", json={"confirm": "x"})
     assert r.status_code == 409 and r.get_json()["code"] == "b1-only"
+
+
+# ---------------------------------------------------------------------------
+# M4 : redirection suivie seulement vers la même origine (le jeton suit)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("old,new,followed", [
+    ("https://bao.example:8200/v1/a", "https://bao.example:8200/v1/b", True),
+    ("https://bao.example:8200/v1/a", "https://evil.example:8200/v1/a", False),   # autre hôte, même en https
+    ("https://bao.example:8200/v1/a", "https://bao.example:8443/v1/a", False),
+    ("http://127.0.0.1:8210/v1/a", "http://127.0.0.1:8210/v1/b", True),
+    ("https://bao.example:8200/v1/a", "http://bao.example:8200/v1/a", False),
+])
+def test_redirect_only_to_the_same_origin(old, new, followed):
+    import urllib.request
+    import openbao_client as oc
+    req = urllib.request.Request(old, headers={"X-Vault-Token": "s.x"})
+    got = oc._SafeRedirect().redirect_request(req, None, 307, "", {}, new)
+    assert (got is not None) is followed

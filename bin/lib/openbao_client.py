@@ -153,14 +153,15 @@ class _Token:
 
 
 class _SafeRedirect(urllib.request.HTTPRedirectHandler):
-    """Redirection refusée (le code 3xx remonte) si elle quitte https ou,
-    en http, l'origine de la requête : le jeton ne part jamais en clair
-    ni vers un autre hôte sans TLS vérifié par la CA de la console."""
+    """Redirection suivie seulement vers la MÊME origine (schéma, hôte et
+    port) ; sinon refusée, le code 3xx remonte. urllib recopie X-Vault-Token
+    dans la requête redirigée : vers un autre hôte, même en https, le jeton
+    partirait chez lui (en mode A sans CA fournie, n'importe quel hôte
+    public au certificat valide ; revue M4 des tâches 5-7)."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         old, new = urllib.parse.urlparse(req.full_url), urllib.parse.urlparse(newurl)
-        if not (new.scheme == "https" and old.scheme == "https"
-                or (new.scheme, new.netloc) == (old.scheme, old.netloc)):
+        if (new.scheme, new.netloc) != (old.scheme, old.netloc):
             return None
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 

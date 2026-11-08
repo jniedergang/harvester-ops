@@ -24,7 +24,9 @@ ExecStartPre=-/usr/bin/podman rm -f harvester-ops-openbao
 # tmpfs (runc cannot create the mount point on a read-only image), the
 # bootstrap files of the first start from /run/hops-openbao-boot (tmpfs,
 # removed by the agent once read). The image's entrypoint is bypassed: it
-# would drop root itself, and its default command is `server -dev`.
+# would drop root itself, and its default command is `server -dev`. No
+# capability and no privilege gain: OpenBao 2.7 runs without them (checked
+# on OpenBao 2.7.2 with --cap-drop=all --security-opt=no-new-privileges).
 ExecStart=/bin/sh -c 'prev=""; boot=""; \
     [ "$${OPENBAO_PREV_KEY:-0}" = 1 ] && prev="--secret hops-openbao-unseal-prev,uid=$${OPENBAO_UID},gid=0,mode=0400"; \
     [ -d /run/hops-openbao-boot ] && boot="-v /run/hops-openbao-boot:/run/hops-openbao-boot:ro,Z"; \
@@ -35,6 +37,7 @@ ExecStart=/bin/sh -c 'prev=""; boot=""; \
     --tmpfs /tmp \
     --tmpfs /run/secrets:mode=0755 \
     --memory 512m --memory-swap 512m \
+    --cap-drop=all --security-opt=no-new-privileges \
     --user "$${OPENBAO_UID}:0" \
     --entrypoint /usr/bin/bao \
     -e SKIP_CHOWN=1 \

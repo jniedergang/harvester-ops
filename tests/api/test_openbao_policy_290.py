@@ -272,3 +272,11 @@ def test_logrotate_keeps_14_and_signals():
     text = pol.logrotate_conf("/var/lib/harvester-ops-openbao/audit")
     assert "rotate 14" in text and "kill --signal HUP harvester-ops-openbao" in text
     assert "create 0600 harvester-ops-openbao root" in text
+    # revue M7 : logrotate (root) agit dans le répertoire du compte du conteneur sous ce compte
+    assert "  su harvester-ops-openbao root\n" in text
+
+
+def test_console_policy_has_no_mid_path_glob():
+    """Revue M5 : un `*` au milieu d'un chemin n'est pas un motif pour OpenBao."""
+    for path, _caps in pol.console_rules("harvester-ops", PREFIX, CID, b1=True):
+        assert "*" not in path[:-1], path

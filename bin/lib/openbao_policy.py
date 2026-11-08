@@ -117,8 +117,12 @@ def _hcl_policy(rules):
 
 
 def console_rules(mount, prefix, cid, b1=False):
-    """[(chemin, capacités)] de la politique de la console (texte exact du
-    plan, « Politique de la console »)."""
+    """[(chemin, capacités)] de la politique de la console (texte du plan,
+    « Politique de la console »). Revue M5 des tâches 5-7 : la ligne
+    `transit/keys/hops-<id>-*/rotate` du plan est retirée, un `*` au milieu
+    d'un chemin n'est pas un motif pour OpenBao ; la rotation passe par le
+    motif final de `transit/keys/hops-<id>-*` (create, update), qui permet
+    aussi `.../config` et `.../trim` de ces seules clés."""
     m = _check(MOUNT_RE, mount, "mount")
     p = _check(PREFIX_RE, prefix, "prefix")
     role = console_role(cid)
@@ -130,7 +134,6 @@ def console_rules(mount, prefix, cid, b1=False):
         (f"{TRANSIT}/keys/hops-{cid}-*", ["create", "update"]),
         (f"{TRANSIT}/encrypt/hops-{cid}-*", ["update"]),
         (f"{TRANSIT}/decrypt/hops-{cid}-*", ["update"]),
-        (f"{TRANSIT}/keys/hops-{cid}-*/rotate", ["update"]),
         (f"auth/token/create/{tf_role(cid)}", ["update"]),
         (f"auth/approle/role/{role}/secret-id", ["update"]),
         (f"auth/approle/role/{role}/secret-id-accessor/destroy", ["update"]),
@@ -400,6 +403,7 @@ def logrotate_conf(audit_dir, owner="harvester-ops-openbao", container="harveste
     au serveur qui rouvre son fichier ; le nouveau fichier appartient au
     compte du conteneur."""
     return (f"{audit_dir}/audit.log {{\n  daily\n  rotate {int(keep)}\n  compress\n  delaycompress\n"
-            f"  missingok\n  notifempty\n  create 0600 {owner} root\n  sharedscripts\n  postrotate\n"
+            f"  missingok\n  notifempty\n  su {owner} root\n  create 0600 {owner} root\n  sharedscripts\n"
+            f"  postrotate\n"
             f"    /usr/bin/podman kill --signal HUP {container} >/dev/null 2>&1 || true\n"
             f"  endscript\n}}\n")

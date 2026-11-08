@@ -5,7 +5,6 @@ path "harvester-ops/config" { capabilities = ["read"] }
 path "transit/keys/hops-abc123def456-*" { capabilities = ["create", "update"] }
 path "transit/encrypt/hops-abc123def456-*" { capabilities = ["update"] }
 path "transit/decrypt/hops-abc123def456-*" { capabilities = ["update"] }
-path "transit/keys/hops-abc123def456-*/rotate" { capabilities = ["update"] }
 path "auth/token/create/hops-tf-abc123def456" { capabilities = ["update"] }
 path "auth/approle/role/harvester-ops-abc123def456/secret-id" { capabilities = ["update"] }
 path "auth/approle/role/harvester-ops-abc123def456/secret-id-accessor/destroy" { capabilities = ["update"] }

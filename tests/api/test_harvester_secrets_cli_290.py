@@ -68,10 +68,16 @@ def env(tmp_path, monkeypatch):
         a._need_podman = lambda: None
         return a
     # l'outil joue l'agent dans son processus (branche root), avec ce faux hôte
-    monkeypatch.setattr(hsc, "_agent_module", lambda: types.SimpleNamespace(Agent=agent))
+    seen_paths = []
+
+    def agent_factory(paths=None):                  # Paths reçus de l'outil (revue M11)
+        seen_paths.append(paths)
+        return agent()
+    monkeypatch.setattr(hsc, "_agent_module", lambda: types.SimpleNamespace(Agent=agent_factory, Paths=hsa.Paths))
     monkeypatch.setattr(hsc, "_is_root", lambda: True)
     monkeypatch.setattr(hsc, "_pause", lambda s: None)
-    yield {"state": state, "etc": etc / "openbao", "run": run, "srv": srv, "paths": paths, "host": host}
+    yield {"state": state, "etc": etc / "openbao", "run": run, "srv": srv, "paths": paths, "host": host,
+           "seen_paths": seen_paths}
     srv.stop()
 
 
@@ -448,6 +454,18 @@ def test_rotate_secret_id_through_the_agent(env, capsys):
     assert rc == 0, doc
     new = (env["etc"] / "secret-id").read_text().strip()
     assert new != old and old not in err + json.dumps(doc) and new not in err + json.dumps(doc)
+
+
+def test_in_process_agent_uses_the_directories_of_the_tool(env, capsys, monkeypatch, tmp_path):
+    """Revue M11 : `sudo harvester-secrets` joue l'agent avec les répertoires
+    de l'outil, même hors des chemins par défaut."""
+    creds(env)
+    (env["etc"] / "secret-id-accessor").write_text("")
+    settings(env)
+    monkeypatch.delenv("HARVESTER_OPS_ETC", raising=False)
+    assert cli(["rotate", "secret-id"], capsys=capsys)[0] == 0
+    got = env["seen_paths"][-1]
+    assert got.state == env["state"] / "secrets-agent" and got.etc == env["etc"]
 
 
 def test_snapshot(env, capsys, tmp_path):

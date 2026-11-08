@@ -207,7 +207,13 @@ def run_agent(req, timeout=None):
     with os.fdopen(fd, "w") as f:
         json.dump(req, f)
     if in_process:
-        _agent_module().Agent().process()
+        # mêmes répertoires que l'outil (revue M11 des tâches 5-7) : hors des
+        # chemins par défaut, Paths() de l'agent lirait ailleurs
+        mod = _agent_module()
+        env = dict(os.environ, HARVESTER_OPS_STATE_DIR=str(state()))
+        if ss.openbao_dir().name == "openbao":
+            env["HARVESTER_OPS_ETC"] = str(ss.openbao_dir().parent)
+        mod.Agent(paths=mod.Paths(env)).process()
     deadline = time.monotonic() + timeout
     shown = {}
     while True:

@@ -152,6 +152,7 @@ def test_b1_unit_podman_arguments(tmp_path, prev, boot):
     for part in ("run --rm --name harvester-ops-openbao --network host --read-only --tmpfs /tmp",
                  "--tmpfs /run/secrets:mode=0755", "--memory 512m --memory-swap 512m", "--user 990:0",
                  "--entrypoint /usr/bin/bao", "--secret hops-openbao-unseal,uid=990,gid=0,mode=0400",
+                 "--cap-drop=all --security-opt=no-new-privileges",          # revue M7 des tâches 5-7
                  "localhost/harvester-ops-openbao:current server -config=/openbao/config/openbao.hcl"):
         assert part in joined, part
     assert ("hops-openbao-unseal-prev,uid=990" in joined) == prev
