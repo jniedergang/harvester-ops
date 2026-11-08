@@ -62,6 +62,29 @@ d'API classiques.
   injectable), le guichet HTTP qui sert les disques à CDI dans
   `bin/lib/vm_transfer_serve.py`, et la place allouable Longhorn qu'il
   partage avec la console dans `bin/lib/longhorn_room.py`.
+- `harvester-capi.py`, `harvester-registry.py` et `harvester-artefacts.py`
+  pilotent Cluster API, les registres et les paquets d'artefacts. La 2.8.0
+  ajoute six modules purs (bibliothèque standard, aucun accès à un cluster,
+  testés seuls) :
+  - `bin/lib/rancher_import.py` : noms, corps et marques de l'import dans un
+    Rancher externe, chemin du manifeste, sondes de l'image de l'agent,
+    restes de Rancher ;
+  - `bin/lib/child_oidc.py` : l'option `oidc`, l'`AuthenticationConfiguration`
+    et le kubeconfig des personnes ;
+  - `bin/lib/child_gitops.py` : entrées GitOps, choix de l'outil, objets
+    Flux, objets Fleet, valeurs de verrouillage ;
+  - `bin/lib/flux_artifact.py` : l'artefact Flux déterministe d'un élément
+    `gitops` ;
+  - `bin/lib/capi_renew.py` : rotation des gabarits, progression d'un
+    renouvellement, sa marque ;
+  - `bin/lib/rke2_offline.py` : la sorte `rke2` et les commandes d'un
+    cluster enfant amorcé sans Internet.
+- Sous-commandes nouvelles en 2.8.0 : `harvester-capi rancher-import |
+  rancher-unimport | rancher-status | oidc-kubeconfig | gitops-check |
+  gitops-deploy | gitops-remove | gitops-status | renew` ;
+  `harvester-registry renew-cert | harvester-nodes` ;
+  `harvester-artefacts pack --rke2`. L'onglet GitOps de Cluster API est
+  `web/static/js/capi-gitops.js`.
 
 ### Bibliothèque commune (`bin/lib/common.sh`)
 

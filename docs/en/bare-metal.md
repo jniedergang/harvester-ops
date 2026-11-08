@@ -935,8 +935,8 @@ phases:
 - A chart needs `registry` (a registry where the package is published, or
   published by the Registry phase of the plan); a manifest refuses
   `registry` and `values`. `values` follow the secret rules of the plans.
-  The kinds `images` ("published by the Registry phase") and `gitops`
-  ("coming in 2.8") are refused.
+  The kinds `images` and `rke2` ("published by the Registry phase") and
+  `gitops` ("applied by a GitOps entry", 2.8.0) are refused.
 - 32 entries and 128 items once the clusters are unfolded, at most.
 - In each cluster: `pol-<cluster>` (base, roles, accounts) first, then the
   manifests and policies, then the charts, in the order of the entries;
@@ -958,6 +958,78 @@ phases:
   they are all there) and skips them.
 - 2.7.0 also marks the Terraform declarations a run creates (`origin.run`,
   `created`, `undo`), so that the undo can prove what it destroys.
+
+### Deployment plans: GitOps phase (2.8.0)
+
+The last phase of the chain, after Artefacts, poses GitOps entries on the
+child clusters. What an entry writes, Flux and Fleet, the sources and the
+lockdown are described in [gitops.md](gitops.md).
+
+```yaml
+phases:
+  gitops:
+    enabled: true
+    timeout_minutes: 15            # per item, 1 to 60
+    entries:
+      - name: apps                 # RFC 1123, 34 characters at most
+        tool: auto                 # auto | flux | fleet
+        clusters: ["{{cluster}}-apps", "tools/tools"]
+        target_namespace: team-a
+        source: {type: oci, package: socle, version: "2026.11",
+                 item: apps, registry: "{{registry}}"}
+        privileges: namespace      # namespace | cluster (admin)
+        interval_minutes: 10
+        prune: true
+      - name: infra
+        clusters: ["{{cluster}}-apps"]
+        target_namespace: team-a
+        source: {type: git, url: "ssh://git@git.example/infra.git",
+                 branch: main, path: ./deploy, secret: infra-key}
+```
+
+- 16 entries and 64 items once the clusters are unfolded, at most.
+- `clusters`: as in the Artefacts phase (a cluster of the Clusters phase,
+  or an existing `<ns>/<name>`; `gitops-cluster-unknown` otherwise).
+  Variables are allowed in `clusters` and in `source.registry`.
+- `source.secret` names a secret of the plan. It is entered at launch in
+  the Deploy window (or `gitops_secrets` in the secrets file of
+  `harvester-plans`, `--secrets-file` or `--secrets-stdin`), never stored,
+  and asked again on resume. A missing one blocks
+  (`gitops-secret-missing`).
+- An item depends on its cluster (`clusters:<c>`). A Flux item also waits
+  for the chart item `flux` of the same cluster in the Artefacts phase of
+  the plan (`gitops-flux-in-plan`, information). When neither the plan nor
+  the cluster has Flux: `gitops-flux-missing`.
+- Before the phase, the console replays the checks of each item: tool and
+  source, Fleet and `privileges: cluster` for administrators only
+  (`gitops-fleet-admin-only`, `gitops-privileges-admin-only`), artefact or
+  chart published (`gitops-package-not-published`), entry laid by another
+  origin (`gitops-taken`), and `gitops-check` on an existing child cluster.
+- One child action per item: `capi-gitops:<ns>/<c>:<entry>`. An entry is
+  marked `created` only when it carries the run of this chain; an entry
+  laid by this plan is adopted and keeps the run that created it. A
+  resumed run checks the items done with `gitops-status`.
+- A disabled phase with entries only warns: the plan was written before.
+
+**A chain that installs Harvester.** A plan chained to a Harvester install
+(single install or batch) refuses at launch an external Rancher import
+(`rancher_external` in a cluster template) and every Fleet entry:
+`rancher-session-in-chain`, blocking. A freshly installed Harvester is not
+known to your Rancher session. The install and batch windows ask for the
+Git secrets of the chosen plan, and clear them once sent.
+
+**Access options of cluster templates (2.8.0).** A cluster template
+accepts the access options of the creation window (see
+[operating-procedure.md](operating-procedure.md), Cluster API):
+
+- `rancher_external: true`: the child cluster is imported into the
+  Rancher of the session that runs the plan. With `rancher_import`
+  (embedded Turtles) it is refused (`rancher-import-conflict`). An adopted
+  cluster without the import is imported by the run.
+- `oidc`: an object of strings (`issuer_url`, `audience`, claims,
+  prefixes, `ca_pem`, `admin_group`), checked when its values are fixed.
+- `offline: true` and `offline_artifacts` (`fetch` or `image`): a child
+  cluster bootstrapped without the Internet.
 
 ### Undoing a deployment (2.7.0)
 
@@ -995,7 +1067,24 @@ boxes is back and the name matches, and sends one request only.
 The undo is an action `deploy-undo:<cluster>` under the same cluster lock
 as `deploy:` (a deployment and an undo never run together on a cluster),
 with child actions `capi-service-remove:`, `capi-manifest-remove:`,
-`capi-cluster-delete:`, `registry-delete:` and `tf-destroy:`.
+`capi-cluster-delete:`, `registry-delete:` and `tf-destroy:`, and since
+2.8.0 `capi-gitops-remove:` and `capi-rancher-unimport:`.
+
+**2.8.0: GitOps entries and imports.** Two more kinds: `gitops` (an entry
+the run posed) and `rancher-import` (an import into the external Rancher
+made by the run). The order becomes: gitops, artefacts, rancher-import,
+clusters, registry, terraform.
+
+- The artefacts and the import of a cluster wait for its GitOps entries;
+  the cluster waits for its GitOps entries, its artefacts and its import.
+  The Flux chart goes after the entries of its cluster.
+- When the cluster of an import is undone too, the import step ends
+  "left to the removal of its cluster": the deletion drops the import
+  without reading the child cluster.
+- A Fleet entry needs a Rancher session. Without one, its item fails
+  with `rancher-session-needed`, never "already gone".
+- Undo is refused while a machine renewal runs on the Harvester cluster
+  (`renew-running`).
 
 - **Order and dependencies.** A child cluster waits for the removal of its
   artefacts; the registry waits for every chosen cluster; each Terraform

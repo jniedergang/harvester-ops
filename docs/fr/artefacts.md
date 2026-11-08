@@ -1,4 +1,4 @@
-# Paquets d'artefacts et registres (2.6.0), artefacts dans les clusters enfants (2.7.0)
+# Paquets d'artefacts et registres (2.6.0), artefacts dans les clusters enfants (2.7.0), registres achevés (2.8.0)
 
 Les clusters enfants créés par Cluster API tournent souvent là où Internet
 n'est pas joignable. La 2.6.0 apporte de quoi leur donner quand même leurs
@@ -20,6 +20,13 @@ console retire elle-même les objets, un socle de politiques et des comptes
 d'automatisation aux jetons courts. Voir « Artefacts dans les clusters
 enfants (2.7.0) » plus bas. Les phases Registre et Artefacts des plans, et
 le Défaire d'un déploiement, sont décrits dans [bare-metal.md](bare-metal.md).
+
+La 2.8.0 ajoute deux sortes de paquet : `gitops` (un artefact Flux, voir
+[gitops.md](gitops.md)) et `rke2` (RKE2 lui-même, pour un cluster enfant
+amorcé sans Internet). Elle achève les registres : le mot de passe de
+lecture quitte son Secret à part, la CA d'un registre d'amorçage est
+gardée et son certificat se renouvelle, et un registre peut être fusionné
+dans les nœuds Harvester. Voir « Registres achevés (2.8.0) » plus bas.
 
 ## Le paquet
 
@@ -49,10 +56,24 @@ qu'il extrait l'archive. Un fichier absent de la liste, ou d'une autre
 empreinte, fait refuser tout le paquet.
 
 Sortes d'éléments : `chart`, `images`, `manifest`, `policy` (un manifeste
-de politiques, livré comme un manifeste depuis la 2.7.0). Une sorte de
-plus, `gitops`, est gardée dans le paquet et montrée « à venir (2.8) » ;
-elle n'est jamais appliquée ni publiée. Manifestes et politiques ne sont
-pas publiés dans un registre.
+de politiques, livré comme un manifeste depuis la 2.7.0), et depuis la
+2.8.0 `gitops` et `rke2`. Manifestes et politiques ne sont pas publiés
+dans un registre.
+
+- **`gitops`** : des fichiers YAML (`files`, obligatoire), publiés en
+  **artefact Flux** : une couche
+  `application/vnd.cncf.flux.content.v1.tar+gzip` (tar.gz déterministe),
+  dépôt `<registre>/harvester-ops/gitops/<paquet>/<élément>`, étiquette =
+  la version du paquet. Il se pose par une entrée GitOps, jamais par
+  Appliquer (`artefact-kind-gitops`). Son contenu est jugé par les règles
+  des manifestes à la publication (`publish-gitops-refused`) : chaque objet
+  d'une sorte à namespace doit porter `metadata.namespace` (trouvé sur le
+  banc). Voir [gitops.md](gitops.md).
+- **`rke2`** : une version exacte de RKE2 (`v1.34.11+rke2r1`), ses trois
+  fichiers `rke2/<version>/{rke2.linux-amd64.tar.gz, sha256sum-amd64.txt,
+  install.sh}`, et les images système de cette version pour une CNI. Il
+  sert un cluster enfant créé avec `offline: true` (voir
+  [procedure-operationnelle.md](procedure-operationnelle.md), Cluster API).
 
 ### Construire un paquet : `harvester-artefacts pack`
 
@@ -101,6 +122,18 @@ harvester-artefacts pack socle.json --out dist/ --sign-key ~/.ssh/artefacts_ed25
   en clair (installations d'essai). Toute source `http://` l'exige, même
   sans identifiants.
 - **`--sign-key FICHIER`** signe le paquet à la fin (voir plus bas).
+- **`--rke2 VERSION [--cni calico]`** (2.8.0) construit un paquet
+  `rke2-<x.y.z-rke2rN>` d'un élément `rke2`, sans description ; donné avec
+  une description, l'élément s'y ajoute. L'archive est contrôlée contre
+  `sha256sum-amd64.txt`. Les images système sont la liste
+  `rke2-images-all.linux-amd64.txt` de la version, filtrée par la CNI
+  (`calico`, `canal`, `cilium`, `flannel`, `none`), recopiées comme
+  n'importe quelle image. Les téléchargements envoient un `User-Agent`
+  (`get.rke2.io` refuse celui de Python par défaut, HTTP 403).
+
+```bash
+harvester-artefacts pack --rke2 v1.34.11+rke2r1 --cni calico --out dist/ --sign-key ~/.ssh/artefacts_ed25519
+```
 
 Codes de sortie : 0 construit, 1 échec (source injoignable, chart
 introuvable, empreinte fausse), 2 description refusée (clé inconnue, nom
@@ -411,11 +444,12 @@ registre d'amorçage. Le réglage est lu à chaque geste, sans redémarrage.
 
 - **TLS toujours.** La console génère une CA (10 ans) et un certificat
   serveur (2 ans), ou prend votre certificat (`--cert`, `--key`, `--ca`).
-  **La clé de la CA générée est effacée après le déploiement : le
-  certificat ne peut pas être renouvelé.** Un nouveau déploiement donne une
-  nouvelle CA, et les clusters enfants gardent l'ancienne sur leurs nœuds
-  (les registres sont posés à la création seulement, voir plus bas).
-  Prévoyez-le : avec la CA générée, le registre a deux ans devant lui.
+  Jusqu'à la 2.7.x, la clé de la CA générée était effacée après le
+  déploiement. **Depuis la 2.8.0, elle est gardée** dans le Secret
+  `<nom>-ca-key`, et la CA porte un `nameConstraints` critique limité à
+  l'adresse du registre (et à son nom DNS s'il est donné). Le certificat
+  peut alors être renouvelé : voir « Registres achevés (2.8.0) ». Un
+  nouveau déploiement donne toujours une nouvelle CA.
 - **Deux comptes**, `push` et `pull`, aux mots de passe aléatoires (32
   octets). Ils n'existent que dans des Secrets du cluster Harvester. Il n'y
   a jamais d'accès anonyme.
@@ -467,6 +501,19 @@ Deux images de même chemin sur deux hôtes ne se mélangent jamais. Les charts
 vont sous `<registre>/charts/<chart>:<version>` (un `+` de la version
 devient `_`).
 
+Depuis la 2.8.0 :
+
+- un élément `gitops` va dans
+  `<registre>/harvester-ops/gitops/<paquet>/<élément>:<version>`, un
+  artefact Flux (configuration `application/vnd.cncf.flux.config.v1+json`,
+  couche `application/vnd.cncf.flux.content.v1.tar+gzip`) ;
+- un élément `rke2` va dans `<registre>/harvester-ops/rke2` : chacun des
+  trois fichiers en blob, plus un manifeste OCI de type d'artefact
+  `application/vnd.harvester-ops.rke2.v1+json` (configuration vide, une
+  couche titrée par fichier). L'étiquette est la version au `+` remplacé
+  par `_` (les étiquettes OCI refusent le `+`), par exemple
+  `v1.34.11_rke2r1`.
+
 ## Publication
 
 **Publier** sur un paquet de l'onglet Artefacts (opérateurs) : choisir un
@@ -483,9 +530,12 @@ vérifications, puis publier.
   couche déjà dans le registre n'est pas renvoyée (ou elle est montée
   depuis un autre dépôt du même registre). Une publication interrompue se
   reprend en publiant à nouveau.
-- Les images d'abord, puis les charts ; les manifestes et les sortes « à
-  venir » sont sautés. La progression montre `images 3/14` et les Mio
-  envoyés.
+- Les images d'abord, puis les charts, puis les artefacts `gitops` et
+  `rke2` (2.8.0) ; les manifestes sont sautés. La progression montre
+  `images 3/14` et les Mio envoyés.
+- Un élément `gitops` demande un registre qui sert les charts (un artefact
+  Flux est un artefact OCI, comme un chart) ; un élément `rke2` en demande
+  un qui sert les images (`registry-no-usage` sinon).
 - La déclaration du registre garde la liste des paquets publiés (noms,
   versions, date, personne).
 
@@ -502,9 +552,11 @@ Dans la fenêtre de création de Cluster API > Clusters, le menu
 pas être choisi). Les modèles de cluster et les entrées de plan prennent la
 même liste, avec des `{{variables}}`.
 
-- **Posés à la création seulement.** RKE2 lit sa configuration de
-  registres au démarrage. Changer les registres d'un cluster existant n'est
-  pas proposé en 2.6.0.
+- **Posés à la création, changés par un renouvellement.** RKE2 lit sa
+  configuration de registres au démarrage. Depuis la 2.8.0, les registres
+  d'un cluster existant changent par le renouvellement de ses machines
+  (`harvester-capi renew --what registries`, voir
+  [procedure-operationnelle.md](procedure-operationnelle.md), Cluster API).
 - **Ordre** : pour chaque origine miroitée, les registres qui la servent
   sont essayés dans l'ordre de la liste ; le premier est préféré, les
   suivants sont ses secours.
@@ -521,12 +573,16 @@ même liste, avec des `{{variables}}`.
   dans le même fichier (vu sur le banc, voir « Vu en réel »).
 - **Secrets** dans le namespace du cluster, sur Harvester :
   `<cluster>-registries` (`registries.yaml` et un `ca-<registre>.crt` par
-  registre, lus par les nœuds à leur premier démarrage),
-  `<cluster>-registry-<registre>-auth` (le compte de lecture) et
-  `<cluster>-registry-<registre>-ca` (`Opaque`, `ca.crt` seul), ces deux
-  derniers étiquetés au nom du registre (ils disent quels clusters
-  l'emploient). Tous sont étiquetés pour partir avec le cluster. **Seul le
-  compte de lecture va sur les nœuds** ; le compte d'écriture jamais.
+  registre, lus par les nœuds à leur premier démarrage) et
+  `<cluster>-registry-<registre>-ca` (`Opaque`, `ca.crt` seul). Depuis la
+  2.8.0, le mot de passe de lecture n'est rangé qu'une fois, dans
+  `<cluster>-registries` ; l'étiquette
+  `harvester-ops.io/registry-<registre>: used` de ce Secret dit quels
+  clusters emploient un registre. Jusqu'à la 2.7.x, un troisième Secret,
+  `<cluster>-registry-<registre>-auth`, portait de nouveau le compte de
+  lecture (voir « Registres achevés (2.8.0) »). Tous sont étiquetés pour
+  partir avec le cluster. **Seul le compte de lecture va sur les nœuds** ;
+  le compte d'écriture jamais.
 - **Le mot de passe de lecture finit dans le cloud-init des VMs.** CAPRKE2
   recopie `registries.yaml`, mot de passe de lecture compris, dans le
   Secret d'amorçage de chaque Machine, et CAPHV le recopie dans le Secret
@@ -741,6 +797,115 @@ kubeconfig du cluster enfant, 0600, effacé à la fin) vont dans
 sous-répertoire donné par la variable est accepté, propriétaire et mode
 contrôlés).
 
+## Registres achevés (2.8.0)
+
+### Le mot de passe de lecture rangé une fois (m-14)
+
+Jusqu'à la 2.7.x, un cluster enfant gardait son compte de lecture deux
+fois : dans `<c>-registries` (lu par les nœuds) et dans
+`<c>-registry-<r>-auth`.
+
+- Depuis la 2.8.0, le mot de passe n'est rangé qu'une fois, dans
+  `<c>-registries`. L'étiquette `harvester-ops.io/registry-<r>: used` de ce
+  Secret est la marque d'usage.
+- L'ancienne forme est encore lue (quels clusters emploient un registre, le
+  contrôle de miroir d'un service, la bascule de CA, la suppression).
+- Elle est retirée au premier renouvellement des registres du cluster, une
+  fois les machines remplacées, ou avec le cluster.
+
+### Clé de CA gardée et renouvellement du certificat
+
+Un registre d'amorçage posé à partir de la 2.8.0 garde la clé de sa CA dans
+le Secret `harvester-ops-registry/<r>-ca-key`. Sa CA porte un
+`nameConstraints` critique : l'adresse du registre, et son nom DNS s'il est
+donné. L'onglet Registres montre l'échéance du certificat.
+
+**Renouveler le certificat** (administrateurs), ou en ligne de commande :
+
+```
+harvester-registry renew-cert NOM --cluster C [--days 730] [--dry-run]
+```
+
+- Un nouveau certificat serveur signé par la même CA, valable `--days`
+  (1 à 3 650, 730 par défaut).
+- Le Secret TLS est remplacé et le pod redémarré. La console attend `/v2/`
+  et dit combien de temps la lecture a été coupée (quelques secondes).
+- Aucun fichier des nœuds ne change : les clusters enfants font toujours
+  confiance à la même CA.
+
+Un registre posé avant la 2.8.0 n'a pas de clé gardée : `status` dit
+`registry-ca-key-missing` (information), et `renew-cert` refuse sans
+`--new-ca`.
+
+### Nouvelle CA pour un registre posé avant la 2.8.0
+
+`--new-ca` change la CA en trois temps, pour qu'aucun cluster enfant ne
+perde jamais confiance en son registre :
+
+1. `renew-cert NOM --cluster C --new-ca` crée une nouvelle CA, gardée dans
+   `<r>-ca-next`. Dès lors, ce que la console écrit pour ce registre fait
+   confiance aux deux CA (l'ancienne et la nouvelle).
+2. Portez la nouvelle CA dans chaque copie. Lancez `harvester-capi renew
+   --name NS/C --what ca` sur chaque cluster enfant qui emploie le
+   registre. Redéployez les entrées Flux qui en tirent, et relancez
+   `harvester-nodes` s'il est fusionné dans les nœuds Harvester.
+3. Relancez `renew-cert NOM --cluster C`. Tant qu'une copie n'a pas la
+   nouvelle CA, c'est refusé (`registry-ca-transition-pending`) avec la
+   liste des copies et leur raison. Une fois la liste vide, le certificat
+   serveur est signé par la nouvelle CA, qui devient `<r>-ca-key`.
+
+Les raisons de la liste :
+
+| Raison | Copie | Que faire |
+|---|---|---|
+| `renewing` | un renouvellement du cluster enfant n'est pas fini | `renew --finish` |
+| `nodes` | le Secret des nœuds désigné par les gabarits actuels | `renew --what ca` |
+| `rke2-fetch` | `<c>-rke2-fetch` d'un cluster sans Internet | `renew --what ca` |
+| `service-ca` | `<c>-registry-<r>-ca` lu par les services | `renew --what ca` |
+| `flux:<entrée>` | une entrée Flux dont la source est dans le registre | redéployer l'entrée |
+| `harvester-nodes` | le réglage `additional-ca` des nœuds Harvester | relancer `harvester-nodes` |
+
+- Les entrées Fleet vivent dans Rancher et `harvester-registry` ne les lit
+  pas. La bascule n'émet que l'étape d'avertissement
+  `registry-ca-fleet-unchecked` : redéployez avant les entrées Fleet qui
+  tirent du registre.
+- En ligne de commande, un seul `--new-ca` à la fois. La console bloque un
+  second geste sur le même registre.
+- Une transition en cours reprend sans `--new-ca`. Elle ne signe jamais
+  avec l'ancienne clé entre-temps. Si la CA suivante a été perdue en route,
+  `registry-ca-signer-missing` refuse proprement.
+
+### Nœuds Harvester
+
+**Nœuds Harvester** (administrateurs) fait tirer les nœuds Harvester
+eux-mêmes d'un registre :
+
+```
+harvester-registry harvester-nodes NOM --cluster C [--remove] [--dry-run] [--wait 60]
+```
+
+- Les miroirs et le compte de lecture du registre sont fusionnés dans le
+  réglage Harvester `containerd-registry`. Les autres entrées sont gardées.
+  Une origine déjà miroitée par un autre registre est refusée
+  (`harvester-nodes-mirror-conflict`).
+- Sa CA (et la CA suivante pendant une transition) est fusionnée dans le
+  réglage `additional-ca`.
+- **Harvester redémarre RKE2 sur chaque nœud** pour l'appliquer
+  (`harvester-rke2-restart`). La fenêtre demande de cocher ce redémarrage.
+- L'écriture passe par un fichier privé, jamais par la ligne de commande.
+  Harvester range ensuite le mot de passe de lecture dans un Secret de type
+  `rke.cattle.io/auth-config` de `fleet-local`, et le retire du réglage. La
+  console le vérifie dans les `--wait` secondes (60 par défaut) :
+  `harvester-nodes-auth-inline` sinon (code 1).
+- **Refusé quand un autre registre du réglage garde un mot de passe dans
+  Harvester** (`harvester-nodes-other-auth`). Quand les miroirs changent,
+  Harvester 1.9 réécrit ces Secrets depuis le réglage avec l'hôte seul : il
+  effacerait ce mot de passe. Retirez d'abord ces identifiants dans
+  Harvester, puis saisissez-les de nouveau ensuite.
+- La valeur précédente est rendue masquée, dans le résultat de l'action.
+  Elle ne peut pas rendre les mots de passe.
+- `--remove` retire la seule entrée de ce registre.
+
 ## Rôles
 
 | Geste | Rôle |
@@ -752,6 +917,7 @@ contrôlés).
 | Rattacher un registre du client à un cluster Harvester, vérifier un registre | opérateur |
 | Publier un paquet | opérateur |
 | Choisir des registres à la création d'un cluster enfant, déployer un service depuis un registre | opérateur |
+| Renouveler le certificat d'un registre d'amorçage, fusionner un registre dans les nœuds Harvester (2.8.0) | admin |
 
 Les écritures sur le cluster Harvester se font avec l'identité de la
 personne, comme en 2.5.0.
@@ -771,6 +937,8 @@ harvester-registry leftovers   --cluster C
 harvester-registry delete  NOM --cluster C [--delete-data]
 harvester-registry write-access [NOM] --cluster C
 harvester-registry settings [--write-sources A,B | --clear]
+harvester-registry renew-cert NOM --cluster C [--days 730] [--new-ca] [--timeout S] [--dry-run]
+harvester-registry harvester-nodes NOM --cluster C [--remove] [--dry-run] [--wait 60]
 ```
 
 `attach` lit `{"push": {"username", "password"}, "pull": {...}}` sur
@@ -782,25 +950,41 @@ nommé). Codes
 de sortie : 0 succès, 1 échec, 2 refus (constat bloquant, registre
 employé...).
 
-## Hors de la 2.7.0
+## Hors de la 2.8.0
 
-- Les éléments **GitOps** (Fleet, Flux) et l'OIDC de l'API des clusters
-  enfants : 2.8.0. La sorte `gitops` reste « à venir (2.8) ».
-- Le renouvellement du certificat d'un registre d'amorçage (sa CA n'est pas
-  gardée), la restriction du port 5443 à l'adresse de la console au-delà de
-  la 2.6.1, le format des Secrets de registre (m-14) : plus tard.
-- Un cluster enfant amorcé **entièrement sans Internet** (RKE2 lui-même et
-  ses images système depuis le registre, une image de VM préparée) : plus
-  tard.
-- **Changer les registres d'un cluster existant** : plus tard, par
-  renouvellement des machines.
 - Un registre Harbor posé par la console. Un Harbor du client s'emploie
   comme registre du client ; ce n'a pas été essayé en réel.
-- Brancher le réglage `containerd-registry` des nœuds Harvester sur les
-  registres déclarés : le réglage reste un geste manuel (Réglages).
-- Le ramasse-miettes et l'agrandissement d'un registre d'amorçage.
-- La sonde depuis le réseau des VMs et le port d'écriture réservé à la
-  console sont arrivés en 2.6.1 (voir plus haut).
+- Argo CD comme outil GitOps : Flux et Fleet seulement.
+- La montée de version de Kubernetes des clusters enfants.
+- La restriction du port 5443 à l'adresse de la console au-delà de la
+  2.6.1.
+- Le ramasse-miettes et le redimensionnement d'un registre d'amorçage.
+
+**Vu en réel (2.8.0).** Sur harvlab2, avec un registre d'amorçage posé par la 2.7.1 et un cluster
+enfant créé par la 2.7.1 :
+
+- Un renouvellement des registres par la 2.8.0 (miroir sans repli ajouté)
+  a remplacé les deux machines en 15 min (API coupée environ 85 s, plan de
+  contrôle unique), retiré l'ancien Secret `-auth` et étiqueté le nouveau
+  Secret des nœuds ; les nouveaux nœuds tirent par le registre, sans repli
+  dans `hosts.toml`.
+- `renew-cert --new-ca` : refus avec les copies listées (`nodes`,
+  `service-ca`), `renew --what ca` sur le cluster enfant, puis la bascule
+  (lectures coupées 5,3 s) ; une image tirée après. Puis `renew-cert` avec
+  la clé gardée (lectures coupées 6,3 s, nœuds intacts, image toujours
+  tirée).
+- `pack --rke2 v1.34.11+rke2r1` (57 images, 2,6 Go) et sa publication.
+- `harvester-nodes` : refusé tant qu'un autre registre garde un mot de
+  passe dans Harvester ; garde contournée sur le banc, Harvester a bien
+  effacé ce mot de passe, comme le dit la source. Fusion et retrait
+  sinon comme documenté (réglage et `additional-ca` revenus à leur valeur,
+  Secret d'identifiants élagué par Harvester).
+
+Non vérifié en réel : des images tirées par les nœuds Harvester à travers
+le registre fusionné (le nœud qui porte l'adresse du registre ne la joint
+pas, containerd s'est replié sur l'origine), un registre Harbor ou à jetons
+seulement, la bascule de CA avec à la fois un cluster enfant sans Internet
+et une entrée Flux.
 
 **Vu en réel (2.6.0).** Banc harvlab2 (Harvester v1.9.0, un nœud
 imbriqué, 32 Gio), console de cette version, 7 novembre 2026.
