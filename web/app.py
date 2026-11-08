@@ -12803,9 +12803,21 @@ def api_kvm_host_add():
         return _kvm_err("the private key file is missing")
     if len(data) > KVM_KEY_MAX:
         return _kvm_err("the SSH key file is too large")
-    try:                                       # jamais la clé dans /tmp : ssh/ est forcé en 0700
-        wd = _kd.ensure_ssh_dir(state)
-    except OSError:
+    try:
+        text = data.decode(errors="strict")
+    except UnicodeDecodeError:
+        return _kvm_err("the SSH key file is not a text private key")
+    migrated = _secret_migrated("ssh-kvm")
+    try:
+        # jamais la clé dans /tmp : ssh/ est forcé en 0700 ; classe migrée ->
+        # copie sur tmpfs, jamais sur le disque persistant, même le temps de
+        # l'action (une console tuée pendant l'ajout la laisserait, revue M5)
+        if migrated:
+            wd = _sst.secret_files_dir(_sst.store().settings) / "kvm-add"
+            wd.mkdir(mode=0o700, parents=True, exist_ok=True)
+        else:
+            wd = _kd.ensure_ssh_dir(state)
+    except (OSError, _sst.SecretError):
         return _kvm_err("no private work directory for the key: check the console state", 503)
     fd, key_path = tempfile.mkstemp(prefix="kvm-key-", dir=str(wd))   # 0600
     with os.fdopen(fd, "wb") as out:
@@ -12823,7 +12835,6 @@ def api_kvm_host_add():
     ] + [f"--label={k}={v}" for k, v in sorted(decl["labels"].items())]
     # 2.9.0 tâche 8 : classe ssh-kvm migrée -> la clé va dans OpenBao, la
     # déclaration porte sa référence ; l'outil lit la copie privée pour ses tests
-    text = data.decode(errors="strict") if isinstance(data, bytes) else data
     try:
         ref = _secret_put("ssh-kvm", name, "private_key", text if text.endswith("\n") else text + "\n")
     except _sst.SecretError:
@@ -13451,14 +13462,30 @@ def api_clusters_upload_kubeconfig(name):
         # 2.9.0 : les kubeconfigs de config.yaml restent locaux (installateur)
         ref = _secret_put("kubeconfig", name, "kubeconfig", content) if origin == "console" else None
         if ref:
+            old_local = cluster.get("kubeconfig")
             cluster["kubeconfig"] = ref
             _save_cluster(origin, cluster, raw, idx)
+            # revue M4 : l'ancien fichier en clair d'un cluster resté local
+            # (classe migrée en partie) ne survit pas à son remplacement
+            _drop_replaced_local(old_local, _origin_dirs(origin)[0])
             return jsonify({"cluster": name, "kubeconfig": ref, "origin": origin})
         kc_path = _origin_dirs(origin)[0] / f"{name}.yaml"
         _bm_write_private(kc_path, content)
         cluster["kubeconfig"] = str(kc_path)
         _save_cluster(origin, cluster, raw, idx)
     return jsonify({"cluster": name, "kubeconfig": str(kc_path), "origin": origin})
+
+
+def _drop_replaced_local(value, own_dir):
+    """Fichier local d'un secret que sa référence `openbao:` vient de
+    remplacer : effacé s'il est dans le répertoire de la console (jamais un
+    fichier de l'opérateur, jamais une référence)."""
+    if not value or not isinstance(value, str) or _sst.is_ref(value):
+        return
+    p = Path(value) if os.path.isabs(value) else _state_dir() / value
+    with contextlib.suppress(OSError, ValueError):
+        if p.is_file() and not p.is_symlink() and p.resolve().is_relative_to(Path(own_dir).resolve()):
+            p.unlink()
 
 
 @app.route("/api/clusters/<name>/sshkey", methods=["POST"])
@@ -13482,6 +13509,7 @@ def api_clusters_upload_sshkey(name):
         if refused:
             return refused
         ref = _secret_put("ssh-cluster", name, "private_key", raw_key) if origin == "console" else None
+        old_local = (cluster.get("ssh") or {}).get("key")
         if ref:
             key_path = ref
         else:
@@ -13491,6 +13519,9 @@ def api_clusters_upload_sshkey(name):
         # une clé téléversée n'est plus celle que la console a créée
         cluster["ssh"].pop("generated", None)
         _save_cluster(origin, cluster, raw, idx)
+        if ref:
+            # revue M4 : l'ancien fichier en clair ne survit pas à son remplacement
+            _drop_replaced_local(old_local, _origin_dirs(origin)[1])
     return jsonify({"cluster": name, "ssh_key": str(key_path), "origin": origin})
 
 
@@ -33597,7 +33628,12 @@ def _secret_originals_due(now=None):
     days = settings["originals_keep_days"]
     fs = _sst.FileStore(_state_dir())
     due = []
-    for cls in sorted(settings.get("migrated") or {}):
+    # toutes les classes, marquées ou non : une classe dont la marque est
+    # tombée (retour partiel, renommage) garde ses originaux soumis au même
+    # délai (revue M3)
+    for cls in sorted(set(settings.get("migrated") or {}) | set(_ssc.MIGRATABLE)):
+        if cls == "plan-run":
+            continue
         try:
             ad = _ssc.adapter(cls)
             originals = ad.originals(fs) if ad.originals else []

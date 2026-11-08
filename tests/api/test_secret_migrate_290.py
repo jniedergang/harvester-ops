@@ -302,7 +302,7 @@ def test_outage_in_the_middle_resumes(env, capsys):
 def gate(env):
     doc = json.loads((env["state"] / ss.SETTINGS_FILE).read_text())
     doc["migrated"] = dict(doc.get("migrated") or {}, **{"rancher-oidc": {"at": 1}})
-    doc["outage_test"] = {"ok_at": 1}
+    doc["outage_test"] = {"ok_at": 1, "addr": doc.get("addr"), "mode": doc.get("mode")}
     (env["state"] / ss.SETTINGS_FILE).write_text(json.dumps(doc))
 
 

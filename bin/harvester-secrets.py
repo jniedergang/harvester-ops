@@ -515,7 +515,7 @@ def _drop_cache(bao, cls, path):
             del bao._cache[r]
 
 
-def _write_cas0(bao, cls, path, want, actor=None, action=None, dry_run=False):
+def _write_cas0(bao, cls, path, want, actor=None, action=None, dry_run=False, replace=False):
     """Écrit les champs `want` d'un chemin avec `cas=0` (plan, « Migration »).
     Refus de `cas` : OpenBao rend le même 400 que la valeur soit la même ou
     non (essai 5), la valeur rangée est donc relue et comparée par SHA-256 en
@@ -548,7 +548,13 @@ def _write_cas0(bao, cls, path, want, actor=None, action=None, dry_run=False):
         raise (bao._failed(e, cls, path) or ss.SecretError(e.code, cls, path, e.detail)) from None
     out = {}
     for f, v in want.items():
-        if f in data:
+        if f in data and _sha(data[f]) != _sha(v) and replace:
+            # remplacement demandé par l'exploitant pour CE nom (revue M2) :
+            # écrit à la version courante, l'ancienne valeur reste une version
+            # précédente dans OpenBao (`versions`, `rollback`), jamais détruite
+            bao.put(cls, path, f, v, actor=actor, action=action)
+            out[f] = "replaced"
+        elif f in data:
             out[f] = "resumed" if _sha(data[f]) == _sha(v) else "conflict"
         else:
             bao.put(cls, path, f, v, actor=actor, action=action)
@@ -556,7 +562,7 @@ def _write_cas0(bao, cls, path, want, actor=None, action=None, dry_run=False):
     return out
 
 
-def migrate_class(bao, fs, cls, name=None, dry_run=False, actor=None, action=None):
+def migrate_class(bao, fs, cls, name=None, dry_run=False, actor=None, action=None, replace=False):
     """Migration d'une classe vers OpenBao (plan, « Migration ») : pour
     chaque chemin, écriture `cas=0` ; refus de `cas` -> valeur relue et
     comparée (identique : reprise sans écriture ; différente : conflit, local
@@ -590,7 +596,7 @@ def migrate_class(bao, fs, cls, name=None, dry_run=False, actor=None, action=Non
     for path, items in groups.items():
         want = {f: v for f, v, _l in items}
         try:
-            status = _write_cas0(bao, cls, path, want, actor, action, dry_run)
+            status = _write_cas0(bao, cls, path, want, actor, action, dry_run, replace)
         except ss.SecretError as e:
             for _f, _v, label in items:
                 errors.append({"secret": label, "code": e.code})
@@ -613,7 +619,8 @@ def migrate_class(bao, fs, cls, name=None, dry_run=False, actor=None, action=Non
         for f, v, label in items:
             if status[f] == "conflict":
                 errors.append({"secret": label, "code": "openbao-cas-conflict"})
-                step(f"migrate-{cls}", "error", f"{label}: another value already in OpenBao, local kept")
+                step(f"migrate-{cls}", "error", f"{label}: another value already in OpenBao, local kept "
+                     f"(see `versions`; to replace it: migrate --name {path.split('/')[0]} --replace-existing)")
                 continue
             if not back or _sha(back.get(f, "")) != _sha(v):
                 errors.append({"secret": label, "code": "migrate-readback-mismatch"})
@@ -631,8 +638,12 @@ def migrate_class(bao, fs, cls, name=None, dry_run=False, actor=None, action=Non
                       "local kept")
                 continue
             resumed = status[f] == "resumed"
-            done.append({"secret": label, "resumed": resumed})
-            step(f"migrate-{cls}", "running", f"{label}: {'already there' if resumed else 'migrated'}")
+            done.append({"secret": label, "resumed": resumed, **({"replaced": True} if status[f] == "replaced"
+                                                                  else {})})
+            step(f"migrate-{cls}", "running", f"{label}: " + (
+                "already there" if resumed else
+                "migrated, the other value is kept as the previous version" if status[f] == "replaced"
+                else "migrated"))
         if stop:
             break
     return done, errors
@@ -699,8 +710,12 @@ def _kubeconfig_gate(doc):
     others = [c for c in (doc.get("migrated") or {}) if c != "kubeconfig"]
     if not others:
         return "migrate another class first (replication-notify, rancher-oidc, ...)"
-    if not (doc.get("outage_test") or {}).get("ok_at"):
+    ot = doc.get("outage_test") or {}
+    if not ot.get("ok_at"):
         return "run a simulated outage first (harvester-secrets outage-test)"
+    # l'essai vaut pour le serveur et le mode d'alors (revue M7)
+    if (ot.get("addr"), ot.get("mode")) != (doc.get("addr"), doc.get("mode")):
+        return "the OpenBao server or mode changed since the simulated outage: run it again"
     return None
 
 
@@ -716,6 +731,9 @@ def cmd_migrate(args):
         return refuse("class-not-migratable", f"{c} cannot move to OpenBao")
     if c == "plan-run":
         return refuse("class-not-migratable", "plan-run has nothing to migrate (new runs go to OpenBao)")
+    if args.replace_existing and (args.to != "openbao" or not args.name):
+        return refuse("replace-needs-name", "--replace-existing replaces one named secret: "
+                      "give --to openbao and --name")
     doc = raw_settings()
     if args.to == "openbao" and c == "kubeconfig" and not args.dry_run:
         why = _kubeconfig_gate(doc)
@@ -734,8 +752,11 @@ def cmd_migrate(args):
             mig[c] = {"at": int(time.time()), "by": ARGS.actor or "cli", "action": ARGS.id or "",
                       "complete": False}
             save_settings(doc)
-    fn = migrate_class if args.to == "openbao" else restore_class
-    done, errors = fn(bao, fs, c, args.name, args.dry_run, ARGS.actor, ARGS.id)
+    if args.to == "openbao":
+        done, errors = migrate_class(bao, fs, c, args.name, args.dry_run, ARGS.actor, ARGS.id,
+                                     replace=args.replace_existing)
+    else:
+        done, errors = restore_class(bao, fs, c, args.name, args.dry_run, ARGS.actor, ARGS.id)
     if not args.dry_run:
         # une classe dont un secret est une référence est migrée (même en
         # partie) : `disable` refusé, les nouveaux secrets vont dans OpenBao
@@ -871,7 +892,8 @@ def cmd_outage_test(args):
         step(f"outage-{c['id']}", "done" if c["ok"] else "error", c["reason"])
     if ok:
         doc = raw_settings()
-        doc["outage_test"] = {"ok_at": int(time.time()), "by": ARGS.actor or "cli"}
+        doc["outage_test"] = {"ok_at": int(time.time()), "by": ARGS.actor or "cli",
+                              "addr": doc.get("addr"), "mode": doc.get("mode")}
         save_settings(doc)
     out({"ok": ok, "checks": checks})
     return EXIT_OK if ok else EXIT_FAIL
@@ -1094,6 +1116,8 @@ def parser():
     s.add_argument("--class", dest="cls", action="append")
     s.add_argument("--name")
     s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--replace-existing", action="store_true",
+                   help="with --name: replace another value already in OpenBao (kept as the previous version)")
     s = sub.add_parser("confirm")
     s.add_argument("--class", dest="cls", required=True)
     s.add_argument("--older-than-days", type=int, help="only originals kept longer (background task)")

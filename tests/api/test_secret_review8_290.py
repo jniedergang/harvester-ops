@@ -517,3 +517,111 @@ def test_replication_plan_set_alone_stores_hook_headers(toolenv, capsys):
     ref = opts["hooks"][0]["secret_headers"]["Authorization"]
     assert ref == f"openbao:replication-hook/rp-1/pre#{sc.header_field('Authorization')}"
     assert bao_value(toolenv, "replication-hook", "rp-1/pre", sc.header_field("Authorization")) == "Bearer typed"
+
+
+# ---------------------------------------------------------------------------
+# Mineurs de la revue de la tâche 8
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("argv,rc,code", [
+    (["--name", "r1", "--replace-existing"], 0, None),
+    (["--replace-existing"], 2, "replace-needs-name"),                 # jamais en masse
+    ([], 1, "openbao-cas-conflict"),
+])
+def test_conflict_escape_replaces_one_named_secret(env, capsys, argv, rc, code):
+    """Revue M2 : un chemin qui garde une ancienne valeur ne bloque plus la
+    reprise pour toujours ; le remplacement est explicite, nommé, et garde
+    l'ancienne valeur comme version précédente."""
+    env["srv"].put_raw("harvester-ops", f"{PREFIX}/rancher-oidc/r1", {"client_secret": "stale"})
+    got, doc, _ = migrate("rancher-oidc", capsys, extra=argv)
+    assert got == rc, doc
+    e = env["srv"].kv[("harvester-ops", f"{PREFIX}/rancher-oidc/r1")]
+    if rc == 0:
+        assert e["versions"][e["current"]]["client_secret"] == OIDC
+        assert any(v.get("client_secret") == "stale" for n, v in e["versions"].items() if n != e["current"])
+        assert doc["classes"]["rancher-oidc"]["done"][0]["replaced"] is True
+        assert ss.is_openbao_ref(fs(env).read_local("rancher-oidc", "r1", "client_secret"))
+    else:
+        assert (doc.get("code") or doc["classes"]["rancher-oidc"]["errors"][0]["code"]) == code
+        assert e["versions"][e["current"]]["client_secret"] == "stale"
+        assert fs(env).read_local("rancher-oidc", "r1", "client_secret") == OIDC
+
+
+@pytest.mark.parametrize("changed,why", [
+    ({"addr": "https://other.example:8200"}, "changed since the simulated outage"),
+    ({"mode": "b1"}, "changed since the simulated outage"),
+    ({}, None),
+])
+def test_outage_test_is_tied_to_the_server(env, capsys, changed, why):
+    """Revue M7 : la panne simulée vaut pour le serveur et le mode d'alors."""
+    assert migrate("rancher-oidc", capsys)[0] == 0
+    assert cli(["outage-test"], capsys)[0] == 0
+    doc = settings(env)
+    assert doc["outage_test"]["addr"] == doc["addr"] and doc["outage_test"]["mode"] == "a"
+    doc.update(changed)
+    assert hsc._kubeconfig_gate(doc) == why or why in (hsc._kubeconfig_gate(doc) or "")
+
+
+def test_originals_of_an_unmarked_class_still_expire(appenv, capsys, monkeypatch):
+    """Revue M3 : une classe dont la marque est tombée garde ses originaux
+    soumis au délai de garde."""
+    w = appenv["wapp"]
+    doc = settings(appenv)
+    doc["migrated"] = {}
+    (appenv["state"] / ss.SETTINGS_FILE).write_text(json.dumps(doc))
+    assert migrate("rancher-oidc", capsys)[0] == 0
+    doc = settings(appenv)
+    doc["migrated"].pop("rancher-oidc")                      # marque tombée
+    (appenv["state"] / ss.SETTINGS_FILE).write_text(json.dumps(doc))
+    appenv["store"]._sig = None
+    from test_secret_migrate_290 import age
+    age(appenv, "rancher-oidc", 8)
+    due, _days = w._secret_originals_due()
+    assert "rancher-oidc" in due
+
+
+@pytest.mark.parametrize("route,field,local", [
+    ("kubeconfig", "kubeconfig", "kubeconfigs/h1.yaml"),
+    ("sshkey", "ssh_key", "ssh/h1_id"),
+])
+def test_upload_into_migrated_class_erases_the_old_clear_file(appenv, route, field, local):
+    """Revue M4 : cluster resté local d'une classe migrée en partie -> le
+    téléversement pose la référence ET retire l'ancien fichier en clair."""
+    w, st = appenv["wapp"], appenv["state"]
+    assert (st / local).is_file()
+    body = KC2.encode() if route == "kubeconfig" else KEY.encode()
+    with w.app.test_client() as c:
+        r = c.post(f"/api/clusters/h1/{route}", data={"file": (io.BytesIO(body), "f")},
+                   content_type="multipart/form-data")
+    assert r.status_code == 200 and r.get_json()[field].startswith("openbao:")
+    assert not (st / local).exists()
+
+
+def test_kvm_host_add_copy_on_tmpfs_when_migrated(appenv, monkeypatch):
+    """Revue M5 : classe ssh-kvm migrée -> la copie de travail de la clé est
+    sur le répertoire tmpfs, jamais sous <état>/ssh ; clé non UTF-8 -> 400."""
+    w, st, run = appenv["wapp"], appenv["state"], appenv["run"]
+    monkeypatch.setattr(ss, "secret_files_dir", lambda settings=None, mountinfo=None, env=None: run)
+    seen = {}
+
+    def fake_action(host, label, cmd, cleanup=None, cluster=None, waits=False, secret_files=None):
+        seen.update(cmd=cmd)
+        return types_ns(id="a1"), None
+    monkeypatch.setattr(w, "_kvm_action", fake_action)
+    monkeypatch.setattr(w, "_kvm_unavailable", lambda: None)
+    payload = {"name": "k9", "address": "10.0.0.9", "port": 22, "user": "root",
+               "fingerprint": "SHA256:" + "A" * 43, "labels": {}}
+    with w.app.test_client() as c:
+        r = c.post("/api/kvm/hosts", data={"payload": json.dumps(payload),
+                                           "key": (io.BytesIO(b"\xff\xfe-----BEGIN"), "k")},
+                   content_type="multipart/form-data")
+        assert r.status_code == 400
+        r = c.post("/api/kvm/hosts", data={"payload": json.dumps(payload), "key": (io.BytesIO(KEY.encode()), "k")},
+                   content_type="multipart/form-data")
+    assert r.status_code == 202, r.get_json()
+    key_arg = next(a for a in seen["cmd"] if a.startswith("--ssh-key="))[len("--ssh-key="):]
+    assert Path(key_arg).parent.parent == run and not list((st / "ssh").glob("kvm-key-*"))
+
+
+def types_ns(**kw):
+    import types
+    return types.SimpleNamespace(**kw)

@@ -44,6 +44,7 @@ ALLOWED = {
         ("web/app.py", "api_clusters_create"), ("web/app.py", "api_clusters_update"),
         ("web/app.py", "api_clusters_delete"),               # gestion de la déclaration
         ("web/app.py", "_cluster_secrets_rename"),           # référence déplacée au renommage (revue C1)
+        ("web/app.py", "api_clusters_upload_kubeconfig"),    # ancien fichier en clair effacé (revue M4)
         ("bin/lib/cluster_decl.py", "_map_paths"), ("bin/lib/cluster_decl.py", "materialize"),
         ("bin/lib/kube_rest.py", "run"),                     # option --kubeconfig de kubectl
     },
@@ -56,6 +57,7 @@ ALLOWED = {
         ("web/app.py", "_validate_cluster_payload"), ("web/app.py", "api_clusters_create"),
         ("web/app.py", "api_clusters_update"), ("web/app.py", "api_clusters_delete"),
         ("web/app.py", "_cluster_secrets_rename"),           # référence déplacée au renommage (revue C1)
+        ("web/app.py", "api_clusters_upload_sshkey"),        # ancien fichier en clair effacé (revue M4)
         ("bin/lib/cluster_decl.py", "_map_paths"), ("bin/lib/cluster_decl.py", "materialize"),
         ("bin/lib/node_images.py", "ssh_options"),           # par secret_store.path_of
     },
