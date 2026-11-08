@@ -51,6 +51,7 @@ REF_RE = re.compile(r"^(?P<backend>local|openbao):(?P<cls>[a-z0-9-]+)/(?P<path>[
 _LOWER_PATH_RE = re.compile(r"^[a-z0-9._/-]{1,200}$")
 # Classe -> {"persist"} : `plan-run` vit en mémoire (2.4.0) ; les autres
 # ont un emplacement local (support fichier) et peuvent migrer dans OpenBao.
+PLAN_RUN = "plan-run"
 CLASSES = {
     "plan-run": {"persist": False},
     "kubeconfig": {"persist": True},
@@ -83,10 +84,12 @@ DEFAULTS = {
     "dev_disk_secret_files": False,
     "originals_keep_days": 7,     # garde des originaux migrés (1 à 30)
     "outage_test": None,          # {"ok_at", "by"} : panne simulée réussie (point 255)
+    "plan_secrets_keep_days": 7,  # secrets d'un déroulé arrêté reprenable (1 à 30, décision 141)
     "tf_vault_ack": None,         # {"addr", "version", "at", "by"} : Vault > 1.14 acquitté (point 270)
     "tf_entities_pending": [],    # mode A : entités tf-<décl> à retirer par l'administrateur
 }
 ORIGINALS_KEEP_RANGE = (1, 30)
+PLAN_SECRETS_KEEP_RANGE = (1, 30)
 CACHE_TTL_RANGE = (1, 120)
 VALUE_MAX = 1 << 20               # 1 Mio
 TMPFS_TYPES = ("tmpfs", "ramfs")
@@ -234,6 +237,11 @@ def load_settings(state_dir=None):
     except (TypeError, ValueError):
         keep = DEFAULTS["originals_keep_days"]
     out["originals_keep_days"] = max(ORIGINALS_KEEP_RANGE[0], min(ORIGINALS_KEEP_RANGE[1], keep))
+    try:
+        keep = int(out["plan_secrets_keep_days"])
+    except (TypeError, ValueError):
+        keep = DEFAULTS["plan_secrets_keep_days"]
+    out["plan_secrets_keep_days"] = max(PLAN_SECRETS_KEEP_RANGE[0], min(PLAN_SECRETS_KEEP_RANGE[1], keep))
     if not isinstance(out["tf_entities_pending"], list):
         out["tf_entities_pending"] = []
     if not out["prefix"] and out["console_id"]:
@@ -1262,6 +1270,17 @@ class OpenBaoStore:
                 del self._cache[r]
         return len(leaves)
 
+    def children(self, cls, actor=None):
+        """Noms de premier niveau sous `<classe>/` (LIST, sans lire de
+        valeur) : identifiants des déroulés de `plan-run` (balayage)."""
+        import openbao_client as oc
+        if cls not in CLASSES:
+            raise ValueError("unknown secret class")
+        try:
+            return sorted({k.rstrip("/") for k in self._client(actor).kv_list(self.mount, f"{self.prefix}/{cls}")})
+        except oc.OpenBaoError as e:
+            raise (self._failed(e, cls, "") or SecretError(e.code, cls, "", e.detail)) from None
+
     def refs(self, cls, path, actor=None):
         import openbao_client as oc
         if cls not in CLASSES:
@@ -1621,6 +1640,19 @@ class MultiStore(LocalStore):
         if cls not in CLASSES:
             make_ref(cls, path, field)              # ValueError
         if not CLASSES[cls]["persist"]:
+            # 2.9.0 (décision 141, tâche 10) : OpenBao actif, les secrets d'un
+            # déroulé y sont gardés jusqu'à sa fin (reprise sans les
+            # redemander) ; inactif, la mémoire de la 2.4.0.
+            bao = self.openbao
+            if bao is not None and cls == PLAN_RUN:
+                make_ref(cls, path, field)
+                try:
+                    return bao.put(cls, path, field, value, actor=actor, action=action)
+                except SecretError as e:
+                    if e.code not in DOWN_CODES:
+                        raise
+                    # OpenBao coupé : secrets tapés gardés en mémoire comme en
+                    # 2.4.0 (redemandés si la console s'arrête)
             return super().put(cls, path, field, value)
         make_ref(cls, path, field)
         bao = self.openbao                          # une seule lecture (revue M9)
@@ -1641,7 +1673,20 @@ class MultiStore(LocalStore):
         if backend == "openbao":
             return self._need_bao(cls, path).get(ref, actor)
         if not CLASSES[cls]["persist"]:
-            return super().get(ref)
+            try:
+                return super().get(ref)
+            except SecretMissing:
+                bao = self.openbao if cls == PLAN_RUN else None
+                if bao is None:
+                    raise
+                with self._lock:
+                    here = any(r.startswith(f"local:{cls}/{path}#") for r in self._data)
+                if here:
+                    # ce secret vit en mémoire (OpenBao coupé à l'écriture) :
+                    # un champ absent est absent, OpenBao n'est pas consulté
+                    raise
+            # pas en mémoire, OpenBao actif : gardé dans OpenBao (décision 141)
+            return bao.get(make_ref(cls, path, _field, "openbao"), actor)
         v = self.files.get(ref)
         if is_openbao_ref(v):                       # valeur locale remplacée par sa référence
             return self.get(v, actor)
@@ -1680,12 +1725,27 @@ class MultiStore(LocalStore):
     def delete_tree(self, cls, path, backend="local", actor=None, action=None):
         if backend == "openbao":
             return self._need_bao(cls, path).delete_tree(cls, path, actor=actor, action=action)
-        return super().delete_tree(cls, path)
+        n = super().delete_tree(cls, path)
+        bao = self.openbao if cls == PLAN_RUN else None
+        if bao is not None:
+            # fin d'un déroulé : `metadata delete` de chaque feuille, versions
+            # comprises (KV v2 n'a pas de suppression récursive, essai 5).
+            # OpenBao coupé : le balayage des déroulés finis s'en chargera.
+            try:
+                n += bao.delete_tree(cls, path, actor=actor, action=action)
+            except SecretError as e:
+                if e.code not in DOWN_CODES:
+                    raise
+        return n
 
     def refs(self, cls, path, backend="local"):
         if backend == "openbao":
             return self._need_bao(cls, path).refs(cls, path)
         return super().refs(cls, path)
+
+    def children(self, cls, backend="openbao"):
+        """Noms de premier niveau d'une classe dans OpenBao (balayage)."""
+        return self._need_bao(cls).children(cls)
 
     def bao_client(self, actor=None, action=None):
         """Client connecté de la console (identité de service), pour les

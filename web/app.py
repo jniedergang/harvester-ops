@@ -35579,6 +35579,9 @@ def _deploy_install_secrets_put(store, run_id, rows):
             if v:
                 path = f"{run_id}/bmc/{i}" if k == "bmc_password" else f"{run_id}/install/{i}"
                 store.put(_dch.SECRET_CLASS, path, k, str(v))
+                if k == "bmc_password" and o.get("bmc_host"):
+                    # 2.9.0 : la reprise retrouve le mot de passe de chaque BMC
+                    store.put(_dch.SECRET_CLASS, path, "bmc_host", str(o["bmc_host"]))
 
 
 def _deploy_install_secrets_get(store, run_id, rows):
@@ -36948,7 +36951,8 @@ def _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, in
     res = None
     try:
         phases = _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install, store)
-        res = _dch.run(ctx, phases, previous=previous, secrets=store)
+        res = _dch.run(ctx, phases, previous=previous, secrets=store,
+                       keep_secrets=lambda status: _deploy_keep_secrets(store, run, status))
     except BaseException as e:
         log.exception("deploy %s", run.id)
         res = dict(run.result or {}, status="error", error_summary=type(e).__name__)
@@ -36978,6 +36982,188 @@ def _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, in
         run.ended_at = time.time()
         run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
         run.close()
+
+
+# 2.9.0 (tâche 10, décision 141, point 262) : OpenBao actif, les secrets d'un
+# déroulé sont gardés dans OpenBao (`plan-run/<action>/...`) ; un déroulé
+# arrêté reprenable les garde jusqu'à sa reprise, qui les lit au lieu de les
+# redemander, au plus `plan_secrets_keep_days` jours (7) ; un déroulé fini
+# les efface (`metadata delete`, versions comprises). Balayage au démarrage
+# (console arrêtée au mauvais moment) et à la tâche de fond. OpenBao inactif :
+# la mémoire de la 2.4.0, secrets redemandés.
+PLAN_SECRETS_SWEEP_LABEL = "secrets:plan-run-sweep"
+PLAN_SECRETS_SWEEP_S = 3600
+PLAN_SECRETS_ORPHAN_S = 3600          # secrets sans action connue (lancement en cours)
+_PLAN_SECRETS_DOWN = ("openbao-unreachable", "openbao-tls", "openbao-sealed", "openbao-internal",
+                      "openbao-login-failed")
+
+
+def _deploy_keep_secrets(store, run, status):
+    return bool(not run.dry_run and status in _dch.RESUMABLE and _sst.is_active(store))
+
+
+def _deploy_resume_fill(store, prev_id, secrets_, gitops):
+    """Secrets d'une reprise : ce que la requête n'apporte pas est lu dans
+    l'arbre du déroulé repris, dans OpenBao. Rend (secrets_, gitops, source,
+    code d'erreur) ; source = "openbao" si quelque chose y a été lu. Les
+    secrets d'installation tapés remplacent tous ceux gardés (nouvelle
+    saisie) ; ceux de GitOps nom par nom. OpenBao injoignable : le code,
+    rien de lu (l'appelant redemande les secrets, comportement 2.4.0)."""
+    secrets_, gitops = dict(secrets_ or {}), dict(gitops or {})
+    if not _sst.is_active(store):
+        return secrets_, gitops, None, None
+    try:
+        refs = store.refs(_dch.SECRET_CLASS, prev_id, backend="openbao")
+        values = {r: store.get(r) for r in refs}
+    except _sst.SecretError as e:
+        return secrets_, gitops, None, e.code
+    except _sst.SecretMissing:
+        return secrets_, gitops, None, None
+    bmc, install, found_g = {}, {}, {}
+    for ref, v in values.items():
+        _b, _c, path, field = _sst.parse_ref_full(ref)
+        parts = path.split("/")
+        if len(parts) == 3 and parts[1] == "bmc":
+            bmc.setdefault(parts[2], {})[field] = v
+        elif len(parts) == 3 and parts[1] == "install" and field in ("token", "password"):
+            install.setdefault(field, v)
+        elif len(parts) == 3 and parts[1] == "gitops" and field in GITOPS_SECRET_KEYS:
+            found_g.setdefault(parts[2], {})[field] = v
+    used = False
+    typed = any(secrets_.get(k) for k in ("token", "password", "bmc_password", "bmc_passwords"))
+    if not typed and (install or bmc):
+        secrets_.update(install)
+        per_host = {e["bmc_host"]: e["bmc_password"] for e in bmc.values()
+                    if e.get("bmc_host") and e.get("bmc_password")}
+        if per_host:
+            secrets_["bmc_passwords"] = per_host
+            secrets_["bmc_password"] = next(iter(per_host.values()))
+        used = True
+    for name, vals in found_g.items():
+        if name not in gitops:
+            gitops[name] = vals
+            used = True
+    return secrets_, gitops, "openbao" if used else None, None
+
+
+def _plan_secrets_age_s(store, run_id, now):
+    """Âge du plus récent secret d'un déroulé dans OpenBao (métadonnées
+    seules), ou None."""
+    import datetime as _dt
+    newest = None
+    for ref in store.refs(_dch.SECRET_CLASS, run_id, backend="openbao"):
+        for v in store.versions(ref):
+            try:
+                t = _dt.datetime.fromisoformat(str(v.get("created") or "").replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            ts = t.timestamp()
+            newest = ts if newest is None else max(newest, ts)
+    return None if newest is None else now - newest
+
+
+def _plan_secrets_verdict(store, run_id, now, keep_s):
+    """"keep" ou la raison de l'effacement des secrets d'un déroulé."""
+    prev, err = _deploy_previous(run_id)
+    if err:
+        age = _plan_secrets_age_s(store, run_id, now)
+        return "orphan" if age is not None and age > PLAN_SECRETS_ORPHAN_S else "keep"
+    if prev["status"] in ("starting", "running"):
+        return "keep"
+    if prev["dry_run"] or prev["status"] not in (*_dch.RESUMABLE, "interrupted"):
+        return "ended"
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(run_id)
+    ended = getattr(run, "ended_at", None) if run is not None else None
+    if ended is None:
+        d, _ev = _actions_db_get(run_id)
+        ended = (d or {}).get("ended_at") or (d or {}).get("started_at")
+    try:
+        ended = float(ended)
+    except (TypeError, ValueError):
+        return "keep"
+    return "expired" if now - ended > keep_s else "keep"
+
+
+def _plan_secrets_due(store=None, now=None):
+    """[(identifiant du déroulé, raison)] dont les secrets sont à effacer."""
+    store = store or _sst.store()
+    if not _sst.is_active(store):
+        return []
+    now = time.time() if now is None else now
+    keep_s = int(store.settings.get("plan_secrets_keep_days") or 7) * 86400
+    out = []
+    for rid in store.children(_dch.SECRET_CLASS):
+        if not _dch.RUN_ID_RE.match(rid):
+            continue
+        why = _plan_secrets_verdict(store, rid, now, keep_s)
+        if why != "keep":
+            out.append((rid, why))
+    return out
+
+
+def _plan_secrets_sweep(store=None, now=None, wait=False):
+    """Une action suivie qui efface les secrets des déroulés finis ou
+    expirés ; None s'il n'y a rien à effacer (ou OpenBao inactif). La liste
+    est relue dans l'action (un déroulé repris entre-temps garde les
+    siens)."""
+    store = store or _sst.store()
+    due = _plan_secrets_due(store, now)
+    if not due:
+        return None
+    with ACTIONS_LOCK:
+        if any(r.action == PLAN_SECRETS_SWEEP_LABEL and r.status in ("starting", "running")
+               for r in ACTIONS.values()):
+            return None
+    run = ActionRun(uuid.uuid4().hex[:12], PLAN_SECRETS_SWEEP_LABEL, "", [], dry_run=False)
+    run.result = {"by": "service"}
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    READ_SHARE.invalidate("_activity")
+
+    def body():
+        run.status = "running"
+        run.emit({"type": "status", "status": "running", "ts": time.time()})
+        removed, failed = [], []
+        for rid, why in _plan_secrets_due(store, now):
+            try:
+                n = store.delete_tree(_dch.SECRET_CLASS, rid, backend="openbao", actor="service", action=run.id)
+                removed.append(rid)
+                run.emit({"type": "step", "step_id": f"run-{rid}", "status": "done",
+                          "message": f"{n} secret(s) of run {rid} removed ({why})", "ts": time.time()})
+            except _sst.SecretError as e:
+                failed.append(rid)
+                run.emit({"type": "step", "step_id": f"run-{rid}", "status": "error",
+                          "message": f"run {rid}: {e.code}", "ts": time.time()})
+        run.result = dict(run.result, removed=removed, failed=failed)
+        run.exit_code = 1 if failed else 0
+        run.status = "error" if failed else "done"
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
+        run.close()
+    if wait:
+        body()
+    else:
+        threading.Thread(target=body, daemon=True, name="plan-secrets-sweep").start()
+    return run
+
+
+def _plan_secrets_loop():
+    time.sleep(60)                             # après la vague de démarrage
+    while True:
+        try:
+            _plan_secrets_sweep()
+        except Exception as e:                 # noqa: BLE001 : la tâche de fond ne tombe jamais
+            log.warning("plan secrets sweep failed: %s", type(e).__name__)
+        time.sleep(PLAN_SECRETS_SWEEP_S)
+
+
+def _start_plan_secrets_sweeper():
+    if IS_READ_WORKER:
+        return None
+    t = threading.Thread(target=_plan_secrets_loop, daemon=True, name="plan-secrets")
+    t.start()
+    return t
 
 
 def _deploy_start(cluster, kc, dctx, dry_run=False, user="", cluster_user=None, previous=None,
@@ -37490,14 +37676,19 @@ def api_deploy_resume(cluster):
     gsec, gerr = _deploy_gitops_secrets(data.get("gitops_secrets"))
     if gerr:
         return jsonify({"error": gerr, "fields": ["gitops_secrets"]}), 400
+    if result.get("install") and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return jsonify({"error": "forbidden", "role": current_role(), "required": "admin",
+                        "hint": "a run with an installation is resumed by an administrator"}), 403
+    # 2.9.0 (décision 141) : secrets gardés dans OpenBao, plus redemandés
+    secrets_ = data.get("secrets") if isinstance(data.get("secrets"), dict) else {}
+    secrets_, gsec, from_bao, bao_err = _deploy_resume_fill(_sst.store(), data["action_id"], secrets_, gsec)
     if result.get("install"):
-        if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
-            return jsonify({"error": "forbidden", "role": current_role(), "required": "admin",
-                            "hint": "a run with an installation is resumed by an administrator"}), 403
-        secrets_ = data.get("secrets") if isinstance(data.get("secrets"), dict) else {}
         confirms = data.get("system_confirm") if isinstance(data.get("system_confirm"), dict) else {}
         install, ierr = _deploy_resume_install(result, cluster, secrets_, confirms)
         if ierr:
+            if bao_err and ierr[0].get("code") == "secrets-required":
+                return jsonify({"error": f"OpenBao does not answer ({bao_err}): type the secrets to resume",
+                                "code": bao_err, "fields": ierr[0].get("fields"), "secrets_prompt": True}), 503
             return jsonify(ierr[0]), ierr[1]
         vip = ((result.get("install") or {}).get("batch") or {}).get("vip") or ""
         store = _sst.store()
@@ -37519,7 +37710,23 @@ def api_deploy_resume(cluster):
         update_differing=result.get("update_differing") is True, role=current_role(), gitops_secrets=gsec)
     if status != 202 and store is not None:
         store.delete_tree(_dch.SECRET_CLASS, run_id)
+    if status == 202:
+        _deploy_resume_forget(data["action_id"])
+        if from_bao:
+            body = dict(body, secrets_source="openbao")
     return jsonify(body), status
+
+
+def _deploy_resume_forget(prev_id):
+    """Reprise lancée : les secrets du déroulé repris (copiés sous le nouveau)
+    sont effacés ; OpenBao coupé, le balayage s'en chargera."""
+    st = _sst.store()
+    if not _sst.is_active(st):
+        return
+    try:
+        st.delete_tree(_dch.SECRET_CLASS, prev_id, backend="openbao")
+    except _sst.SecretError as e:
+        log.warning("secrets of resumed run %s kept for the sweep: %s", prev_id, e.code)
 
 
 # --- 2.7.0 : « Défaire le déploiement » (décision 128) ---------------------------
@@ -39128,6 +39335,7 @@ if __name__ == "__main__":
     _announce_setup()
     try:
         _start_secret_originals_sweeper()        # 2.9.0 : délai de garde des originaux migrés
+        _start_plan_secrets_sweeper()            # 2.9.0 : secrets des déroulés finis ou expirés
     except Exception as _e:                      # noqa: BLE001
         log.warning("secret originals sweeper startup failed: %s", _e)
     try:
