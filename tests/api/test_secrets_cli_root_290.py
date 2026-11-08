@@ -219,3 +219,29 @@ def test_safe_fs_create_never_replaces(tmp_path):
                        input=b'{"op": "other"}\n', capture_output=True)
     assert r.returncode == 4 and json.loads(rp.read_text()) == {"op": "b1-policies"}
     assert [p.name for p in rp.parent.iterdir()] == ["request.json"]      # aucun temporaire laissé
+
+
+# Tâche 13 (essai réel) : l'opération b1-upgrade de l'agent n'avait aucun
+# moyen d'être demandée (ni outil, ni route) ; `upgrade-b1 --bundle`.
+def test_upgrade_b1_hands_a_verified_bundle_to_the_agent(env, capsys, tmp_path, bundle, test_key):
+    path, info = bundle
+    src = tmp_path / "admin" / path.name
+    src.parent.mkdir()
+    src.write_bytes(path.read_bytes())
+    settings(env, mode="local")
+    rc, doc, _ = cli(["upgrade-b1", "--bundle", str(src)], capsys=capsys)
+    assert rc == 2 and doc["code"] == "b1-only"
+    settings(env, mode="b1")
+    seen = []
+    real = hsc.run_agent
+    hsc_run = lambda req: seen.append(req) or {"state": "done", "message": "ok"}   # noqa: E731
+    try:
+        hsc.run_agent = hsc_run
+        rc, doc, _ = cli(["upgrade-b1", "--bundle", str(src), "--dry-run"], capsys=capsys)
+        assert rc == 0 and doc["dry_run"] and not seen
+        rc, doc, _ = cli(["upgrade-b1", "--bundle", str(src)], capsys=capsys)
+    finally:
+        hsc.run_agent = real
+    assert rc == 0, doc
+    assert seen == [{"op": "b1-upgrade", "bundle": path.name}]
+    assert (staged(env) / path.name).read_bytes() == path.read_bytes()

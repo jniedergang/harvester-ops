@@ -766,6 +766,37 @@ def _enable_b1(args, doc):
     return EXIT_OK
 
 
+def cmd_upgrade_b1(args):
+    """Mise à jour de l'image d'OpenBao B1 par un nouveau paquet (tâche 13 :
+    l'opération `b1-upgrade` de l'agent n'avait aucun moyen d'être demandée).
+    Paquet vérifié comme à la pose ; l'agent prend un instantané
+    `pre-upgrade`, charge l'image, redémarre et revient à l'image d'avant si
+    OpenBao ne se descelle pas. Une version plus ancienne est refusée."""
+    if (settings().get("mode") or "local") != "b1":
+        return refuse("b1-only", "OpenBao B1 is not the active mode")
+    src = Path(args.bundle)
+    if not ob.NAME_RE.match(src.name):
+        return refuse("bundle-bad-name", "not an OpenBao bundle name (harvester-ops-openbao-<version>-<tag>.tar.gz)")
+    step("bundle", "running", "checking the OpenBao bundle")
+    with tempfile.TemporaryDirectory(prefix="openbao-bundle-") as tmp:
+        local = Path(tmp) / src.name
+        with open_input(args.bundle) as f, open(local, "wb") as o:
+            shutil.copyfileobj(f, o, 1 << 20)
+        try:
+            info = ob.verify(local, Path(tmp) / "check", cosign_key=cosign_key())
+        except ob.BundleError as e:
+            return refuse(e.code, str(e))
+        step("bundle", "done", f"OpenBao {info['version']} ({info['tag']}, {info['index_digest'][:19]})")
+        if args.dry_run:
+            out({"ok": True, "dry_run": True, "version": info["version"], "tag": info["tag"],
+                 "would": ["stage the bundle", "pre-upgrade snapshot, new image, restart (agent)"]})
+            return EXIT_OK
+        _stage_bundle(local)
+    agent_ok(run_agent({"op": "b1-upgrade", "bundle": src.name}))
+    out({"ok": True, "version": info["version"], "tag": info["tag"]})
+    return EXIT_OK
+
+
 def tf_workspaces_dir():
     """Racine des espaces Terraform de la console : la variable, sinon celle
     que la console a écrite au démarrage (revue m12), sinon `<état>/terraform`."""
@@ -1978,6 +2009,9 @@ def parser():
     s.add_argument("--wrapped-stdin", action="store_true")
     s.add_argument("--dry-run", action="store_true")
     s.add_argument("--spec", help=argparse.SUPPRESS)
+    s = sub.add_parser("upgrade-b1", help="new OpenBao B1 image from a bundle (pre-upgrade snapshot first)")
+    s.add_argument("--bundle", required=True)
+    s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("disable")
     s.add_argument("--remove-b1", action="store_true")
     s.add_argument("--leave-plan-secrets", action="store_true",
@@ -2049,6 +2083,7 @@ def parser():
 
 
 COMMANDS = {"status": cmd_status, "assistant": cmd_assistant, "check": cmd_check, "enable": cmd_enable,
+            "upgrade-b1": cmd_upgrade_b1,
             "disable": cmd_disable, "migrate": cmd_migrate, "confirm": cmd_confirm, "versions": cmd_versions,
             "rollback": cmd_rollback, "outage-test": cmd_outage_test, "rotate": cmd_rotate, "snapshot": cmd_snapshot, "restore": cmd_restore,
             "bundle": cmd_bundle, "file": cmd_file, "offline-copy": cmd_offline_copy,
