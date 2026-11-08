@@ -432,11 +432,15 @@ def _apply_offline(docs, offline):
     gabarits RKE2 : fichiers (netrc et CA, depuis un Secret), commandes de
     récupération ajoutées à la fin de `preRKE2Commands`, et
     `agentConfig.airGapped: true` (CAPRKE2 lance alors /opt/install.sh sur
-    /opt/rke2-artifacts). `offline` = {files, preRKE2Commands, secrets}
+    /opt/rke2-artifacts). 2.8.1 : `agentConfig.additionalUserData.config` =
+    cloud-init sans mise à jour de paquets ni dépôt zypper au premier
+    démarrage, dépôts remis en tête des commandes (rke2_offline.user_data,
+    les deux modes). `offline` = {files, preRKE2Commands, secrets}
     rendu par l'appelant (rke2_offline.template_patch), vide en mode
     `image` (l'image de VM porte déjà les fichiers)."""
     if offline is None:
         return docs
+    import rke2_offline
     for d in docs:
         if d.get("kind") not in RKE2_TEMPLATE_KINDS:
             continue
@@ -445,9 +449,13 @@ def _apply_offline(docs, offline):
         if paths:
             inner["files"] = [f for f in inner.get("files") or [] if f.get("path") not in paths] \
                 + copy.deepcopy(offline["files"])
-        if offline.get("preRKE2Commands"):
-            inner["preRKE2Commands"] = list(inner.get("preRKE2Commands") or []) + list(offline["preRKE2Commands"])
-        inner.setdefault("agentConfig", {})["airGapped"] = True
+        # 2.8.1 (décision 241) : dépôts zypper remis en place avant la
+        # récupération (rke2_offline.user_data les met de côté au démarrage)
+        inner["preRKE2Commands"] = list(inner.get("preRKE2Commands") or []) + [rke2_offline.repos_back()] \
+            + list(offline.get("preRKE2Commands") or [])
+        agent = inner.setdefault("agentConfig", {})
+        agent["airGapped"] = True
+        agent["additionalUserData"] = {"config": rke2_offline.user_data()}
     return docs + [copy.deepcopy(s) for s in offline.get("secrets") or []]
 
 
@@ -774,6 +782,11 @@ def check(spec, facts):
         # VM en Scheduling jusqu'au délai, sans autre signe
         out.append(finding("disk-smaller-than-image", "block", image=spec.get("image"),
                            disk=spec.get("disk_size"), image_size=f"{-(-img['virtual_size'] // _QUANTITY['Gi'])}Gi"))
+    if spec.get("offline") and 0 < _bytes(spec.get("disk_size")) < _bytes(OFFLINE_DISK_MIN):
+        # 2.8.1 : essai de la tâche 1 de 2.8.0, disque de 10 Gio à 78 % avec
+        # l'agent et Flux, ramasse-miettes d'images en échec (rien ne se
+        # télécharge à nouveau sans Internet)
+        out.append(finding("offline-disk-small", "warn", disk=spec.get("disk_size"), advised=OFFLINE_DISK_MIN))
     if img and img.get("ready") and not img.get("iso") and img.get("os") == "sles":
         # 2.7.0 (m-17) : rendu aussi avec disk-smaller-than-image (un `elif`
         # le cachait). Vu sur harv1 : une image SLES non enregistrée n'a aucun dépôt,
@@ -1030,6 +1043,8 @@ def blocking(findings):
     return [f for f in findings if f["level"] == "block"]
 
 
+# 2.8.1 : disque conseillé d'un cluster sans Internet (constat offline-disk-small)
+OFFLINE_DISK_MIN = "20Gi"
 _QUANTITY = {"Ki": 1024, "Mi": 1024 ** 2, "Gi": 1024 ** 3, "Ti": 1024 ** 4}
 
 

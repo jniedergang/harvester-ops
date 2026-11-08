@@ -206,7 +206,10 @@ def test_image_mode_only_sets_air_gap_and_no_option_changes_nothing():
     out = cc.postprocess(templates(), cc.normalize({"name": "web", "offline": True, "offline_artifacts": "image"}),
                          offline={})
     inner = next(d for d in out if d["kind"] == "RKE2ConfigTemplate")["spec"]["template"]["spec"]
-    assert inner == {"agentConfig": {"airGapped": True}}
+    # 2.8.1 (décision 241) : plus le cloud-init sans paquets et la remise
+    # en place des dépôts (tests/api/test_offline_bootstrap_281.py)
+    assert inner == {"agentConfig": {"airGapped": True, "additionalUserData": {"config": ro.user_data()}},
+                     "preRKE2Commands": [ro.repos_back()]}
     plain = cc.postprocess(templates(), cc.normalize({"name": "web"}))
     assert "agentConfig" not in json.dumps([d for d in plain if d["kind"] in cc.RKE2_TEMPLATE_KINDS])
 

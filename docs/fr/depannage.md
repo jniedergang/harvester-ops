@@ -703,15 +703,31 @@ de nouveau dans Harvester ensuite.
 
 ### Un cluster enfant sans Internet reste à 10 %
 
-CAPHV (v0.10.1) écrit `package_update: true` et `packages: [iptables]` dans
-le cloud-init de chaque machine. Sans Internet, zypper attend l'expiration
-de chaque dépôt de l'image (environ 5 minutes chacun, vu sur harvlab2 avec
-Leap 15.6) avant que les commandes RKE2 ne passent. Lisez la console de la
-machine (`kubectl -n <ns>-vms logs <pod virt-launcher> -c
-guest-console-log`) : lignes `Timeout exceeded when accessing ...`.
-Employez une image dont les dépôts visent un miroir que les machines
-joignent, ou qui n'en a aucun. La création sans Internet de bout en bout
-n'est pas vérifiée en réel en 2.8.0 pour cette raison.
+CAPHV (v0.10.1) écrit `package_update: true` et `packages:
+[qemu-guest-agent, iptables]` dans le cloud-init de chaque machine. Sans
+Internet, zypper attend l'expiration de chaque dépôt de l'image (environ
+5 minutes chacun, vu sur harvlab2 avec Leap 15.6) avant que les commandes
+RKE2 ne passent.
+
+Depuis 2.8.1, un cluster créé avec `offline: true` coupe la mise à jour
+des paquets et met de côté les dépôts zypper pendant le premier démarrage
+(voir la procédure opérationnelle, cluster enfant sans Internet). Si les
+lignes `Timeout exceeded when accessing ...` apparaissent encore dans la
+console de la machine (`kubectl -n <ns>-vms logs <pod virt-launcher> -c
+guest-console-log`) :
+
+- le cluster a été créé avant 2.8.1 : ses gabarits ne portent pas
+  `agentConfig.additionalUserData`. Supprimez-le et créez-le de nouveau ;
+- lisez le Secret cloud-init de la machine sur le cluster Harvester
+  (`<machine>-cloud-init` dans l'espace de noms des VMs, clé `userdata`).
+  Il doit porter `package_update: false` et la ligne `bootcmd`
+  `harvester-ops-repos-aside`. Si `package_update` vaut encore true, la
+  version de CAPHV fusionne cloud-init autrement : employez une image dont
+  les dépôts visent un miroir que les machines joignent, ou qui n'en a
+  aucun.
+
+La création sans Internet de bout en bout n'est pas encore vérifiée en
+réel (2.8.1 reste à passer au banc).
 
 ### Nœuds Harvester posé, mais les images viennent encore de l'origine
 

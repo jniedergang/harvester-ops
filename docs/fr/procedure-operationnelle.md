@@ -814,12 +814,29 @@ Internet** ; ou un modèle de cluster).
      lance (`agentConfig.airGapped: true`).
 4. `offline_artifacts: image` : l'image de VM porte déjà ces fichiers. Rien
    n'est récupéré.
+5. cloud-init sans réseau (2.8.1, les deux modes). CAPHV demande à
+   cloud-init une mise à jour des paquets, ainsi que `qemu-guest-agent` et
+   `iptables`, sur chaque machine. Sans Internet, zypper attendait environ
+   5 minutes par dépôt avant RKE2. La console pose désormais
+   `agentConfig.additionalUserData` dans les deux gabarits :
+   - `package_update`, `package_upgrade` et `package_reboot_if_required`
+     à false ;
+   - au premier démarrage, un `bootcmd` met de côté `/etc/zypp/repos.d` et
+     `/etc/zypp/services.d` (une fois par instance). La liste de paquets de
+     CAPHV ne peut pas être retirée, et son installation rafraîchirait les
+     dépôts. Sans dépôt, elle échoue tout de suite ;
+   - la première commande sans Internet les remet en place, avant la
+     récupération.
+
+   L'image doit donc déjà porter `iptables` et `qemu-guest-agent` : ils ne
+   sont pas installés. Sans `iptables`, les pods qui publient un port
+   d'hôte (ingress-nginx) ne démarrent pas.
 
 Limites : la récupération emploie l'authentification Basic. Un registre
 qui n'accepte que l'authentification par jeton sur ses blobs (Harbor,
-façon ghcr) n'est pas contrôlé. Donnez aux workers un disque de 20 Gio au
-moins : à 10 Gio, le banc a atteint 78 % avec l'agent et Flux, et le
-ramasse-miettes des images échouait.
+façon ghcr) n'est pas contrôlé. Un disque de moins de 20 Gio est un
+avertissement (`offline-disk-small`) : à 10 Gio, le banc a atteint 78 %
+avec l'agent et Flux, et le ramasse-miettes des images échouait.
 
 ### Rôles (2.8.0)
 
@@ -855,7 +872,7 @@ Sur harvlab2, avec un Dex de banc (OIDC) et le Rancher externe 2.14.1 :
 Non vérifié en réel : un fournisseur d'identité de client autre que Dex
 (Keycloak, Entra ID), Rancher 2.15, un Rancher en airgap avec
 `system-default-registry`, le cluster enfant sans Internet de bout en bout
-(arrêté par la mise à jour de paquets que CAPHV demande à cloud-init, voir
-le dépannage), un plan enchaîné à une vraie installation de Harvester avec
+(arrêté en 2.8.0 par la mise à jour de paquets que CAPHV demande à
+cloud-init ; 2.8.1 la saute, l'essai au banc reste à faire), un plan enchaîné à une vraie installation de Harvester avec
 un secret Git, plus de deux clusters enfants, harv4 (deux clusters dans une
 exécution).

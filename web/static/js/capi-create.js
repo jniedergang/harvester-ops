@@ -58,6 +58,7 @@ const CapiCreate = (() => {
     'offline-needs-no-fallback': (v) => tr('capi.new.fd.offline-needs-no-fallback', v),
     'offline-rke2-missing': (v) => tr('capi.new.fd.offline-rke2-missing', v),
     'offline-rke2-version-mismatch': (v) => tr('capi.new.fd.offline-rke2-version-mismatch', v),
+    'offline-disk-small': (v) => tr('capi.new.fd.offline-disk-small', v),          // 2.8.1
     'keypair-missing': (v) => tr('capi.new.fd.keypair-missing', v),
     'network-missing': (v) => tr('capi.new.fd.network-missing', v),
     'storage-class-missing': (v) => tr('capi.new.fd.storage-class-missing', v),
@@ -136,7 +137,7 @@ const CapiCreate = (() => {
                      kubernetes: 'capi', integrations: 'plug', access: 'key', registries: 'containers', check: 'test' };
   // Le menu où se règle ce que dit chaque constat (compteur sur le menu).
   const FINDING_SEC = {
-    'small-nodes': 'nodes', 'cpu-short': 'nodes', 'memory-short': 'nodes',
+    'small-nodes': 'nodes', 'cpu-short': 'nodes', 'memory-short': 'nodes', 'offline-disk-small': 'nodes',
     'gateway-differs': 'network', 'mask-differs': 'network', 'endpoint-dhcp': 'network',
     'storage-class-missing': 'storage', 'cidr-overlap': 'kubernetes', 'cni-tuning-ignored': 'integrations',
     'cluster-registry-unknown': 'registries', 'cluster-registry-not-attached': 'registries',

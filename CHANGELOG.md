@@ -4,6 +4,63 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.8.1] - 2026-11-08 - Offline child clusters skip the package update
+
+### Fixed
+- **Child cluster without Internet stuck before RKE2** (decision 241, R11
+  of the 2.8.0 bench). CAPHV v0.10.1 merges its own base into the
+  cloud-init of every machine: `package_update: true` and `packages:
+  [qemu-guest-agent, iptables]`. Without Internet, zypper waited about 5
+  minutes per repository of the image, and RKE2 had not started after 21
+  minutes. For a cluster created with `offline: true` (both
+  `offline_artifacts` modes), the console now sets
+  `agentConfig.additionalUserData.config` in both RKE2 templates:
+  `package_update`, `package_upgrade` and `package_reboot_if_required`
+  are false, and a `bootcmd` moves `/etc/zypp/repos.d` and
+  `/etc/zypp/services.d` aside once per instance (`cloud-init-per
+  instance`). The package list of CAPHV is a merged list the console
+  cannot remove, and installing it would refresh the repositories; without
+  repositories it fails at once. The first command without Internet puts
+  the repositories back, before the RKE2 fetch. Online clusters are
+  unchanged.
+
+### Added
+- **Warning for a small disk without Internet** (`offline-disk-small`,
+  not blocking): a cluster created with `offline: true` and a disk under
+  20 GiB. At 10 GiB the 2.8.0 bench reached 78 % with the agent and Flux,
+  and the image garbage collection failed. In the creation window (Nodes
+  menu), in `harvester-capi check` and in the plans.
+### Upgrade notes
+- A child cluster created without Internet by 2.8.0 keeps its templates:
+  delete it and create it again with 2.8.1.
+- The node image of a cluster without Internet must already carry
+  `iptables` and `qemu-guest-agent`: they are not installed.
+
+**Back to 2.8.0**: nothing to undo. Templates made by 2.8.1 keep their
+`additionalUserData` until the cluster is deleted.
+
+### Known limits
+- The cloud-init change relies on how CAPHV v0.10.1 merges cloud-init
+  (`util/cloudinit.go`, MergeCloudInitData: the bootstrap data of CAPRKE2
+  come last and their simple keys win, lists are joined). Another CAPHV
+  version may merge differently.
+- Only zypper repositories are moved aside. An image with another package
+  manager still tries to install the CAPHV package list.
+
+### Tests
+- API tests: both templates carry the cloud-init in both modes and none
+  online, a copy of the CAPHV merge turns the package update off, the
+  configuration survives CAPRKE2 (no ignored key, no Jinja marker), the
+  repositories are set aside then restored by a real shell (twice, without
+  a saved copy, placeholder used meanwhile, no zypper), the restore comes
+  before the fetch, renewal keeps the cloud-init, the disk warning at its
+  threshold. Seven named mutations are killed.
+
+### Not verified for real
+- Unit-tested only, no bench pass for this release: the offline
+  cloud-init (R11 and R12 on harv4 and a real chained plan with a Git
+  secret are to run with 2.8.1).
+
 ## [2.8.0] - 2026-11-08 - Child cluster access, GitOps, machine renewal and finished registries
 
 ### Added

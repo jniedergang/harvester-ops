@@ -116,6 +116,8 @@ LITERALS = [
     (CREATE, r"'offline-rke2-missing': \(v\) => tr\('capi\.new\.fd\.offline-rke2-missing'", "capi.new.fd.offline-rke2-missing"),
     (CREATE, r"'offline-rke2-version-mismatch': \(v\) => tr\('capi\.new\.fd\.offline-rke2-version-mismatch'",
      "capi.new.fd.offline-rke2-version-mismatch"),
+    # 2.8.1 : disque d'un cluster sans Internet sous 20 Gio
+    (CREATE, r"'offline-disk-small': \(v\) => tr\('capi\.new\.fd\.offline-disk-small'", "capi.new.fd.offline-disk-small"),
 ]
 
 

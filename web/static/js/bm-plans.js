@@ -204,6 +204,7 @@ const BMPlans = (() => {
     'offline-needs-no-fallback': () => tr('dpw.f.offlineNeedsNoFallback'),
     'offline-rke2-missing': () => tr('dpw.f.offlineRke2Missing'),
     'offline-rke2-version-mismatch': () => tr('dpw.f.offlineRke2VersionMismatch'),
+    'offline-disk-small': () => tr('dpw.f.offlineDiskSmall'),                       // 2.8.1
   };
   const LEVELS = {
     blocking: () => tr('dpw.lvl.blocking'), warning: () => tr('dpw.lvl.warning'), info: () => tr('dpw.lvl.info'),

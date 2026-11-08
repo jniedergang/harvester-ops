@@ -674,15 +674,30 @@ them again in Harvester afterwards.
 
 ### A child cluster without Internet stays at 10 %
 
-CAPHV (v0.10.1) writes `package_update: true` and `packages: [iptables]`
-in the cloud-init of every machine. Without Internet, zypper waits for
-each repository of the image to time out (about 5 minutes each, seen on
-harvlab2 with Leap 15.6) before the RKE2 commands run. Read the console of
-the machine (`kubectl -n <ns>-vms logs <virt-launcher pod> -c
-guest-console-log`): lines `Timeout exceeded when accessing ...`. Use an
-image whose repositories point at a mirror the machines reach, or that
-has none. The end-to-end offline creation is not verified for real in
-2.8.0 for this reason.
+CAPHV (v0.10.1) writes `package_update: true` and `packages:
+[qemu-guest-agent, iptables]` in the cloud-init of every machine. Without
+Internet, zypper waits for each repository of the image to time out
+(about 5 minutes each, seen on harvlab2 with Leap 15.6) before the RKE2
+commands run.
+
+Since 2.8.1, a cluster created with `offline: true` turns the package
+update off and moves the zypper repositories aside during the first
+boot (see the operating procedure, child cluster without Internet). If
+the lines `Timeout exceeded when accessing ...` still show in the console
+of the machine (`kubectl -n <ns>-vms logs <virt-launcher pod> -c
+guest-console-log`):
+
+- the cluster was created before 2.8.1: its templates do not carry
+  `agentConfig.additionalUserData`. Delete it and create it again;
+- read the cloud-init Secret of the machine on the Harvester cluster
+  (`<machine>-cloud-init` in the VM namespace, key `userdata`). It should
+  hold `package_update: false` and the `bootcmd` line
+  `harvester-ops-repos-aside`. If `package_update` is still true, the
+  CAPHV version merges cloud-init differently: use an image whose
+  repositories point at a mirror the machines reach, or that has none.
+
+The end-to-end offline creation is not verified for real yet (2.8.1
+still has to be run on the bench).
 
 ### Harvester nodes merged, but images still come from the origin
 
