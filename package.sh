@@ -129,12 +129,28 @@ else
     providers="$(tar -xzOf "$bundle" --wildcards '*/turtles.json' 2>/dev/null \
         | python3 -c 'import json,sys; print(", ".join(p["name"]+" "+p["version"] for p in json.load(sys.stdin)["providers"]))' 2>/dev/null || echo "?")"
     ok "Cluster API bundle embedded: $(basename "$bundle") ($providers)"
-    python3 bin/harvester-provider-install.py "$TF_PROVIDER_VERSION" \
+    # 2.9.0 : une somme publiée illisible fait échouer l'installateur (miroir
+    # des fichiers officiels : HARVESTER_PROVIDER_BASE_URL) ; le message dit
+    # ce qui a réellement été vérifié, d'après provider.json
+    tfp_log="$(mktemp "${DIST_DIR}/.tf-provider.XXXXXX")"
+    if ! python3 bin/harvester-provider-install.py "$TF_PROVIDER_VERSION" \
         --dest "$WORK_DIR/bundles/terraform-provider" \
-        --source-label "embedded in harvester-ops ${VERSION}" 2>/dev/null
-    [[ -x "$WORK_DIR/bundles/terraform-provider/bin/terraform-provider-harvester" ]] || {
-        err "Terraform provider ${TF_PROVIDER_VERSION} could not be fetched"; exit 1; }
-    ok "Terraform provider embedded: v${TF_PROVIDER_VERSION} (checksum verified)"
+        --source-label "embedded in harvester-ops ${VERSION}" >/dev/null 2>"$tfp_log" \
+        || [[ ! -x "$WORK_DIR/bundles/terraform-provider/bin/terraform-provider-harvester" ]]; then
+        err "Terraform provider ${TF_PROVIDER_VERSION} could not be fetched or verified:"
+        grep '|error|' "$tfp_log" | cut -d'|' -f4- >&2 || true
+        rm -f "$tfp_log"
+        exit 1
+    fi
+    rm -f "$tfp_log"
+    tfp_meta="$WORK_DIR/bundles/terraform-provider/provider.json"
+    tfp_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$tfp_meta")"
+    if [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("verified") is True)' "$tfp_meta")" == "True" ]]; then
+        ok "Terraform provider embedded: v${TF_PROVIDER_VERSION} (sha256 ${tfp_sha:0:12}... matches the published SHA256SUMS)"
+    else
+        warn "Terraform provider embedded: v${TF_PROVIDER_VERSION} WITHOUT CHECKSUM VERIFICATION" \
+             "(HARVESTER_PROVIDER_ALLOW_UNVERIFIED=1, development only, never for a release)"
+    fi
     # 2.3.0 : le provider libvirt des déclarations KVM, vérifié par la
     # signature GPG de la release (clé épinglée) puis par sa somme
     scripts/fetch-libvirt-provider.sh "$TF_LIBVIRT_PROVIDER_VERSION" "$TF_LIBVIRT_PROVIDER_FPR" \
