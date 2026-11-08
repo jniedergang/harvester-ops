@@ -241,7 +241,9 @@ Such an entity carries no policy, so it gives nothing beyond the OpenTofu
 token policy.
 
 Restoring by hand (`sudo harvester-secrets restore <file>`) does not check
-the console's running actions.
+the console's running actions. The preflight lists KVM keys rotated from the
+console only: a rotation run by hand with `harvester-secrets rotate ssh-kvm`
+is not listed.
 
 ## OpenTofu encrypted states
 

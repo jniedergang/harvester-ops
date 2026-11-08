@@ -254,7 +254,9 @@ première action. Une telle entité ne porte aucune politique : elle ne donne
 rien de plus que la politique des jetons d'OpenTofu.
 
 Une restauration à la main (`sudo harvester-secrets restore <file>`) ne
-vérifie pas les actions en cours de la console.
+vérifie pas les actions en cours de la console. La vérification préalable
+ne liste que les clés KVM tournées depuis la console : une rotation lancée
+à la main par `harvester-secrets rotate ssh-kvm` n'y figure pas.
 
 ## États OpenTofu chiffrés
 

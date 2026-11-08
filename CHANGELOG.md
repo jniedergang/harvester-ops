@@ -163,7 +163,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   refused. Cluster connections already open keep working.
 - **Empty the cache** applies to the console process; each tool run logs in
   and leaves its token to expire (1 h period).
-- Restoring by hand does not check the console's running actions.
+- Restoring by hand does not check the console's running actions; the
+  preflight does not see a KVM key rotated by hand with `harvester-secrets
+  rotate ssh-kvm`.
 - The restore review compares `default` only once its hash is recorded
   (install or first policy refresh; a failed read is logged and retried at
   the next refresh).
