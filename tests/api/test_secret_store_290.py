@@ -752,7 +752,8 @@ def test_tool_copies_erased_on_sigterm(tmp_path):
         time.sleep(30)
     """)
     p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True,
-                         env={k: v for k, v in os.environ.items() if k != ss.SPAWNED_ENV})
+                         env={k: v for k, v in os.environ.items() if k != ss.SPAWNED_ENV},
+                         preexec_fn=lambda: signal.signal(signal.SIGTERM, signal.SIG_DFL))  # pas d'héritage ignoré
     path = Path(p.stdout.readline().strip())
     assert path.exists()
     p.send_signal(signal.SIGTERM)

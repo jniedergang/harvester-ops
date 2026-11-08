@@ -18,6 +18,8 @@ INSTALL_DIR="/opt/harvester-ops"
 # Test hook: only the main unit follows it (the update agent units always go
 # to /etc/systemd/system).
 SYSTEMD_DIR="${HARVESTER_OPS_UNIT_DIR:-/etc/systemd/system}"
+# Test hook of the secret store agent units (2.9.0); /etc/systemd/system otherwise.
+SECRETS_UNIT_DIR="${HARVESTER_OPS_SECRETS_UNIT_DIR:-/etc/systemd/system}"
 CONTAINER_RUNTIME=""
 
 C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_RED=$'\e[31m'; C_BLUE=$'\e[34m'; C_BOLD=$'\e[1m'; C_RESET=$'\e[0m'
@@ -543,6 +545,49 @@ install_update_agent() {
         || warn "could not enable harvester-ops-update.path (updates from the web UI unavailable)"
 }
 
+# 2.9.0 : un service à interpréteur Python figé (même rendu que l'agent des
+# mises à jour).
+render_python_unit() {
+    local python="$1" unit="$2"
+    python="${python//\\/\\\\}"
+    python="${python//&/\\&}"
+    python="${python//|/\\|}"
+    sed "s|^ExecStart=/usr/bin/python3 |ExecStart=$python |" "$unit"
+}
+
+# 2.9.0 : l'agent des secrets (OpenBao). La console, non root, ne peut ni
+# écrire /etc/harvester-ops/openbao ni poser un conteneur : elle dépose une
+# demande que cet agent, root, traite (liste fermée d'opérations). La
+# minuterie quotidienne fait tourner le secret_id de la console à 30 jours.
+# L'unité du mode B1 est gardée dans $INSTALL_DIR/openbao (l'agent la pose à
+# l'installation de B1) ; déjà posée, elle est mise à jour, jamais relancée.
+install_secrets_agent() {
+    local python u
+    python="$(detect_update_python)" || return 2
+    install -d -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/openbao" "$SECRETS_UNIT_DIR"
+    install -m 0644 "$SCRIPT_DIR/config/systemd/harvester-ops-openbao.service" "$INSTALL_DIR/openbao/"
+    install -m 0644 "$SCRIPT_DIR/config/openbao/openbao.hcl.tpl" "$INSTALL_DIR/openbao/"
+    install -d -m 0750 "$STATE_DIR"
+    install -d -m 0750 -o harvester-ops -g harvester-ops "$STATE_DIR/secrets-agent" "$STATE_DIR/secrets-agent/staged" 2>/dev/null \
+        || install -d -m 0750 "$STATE_DIR/secrets-agent" "$STATE_DIR/secrets-agent/staged"
+    for u in harvester-secrets-agent.path harvester-secrets-rotate.timer; do
+        install -m 0644 "$SCRIPT_DIR/config/systemd/$u" "$SECRETS_UNIT_DIR/$u"
+    done
+    render_python_unit "$python" "$SCRIPT_DIR/config/systemd/harvester-secrets-agent.service" \
+        > "$SECRETS_UNIT_DIR/harvester-secrets-agent.service"
+    chmod 0644 "$SECRETS_UNIT_DIR/harvester-secrets-agent.service"
+    if [[ -f "$SECRETS_UNIT_DIR/harvester-ops-openbao.service" ]]; then
+        install -m 0644 "$SCRIPT_DIR/config/systemd/harvester-ops-openbao.service" "$SECRETS_UNIT_DIR/"
+    fi
+    printf '{"installed": "%s", "ts": %s}\n' "$(cat "$SCRIPT_DIR/VERSION")" "$(date +%s)" \
+        > "$STATE_DIR/secrets-agent/agent.json"
+    chown harvester-ops:harvester-ops "$STATE_DIR/secrets-agent/agent.json" 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now harvester-secrets-agent.path harvester-secrets-rotate.timer >/dev/null 2>&1 \
+        && ok "Secret store agent installed (OpenBao from the web UI)" \
+        || warn "could not enable the secret store agent (OpenBao from the web UI unavailable; use sudo harvester-secrets)"
+}
+
 # v1.82.0 : mise à jour non interactive, lancée par l'agent (ou à la main) :
 # scripts, image, fournisseurs embarqués, unités. Ne touche jamais à la
 # configuration, aux comptes, aux certificats ni au pare-feu.
@@ -560,6 +605,7 @@ upgrade() {
         write_container_service || return 2
     fi
     install_update_agent
+    install_secrets_agent
     install_uninstaller
     ok "Upgrade to $(cat "$SCRIPT_DIR/VERSION") installed (restart harvester-ops to run it)"
 }
@@ -645,6 +691,23 @@ PY
             warn "bootstrap registry images: checksum mismatch, not installed"
         fi
     fi
+    # 2.9.0 : le paquet OpenBao du mode B1, construit par le client
+    # (harvester-secrets bundle) et posé dans bundles/openbao/ avant
+    # l'installation : somme vérifiée, rangé où la console le propose
+    # (l'agent le revérifie entièrement avant de le poser)
+    if compgen -G "$src/openbao/harvester-ops-openbao-*.tar.gz" >/dev/null; then
+        install -d -m 0750 "$STATE_DIR" "$STATE_DIR/secrets-agent" "$STATE_DIR/secrets-agent/staged"
+        for b in "$src"/openbao/harvester-ops-openbao-*.tar.gz; do
+            name="$(basename "$b")"
+            if ! (cd "$src/openbao" && sha256sum -c "$name.sha256" >/dev/null 2>&1); then
+                warn "OpenBao bundle $name: checksum mismatch, not installed"
+                continue
+            fi
+            install -m 0640 "$b" "$b.sha256" "$STATE_DIR/secrets-agent/staged/"
+            ok "OpenBao bundle $name available (Settings > Secrets, or sudo harvester-secrets enable --mode b1)"
+        done
+        chown -R "$owner" "$STATE_DIR/secrets-agent" 2>/dev/null || warn "could not give $STATE_DIR/secrets-agent to $owner"
+    fi
     # 2.3.0 : le provider libvirt des déclarations KVM, vérifié au build
     # (signature GPG + somme) ; celui du livrable remplace toujours le précédent
     local lv="$src/terraform-provider-libvirt"
@@ -695,6 +758,7 @@ EOF
         if prompt_yesno "Install the systemd service?" "Y"; then
             install_systemd
             install_update_agent
+            install_secrets_agent
         fi
     fi
 

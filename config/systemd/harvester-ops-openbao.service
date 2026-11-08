@@ -1,0 +1,52 @@
+[Unit]
+Description=harvester-ops, OpenBao secret store next to the console (mode B1)
+Documentation=file:///opt/harvester-ops/docs/en/install.md
+After=network-online.target
+Wants=network-online.target
+# Started before the console, but never required by it: without OpenBao the
+# console starts and shows its banner.
+Before=harvester-ops.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=120s
+TimeoutStopSec=60s
+# Written by harvester-secrets-agent: OPENBAO_IMAGE, OPENBAO_UID (account
+# harvester-ops-openbao), OPENBAO_PREV_KEY (1 during an unseal key rotation).
+EnvironmentFile=/etc/harvester-ops-openbao/unit.env
+
+ExecStartPre=-/usr/bin/podman rm -f harvester-ops-openbao
+# Listens on 127.0.0.1:8210 only, hence --network host (the console joins it
+# on the loopback, the AppRole roles are bound to 127.0.0.1/32). Read-only
+# root filesystem; the unseal key comes as a podman secret on a private
+# tmpfs (runc cannot create the mount point on a read-only image), the
+# bootstrap files of the first start from /run/hops-openbao-boot (tmpfs,
+# removed by the agent once read). The image's entrypoint is bypassed: it
+# would drop root itself, and its default command is `server -dev`.
+ExecStart=/bin/sh -c 'prev=""; boot=""; \
+    [ "$${OPENBAO_PREV_KEY:-0}" = 1 ] && prev="--secret hops-openbao-unseal-prev,uid=$${OPENBAO_UID},gid=0,mode=0400"; \
+    [ -d /run/hops-openbao-boot ] && boot="-v /run/hops-openbao-boot:/run/hops-openbao-boot:ro,Z"; \
+    exec /usr/bin/podman run --rm \
+    --name harvester-ops-openbao \
+    --network host \
+    --read-only \
+    --tmpfs /tmp \
+    --tmpfs /run/secrets:mode=0755 \
+    --memory 512m --memory-swap 512m \
+    --user "$${OPENBAO_UID}:0" \
+    --entrypoint /usr/bin/bao \
+    -e SKIP_CHOWN=1 \
+    --secret "hops-openbao-unseal,uid=$${OPENBAO_UID},gid=0,mode=0400" $$prev \
+    -v /etc/harvester-ops-openbao/openbao.hcl:/openbao/config/openbao.hcl:ro,Z \
+    -v /etc/harvester-ops-openbao/tls:/openbao/tls:ro,Z \
+    -v /var/lib/harvester-ops-openbao/data:/openbao/data:rw,Z \
+    -v /var/lib/harvester-ops-openbao/audit:/openbao/audit:rw,Z \
+    $$boot \
+    "$${OPENBAO_IMAGE}" server -config=/openbao/config/openbao.hcl'
+
+ExecStop=/usr/bin/podman stop -t 30 harvester-ops-openbao
+
+[Install]
+WantedBy=multi-user.target
