@@ -46,16 +46,20 @@ def release(tmp_path):
     return d
 
 
-def run_install(tmp_path, call, script_dir, state):
+def run_install(tmp_path, call, script_dir, state, b1=False):
     src = (ROOT / "install.sh").read_text()
     names = ["detect_update_python", "render_python_unit", "install_secrets_agent", "install_bundles", "_safe_fs"]
     body = "".join(shell_fn(src, n) for n in names)
     units = tmp_path / "units"
     units.mkdir(exist_ok=True)
-    script = ("set -eo pipefail\nok(){ echo \"OK $*\"; }\nwarn(){ echo \"WARN $*\"; }\n"
+    bao_etc = tmp_path / "etc-bao"
+    if b1:
+        bao_etc.mkdir(exist_ok=True)
+        (bao_etc / "agent.json").write_text("{}")
+    script = ("set -eo pipefail\nok(){ echo \"OK $*\"; }\nwarn(){ echo \"WARN $*\"; }\ninfo(){ echo \"INFO $*\"; }\n"
               "err(){ echo \"ERR $*\" >&2; }\nsystemctl(){ :; }\n"
               f"SCRIPT_DIR={script_dir}\nSTATE_DIR={state}\nINSTALL_DIR={tmp_path / 'opt'}\n"
-              f"SECRETS_UNIT_DIR={units}\n{body}\n{call}\n")
+              f"SECRETS_UNIT_DIR={units}\nOPENBAO_ETC={bao_etc}\n{body}\n{call}\n")
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
 
@@ -118,6 +122,41 @@ def test_install_bundles_stages_the_openbao_bundle_through_the_helper(tmp_path):
     assert (staged / BUNDLE).read_bytes() == b"bundle"
     assert stat.S_IMODE((staged / BUNDLE).stat().st_mode) == 0o640
     assert "could not give" not in r.stdout
+
+
+@pytest.mark.parametrize("b1,waiting,queued", [
+    (False, False, False),          # pas de B1 : rien à remettre
+    (True, False, True),            # B1 posé : b1-policies demandé à l'agent
+    (True, True, False),            # une demande de la console attend : jamais remplacée
+])
+def test_upgrade_queues_b1_policies_when_b1_is_installed(tmp_path, b1, waiting, queued):
+    state = tmp_path / "state"
+    (state / "secrets-agent").mkdir(parents=True)
+    rp = state / "secrets-agent" / "request.json"
+    if waiting:
+        rp.write_text('{"op": "status"}')
+    r = run_install(tmp_path, "install_secrets_agent", release(tmp_path), state, b1=b1)
+    assert r.returncode == 0, r.stderr
+    if queued:
+        req = json.loads(rp.read_text())
+        assert req == {"op": "b1-policies", "requested_by": "install.sh 2.9.0"}
+        assert stat.S_IMODE(rp.stat().st_mode) == 0o600
+        # la demande passe la liste fermée de l'agent
+        assert set(req) <= hsa.COMMON | hsa.KEYS[req["op"]]
+    elif waiting:
+        assert rp.read_text() == '{"op": "status"}' and "already waiting" in r.stdout
+    else:
+        assert not rp.exists()
+
+
+def test_upgrade_b1_policies_request_never_follows_a_link(tmp_path):
+    state = tmp_path / "state"
+    (state / "secrets-agent").mkdir(parents=True)
+    victim = plant_file_link(state, "secrets-agent/request.json", tmp_path)
+    before = victim.read_text()
+    r = run_install(tmp_path, "install_secrets_agent", release(tmp_path), state, b1=True)
+    assert r.returncode == 0 and victim.read_text() == before
+    assert not (state / "secrets-agent" / "request.json").is_symlink()
 
 
 @pytest.mark.parametrize("name", ["install_secrets_agent", "install_bundles"])

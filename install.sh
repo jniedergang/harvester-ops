@@ -598,6 +598,19 @@ install_secrets_agent() {
     fi
     printf '{"installed": "%s", "ts": %s}\n' "$(cat "$SCRIPT_DIR/VERSION")" "$(date +%s)" \
         | _safe_fs --owner harvester-ops write "$STATE_DIR" secrets-agent/agent.json 0644
+    # B1 déjà posé : les politiques hops-* de cette console sont remises au
+    # texte de la version installée (décision 276) par une demande b1-policies,
+    # traitée par l'agent dès que son unité de chemin est active. Une demande
+    # de la console déjà en attente n'est jamais remplacée.
+    if [[ -f "${OPENBAO_ETC:-/etc/harvester-ops-openbao}/agent.json" ]]; then
+        if _safe_fs exists "$STATE_DIR" secrets-agent/request.json; then
+            warn "OpenBao B1 policies not refreshed: a request is already waiting for the agent (reinstall later)"
+        else
+            printf '{"op": "b1-policies", "requested_by": "install.sh %s"}\n' "$(cat "$SCRIPT_DIR/VERSION")" \
+                | _safe_fs write "$STATE_DIR" secrets-agent/request.json 0600 \
+                && info "OpenBao B1 policies of this console queued for refresh (Settings > Secrets shows the result)"
+        fi
+    fi
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now harvester-secrets-agent.path harvester-secrets-rotate.timer >/dev/null 2>&1 \
         && ok "Secret store agent installed (OpenBao from the web UI)" \
