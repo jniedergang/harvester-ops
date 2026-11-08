@@ -1756,6 +1756,15 @@ class ActionRun:
         self.proc = None
         self._cond = threading.Condition()
         self._closed = False
+        # 2.9.0 (revue I1 des tâches 5-7) : bail de l'action sur les copies
+        # de travail des secrets (kubeconfig, clé), porté par l'action et non
+        # par le fil : les copies que le fil de la requête vient de recevoir
+        # passent à l'action, rendues à sa fin (close)
+        self.secret_lease = None
+        if _sst._STORE is not None and _sst._STORE._bao is not None:
+            self.secret_lease = _sst.Lease()
+            with contextlib.suppress(Exception):
+                _sst._STORE.lease_thread_holds(self.secret_lease)
         # v1.6.0: bump the in-flight gauge; close() will decrement.
         metric_actions_in_flight.inc()
 
@@ -1779,10 +1788,26 @@ class ActionRun:
             self.progress_ver += 1
             self._cond.notify_all()
 
+    def hold_secrets(self, *paths):
+        """L'action tient celles des `paths` (arguments compris, `--opt=chemin`)
+        qui sont des copies de travail du magasin, jusqu'à sa fin."""
+        st = _sst._STORE
+        if st is None or not paths:
+            return 0
+        if self.secret_lease is None:
+            self.secret_lease = _sst.Lease()
+        try:
+            return st.hold_for(paths, self.secret_lease)
+        except Exception:                      # noqa: BLE001 : jamais bloquant pour l'action
+            return 0
+
     def close(self):
         with self._cond:
             self._closed = True
             self._cond.notify_all()
+        if self.secret_lease is not None and _sst._STORE is not None:
+            with contextlib.suppress(Exception):
+                _sst._STORE.release(self.secret_lease)
         try:
             _actions_persist(self)
         except Exception:
@@ -2425,6 +2450,7 @@ def start_action(action, cluster, dry_run=False, interactive=False,
 
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, action, cluster, cmd, dry_run=dry_run)
+    run.hold_secrets(*cmd)                     # copies remises à l'outil (revue I1 des tâches 5-7)
     # Identité capturée ICI, dans le thread de la requête : le thread de
     # travail ne la retrouverait pas, et l'action repartirait avec le
     # kubeconfig partagé, administrateur.
@@ -17745,13 +17771,17 @@ def api_capi_install(cluster):
                         f"{compat_warning['target_version']} — proceeding anyway"),
             "ts": time.time(),
         })
+    key_path = _cluster_ssh_key_path(ssh) or ""
+    # copies résolues par le fil de la requête, utilisées par le fil de
+    # l'action : tenues par l'action jusqu'à sa fin (revue I1 des tâches 5-7)
+    run.hold_secrets(kc, key_path)
     with ACTIONS_LOCK:
         ACTIONS[run_id] = run
     threading.Thread(
         target=_capi_install_runner,
         args=(run, cluster, kc, nodes_ips,
               ssh.get("user", "rancher"),
-              _cluster_ssh_key_path(ssh) or "",
+              key_path,
               ssh.get("port", 22),
               dry_run),
         daemon=True,
@@ -18068,6 +18098,7 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
                        and not a.partition("=")[2].startswith("/")
                        and a not in ("--kubeconfig", "--db")]
     run = ActionRun(run_id, label, cluster, public, dry_run=dry_run)
+    run.hold_secrets(*cmd)                     # copies remises à l'outil (revue I1 des tâches 5-7)
     run.cluster_user = ((current_cluster_identity() or {}).get("user") if cluster_user is _UNSET
                         else cluster_user)
     run.secret_clusters = tuple(c for c in (*(busy_clusters or ()), *(secret_clusters or ())) if c)
@@ -24039,6 +24070,7 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
 def _start_transfer(label, cluster, clusters, public_cmd, cmd, result=None):
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, label, cluster, public_cmd)
+    run.hold_secrets(*cmd)                     # copies remises à l'outil (revue I1 des tâches 5-7)
     run.result = dict(result or {})
     run.secret_clusters = tuple(c for c in clusters or () if c)       # 2.9.0 : copies des deux clusters
     _ident = current_cluster_identity()

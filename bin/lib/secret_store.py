@@ -1371,6 +1371,28 @@ class OpenBaoStore:
             self._hold(path, c["ref"])
             return True
 
+    def hold_for(self, path, lease):
+        """L'action `lease` (Lease) tient la copie `path` jusqu'à sa fin,
+        quel que soit le fil qui l'a reçue (revue I1 des tâches 5-7 : copie
+        résolue par le fil de la requête, utilisée par le fil de l'action).
+        False si `path` n'est pas une copie de ce magasin."""
+        with self._lock:
+            c = self._copies.get(str(path))
+            if c is None:
+                return False
+            if not any(w() is lease for w in c["holders"]):
+                c["holders"].append(lease.ref)
+            return True
+
+    def lease_thread_holds(self, lease):
+        """Les copies tenues par le fil courant passent aussi à `lease`
+        (création d'une action dans le fil d'une requête)."""
+        me = threading.current_thread()
+        with self._lock:
+            for c in self._copies.values():
+                if any(w() is me for w in c["holders"]) and not any(w() is lease for w in c["holders"]):
+                    c["holders"].append(lease.ref)
+
     def _hold(self, p, ref):
         me = threading.current_thread()
         for path, c in self._copies.items():
@@ -1392,6 +1414,23 @@ class OpenBaoStore:
                 del self._copies[path]
                 if self._derived.get(c["ref"]) == path:
                     del self._derived[c["ref"]]
+
+
+class Lease:
+    """Bail d'une action sur des copies de travail : vivant jusqu'à
+    `release()` (fin de l'action), quel que soit le fil qui tient la copie."""
+
+    def __init__(self):
+        self._alive = True
+
+    def is_alive(self):
+        return self._alive
+
+    def ref(self):                                  # forme d'un weakref : holder() -> objet vivant
+        return self
+
+    def release(self):
+        self._alive = False
 
 
 # ---------------------------------------------------------------------------
@@ -1706,6 +1745,32 @@ class MultiStore(LocalStore):
             if b is not None:
                 b.purge()
         self._old_bao = []
+
+    def hold_for(self, paths, lease):
+        """Bail de l'action `lease` sur celles des `paths` qui sont des
+        copies de travail (anciens supports compris) ; les autres chemins
+        sont ignorés. Rend le nombre de copies tenues."""
+        n = 0
+        stores = [b for b in [self._bao, *self._old_bao] if b is not None]
+        for p in paths or ():
+            if not isinstance(p, (str, Path)):
+                continue
+            p = str(p).split("=", 1)[1] if str(p).startswith("--") and "=" in str(p) else str(p)
+            n += sum(1 for b in stores if b.hold_for(p, lease))
+        return n
+
+    def lease_thread_holds(self, lease):
+        for b in [self._bao, *self._old_bao]:
+            if b is not None:
+                b.lease_thread_holds(lease)
+
+    def release(self, lease):
+        """Fin de l'action : son bail tombe, ses copies retirées partent."""
+        lease.release()
+        for b in [self._bao, *self._old_bao]:
+            if b is not None:
+                b.sweep()
+        self._sweep_old()
 
     def _sweep_old(self):
         for b in list(self._old_bao):
