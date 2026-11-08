@@ -1651,6 +1651,9 @@ def service_source(kube, spec, harvester, read_creds=False):
             import yaml
             resolved["values"] = yaml.safe_dump(cg.flux_values(yaml.safe_load(resolved["values"] or "") or {}),
                                                 sort_keys=False)
+            # banc 2.8.0 : la release allait dans `default` (namespace par
+            # défaut d'un service) ; Flux vit dans `flux-system`
+            resolved["namespace"] = cg.FLUX_NAMESPACE
     except ValueError as e:
         return spec, found + [sv.finding("invalid-values", "block", message=str(e)[:200])], None
     if not any((p.get("package"), p.get("version")) == (src["package"], src["version"])
