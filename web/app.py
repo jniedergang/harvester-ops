@@ -3370,9 +3370,8 @@ def logout_local():
 def _sso_start(st, server_id):
     state, nonce, challenge, browser = _SSO_PENDING.start(_safe_next(request.args.get("next")),
                                                           server=server_id)
-    # 2.10.0 : `groups` demandé seulement si la découverte l'annonce
-    resp = redirect(_rs.authorize_url(st, _sso_redirect_uri(st), state, nonce, challenge,
-                                      supported=_rs.scopes_supported(_sso_http(st), st)))
+    # 2.10.0, décision 310 : jamais la portée `groups` (aucune découverte ici)
+    resp = redirect(_rs.authorize_url(st, _sso_redirect_uri(st), state, nonce, challenge))
     resp.set_cookie(_rs.PENDING_COOKIE, browser, max_age=_rs.PENDING_TTL, httponly=True,
                     secure=_sso_cookie_secure(st), samesite="Lax", path="/auth/rancher")
     return resp
@@ -3742,25 +3741,17 @@ def api_rancher_sso_register(server_id):
     x, st, admin, _ = got
     from urllib.parse import urlparse as _up
     name = (x.get("sso") or {}).get("oidc_client") or _radm.oidc_client_name(_up(redirect_uri).hostname)
-    # 2.10.0 : la portée `groups` ajoutée au client seulement si la
-    # découverte de ce Rancher l'annonce (Rancher 2.14.1 ne l'a pas)
-    groups = False
-    try:
-        groups = "groups" in _rs.scopes_supported(_sso_http(st), st)
-    except Exception:  # noqa: BLE001 : la découverte ne bloque pas l'enregistrement
-        groups = False
+    # 2.10.0, décision 310 : le client garde les portées par défaut de Rancher
     try:
         with admin:
             client_id, secret = _radm.register_oidc(
-                admin, name, redirect_uri, refresh_seconds=int(x["session_hours"]) * 3600,
-                scopes=["openid", "profile", "offline_access", "groups"] if groups else None)
+                admin, name, redirect_uri, refresh_seconds=int(x["session_hours"]) * 3600)
     except _radm.AdminError as e:
         app.logger.warning("Rancher SSO registration on %s refused: %s", server_id, e)
         return jsonify({"error": str(e)}), e.status
     _RANCHER_STORE.set_sso(load_config(), server_id, client_id, secret, redirect_uri, name)
     app.logger.info("Rancher SSO registered by %s on %s: client %s", current_user(), server_id, client_id)
-    return jsonify({"client_id": client_id, "redirect_uri": redirect_uri, "oidc_client": name,
-                    "groups_scope": groups})
+    return jsonify({"client_id": client_id, "redirect_uri": redirect_uri, "oidc_client": name})
 
 
 @app.route("/api/rancher/servers/<server_id>/sso/unregister", methods=["POST"])

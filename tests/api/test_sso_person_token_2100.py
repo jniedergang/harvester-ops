@@ -7,7 +7,7 @@
   (Rancher l'accepte encore : essai 1) ;
 * rappels « renouvelée » (reconnexion du jeton OpenBao avec le nouveau
   jeton d'identité, révocation de l'ancien) et « fermée » (revoke-self) ;
-* portée `groups` demandée seulement si la découverte l'annonce ;
+* portée `groups` jamais demandée (décision 310, revue I4) ;
 * la console n'envoie JAMAIS le jeton d'accès à OpenBao (il porte la même
   audience : OpenBao l'accepterait, essai 1) : seul le jeton d'identité.
 
@@ -169,39 +169,21 @@ def test_close_hook_and_tokens_forgotten(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Portée `groups`
+# Portée `groups` : jamais demandée en 2.10.0 (décision 310, revue I4)
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("scopes,want", [
-    (["openid", "profile", "offline_access"], False),           # Rancher 2.14.1 (essai 1)
-    (["openid", "profile", "offline_access", "groups"], True),  # rancher#55473
-])
-def test_groups_scope_only_when_announced(tmp_path, scopes, want, monkeypatch):
-    monkeypatch.setattr(rs, "_DISCOVERY", {})
+def test_groups_scope_never_requested(tmp_path):
     s = settings(tmp_path)
-    fake = Rancher()
-    fake.scopes = scopes
-    sup = rs.scopes_supported(fake, s)
-    u = rs.authorize_url(s, "https://hops/cb", "st", "no", "ch", supported=sup)
-    scope = dict(parse_qsl(urlparse(u).query))["scope"]
-    assert ("groups" in scope.split()) is want
-    assert scope.startswith("openid profile offline_access")
+    u = rs.authorize_url(s, "https://hops/cb", "st", "no", "ch")
+    assert dict(parse_qsl(urlparse(u).query))["scope"] == "openid profile offline_access"
+    assert not hasattr(rs, "scopes_supported") and not hasattr(rs, "request_scopes")
 
 
-def test_discovery_cached_and_failure_adds_nothing(tmp_path, monkeypatch):
-    monkeypatch.setattr(rs, "_DISCOVERY", {})
-    s = settings(tmp_path)
-    fake = Rancher()
-    fake.scopes = ["groups"]
-    rs.scopes_supported(fake, s)
-    rs.scopes_supported(fake, s)
-    assert sum(1 for c in fake.calls if "openid-configuration" in c[1]) <= 1
-    monkeypatch.setattr(rs, "_DISCOVERY", {})
-
-    class Down:
-        def request(self, *a, **k):
-            raise rs.SSOError("rancher-unreachable")
-    assert rs.scopes_supported(Down(), s) == ()
-    assert rs.request_scopes(()) == "openid profile offline_access"
+def test_register_keeps_default_scopes():
+    """Le client enregistré par la console garde les portées par défaut de
+    Rancher (aucun `spec.scopes`)."""
+    a = Admin()
+    radm.register_oidc(a, "n", "https://hops/cb", sleep=lambda s: None)
+    assert "scopes" not in a.sent[0][1]["spec"]
 
 
 class Admin:
@@ -220,19 +202,6 @@ class Admin:
             return 200, {"data": {"client-secret-1": base64.b64encode(b"sec").decode()}}
         cur = self.existing or {}
         return 200, dict(cur, status={"clientID": "client-1"})
-
-
-def test_register_adds_groups_scope_when_asked():
-    a = Admin()
-    radm.register_oidc(a, "n", "https://hops/cb", sleep=lambda s: None,
-                       scopes=["openid", "profile", "offline_access", "groups"])
-    assert a.sent[0][1]["spec"]["scopes"] == ["openid", "profile", "offline_access", "groups"]
-    b = Admin()
-    radm.register_oidc(b, "n", "https://hops/cb", sleep=lambda s: None)
-    assert "scopes" not in b.sent[0][1]["spec"]
-    c = Admin(existing={"spec": {"redirectURIs": ["https://hops/cb"], "scopes": ["openid"]}})
-    radm.register_oidc(c, "n", "https://hops/cb", sleep=lambda s: None, scopes=["openid", "groups"])
-    assert c.sent[-1][0] == "PUT" and c.sent[-1][1]["spec"]["scopes"] == ["openid", "groups"]
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +379,6 @@ def test_callback_keeps_id_token_out_of_whoami_and_logs(tmp_path, monkeypatch, c
     monkeypatch.setattr(wapp, "_SSO_SESSIONS", rs.Sessions(lambda: ids))
     monkeypatch.setattr(wapp, "_SSO_PENDING", rs.PendingLogins())
     monkeypatch.setattr(wapp, "_SSO_CLUSTER_IDS", {})
-    monkeypatch.setattr(rs, "_DISCOVERY", {})
     fake = r179.Rancher()
     monkeypatch.setattr(wapp, "_sso_http", lambda s: fake)
     monkeypatch.setattr(wapp, "_rancher_http", lambda s, timeout=15: fake)
@@ -421,7 +389,8 @@ def test_callback_keeps_id_token_out_of_whoami_and_logs(tmp_path, monkeypatch, c
                                     "http://localhost/auth/rancher/callback", "harvester-ops-localhost")
         r = c.get("/auth/rancher/lab/login")
         q = dict(parse_qsl(urlparse(r.headers["Location"]).query))
-        assert q["scope"] == "openid profile offline_access"     # découverte sans `groups`
+        assert q["scope"] == "openid profile offline_access"     # jamais `groups` (décision 310)
+        assert not [c for c in getattr(fake, "calls", []) if "openid-configuration" in str(c)]
         fake.nonce = q["nonce"]
         r = c.get(f"/auth/rancher/callback?code=c1&state={q['state']}")
         assert r.status_code == 302

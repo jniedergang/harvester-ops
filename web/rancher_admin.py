@@ -144,32 +144,23 @@ def oidc_client_name(console_host):
 
 
 def register_oidc(admin, name, redirect_uri, token_seconds=600, refresh_seconds=43200,
-                  sleep=time.sleep, wait=30, scopes=None):
+                  sleep=time.sleep, wait=30):
     """Crée (ou complète) le client OIDC `name` dans Rancher et rend
     (client_id, secret). Un client du même nom déjà présent reçoit notre
-    adresse de retour en plus des siennes. 2.10.0 : `scopes` (portées du
-    client, `spec.scopes`) seulement quand la découverte annonce `groups`
-    (rancher#55473) ; None laisse les portées par défaut de Rancher."""
+    adresse de retour en plus des siennes."""
     body = {"apiVersion": "management.cattle.io/v3", "kind": "OIDCClient",
             "metadata": {"name": name},
             "spec": {"description": "harvester-ops console", "redirectURIs": [redirect_uri],
                      "tokenExpirationSeconds": int(token_seconds),
                      "refreshTokenExpirationSeconds": int(refresh_seconds)}}
-    if scopes:
-        body["spec"]["scopes"] = list(scopes)
     st, out = admin.send("POST", OIDC_API, body)
     if st == 409:
         st, cur = admin.get(f"{OIDC_API}/{name}")
         if st != 200:
             raise AdminError(f"Rancher answered {st} reading the existing OIDC client")
         uris = list(((cur.get("spec") or {}).get("redirectURIs")) or [])
-        have = list(((cur.get("spec") or {}).get("scopes")) or [])
-        missing = [x for x in (scopes or ()) if x not in have]
-        if redirect_uri not in uris or missing:
-            if redirect_uri not in uris:
-                cur.setdefault("spec", {})["redirectURIs"] = uris + [redirect_uri]
-            if missing:
-                cur.setdefault("spec", {})["scopes"] = have + missing
+        if redirect_uri not in uris:
+            cur.setdefault("spec", {})["redirectURIs"] = uris + [redirect_uri]
             st, out = admin.send("PUT", f"{OIDC_API}/{name}", cur)
             if st not in (200, 201):
                 raise AdminError(f"Rancher refused updating the OIDC client ({st}): {_msg(out)}")

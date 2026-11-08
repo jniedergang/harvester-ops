@@ -170,43 +170,19 @@ class PendingLogins:
             del self._d[k]
 
 
+# 2.10.0, décision 310 (revue I4 des tâches 2 à 5) : la portée `groups` n'est
+# jamais demandée. La 2.10.0 n'en fait rien (groupes internes seulement,
+# décision 303) ; un client enregistré sans `groups` dans `spec.scopes`
+# ferait refuser toute la connexion (`invalid_scope`, essai 1). À revoir avec
+# les groupes externes (option B : seulement si la console l'a posée à
+# l'enregistrement, nouvel essai sans `groups` sur `invalid_scope`).
 BASE_SCOPES = "openid profile offline_access"
-DISCOVERY_TTL = 600
-_DISCOVERY = {}                # émetteur -> (instant, portées annoncées)
-_DISCOVERY_LOCK = threading.Lock()
 
 
-def scopes_supported(http, s, now=time.time):
-    """Portées annoncées par le document de découverte de ce Rancher, gardées
-    dix minutes ; une découverte illisible rend () (rien d'ajouté)."""
-    iss = s["issuer"]
-    with _DISCOVERY_LOCK:
-        hit = _DISCOVERY.get(iss)
-        if hit and now() - hit[0] < DISCOVERY_TTL:
-            return hit[1]
-    try:
-        status, doc = http.request("GET", iss + "/.well-known/openid-configuration")
-    except SSOError:
-        status, doc = 0, None
-    found = tuple(str(x) for x in ((doc or {}).get("scopes_supported") or ())) if status == 200 \
-        and isinstance(doc, dict) else ()
-    with _DISCOVERY_LOCK:
-        _DISCOVERY[iss] = (now(), found)
-    return found
-
-
-def request_scopes(supported=()):
-    """2.10.0 : la portée `groups` n'est demandée que si le document de
-    découverte la cite. Rancher 2.14.1 ne l'annonce pas et refuse une
-    portée inconnue (`invalid_scope`), ce qui fait échouer toute la
-    connexion (essai 1)."""
-    return BASE_SCOPES + (" groups" if "groups" in (supported or ()) else "")
-
-
-def authorize_url(s, redirect_uri, state, nonce, challenge, supported=()):
+def authorize_url(s, redirect_uri, state, nonce, challenge):
     return s["issuer"] + "/authorize?" + urllib.parse.urlencode({
         "client_id": s["client_id"], "redirect_uri": redirect_uri, "response_type": "code",
-        "scope": request_scopes(supported), "state": state, "nonce": nonce,
+        "scope": BASE_SCOPES, "state": state, "nonce": nonce,
         "code_challenge": challenge, "code_challenge_method": "S256"})
 
 
