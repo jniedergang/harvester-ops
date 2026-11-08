@@ -30,7 +30,7 @@ from fake_openbao import fake_jwt  # noqa: E402
 
 ISS = "https://rancher.example/oidc"
 CLIENT = "client-7zjw5jtpx6"
-MOUNT = f"jwt-hops-{CID}-rmgr"
+MOUNT = f"jwt-hops-{CID}-p-rmgr"
 KV = "harvester-ops"
 
 
@@ -374,7 +374,7 @@ def watch(monkeypatch):
     doc = {"mode": "a", "addr": "https://bao.example", "prefix": PREFIX, "person_token": {
         "enabled": True, "servers": {
             "rmgr": {"mount": MOUNT, "issuer": ISS, "keys": "static", "keys_sha256": oj.keys_sha256(JWKS1)},
-            "lab": {"mount": f"jwt-hops-{CID}-lab", "issuer": "https://lab.example/oidc", "keys": "discovery"}}}}
+            "lab": {"mount": f"jwt-hops-{CID}-p-lab", "issuer": "https://lab.example/oidc", "keys": "discovery"}}}}
     monkeypatch.setattr(wapp, "_secrets_settings", lambda: doc)
     monkeypatch.setattr(wapp, "_PERSON_KEYS", {"at": 0.0, "seen": {}})
     return wapp, doc

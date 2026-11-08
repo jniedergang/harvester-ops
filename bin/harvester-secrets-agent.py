@@ -1311,7 +1311,15 @@ class Agent:
             role = oj.person_role_params(req.get("client_id"), pol.B1_CIDR, cid)
         except ValueError as e:
             raise AgentError("bad-request", str(e)) from None
+        self._person_mount_only(cid, mount)
         return mount, config, role
+
+    @staticmethod
+    def _person_mount_only(cid, mount):
+        """Revue 6-7 I-3 : les gestes des personnes ne visent jamais un
+        montage d'une autre famille (cluster enfant ESO)."""
+        if not oj.is_person_mount(cid, mount) or oj.is_eso_mount(cid, mount):
+            raise AgentError("jwt-mount-kind", f"{mount} is not a person mount")
 
     @staticmethod
     def _ttl_s(v):
@@ -1449,6 +1457,7 @@ class Agent:
             mount = oj.person_mount(cid, req.get("rancher"))
         except ValueError as e:
             raise AgentError("bad-request", str(e)) from None
+        self._person_mount_only(cid, mount)
         rancher = str(req["rancher"])
         rest = {k: v for k, v in (st.get("person_jwt") or {}).items() if k != rancher}
         self.step("mount", "running", mount)

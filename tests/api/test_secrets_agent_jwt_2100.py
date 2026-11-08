@@ -28,7 +28,7 @@ from fake_openbao_b1 import TOKEN_ACCESSOR, acl_allows  # noqa: E402
 
 ISS = "https://rancher.example/oidc"
 CLIENT = "client-7zjw5jtpx6"
-MOUNT = f"jwt-hops-{CID}-rmgr"
+MOUNT = f"jwt-hops-{CID}-p-rmgr"
 PEM_A = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----"
 PEM_B = "-----BEGIN PUBLIC KEY-----\nBBBB\n-----END PUBLIC KEY-----"
 CA = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
@@ -104,6 +104,24 @@ def test_b1_jwt_mount_used_by_another_method_refused(b1):
     assert b1["srv"].auth_mounts[MOUNT + "/"]["type"] == "userpass"
 
 
+def test_b1_jwt_never_touches_an_eso_mount(b1):
+    """Revue 6-7 I-3 : un Rancher nommé comme une clé ESO pose son propre
+    montage `p-` ; le montage du cluster enfant, son rôle et sa configuration
+    restent tels quels, retrait compris."""
+    srv = b1["srv"]
+    eso = oj.eso_mount(CID, "1d905023")
+    srv.auth_mounts[eso + "/"] = {"type": "jwt", "accessor": "auth_jwt_e50e50"}
+    srv.jwt_roles[eso] = {"eso": {"token_policies": [f"hops-eso-{CID}-1d905023"]}}
+    srv.jwt_config[eso] = {"bound_issuer": "https://kubernetes.default.svc.cluster.local"}
+    before = (dict(srv.jwt_roles[eso]), dict(srv.jwt_config[eso]))
+    rc, st = jwt_op(b1, rancher="eso-1d905023")
+    assert rc == 0, st
+    assert oj.person_mount(CID, "eso-1d905023") + "/" in srv.auth_mounts
+    assert (srv.jwt_roles[eso], srv.jwt_config[eso]) == before
+    assert request(b1, op="b1-jwt-remove", rancher="eso-1d905023")[0] == 0
+    assert eso + "/" in srv.auth_mounts and srv.jwt_roles[eso] == before[0]
+
+
 def test_b1_jwt_foreign_role_removed(b1):
     srv = b1["srv"]
     assert jwt_op(b1)[0] == 0
@@ -143,7 +161,7 @@ def test_agent_policy_is_exactly_what_b1_jwt_needs(b1):
 @pytest.mark.parametrize("path,cap,ok", [
     (f"sys/auth/{MOUNT}", "sudo", True),
     ("sys/auth/userpass", "update", False),
-    (f"sys/auth/jwt-hops-000000000000-rmgr", "update", False),
+    (f"sys/auth/jwt-hops-000000000000-p-rmgr", "update", False),
     (f"auth/{MOUNT}/role", "list", True),
     (f"sys/policies/acl/hops-person-{CID}", "update", True),
     (f"sys/policies/acl/harvester-ops-{CID}", "update", False),

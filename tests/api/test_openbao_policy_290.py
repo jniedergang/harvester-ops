@@ -391,13 +391,13 @@ def _pt_cmds(keys=None, ca=None):
 def test_person_token_commands_exact_and_without_value():
     c = _pt_cmds()
     assert c[0] == "export BAO_ADDR=https://bao.example:8200"
-    assert f"bao auth enable -path=jwt-hops-{CID}-rmgr jwt" in c
+    assert f"bao auth enable -path=jwt-hops-{CID}-p-rmgr jwt" in c
     assert f"bao policy write hops-person-{CID} - <<'EOF'\n{pol.person_policy('harvester-ops', PREFIX, CID)}EOF" in c
     import json as _j
     import openbao_jwt as oj
-    conf = next(x for x in c if x.startswith(f"bao write auth/jwt-hops-{CID}-rmgr/config - "))
+    conf = next(x for x in c if x.startswith(f"bao write auth/jwt-hops-{CID}-p-rmgr/config - "))
     assert _j.loads(conf.split("\n", 1)[1].rsplit("\n", 1)[0]) == oj.mount_config("https://rancher.example/oidc")
-    role = next(x for x in c if x.startswith(f"bao write auth/jwt-hops-{CID}-rmgr/role/person - "))
+    role = next(x for x in c if x.startswith(f"bao write auth/jwt-hops-{CID}-p-rmgr/role/person - "))
     assert _j.loads(role.split("\n", 1)[1].rsplit("\n", 1)[0]) == oj.person_role_params("client-7zjw5jtpx6",
                                                                                        "10.0.0.5/32", CID)
     assert "groups_claim" not in "\n".join(c)
@@ -427,8 +427,8 @@ def test_group_and_remove_commands():
     assert pol.group_remove_commands("https://b:8200", CID, "ops")[1:] == [
         f"bao delete identity/group/name/hops-{CID}-ops", f"bao policy delete hops-group-{CID}-ops"]
     assert pol.person_remove_commands("https://b:8200", CID, "rmgr", last=True)[1:] == [
-        f"bao auth disable jwt-hops-{CID}-rmgr", f"bao policy delete hops-person-{CID}"]
-    assert pol.person_remove_commands("https://b:8200", CID, "rmgr")[1:] == [f"bao auth disable jwt-hops-{CID}-rmgr"]
+        f"bao auth disable jwt-hops-{CID}-p-rmgr", f"bao policy delete hops-person-{CID}"]
+    assert pol.person_remove_commands("https://b:8200", CID, "rmgr")[1:] == [f"bao auth disable jwt-hops-{CID}-p-rmgr"]
 
 
 @pytest.mark.parametrize("groups_only,expect", [

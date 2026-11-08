@@ -20,8 +20,8 @@ import secret_store as ss        # noqa: E402
 
 CID = "abc123def456"
 ON = {"mode": "b1", "addr": "https://127.0.0.1:8210", "prefix": f"consoles/{CID}", "console_id": CID,
-      "person_token": {"enabled": True, "servers": {"rmgr": {"mount": f"jwt-hops-{CID}-rmgr"},
-                                                     "config": {"mount": f"jwt-hops-{CID}-config"}}}}
+      "person_token": {"enabled": True, "servers": {"rmgr": {"mount": f"jwt-hops-{CID}-p-rmgr"},
+                                                     "config": {"mount": f"jwt-hops-{CID}-p-config"}}}}
 
 
 def sess(kind="sso", server="rmgr", sid="s1", login="alice@rancher"):
@@ -55,7 +55,7 @@ def test_who_acts(cls, case, session, settings, expect):
         assert idt.actor == "alice@rancher"            # X-Hops-Actor = la personne, toujours
     if want_person:
         assert idt.session_id == "s1" and idt.role == "person"
-        assert idt.mount == (f"jwt-hops-{CID}-config" if session.server_id is None else f"jwt-hops-{CID}-rmgr")
+        assert idt.mount == (f"jwt-hops-{CID}-p-config" if session.server_id is None else f"jwt-hops-{CID}-p-rmgr")
 
 
 def test_who_acts_local_actor():
@@ -67,18 +67,32 @@ def test_person_classes_match_table():
 
 
 @pytest.mark.parametrize("rid,mount", [
-    ("rmgr", f"jwt-hops-{CID}-rmgr"),
-    ("abcdefghijkl", f"jwt-hops-{CID}-abcdefghijkl"),          # 12 : gardé
+    ("rmgr", f"jwt-hops-{CID}-p-rmgr"),
+    ("abcdefghijkl", f"jwt-hops-{CID}-p-abcdefghijkl"),          # 12 : gardé
 ])
 def test_person_mount(rid, mount):
     assert oj.person_mount(CID, rid) == mount
+
+
+@pytest.mark.parametrize("rid", ["eso-1d905023", "eso-1d905023ab", "eso-abcdef0123456", "eso-x",
+                                 "p-eso-1d905023"])
+def test_person_and_eso_mounts_never_collide(rid):
+    """Revue 6-7 I-3 (décision 314 A) : un Rancher nommé comme une clé ESO,
+    tronqué ou non, ne donne jamais le montage d'un cluster enfant ; les deux
+    familles se reconnaissent à leur préfixe."""
+    m = oj.person_mount(CID, rid)
+    assert m.startswith(f"jwt-hops-{CID}-p-")
+    assert not m.startswith(f"jwt-hops-{CID}-eso-")
+    assert oj.is_person_mount(CID, m) and not oj.is_eso_mount(CID, m)
+    e = oj.eso_mount(CID, "1d905023")
+    assert e != m and oj.is_eso_mount(CID, e) and not oj.is_person_mount(CID, e)
 
 
 def test_person_mount_long_ids_are_distinct():
     a, b = oj.person_mount(CID, "rancher-prod-paris"), oj.person_mount(CID, "rancher-prod-lyon")
     assert a != b
     for m in (a, b):
-        tail = m[len(f"jwt-hops-{CID}-"):]
+        tail = m[len(f"jwt-hops-{CID}-p-"):]
         assert len(tail) <= 12 and tail.startswith("ranche")
 
 

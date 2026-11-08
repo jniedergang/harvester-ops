@@ -29,7 +29,7 @@ from fake_openbao import FakeOpenBao, fake_jwt  # noqa: E402
 CID = "abc123def456"
 PREFIX = f"consoles/{CID}"
 KV = "harvester-ops"
-JWT_MOUNT = f"jwt-hops-{CID}-rmgr"
+JWT_MOUNT = f"jwt-hops-{CID}-p-rmgr"
 ISS = "https://rancher.example/oidc"
 AUD = "client-abc"
 KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nk1-person-2100\n-----END OPENSSH PRIVATE KEY-----\n"

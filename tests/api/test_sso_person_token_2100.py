@@ -44,7 +44,7 @@ AUD = "client-abc"
 CID = "abc123def456"
 PREFIX = f"consoles/{CID}"
 KV = "harvester-ops"
-JWT_MOUNT = f"jwt-hops-{CID}-config"
+JWT_MOUNT = f"jwt-hops-{CID}-p-config"
 
 
 class Rancher(FakeRancher):

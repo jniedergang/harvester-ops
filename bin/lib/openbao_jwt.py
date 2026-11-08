@@ -34,6 +34,13 @@ TOKEN_TTL = "15m"
 TOKEN_MAX_TTL = "15m"
 ALGS = ["RS256"]
 MOUNT_PREFIX = "jwt-hops-"
+# Revue 6-7 I-3 (décision 314 A) : deux familles de montages aux préfixes
+# disjoints, `p-` pour les personnes, `eso-` pour les clusters enfants. Un
+# Rancher nommé `eso-1d905023` (accepté par RANCHER_ID_RE) donnait le nom du
+# montage ESO de la clé `1d905023`.
+PERSON_INFIX = "p-"
+ESO_INFIX = "eso-"
+ESO_KEY_RE = re.compile(r"^[0-9a-f]{8}$")
 RANCHER_ID_MAX = 12
 CONSOLE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 RANCHER_ID_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
@@ -44,7 +51,7 @@ DEFAULT_SETTINGS = {"enabled": False, "servers": {}, "groups_only": False}
 
 
 def person_mount(console_id, rancher_id):
-    """`jwt-hops-<console>-<rancher>` ; un identifiant de Rancher de plus de
+    """`jwt-hops-<console>-p-<rancher>` ; un identifiant de Rancher de plus de
     12 caractères devient ses 6 premiers suivis de 6 hexadécimaux de son
     empreinte (deux Rancher aux noms longs proches ne partagent pas un
     montage)."""
@@ -55,7 +62,29 @@ def person_mount(console_id, rancher_id):
         raise ValueError("invalid Rancher id")
     if len(rid) > RANCHER_ID_MAX:
         rid = rid[:6].rstrip("-") + hashlib.sha256(rid.encode()).hexdigest()[:6]
-    return f"{MOUNT_PREFIX}{console_id}-{rid}"
+    return f"{MOUNT_PREFIX}{console_id}-{PERSON_INFIX}{rid}"
+
+
+def eso_mount(console_id, key):
+    """`jwt-hops-<console>-eso-<clé>` d'un cluster enfant (ESO, point 295 ;
+    clé : child_eso.cluster_key, 8 hexadécimaux)."""
+    if not CONSOLE_ID_RE.match(str(console_id or "")):
+        raise ValueError("invalid console id")
+    if not ESO_KEY_RE.match(str(key or "")):
+        raise ValueError("invalid ESO cluster key (8 hexadecimals)")
+    return f"{MOUNT_PREFIX}{console_id}-{ESO_INFIX}{key}"
+
+
+def is_person_mount(console_id, mount):
+    """Montage `jwt` d'une personne de cette console (préfixe `p-`)."""
+    return str(mount or "").rstrip("/").startswith(f"{MOUNT_PREFIX}{console_id}-{PERSON_INFIX}")
+
+
+def is_eso_mount(console_id, mount):
+    """Montage `jwt` d'un cluster enfant de cette console."""
+    m = str(mount or "").rstrip("/")
+    head = f"{MOUNT_PREFIX}{console_id}-{ESO_INFIX}"
+    return m.startswith(head) and bool(ESO_KEY_RE.match(m[len(head):]))
 
 
 def person_policy_name(console_id):
@@ -302,3 +331,4 @@ def identity_for(cls, session, settings, actor=None):
         return secret_store.Identity("service", who)
     return secret_store.Identity("person", who, session_id=getattr(session, "sid", None),
                                  mount=server["mount"], role=PERSON_ROLE)
+

@@ -23,7 +23,7 @@ import openbao_client as oc   # noqa: E402
 from fake_openbao import (FakeOpenBao, MSG_DENIED, MSG_JWT_AUD, MSG_JWT_EXP, MSG_JWT_ISS,  # noqa: E402
                           MSG_JWT_KEY, MSG_JWT_NBF, MSG_JWT_SIG, fake_jwt)
 
-MOUNT_JWT = "jwt-hops-abc123def456-rmgr"
+MOUNT_JWT = "jwt-hops-abc123def456-p-rmgr"
 ISS = "https://rancher.example/oidc"
 AUD = "client-abc"
 KV = "harvester-ops"
