@@ -38,6 +38,7 @@ import secrets as _secrets
 import sqlite3
 import threading
 import time
+import weakref
 from pathlib import Path
 
 import secret_classes
@@ -78,6 +79,9 @@ CACHE_TTL_RANGE = (1, 120)
 VALUE_MAX = 1 << 20               # 1 Mio
 TMPFS_TYPES = ("tmpfs", "ramfs")
 # Erreurs du client qui disent « OpenBao ne répond pas » (bandeau, cache).
+# Une copie partagée retirée mais encore tenue par un fil vivant est effacée
+# au plus tard après ce délai (revue I1 : borne si un fil ne finit jamais).
+SHARED_HOLD_MAX_S = 12 * 3600
 DOWN_CODES = ("openbao-unreachable", "openbao-tls", "openbao-sealed", "openbao-internal")
 
 
@@ -592,7 +596,8 @@ class OpenBaoStore:
         self._clock = clock
         self._lock = threading.RLock()
         self._cache = {}          # référence -> (valeur, instant)
-        self._shared = {}         # référence -> (chemin, échéance)
+        self._shared = {}         # référence -> (chemin, échéance) : copie en service
+        self._copies = {}         # chemin -> {ref, holders (fils), retired} (revue I1)
         self.down_since = None
         self.last_error = None
 
@@ -658,11 +663,22 @@ class OpenBaoStore:
                     "cached": len(live), "cache_left_s": round(until)}
 
     def clear_cache(self):
+        """Vide le cache ; les copies partagées sont retirées du service et
+        effacées dès qu'aucune action qui les a reçues ne tourne encore."""
         with self._lock:
             self._cache.clear()
-            for p, _e in self._shared.values():
-                _unlink(p)
+            for r in list(self._shared):
+                self._retire(r)
+            self._sweep()
+
+    def purge(self):
+        """Arrêt du processus : toutes les copies partagées sont effacées."""
+        with self._lock:
+            self._cache.clear()
             self._shared.clear()
+            for p in list(self._copies):
+                _unlink(p)
+            self._copies.clear()
 
     # -- lecture, écriture ---------------------------------------------------
     def _cached(self, ref):
@@ -853,22 +869,63 @@ class OpenBaoStore:
             _unlink(p)
 
     def shared_file(self, ref, purpose, actor=None):
-        """Copie partagée entre requêtes de lecture (kubeconfig), gardée au
-        plus la durée du cache, effacée à l'expiration et à l'arrêt."""
+        """Copie partagée entre requêtes de lecture (kubeconfig), servie au
+        plus la durée du cache. Revue I1 : le fil qui la reçoit (une action,
+        une requête) la tient ; une copie retirée (expirée, cache vidé) n'est
+        effacée qu'une fois tous ses fils terminés, ou au plus tard
+        SHARED_HOLD_MAX_S après son retrait, et à l'arrêt. Un fil qui
+        reprend le même secret rend sa copie précédente."""
         now = self._clock()
         with self._lock:
-            for r, (p, until) in list(self._shared.items()):
-                if until <= now or not os.path.exists(p):
-                    _unlink(p)
-                    del self._shared[r]
             hit = self._shared.get(ref)
+            if hit and (hit[1] <= now or not os.path.exists(hit[0])):
+                self._retire(ref)
+                hit = None
             if hit:
+                self._hold(hit[0], ref)
+                self._sweep()
                 return hit[0]
         value = self.get(ref, actor)
         p = write_private_copy(self._files_dir(), purpose, value)
         with self._lock:
-            self._shared[ref] = (p, now + self.cache_ttl)
+            hit = self._shared.get(ref)
+            if hit and hit[1] > now and os.path.exists(hit[0]):
+                _unlink(p)                       # un autre fil l'a écrite entre-temps (M4)
+                p = hit[0]
+            else:
+                if hit:
+                    self._retire(ref)
+                self._shared[ref] = (p, now + self.cache_ttl)
+                self._copies[str(p)] = {"ref": ref, "holders": [], "retired": None}
+            self._hold(p, ref)
+            self._sweep()
         return p
+
+    def _retire(self, ref):
+        p, _until = self._shared.pop(ref)
+        c = self._copies.get(str(p))
+        if c is not None and c["retired"] is None:
+            c["retired"] = self._clock()
+
+    def _hold(self, p, ref):
+        me = threading.current_thread()
+        for path, c in self._copies.items():
+            if c["ref"] == ref and path != str(p):
+                c["holders"] = [w for w in c["holders"] if w() is not me]
+        c = self._copies[str(p)]
+        if not any(w() is me for w in c["holders"]):
+            c["holders"].append(weakref.ref(me))
+
+    def _sweep(self):
+        now = self._clock()
+        for path, c in list(self._copies.items()):
+            if c["retired"] is None:
+                continue
+            alive = [w for w in c["holders"] if w() is not None and w().is_alive()]
+            c["holders"] = alive
+            if not alive or now - c["retired"] > SHARED_HOLD_MAX_S:
+                _unlink(path)
+                del self._copies[path]
 
 
 # ---------------------------------------------------------------------------
@@ -919,6 +976,7 @@ class MultiStore(LocalStore):
         self._checked = 0.0
         self.settings = dict(DEFAULTS, migrated={})
         self._bao = None
+        self._old_bao = []
         self._files = None
         self._mem_files = {}
 
@@ -960,6 +1018,7 @@ class MultiStore(LocalStore):
             server = lambda s: (s.get("mode"), s.get("addr"), s.get("mount"), s.get("prefix"))  # noqa: E731
             if self._bao is not None and (server(old) != server(new) or not openbao_active(new)):
                 self._bao.clear_cache()
+                self._old_bao.append(self._bao)     # copies encore tenues : balayées plus tard
                 self._bao = None
             if self._bao is None and openbao_active(new):
                 factory = self._factory_arg or default_client_factory(new)
@@ -1086,6 +1145,7 @@ class MultiStore(LocalStore):
             raise SecretMissing(ref)
         if backend == "local":
             raise ValueError("memory secrets have no shared file")
+        self._sweep_old()
         return self._need_bao(cls, path).shared_file(ref, purpose, actor)
 
     def status(self):
@@ -1097,6 +1157,19 @@ class MultiStore(LocalStore):
     def clear_cache(self):
         if self._bao is not None:
             self._bao.clear_cache()
+
+    def purge(self):
+        for b in [self._bao, *self._old_bao]:
+            if b is not None:
+                b.purge()
+        self._old_bao = []
+
+    def _sweep_old(self):
+        for b in list(self._old_bao):
+            with b._lock:
+                b._sweep()
+                if not b._copies:
+                    self._old_bao.remove(b)
 
 
 _STORE = None
@@ -1120,7 +1193,7 @@ def _cleanup():
     s = _STORE
     if s is not None:
         try:
-            s.clear_cache()
+            s.purge()
         except Exception:                          # noqa: BLE001 : à l'arrêt, au mieux
             pass
 

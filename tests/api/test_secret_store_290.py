@@ -385,7 +385,9 @@ def test_file_and_shared_file_on_tmpfs(active, bao):
     s1 = active.shared_file(ref, "kubectl")
     assert active.shared_file(ref, "kubectl") == s1 and s1.read_text() == VALUE
     active.clear_cache()
-    assert not s1.exists()
+    assert s1.exists()                       # ce fil la tient encore (revue I1)
+    s2 = active.shared_file(ref, "kubectl")  # il en prend une neuve : l'ancienne est rendue
+    assert s2 != s1 and not s1.exists()
 
 
 def test_shared_file_expires(bao, tmp_path):
@@ -566,3 +568,96 @@ def test_put_after_latest_version_deleted(active, bao, how):
     assert json.loads(w["raw"])["options"] == {"cas": 1}
     b.clear_cache()
     assert active.get(ref) == "v2"
+
+
+def _held_in_thread(fn):
+    """Lance `fn` dans un fil qui garde son résultat jusqu'à `release()`."""
+    import threading
+    box, go = {}, threading.Event()
+
+    def run():
+        box["v"] = fn()
+        go.wait(10)
+    t = threading.Thread(target=run)
+    t.start()
+    while "v" not in box:
+        pass
+
+    def release():
+        go.set()
+        t.join()
+    return box["v"], release
+
+
+def test_shared_copy_held_by_a_live_action_survives_expiry_and_clear(bao, tmp_path):
+    """I1 : une action (fil) qui a reçu la copie partagée la garde jusqu'à
+    sa fin, même après l'expiration du cache ou « Vider le cache »."""
+    clk = Clock()
+    b = ss.OpenBaoStore({"mount": "harvester-ops", "prefix": PREFIX}, factory_for(bao),
+                        files_dir=lambda: tmp_path, clock=clk)
+    bao.put_raw("harvester-ops", f"{PREFIX}/kubeconfig/h1", {"kubeconfig": VALUE})
+    ref = "openbao:kubeconfig/h1#kubeconfig"
+    p, release = _held_in_thread(lambda: b.shared_file(ref, "kubectl"))
+    clk.t += 16 * 60
+    p2 = b.shared_file(ref, "kubectl")                 # un poller : nouvelle copie
+    assert p2 != p and p.exists() and p.read_text() == VALUE
+    b.clear_cache()
+    assert p.exists()
+    release()                                          # l'action se termine
+    p3 = b.shared_file(ref, "kubectl")                 # balayage au passage suivant
+    assert not p.exists() and p3.exists()
+    b.purge()
+    assert not p3.exists() and not p2.exists()
+
+
+def test_shared_copy_hold_is_bounded(bao, tmp_path):
+    clk = Clock()
+    b = ss.OpenBaoStore({"mount": "harvester-ops", "prefix": PREFIX}, factory_for(bao),
+                        files_dir=lambda: tmp_path, clock=clk)
+    bao.put_raw("harvester-ops", f"{PREFIX}/kubeconfig/h1", {"kubeconfig": VALUE})
+    ref = "openbao:kubeconfig/h1#kubeconfig"
+    p, release = _held_in_thread(lambda: b.shared_file(ref, "kubectl"))
+    try:
+        b.clear_cache()
+        clk.t += ss.SHARED_HOLD_MAX_S + 1
+        b.shared_file(ref, "kubectl")
+        assert not p.exists()
+    finally:
+        release()
+
+
+def test_shared_copy_concurrent_miss_leaves_one_file(bao, tmp_path, monkeypatch):
+    """M4 : deux échecs de cache simultanés ne laissent qu'une copie."""
+    import threading
+    b = ss.OpenBaoStore({"mount": "harvester-ops", "prefix": PREFIX}, factory_for(bao),
+                        files_dir=lambda: tmp_path)
+    bao.put_raw("harvester-ops", f"{PREFIX}/kubeconfig/h1", {"kubeconfig": VALUE})
+    ref = "openbao:kubeconfig/h1#kubeconfig"
+    bar = threading.Barrier(2)
+    real = b.get
+
+    def slow_get(r, actor=None):
+        v = real(r, actor)
+        bar.wait(5)
+        return v
+    monkeypatch.setattr(b, "get", slow_get)
+    out = []
+    ts = [threading.Thread(target=lambda: out.append(b.shared_file(ref, "kubectl"))) for _ in range(2)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert out[0] == out[1]
+    assert [p.name for p in tmp_path.iterdir()] == [out[0].name]
+
+
+def test_copies_of_a_dropped_store_wait_for_their_holders(active, bao, state):
+    """I1 : désactivation pendant une action, sa copie reste jusqu'à sa fin."""
+    ref = active.openbao.put("kubeconfig", "h1", "kubeconfig", VALUE)
+    p, release = _held_in_thread(lambda: active.shared_file(ref, "kubectl"))
+    _w(state / ss.SETTINGS_FILE, json.dumps({"mode": "local"}))
+    active._checked, active._sig = 0, None
+    assert not active.active() and p.exists()
+    active._sweep_old()
+    assert p.exists()
+    release()
+    active._sweep_old()
+    assert not p.exists() and active._old_bao == []
