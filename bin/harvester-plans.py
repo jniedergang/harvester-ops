@@ -9,7 +9,9 @@
   harvester-plans [--state-dir D] [--json] apply  PLAN --cluster C [--vars vars.yaml] [--dry-run]
                   [--update-declarations]
   harvester-plans [--state-dir D] [--json] resume ACTION_ID [--secrets-file s.yaml | --secrets-stdin]
-                  [--confirm-system HOST=NAME]...
+                  [--confirm-system HOST=NAME]...   (2.9.0 : OpenBao actif, secrets gardés relus)
+  harvester-plans [--state-dir D] [--json] sweep-secrets [--dry-run]
+  harvester-plans [--state-dir D] [--json] forget-secrets ACTION_ID
   harvester-plans [--state-dir D] [--json] undo ACTION_ID [--dry-run] [--include registry,unproven,modified]
                   [--confirm CLUSTER] [--delete-registry-data NAME]...
   harvester-plans [--state-dir D] [--json] install PLAN --profile P --nodes nodes.csv --cluster-name C --vip V
@@ -301,8 +303,20 @@ def cmd_resume(args, state):
     cluster = prev["action"][len(app.DEPLOY_PREFIX):]
     result = prev["result"] or {}
     install, store, run_id, kc, vip = None, None, None, None, None
+    # 2.9.0 (décision 141) : OpenBao actif, les secrets gardés du déroulé
+    # repris complètent ceux du fichier (plus de --secrets-file exigé)
+    raw = _secrets(args)                        # lu une fois (--secrets-stdin)
+    typed_g, gerr = app._deploy_gitops_secrets(raw.get("gitops_secrets"))
+    if gerr:
+        raise Refused(gerr, "secrets")
+    secrets_, gsec, from_bao, bao_err = app._deploy_resume_fill(app._sst.store(), args.action_id, raw, typed_g)
+    if from_bao:
+        print("secrets read in OpenBao (kept until the end of the run)", file=sys.stderr)
     if result.get("install"):
-        install, ierr = app._deploy_resume_install(result, cluster, _secrets(args), _confirms(args))
+        install, ierr = app._deploy_resume_install(result, cluster, secrets_, _confirms(args))
+        if ierr and bao_err and ierr[0].get("code") == "secrets-required":
+            raise Refused(f"OpenBao does not answer ({bao_err}): give the secrets with --secrets-file "
+                          "or --secrets-stdin", bao_err)
         if ierr:
             body = ierr[0]
             for m in body.get("machines") or []:
@@ -320,10 +334,49 @@ def cmd_resume(args, state):
         cluster, kc, result.get("plan") or "", result.get("variables") or {}, False, getpass.getuser(), None,
         previous=result, resumes=args.action_id, install=install, vip=vip, run_id=run_id, store=store,
         required_role="admin" if install else "operator",
-        update_differing=result.get("update_differing") is True, gitops_secrets=_gitops_secrets(app, args))
+        update_differing=result.get("update_differing") is True, gitops_secrets=gsec)
     if status != 202 and store is not None:
         store.delete_tree("plan-run", run_id)
+    if status == 202:
+        app._deploy_resume_forget(args.action_id)
     return _launched(app, body, status)
+
+
+def cmd_forget_secrets(args, state):
+    """Secrets gardés d'un déroulé arrêté oubliés avant le délai (revue m7 des
+    tâches 9-10) : la même action suivie que la console ; la reprise les
+    redemandera."""
+    app = _console(state)
+    prev, err = app._deploy_previous(args.action_id)
+    if err:
+        print(json.dumps({"ok": False, **err[0]}, indent=2))
+        return 2
+    if prev["status"] in ("starting", "running"):
+        print(json.dumps({"ok": False, "code": "deploy-running", "error": "the run is still running"}, indent=2))
+        return 2
+    run = app._plan_secrets_sweep(forget=args.action_id, wait=True, user=os.environ.get("USER") or "cli")
+    if run is None:
+        print(json.dumps({"ok": True, "removed": []}, indent=2))
+        return 0
+    print(json.dumps({"ok": run.status == "done", "action_id": run.id, **(run.result or {})}, indent=2))
+    return 0 if run.status == "done" else 1
+
+
+def cmd_sweep_secrets(args, state):
+    """Secrets des déroulés finis ou gardés plus longtemps que le délai
+    (2.9.0) : la même action suivie que la tâche de fond de la console."""
+    app = _console(state)
+    if args.dry_run:
+        due = app._plan_secrets_due()
+        out = {"ok": True, "dry_run": True, "due": [{"run": r, "reason": w} for r, w in due]}
+        print(json.dumps(out, indent=2))
+        return 0
+    run = app._plan_secrets_sweep(wait=True)
+    if run is None:
+        print(json.dumps({"ok": True, "removed": []}, indent=2))
+        return 0
+    print(json.dumps({"ok": run.status == "done", "action_id": run.id, **(run.result or {})}, indent=2))
+    return 0 if run.status == "done" else 1
 
 
 def cmd_install(args, state):
@@ -452,6 +505,12 @@ def build_parser():
     sp = sub.add_parser("resume", allow_abbrev=False)
     sp.add_argument("action_id")
     secrets_args(sp)
+    sp = sub.add_parser("sweep-secrets", allow_abbrev=False,
+                        help="remove the OpenBao secrets of ended or expired runs")
+    sp.add_argument("--dry-run", action="store_true")
+    sp = sub.add_parser("forget-secrets", allow_abbrev=False,
+                        help="forget now the secrets kept for the resume of a stopped run")
+    sp.add_argument("action_id")
     sp = sub.add_parser("undo", allow_abbrev=False)
     sp.add_argument("action_id")
     sp.add_argument("--dry-run", action="store_true", help="show the destruction plan, write nothing")
@@ -476,7 +535,8 @@ def build_parser():
 
 COMMANDS = {"plan": cmd_store, "template": cmd_store, "capi-template": cmd_store,
             "check": cmd_check, "apply": cmd_apply,
-            "resume": cmd_resume, "install": cmd_install, "undo": cmd_undo}
+            "resume": cmd_resume, "install": cmd_install, "undo": cmd_undo,
+            "sweep-secrets": cmd_sweep_secrets, "forget-secrets": cmd_forget_secrets}
 
 
 def main(argv=None):

@@ -6077,3 +6077,54 @@ html[data-mode="dark"] .tbl-scroll { --tbl-shade: rgba(0, 0, 0, 0.42); }
 .capi-access-facts { margin: 4px 0 10px; }
 .capi-ren-change { margin: 6px 0; }
 .capi-ren-change .bm-paths { margin: 4px 0 0 12px; }
+
+/* 2.9.0 : magasin de secrets (Paramètres > Secrets, assistant, bandeau) */
+.sx-tabs { margin: 6px 0 10px; }
+.sx-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.sx-head .form-hint { flex-basis: 100%; margin: 4px 0 0; }
+dl.sx-kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 8px 0 12px; font-size: 13px; }
+dl.sx-kv dt { color: var(--text-dim); }
+dl.sx-kv dd { margin: 0; overflow-wrap: anywhere; }
+.sx-warnings { margin: 6px 0 10px; }
+.sx-actions { justify-content: flex-start; gap: 8px; flex-wrap: wrap; }
+.sx-card { padding: 10px 12px; margin: 10px 0; }
+.sx-card h5 { margin: 0 0 6px; display: flex; align-items: center; gap: 6px; }
+.sx-steps { margin: 6px 0 0; padding-left: 20px; display: grid; gap: 6px; }
+.sx-settings { margin: 12px 0; }
+.sx-settings summary { cursor: pointer; font-weight: 600; }
+.sx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px 12px; margin: 8px 0; }
+.sx-grid input, .sx-window textarea, .sx-window select, .sx-inline select { width: 100%; box-sizing: border-box; }
+.sx-inline { max-width: 320px; }
+.sx-row-actions { white-space: nowrap; }
+.sx-row-actions .btn { margin: 2px 2px 2px 0; }
+.sx-classes td, .sx-rotation td, .sx-snaps td { vertical-align: top; }
+.sx-name-list { list-style: none; padding: 0; margin: 8px 0; display: flex; flex-wrap: wrap; gap: 6px; }
+pre.sx-cmds { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+  font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow: auto; }
+.sx-window { max-width: 760px; width: calc(100vw - 32px); }
+.sx-window .modal-body { max-height: calc(100vh - 190px); overflow: auto; }
+.sx-foot { padding: 10px 16px; border-top: 1px solid var(--border); justify-content: flex-end; gap: 8px; }
+.sx-modes { margin: 4px 0 10px; }
+.sx-checks { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 4px; font-size: 13px; }
+.sx-checks li.ok { color: var(--done); }
+.sx-checks li.fail { color: var(--error); }
+.sx-checks li .res-dim { color: var(--text-dim); }
+.secrets-banner.sx-down { border-left-color: var(--error); }
+.secrets-banner.sx-down .an-icon { color: var(--error); }
+.rp-secstore { margin: 0 16px; }
+@media (max-width: 700px) {
+  dl.sx-kv { grid-template-columns: 1fr; }
+  dl.sx-kv dt { margin-top: 6px; }
+  .sx-row-actions { white-space: normal; }
+}
+#secrets-settings-body .btn, .sx-window .btn { white-space: nowrap; }
+.sx-snaps td:nth-child(2), .sx-snaps td:nth-child(3), .sx-tfkeys td:nth-child(2), .sx-tfkeys td:nth-child(3) { white-space: nowrap; }
+.sx-snaps code { overflow-wrap: anywhere; }
+/* 2.9.0 : un onglet de plus dans les réglages ; sur un écran étroit les
+   onglets défilent au lieu de se chevaucher */
+@media (max-width: 900px) {
+  #settings-modal .settings-tabs { overflow-x: auto; scrollbar-width: thin; }
+  #settings-modal .settings-tab { flex: 0 0 auto; white-space: nowrap; padding: 10px 10px; }
+}
+.sx-tabs { overflow-x: auto; flex-wrap: nowrap; }
+.sx-tabs .sub-tab { flex: 0 0 auto; white-space: nowrap; }

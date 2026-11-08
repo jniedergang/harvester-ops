@@ -582,3 +582,29 @@ def test_an_unreadable_staged_file_does_not_break_the_tab(console, monkeypatch, 
         assert item["ok"] is False and "unreadable" in item["error"]
         r = c.delete(f"/api/update/staged/{a.name}")
         assert r.status_code == 409 and "cannot remove" in r.get_json()["error"]
+
+
+@pytest.mark.parametrize("extra", [
+    {"version": "1.82.5"},                        # archive remplacée après le garde de la console
+    {"version": "1.82.5", "allow_older": True},
+    {"allow_older": True},                        # retour sans version annoncée
+])
+def test_agent_refuses_an_archive_other_than_the_requested_version(agent_env, keys, extra):
+    """Relecture des corrections finales m1 : l'agent compare la version lue
+    dans l'archive à celle de la demande ; une archive remplacée entre le
+    garde de la console (retour sous la 2.9.0) et son passage est refusée."""
+    ag, dirs = agent_env
+    a = request(dirs, keys)                       # archive 1.82.0
+    (dirs["state"] / "updates" / "request.json").write_text(json.dumps({"archive": a.name, **extra}))
+    host = FakeHost(dirs, "1.82.0")
+    rc, st = run_agent(ag, host, lambda run: (True, "1.82.0"))
+    assert rc == 1 and st["state"] == "failed" and "requested" in st["message"], st
+    assert not any(c[0] == "bash" for c in host.calls)
+
+
+def test_agent_accepts_the_requested_version(agent_env, keys):
+    ag, dirs = agent_env
+    a = request(dirs, keys)
+    (dirs["state"] / "updates" / "request.json").write_text(json.dumps({"archive": a.name, "version": "1.82.0"}))
+    rc, st = run_agent(ag, FakeHost(dirs, "1.82.0"), lambda run: (True, (dirs["opt"] / "VERSION").read_text().strip()))
+    assert rc == 0 and st["state"] == "done", st

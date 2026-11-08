@@ -159,7 +159,7 @@ require_root() { :; }
 detect_update_python() { echo "$HOST_PYTHON"; }
 info() { :; }; ok() { :; }; warn() { :; }; err() { echo "$*" >&2; }
 install_scripts() { :; }; setup_service_account() { :; }; install_bundles() { :; }
-install_update_agent() { :; }; install_uninstaller() { :; }
+install_update_agent() { :; }; install_secrets_agent() { :; }; install_uninstaller() { :; }
 CONTAINER_RUNTIME=""
 upgrade
 '''

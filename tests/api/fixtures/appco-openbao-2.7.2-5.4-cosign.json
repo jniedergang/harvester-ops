@@ -1,0 +1,10 @@
+{
+  "source": "dp.apps.rancher.io/containers/openbao, tag sha256-355cbcca...sig, read 2026-11-08",
+  "index_digest": "sha256:355cbcca102b8a187a329d70a259fec31a19f607a5dee83488d5b35aafa96964",
+  "signatures": [
+    {
+      "payload": "eyJjcml0aWNhbCI6eyJpZGVudGl0eSI6eyJkb2NrZXItcmVmZXJlbmNlIjoiZHAuYXBwcy5yYW5jaGVyLmlvL2NvbnRhaW5lcnMvb3BlbmJhbyJ9LCJpbWFnZSI6eyJkb2NrZXItbWFuaWZlc3QtZGlnZXN0Ijoic2hhMjU2OjM1NWNiY2NhMTAyYjhhMTg3YTMyOWQ3MGEyNTlmZWMzMWExOWY2MDdhNWRlZTgzNDg4ZDViMzVhYWZhOTY5NjQifSwidHlwZSI6ImNvc2lnbiBjb250YWluZXIgaW1hZ2Ugc2lnbmF0dXJlIn0sIm9wdGlvbmFsIjp7ImNyZWF0b3IiOiJPQlMifX0=",
+      "signature": "YOTbTebr29macAei8/OcxGbu+iQvnxt5d8RZ4tEbvTfFkwbyD7sNZqXgBdJxm9OOdPA8NTWKTX9KmX78ht7FvRJzaOk2PIrHwPLbqNUxhzQY9yspc5cYomHW6+HYjRWWSRrC3oGnBwXAwuMovfBDdVtcJDRdJCBbLwwtZi3XG55PnMd4SzgZCkB5UaTd+kMACSmM+NT91Ybf6C+YBO06NAVM/ystJLiBVD+qZtd001W8Cf0zN3itR5p2HtDo4E+qXpXlUAwesMcUanxdrJX7bfTtgME1JXqW9+qi8bmEh1lpdIzWvRIJgIcsOCnMYA0yRB5yADoVn8OmXpqtJh8F8g=="
+    }
+  ]
+}

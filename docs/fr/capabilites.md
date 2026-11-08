@@ -3015,6 +3015,16 @@ sauvegardées.
   workspace est réinitialisé à son prochain apply ; le state Terraform
   n'est jamais touché. La même installation se fait en CLI :
   `bin/harvester-provider-install.py 1.7.3 --dest <rep>`.
+  Depuis la 2.9.0, une version n'est installée qu'une fois sa somme
+  vérifiée. Hors ligne, ou quand GitHub ne répond pas, une mise à jour par
+  numéro de version échoue au lieu d'installer un binaire non vérifié :
+  téléverser l'archive, ou donner `--sha256`. Un miroir réglé par
+  `HARVESTER_PROVIDER_BASE_URL` doit être en `https://` ou `file://` ; son
+  propre `SHA256SUMS` montre seulement que le téléchargement est celui du
+  miroir, le provider est donc noté non vérifié (`verified: false`,
+  `reference: mirror`) sauf avec `--sha256`. Le provider embarqué dans le
+  livrable est comparé à la somme épinglée dans
+  `scripts/embedded-providers.env`.
 
 ## 6. Bare-metal (console)
 
@@ -5267,6 +5277,35 @@ seulement, `--accept-degraded-standby` et les drapeaux de `resume`) sont
 couvertes par des tests unitaires et de bout en bout, pas jouées sur un
 cluster.
 
+## 12. Magasin de secrets (OpenBao, CLI + console)
+
+### Secrets dans OpenBao, classe par classe (2.9.0)
+
+La console peut garder ses secrets dans OpenBao au lieu de fichiers locaux.
+Mode A : votre OpenBao ou un Vault compatible, connexion AppRole,
+`secret_id` emballé. Mode B1 : l'OpenBao de la SUSE Application Collection
+dans un conteneur à côté de la console, clé de descellement statique,
+initialisation déclarative, instantanés. Les classes `kubeconfig`,
+`ssh-cluster`, `ssh-kvm`, `rancher-oidc`, `replication-notify`,
+`replication-hook`, `tf-kvm` migrent une par une et reviennent de la même
+façon. Les secrets d'un plan de déploiement en cours restent dans OpenBao
+jusqu'à la fin du déroulé.
+
+| Fonction | Console | CLI |
+|---|---|---|
+| Assistant d'activation (commandes et politique du mode A, paquet B1), vérifications | Paramètres > Magasin de secrets > Activer OpenBao | `harvester-secrets assistant`, `check`, `enable` |
+| Migrer une classe, revenir, confirmer les originaux | onglet Classes | `migrate`, `confirm` |
+| État, cache, panne simulée, bandeau | onglet État, bandeau | `status`, `outage-test` |
+| Versions d'un secret (auteur, action), retour à une version | onglet Versions | `versions`, `rollback` |
+| Rotation : `secret_id`, clé de descellement de B1, clés SSH KVM, clés transit | onglet Rotation | `rotate` |
+| Instantanés B1 : planification, prise, restauration avec vérification préalable et relecture par liste permise | onglet Instantanés, vue d'ensemble Disaster Recovery | `snapshot`, `snapshots`, `restore` |
+| Copie hors ligne de la clé de descellement de B1 | onglet État | `offline-copy export / done / ack` |
+| États OpenTofu chiffrés par transit | déclarations Terraform (badge, Remettre en clair) | `tf-encryption`, `tf-keys`, `tf-entity-remove` |
+| Paquet B1 et mise à jour de l'image | - | `bundle`, `upgrade-b1` |
+
+Tout est décrit dans [secrets.md](secrets.md), avec les limites et ce qui
+n'a pas été vérifié.
+
 ## Ce qui nécessite quoi
 
 | Vous voulez… | Il vous faut |
@@ -5279,6 +5318,7 @@ cluster.
 | Un fonctionnement 100 % hors-ligne | Le tarball : wheels bundlés + image OCI |
 | Des hôtes KVM et leurs VMs | La console web ou `bin/harvester-kvm.py`, et un accès SSH par clé à un compte du groupe `libvirt` de chaque hôte |
 | Des copies de secours de VMs sur un second cluster | `bin/harvester-replication.py` (ou les routes de la console), deux clusters Harvester qui partagent une cible de sauvegarde |
+| Des secrets hors du répertoire d'état | Mode A : un serveur OpenBao ou Vault ; mode B1 : le paquet OpenBao construit avec un compte de service de l'Application Collection (Rancher Prime) |
 
 Voir [architecture.md](architecture.md) pour la façon dont les surfaces se
 posent sur le moteur partagé, et [installation.md](installation.md) pour

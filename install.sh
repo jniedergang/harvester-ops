@@ -18,6 +18,8 @@ INSTALL_DIR="/opt/harvester-ops"
 # Test hook: only the main unit follows it (the update agent units always go
 # to /etc/systemd/system).
 SYSTEMD_DIR="${HARVESTER_OPS_UNIT_DIR:-/etc/systemd/system}"
+# Test hook of the secret store agent units (2.9.0); /etc/systemd/system otherwise.
+SECRETS_UNIT_DIR="${HARVESTER_OPS_SECRETS_UNIT_DIR:-/etc/systemd/system}"
 CONTAINER_RUNTIME=""
 
 C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_RED=$'\e[31m'; C_BLUE=$'\e[34m'; C_BOLD=$'\e[1m'; C_RESET=$'\e[0m'
@@ -163,7 +165,8 @@ install_scripts() {
     ln -sf "$PREFIX/harvester-plans.py" "$PREFIX/harvester-plans"
     ln -sf "$PREFIX/harvester-artefacts.py" "$PREFIX/harvester-artefacts"
     ln -sf "$PREFIX/harvester-registry.py" "$PREFIX/harvester-registry"
-    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer,forklift,capi,network,resources,baremetal,containers,kvm,gpus,bookings,replication,folders,plans,artefacts,registry}"
+    ln -sf "$PREFIX/harvester-secrets.py" "$PREFIX/harvester-secrets"
+    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer,forklift,capi,network,resources,baremetal,containers,kvm,gpus,bookings,replication,folders,plans,artefacts,registry,secrets}"
 }
 
 # -----------------------------------------------------------------------------
@@ -555,6 +558,71 @@ install_update_agent() {
         || warn "could not enable harvester-ops-update.path (updates from the web UI unavailable)"
 }
 
+# 2.9.0 : un service à interpréteur Python figé (même rendu que l'agent des
+# mises à jour).
+render_python_unit() {
+    local python="$1" unit="$2"
+    python="${python//\\/\\\\}"
+    python="${python//&/\\&}"
+    python="${python//|/\\|}"
+    sed "s|^ExecStart=/usr/bin/python3 |ExecStart=$python |" "$unit"
+}
+
+# 2.9.0 : l'agent des secrets (OpenBao). La console, non root, ne peut ni
+# écrire /etc/harvester-ops/openbao ni poser un conteneur : elle dépose une
+# demande que cet agent, root, traite (liste fermée d'opérations). La
+# minuterie quotidienne fait tourner le secret_id de la console à 30 jours.
+# L'unité du mode B1 est gardée dans $INSTALL_DIR/openbao (l'agent la pose à
+# l'installation de B1) ; déjà posée, elle est mise à jour, jamais relancée.
+install_secrets_agent() {
+    local python u
+    python="$(detect_update_python)" || return 2
+    install -d -m 0755 "$INSTALL_DIR" "$INSTALL_DIR/openbao" "$SECRETS_UNIT_DIR"
+    install -m 0644 "$SCRIPT_DIR/config/systemd/harvester-ops-openbao.service" "$INSTALL_DIR/openbao/"
+    install -m 0644 "$SCRIPT_DIR/config/openbao/openbao.hcl.tpl" "$INSTALL_DIR/openbao/"
+    # clé publique de l'Application Collection : l'agent vérifie avec elle la
+    # signature cosign d'un paquet B1 à la pose (jamais une clé de l'état)
+    install -m 0644 "$SCRIPT_DIR/config/openbao/application-collection-cosign.pub" "$INSTALL_DIR/openbao/"
+    # sous $STATE_DIR (au compte de la console) : seulement par _safe_fs (2.8.3)
+    install -d -m 0750 "$STATE_DIR"
+    _safe_fs --owner harvester-ops mkdir "$STATE_DIR" secrets-agent 0750
+    _safe_fs --owner harvester-ops mkdir "$STATE_DIR" secrets-agent/staged 0750
+    for u in harvester-secrets-agent.path harvester-secrets-rotate.timer; do
+        install -m 0644 "$SCRIPT_DIR/config/systemd/$u" "$SECRETS_UNIT_DIR/$u"
+    done
+    render_python_unit "$python" "$SCRIPT_DIR/config/systemd/harvester-secrets-agent.service" \
+        > "$SECRETS_UNIT_DIR/harvester-secrets-agent.service"
+    chmod 0644 "$SECRETS_UNIT_DIR/harvester-secrets-agent.service"
+    if [[ -f "$SECRETS_UNIT_DIR/harvester-ops-openbao.service" ]]; then
+        install -m 0644 "$SCRIPT_DIR/config/systemd/harvester-ops-openbao.service" "$SECRETS_UNIT_DIR/"
+    fi
+    printf '{"installed": "%s", "ts": %s}\n' "$(cat "$SCRIPT_DIR/VERSION")" "$(date +%s)" \
+        | _safe_fs --owner harvester-ops write "$STATE_DIR" secrets-agent/agent.json 0644
+    # B1 déjà posé : les politiques hops-* de cette console sont remises au
+    # texte de la version installée (décision 276) par une demande b1-policies,
+    # traitée par l'agent dès que son unité de chemin est active. Une demande
+    # de la console déjà en attente n'est jamais remplacée.
+    if [[ -f "${OPENBAO_ETC:-/etc/harvester-ops-openbao}/agent.json" ]]; then
+        # créée seulement si aucune demande n'attend, en une fois (O_EXCL,
+        # mise en place sans remplacement) ; les répertoires recréés vont au
+        # compte de la console, la demande reste à root
+        local rc=0
+        printf '{"op": "b1-policies", "requested_by": "install.sh %s"}\n' "$(cat "$SCRIPT_DIR/VERSION")" \
+            | _safe_fs --owner harvester-ops create "$STATE_DIR" secrets-agent/request.json 0600 || rc=$?
+        if [[ $rc -eq 0 ]]; then
+            info "OpenBao B1 policies of this console queued for refresh (Settings > Secrets shows the result)"
+        elif [[ $rc -eq 4 ]]; then
+            warn "OpenBao B1 policies not refreshed: a request is already waiting for the agent (reinstall later)"
+        else
+            warn "OpenBao B1 policies not refreshed (request not written)"
+        fi
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now harvester-secrets-agent.path harvester-secrets-rotate.timer >/dev/null 2>&1 \
+        && ok "Secret store agent installed (OpenBao from the web UI)" \
+        || warn "could not enable the secret store agent (OpenBao from the web UI unavailable; use sudo harvester-secrets)"
+}
+
 # v1.82.0 : mise à jour non interactive, lancée par l'agent (ou à la main) :
 # scripts, image, fournisseurs embarqués, unités. Ne touche jamais à la
 # configuration, aux comptes, aux certificats ni au pare-feu.
@@ -572,6 +640,7 @@ upgrade() {
         write_container_service || return 2
     fi
     install_update_agent
+    install_secrets_agent
     install_uninstaller
     ok "Upgrade to $(cat "$SCRIPT_DIR/VERSION") installed (restart harvester-ops to run it)"
 }
@@ -663,6 +732,25 @@ PY
             warn "bootstrap registry images: checksum mismatch, not installed"
         fi
     fi
+    # 2.9.0 : le paquet OpenBao du mode B1, construit par le client
+    # (harvester-secrets bundle) et posé dans bundles/openbao/ avant
+    # l'installation : somme vérifiée, rangé où la console le propose
+    # (l'agent le revérifie entièrement avant de le poser)
+    if compgen -G "$src/openbao/harvester-ops-openbao-*.tar.gz" >/dev/null; then
+        install -d -m 0750 "$STATE_DIR"
+        _safe_fs "${own[@]}" mkdir "$STATE_DIR" secrets-agent/staged 0750
+        for b in "$src"/openbao/harvester-ops-openbao-*.tar.gz; do
+            name="$(basename "$b")"
+            if ! (cd "$src/openbao" && sha256sum -c "$name.sha256" >/dev/null 2>&1); then
+                warn "OpenBao bundle $name: checksum mismatch, not installed"
+                continue
+            fi
+            _safe_fs "${own[@]}" install "$b" "$STATE_DIR" "secrets-agent/staged/$name" 0640
+            _safe_fs "${own[@]}" install "$b.sha256" "$STATE_DIR" "secrets-agent/staged/$name.sha256" 0640
+            ok "OpenBao bundle $name available (Settings > Secrets, or sudo harvester-secrets enable --mode b1)"
+        done
+        _safe_fs "${own[@]}" chown-tree "$STATE_DIR" secrets-agent || warn "could not give secrets-agent to harvester-ops"
+    fi
     # 2.3.0 : le provider libvirt des déclarations KVM, vérifié au build
     # (signature GPG + somme) ; celui du livrable remplace toujours le précédent
     local lv="$src/terraform-provider-libvirt"
@@ -715,6 +803,7 @@ EOF
         if prompt_yesno "Install the systemd service?" "Y"; then
             install_systemd
             install_update_agent
+            install_secrets_agent
         fi
     fi
 

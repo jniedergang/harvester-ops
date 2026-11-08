@@ -134,6 +134,8 @@ import replication_follow as rf  # noqa: E402
 import replication_link as rl  # noqa: E402
 import replication_notify as rn  # noqa: E402
 import replication_run as rr  # noqa: E402
+import secret_classes as sc  # noqa: E402
+import secret_store as ss  # noqa: E402
 import vm_transfer as vt  # noqa: E402
 from kube import Kube, cluster_config  # noqa: E402
 
@@ -621,6 +623,41 @@ def _spec_mappings(args):
     return maps
 
 
+def _store_put(args):
+    """Écrivain d'un secret nouveau (revue I4 de la tâche 8) : classe migrée
+    et outil lancé seul -> rangé dans OpenBao, la base garde la référence ;
+    sinon None (écriture locale d'avant). Jamais de valeur dans un message."""
+    def put(cls, path, field, value):
+        try:
+            return ss.cli_put(cls, path, field, value, actor=args.by or system_user(), action=args.id or None)
+        except ss.SecretError as e:
+            raise UsageError(f"secret not stored in OpenBao ({e.code}): nothing saved", e.code) from None
+    return put
+
+
+def _hooks_to_store(args, hooks, plan_key):
+    if not hooks:
+        return hooks
+    return ss.hooks_to_refs(hooks, plan_key, _store_put(args), keep=(rp.MASK,))
+
+
+def _notify_to_store(args, cfg):
+    """Réglage des notifications : chaque secret nouveau (pas déjà une
+    référence) d'une classe migrée rangé dans OpenBao."""
+    put = _store_put(args)
+    for c, secret, value in rn.secret_slots(cfg):
+        if not isinstance(value, str) or ss.is_ref(value):
+            continue
+        ref = put("replication-notify", sc.NOTIFY_PATH, sc.notify_field(c["id"], secret), value)
+        if not ref:
+            continue
+        if isinstance(secret, tuple):
+            c["secret_headers"][secret[1]] = ref
+        else:
+            c[secret] = ref
+    return cfg
+
+
 def cmd_plan_create(args):
     req = plan_request(args)
     try:
@@ -631,6 +668,9 @@ def cmd_plan_create(args):
     for side in ("source_cluster", "target_cluster"):
         if not _known(plan[side]):
             raise UsageError(f"unknown cluster: {plan[side]}", "unknown-cluster")
+    opts = plan.get("options") or {}
+    if opts.get("hooks"):
+        plan["options"] = dict(opts, hooks=_hooks_to_store(args, opts["hooks"], f"new-{os.urandom(6).hex()}"))
     conn = open_db(args)
     try:
         stored = db.insert_plan(conn, plan, created_by=args.by or system_user(), now=utcnow())
@@ -777,6 +817,7 @@ def cmd_plan_set(args):
                     rp.hook_address_refusal(rec["hooks"], rh.allow_for("hooks"))
                 except rp.PlanError as e:
                     raise UsageError(str(e), e.code) from None
+                rec["hooks"] = _hooks_to_store(args, rec["hooks"], plan["id"])
             options.update(rec)
         if options:
             fields["options"] = options
@@ -1297,6 +1338,7 @@ def cmd_notify_set(args):
         rn.address_refusal(cfg, rh.allow_for("notifications"))
     except rn.NotifyError as e:
         raise UsageError(str(e), e.code) from None
+    cfg = _notify_to_store(args, cfg)
     db.set_setting(conn, "notify", cfg, by=args.by or system_user(), now=utcnow())
     shown = rn.mask(cfg)
     db.record_event(conn, "plan", step="notify", code="notify-set",
@@ -1312,7 +1354,7 @@ def cmd_notify_set(args):
 
 def cmd_notify_test(args):
     conn = open_db(args)
-    cfg = db.get_setting(conn, "notify") or {}
+    cfg = rn.resolve_secrets(db.get_setting(conn, "notify") or {})
     ch = next((c for c in cfg.get("channels") or [] if c.get("id") == args.channel), None)
     if ch is None:
         raise UsageError(f"unknown channel: {str(args.channel)[:40]}", "unknown-channel")

@@ -252,13 +252,14 @@ def cluster_config(name):
     data = _read_yaml(cfg) if Path(cfg).is_file() else None
     for c in (data or {}).get("clusters") or []:
         if isinstance(c, dict) and c.get("name") == name:
-            return c
+            return cluster_decl.materialize(c)
     state = cluster_decl.state_dir()
     path = cluster_decl.decl_path(state, name)
     if path is not None and path.is_file():
         doc = _read_yaml(path)
         if cluster_decl.check_decl(doc, path) is None:
-            return cluster_decl.resolve(doc, state)
+            # 2.9.0 : une référence du magasin devient un chemin de travail
+            return cluster_decl.materialize(cluster_decl.resolve(doc, state))
     raise SystemExit(f"unknown cluster: {name} (not in {cfg} nor in {state / cluster_decl.DECL_DIR})")
 
 

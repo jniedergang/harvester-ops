@@ -537,3 +537,161 @@ def test_a_failed_install_summarises_its_cause(tmp_path, monkeypatch):
 def test_a_dry_run_and_an_apply_are_told_apart():
     assert wapp._tf_decl_label("web", 3, True) == "tf-plan-decl:web:3"
     assert wapp._tf_decl_label("web", 3, False) == "tf-apply-decl:web:3"
+
+
+# ---------------------------------------------------------------------------
+# 2.9.0 : une VERSION dont la somme publiée est invérifiable n'est jamais
+# installée ; adresse des releases remplaçable (copie locale des fichiers
+# officiels), somme toujours vérifiée. Vu à la 2.8.2 : pendant une panne de
+# GitHub, l'installateur continuait sans somme et package.sh disait
+# « checksum verified ».
+# ---------------------------------------------------------------------------
+import hashlib  # noqa: E402
+import importlib.util  # noqa: E402
+import re  # noqa: E402
+
+V = "1.7.3"
+ASSET = f"terraform-provider-harvester_{V}_linux_amd64.zip"
+
+
+def mirror(tmp_path, sums="good"):
+    """Copie locale d'une release : l'archive et son SHA256SUMS (bon,
+    faux, sans la ligne de l'archive, ou absent)."""
+    d = tmp_path / "mirror" / f"v{V}"
+    d.mkdir(parents=True)
+    z = make_zip(d / ASSET, f"terraform-provider-harvester_v{V}", fake_elf())
+    digest = hashlib.sha256(z.read_bytes()).hexdigest()
+    lines = {"good": f"{digest}  {ASSET}\n", "wrong": f"{'0' * 64}  {ASSET}\n",
+             "other": f"{digest}  terraform-provider-harvester_{V}_darwin_arm64.zip\n"}
+    if sums in lines:
+        (d / f"terraform-provider-harvester_{V}_SHA256SUMS").write_text(lines[sums])
+    return f"file://{tmp_path / 'mirror'}", digest
+
+
+def run_env(env, *args):
+    e = {k: v for k, v in os.environ.items() if not k.startswith("HARVESTER_PROVIDER_")}
+    e.update(env)
+    r = subprocess.run([sys.executable, str(INSTALLER), *args], capture_output=True, text=True, timeout=60, env=e)
+    return r.returncode, r.stderr, r.stdout
+
+
+@pytest.mark.parametrize("sums,allow,rc,verified,says", [
+    ("good", None, 0, False, "accord avec le miroir seulement"),   # un miroir ne vérifie pas seul (revue I5)
+    ("missing", None, 1, None, "installation refusée"),
+    ("other", None, 1, None, "absent du SHA256SUMS"),
+    ("wrong", None, 1, None, "empreinte incorrecte"),
+    ("missing", "1", 0, False, "EMPREINTE NON VÉRIFIÉE"),
+    ("wrong", "1", 1, None, "empreinte incorrecte"),      # l'exception ne couvre jamais une somme fausse
+])
+def test_version_install_checks_the_published_sum(tmp_path, sums, allow, rc, verified, says):
+    base, digest = mirror(tmp_path, sums)
+    dest = tmp_path / "managed"
+    env = {"HARVESTER_PROVIDER_BASE_URL": base}
+    if allow:
+        env["HARVESTER_PROVIDER_ALLOW_UNVERIFIED"] = allow
+    got, err, out = run_env(env, V, "--dest", str(dest), "--arch", "amd64")
+    assert got == rc, err
+    assert says in err
+    if rc:
+        assert not (dest / "bin").exists() and not (dest / "provider.json").exists()
+    else:
+        meta = json.loads((dest / "provider.json").read_text())
+        assert meta["verified"] is verified and meta["sha256"] == digest
+        assert meta["source"].startswith(base)                       # la copie locale, pas GitHub
+
+
+def test_explicit_sha256_does_not_need_the_published_sum(tmp_path):
+    base, digest = mirror(tmp_path, "missing")
+    dest = tmp_path / "managed"
+    rc, err, _ = run_env({"HARVESTER_PROVIDER_BASE_URL": base}, V, "--dest", str(dest), "--arch", "amd64",
+                         "--sha256", digest)
+    assert rc == 0, err
+    assert json.loads((dest / "provider.json").read_text())["verified"] is True
+
+
+def test_a_local_archive_is_recorded_as_unverified(tmp_path):
+    src = make_zip(tmp_path / "p.zip", "terraform-provider-harvester_v1.7.3", fake_elf())
+    dest = tmp_path / "managed"
+    rc, err, _ = run_installer(str(src), "--dest", str(dest))
+    assert rc == 0, err
+    assert json.loads((dest / "provider.json").read_text())["verified"] is False
+
+
+def test_package_reports_what_was_really_verified():
+    """package.sh ne dit « vérifiée » que d'après provider.json, montre la
+    raison d'un échec et crie quand l'exception de développement a servi."""
+    src = (ROOT / "package.sh").read_text()
+    assert "(checksum verified)" not in src
+    block = src.split("harvester-provider-install.py", 1)[1].split("fetch-libvirt-provider.sh", 1)[0]
+    assert 'get("verified") is True' in block and "matches the checksum pinned" in block
+    assert '--sha256 "$TF_PROVIDER_SHA256"' in block
+    assert "'|error|'" in block and "2>/dev/null" not in block.split("tfp_meta=", 1)[0]
+
+
+# ---------------------------------------------------------------------------
+# 2.9.0, revue I5 et M1 de la tâche 8 : somme épinglée dans le dépôt, base en
+# clair refusée, un miroir ne rend jamais `verified: true` à lui seul,
+# l'exception de développement jamais héritée par un livrable
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("args_sha,base_kind,rc,verified,reference", [
+    (False, "mirror", 0, False, "mirror"),
+    (True, "mirror", 0, True, "pinned"),
+    (False, "github", 0, True, "github"),
+    (True, "github", 0, True, "pinned"),
+])
+def test_reference_of_the_checksum(tmp_path, monkeypatch, capsys, args_sha, base_kind, rc, verified, reference):
+    base, digest = mirror(tmp_path, "good")
+    spec = importlib.util.spec_from_file_location("hpi_ref", INSTALLER)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    for k in list(os.environ):
+        if k.startswith("HARVESTER_PROVIDER_"):
+            monkeypatch.delenv(k)
+    if base_kind == "mirror":
+        monkeypatch.setenv("HARVESTER_PROVIDER_BASE_URL", base)
+    else:
+        monkeypatch.setattr(m, "RELEASE_URL", base)             # la release officielle, servie localement
+    dest = tmp_path / "managed"
+    extra = ["--sha256", digest] if args_sha else []
+    assert m.main([V, "--dest", str(dest), "--arch", "amd64", *extra]) == rc
+    meta = json.loads((dest / "provider.json").read_text())
+    assert meta["verified"] is verified and meta["reference"] == reference
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("base", ["http://mirror.example/releases", "ftp://m/x", "mirror.example/x"])
+def test_clear_text_base_is_refused(tmp_path, base):
+    rc, err, _ = run_env({"HARVESTER_PROVIDER_BASE_URL": base}, V, "--dest", str(tmp_path / "d"), "--arch", "amd64",
+                         "--sha256", "0" * 64)
+    assert rc == 1 and "http:// refusé" in err and not (tmp_path / "d" / "provider.json").exists()
+
+
+def test_pinned_sum_beats_a_mirror_serving_its_own_sum(tmp_path):
+    """Miroir qui sert une autre archive et la somme qui va avec : la somme
+    épinglée (package.sh) la refuse."""
+    base, _digest = mirror(tmp_path, "good")
+    rc, err, _ = run_env({"HARVESTER_PROVIDER_BASE_URL": base}, V, "--dest", str(tmp_path / "d"), "--arch", "amd64",
+                         "--sha256", "1" * 64)
+    assert rc == 1 and "empreinte incorrecte" in err and "épinglée" in err
+
+
+def test_embedded_provider_sum_is_pinned_and_dev_exception_refused():
+    env = (ROOT / "scripts" / "embedded-providers.env").read_text()
+    assert re.search(r"^TF_PROVIDER_SHA256=[0-9a-f]{64}$", env, re.M)
+    src = (ROOT / "package.sh").read_text()
+    block = src.split("harvester-provider-install.py", 1)[0].rsplit("ok \"Cluster API bundle embedded", 1)[1]
+    assert 'HARVESTER_PROVIDER_ALLOW_UNVERIFIED:-0}" == "1" && "${DEV_BUILD:-0}" != "1"' in block
+    assert "exit 1" in block
+
+
+def test_package_refuses_an_inherited_dev_exception(tmp_path):
+    """Le garde de package.sh joué tel quel par bash."""
+    src = (ROOT / "package.sh").read_text()
+    guard = src[src.index('    if [[ "${HARVESTER_PROVIDER_ALLOW_UNVERIFIED'):src.index("    [[ \"$TF_PROVIDER_SHA256\"")]
+    script = "err() { echo \"ERR $*\"; }\n" + guard + "echo built\n"
+    for env, ok in (({"HARVESTER_PROVIDER_ALLOW_UNVERIFIED": "1"}, False),
+                    ({"HARVESTER_PROVIDER_ALLOW_UNVERIFIED": "1", "DEV_BUILD": "1"}, True), ({}, True)):
+        e = {k: v for k, v in os.environ.items() if k not in ("HARVESTER_PROVIDER_ALLOW_UNVERIFIED", "DEV_BUILD")}
+        e.update(env)
+        r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e)
+        assert (r.returncode == 0 and "built" in r.stdout) is ok, (env, r.stdout)

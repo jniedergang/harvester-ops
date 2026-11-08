@@ -1,0 +1,446 @@
+"""Aides des tests 2.9.0 (tâches 6 et 7) : un faux OpenBao de mode B1 (rôles
+AppRole, `secret_id` emballés et accesseurs, politiques, `sys/rotate/root`),
+un faux hôte pour l'agent des secrets, et un paquet OpenBao construit contre
+le faux registre de test_oci_push_175."""
+
+import base64
+import functools
+import json
+import re
+import secrets
+import subprocess
+import tempfile
+from pathlib import Path
+
+import oci_push as op
+import openbao_bundle as ob
+import openbao_policy as pol
+import test_oci_push_175 as t175
+from fake_openbao import MSG_WRAP, FakeOpenBao, new_token
+
+TOKEN_ACCESSOR = "auth_token_1a2b3c4d"
+
+
+ADMIN_PREFIXES = ("sys/policies/", "sys/rotate/", "sys/auth/", "sys/mounts/", "sys/audit/", "sys/raw/",
+                  "identity/", "auth/token/accessors")
+
+
+def admin_path(p):
+    """Chemins d'administration que la politique de la console ne donne pas."""
+    return (p.startswith(ADMIN_PREFIXES) or p in ("auth/token/create", "auth/token/create-orphan")
+            or re.fullmatch(r"auth/approle/role/[^/]+", p) is not None
+            or re.fullmatch(r"auth/approle/role/hops-agent-[^/]+/secret-id", p) is not None)
+
+
+def token_accessor(tok):
+    import hashlib
+    return "tacc-" + hashlib.sha256(tok.encode()).hexdigest()[:16]
+
+
+class FakeB1(FakeOpenBao):
+    """Le faux serveur, avec ce que l'agent emploie en plus."""
+
+    def __init__(self, cid="abc123def456", **kw):
+        super().__init__(**kw)
+        self.cid = cid
+        self.role_ids = {}                   # nom de rôle -> role_id
+        self.accessors = {}                  # accesseur -> (role_id, secret_id)
+        self.policies = {}
+        self.events = []                     # (quoi, détail) dans l'ordre
+        self.initialized = True
+        self.fail_paths = {}                 # chemin -> (code, message) une fois
+        self.unseals = 0
+        self.entities = {}                   # id -> {"name": "entity_<id>", "aliases": {(accesseur, nom)}}
+        # IMP-1 : politiques portées par une entité (id -> liste), espaces de
+        # noms d'OpenBao 2.x ; un instantané fabriqué les remplit
+        self.entity_policies = {}
+        self.namespaces = []
+        # tâche 11 : un instantané fabriqué (jetons aux politiques étrangères,
+        # droits d'administration donnés à la console) ; faux = comme OpenBao
+        self.crafted_admin = False           # la console obtient les chemins d'administration
+        # relecture finale I3 : configuration relue par la revue (liste
+        # permise), comme `initialize` la pose ; un test la modifie pour
+        # simuler un instantané fabriqué
+        self.default_policy = 'path "auth/token/lookup-self" {\n    capabilities = ["read"]\n}\n'
+        self.role_params = {}                # rôle AppRole -> paramètres posés
+        self.auth_mounts = {"token/": {"accessor": TOKEN_ACCESSOR, "type": "token"},
+                            "approle/": {"accessor": "auth_approle_x", "type": "approle"}}
+        self.secret_mounts = {"cubbyhole/": {"type": "cubbyhole"}, "identity/": {"type": "identity"},
+                              "sys/": {"type": "system"}, "transit/": {"type": "transit"},
+                              "harvester-ops/": {"type": "kv", "options": {"version": "2"}}}
+        self.audit_devices = {"hops/": {"type": "file", "path": "hops/"}}
+        self.token_roles = {}
+        self.groups = []
+
+    # -- amorce, comme `initialize` -------------------------------------------
+    def initialize(self, boot_dir):
+        boot = {f: Path(boot_dir, f).read_text() for f in pol.BOOT_FILES}
+        if self.role_ids:
+            # instance neuve d'une restauration : ce qu'elle pose disparaît à
+            # la restauration (le stockage de l'instantané remplace tout)
+            import copy
+            self._before_fresh = copy.deepcopy((self.accessors, self.roles, self.policies))
+        for role, sid in ((pol.console_role(self.cid), boot["console-secret-id"]),
+                          (pol.agent_role(self.cid), boot["agent-secret-id"])):
+            self.role_ids.setdefault(role, "rid-" + secrets.token_hex(6))
+            self.add_role(self.role_ids[role], sid)
+            self.accessors["acc-" + secrets.token_hex(4)] = (self.role_ids[role], sid)
+        self.tokens[boot["boot-token"]] = {"ttl": 900, "policies": [pol.boot_policy_name(self.cid)],
+                                           "created": __import__("time").time()}
+        cid = self.cid
+        self.policies.update({pol.console_role(cid): pol.console_policy("harvester-ops", f"consoles/{cid}", cid,
+                                                                         b1=True),
+                              pol.agent_role(cid): pol.agent_policy(cid),
+                              pol.boot_policy_name(cid): pol.boot_policy(cid)})
+        self.role_params = {pol.console_role(cid): dict(token_policies=[pol.console_role(cid)],
+                                                        **pol.console_role_params(pol.B1_CIDR)),
+                            pol.agent_role(cid): dict(token_policies=[pol.agent_role(cid)],
+                                                      **pol.agent_role_params())}
+        self.token_roles = {pol.tf_role(cid): pol.tf_token_role_params(cid)}
+        self.events.append(("initialized", None))
+
+    def role_of(self, name):
+        return self.role_ids.get(name)
+
+    def login_policies(self, role_id):
+        # comme `initialize` : token_policies = nom du rôle
+        return [next((n for n, r in self.role_ids.items() if r == role_id), "default")]
+
+    def _route(self, h, rec, path, body, raw):
+        m = rec["method"]
+        if path in ("sys/storage/raft/snapshot", "sys/storage/raft/snapshot-force") and m in ("POST", "PUT") \
+                and getattr(self, "_before_fresh", None) is not None and self._auth(rec) \
+                and (self.snapshot_key_ok or path.endswith("-force")):
+            boot = [t for t, i in self.tokens.items() if pol.boot_policy_name(self.cid) in i["policies"]]
+            self.accessors, self.roles, self.policies = self._before_fresh
+            self._before_fresh = None
+            for t in boot:                      # le jeton d'amorce de l'instance neuve disparaît
+                self.tokens.pop(t, None)
+            self.restored.append(raw)
+            return h._send(204)
+        if path in self.fail_paths:
+            code, msg = self.fail_paths.pop(path)
+            return h._err(code, msg)
+        if path == "sys/seal-status":
+            return h._send(200, {"type": "static", "initialized": self.initialized, "sealed": self.sealed,
+                                 "version": self.seal_version})
+        tok = self._auth(rec)
+        parts = path.split("/")
+        if path == "auth/approle/login" and body.get("role_id") in self.role_ids.values() \
+                and body.get("secret_id") in (self.roles.get(body.get("role_id")) or {}).get("secret_ids", ()):
+            # comme OpenBao : la connexion AppRole crée (une fois) l'entité de
+            # l'alias, nommé par le role_id sur le montage approle/
+            key = (self.auth_mounts["approle/"]["accessor"], body["role_id"])
+            if not any(key in e["aliases"] for e in self.entities.values()):
+                eid = secrets.token_hex(8)
+                self.entities[eid] = {"name": f"entity_{eid}", "aliases": {key}}
+        if tok and m == "LIST" and path in ("auth/approle/role", "sys/policies/acl", "auth/token/roles",
+                                            "identity/group/id", "identity/entity/id", "sys/namespaces"):
+            keys = {"auth/approle/role": lambda: sorted(self.role_ids),
+                    "sys/policies/acl": lambda: sorted(set(self.policies) | {"default", "root"}),
+                    "auth/token/roles": lambda: sorted(self.token_roles),
+                    "identity/group/id": lambda: list(self.groups),
+                    "identity/entity/id": lambda: sorted(self.entities),
+                    "sys/namespaces": lambda: [n + "/" for n in self.namespaces]}[path]()
+            return h._send(200, {"data": {"keys": keys}}) if keys else h._err(404)
+        if tok and m == "GET" and path == "sys/mounts":
+            return h._send(200, {"data": dict(self.secret_mounts)})
+        if tok and m == "GET" and path == "sys/audit":
+            return h._send(200, {"data": dict(self.audit_devices)})
+        if tok and m == "GET" and path.startswith("auth/token/roles/"):
+            r = self.token_roles.get(parts[3])
+            return h._send(200, {"data": dict(r, name=parts[3])}) if r else h._err(404)
+        if tok and path == "auth/token/lookup-self" and tok in self.tokens:
+            info = self.tokens[tok]
+            return h._send(200, {"data": {"accessor": token_accessor(tok), "ttl": info["ttl"],
+                                          "policies": info["policies"], "period": info["ttl"]}})
+        if tok and path == "auth/token/revoke-accessor":
+            t = next((t for t in self.tokens if token_accessor(t) == body.get("accessor")), None)
+            if t is None:
+                return h._err(400, "invalid accessor")
+            self.tokens.pop(t)
+            self.events.append(("revoke-accessor", body.get("accessor")))
+            return h._send(204)
+        if path.startswith("auth/approle/role/") and tok:
+            role = parts[3]
+            rid = self.role_ids.get(role)
+            rest = "/".join(parts[4:])
+            if rid is None:
+                return h._err(400, "role not found")
+            if rest == "" and m == "GET":
+                d = dict(self.role_params.get(role) or {"token_policies": [role]}, bind_secret_id=True)
+                # comme OpenBao 2.7.2 (relevé sur la VM client en tâche 13) :
+                # token_bound_cidrs rend l'adresse seule pour un /32, alors
+                # que secret_id_bound_cidrs garde « 127.0.0.1/32 »
+                d["token_bound_cidrs"] = [c[:-3] if str(c).endswith("/32") else c
+                                          for c in d.get("token_bound_cidrs") or []]
+                return h._send(200, {"data": d})
+            if rest == "secret-id" and m == "LIST":
+                return h._send(200, {"data": {"keys": [a for a, (r, _s) in self.accessors.items() if r == rid]}})
+            if rest == "role-id" and m == "GET":
+                return h._send(200, {"data": {"role_id": rid}})
+            if rest == "secret-id/lookup":
+                acc = next((a for a, (r, s) in self.accessors.items() if r == rid and s == body.get("secret_id")),
+                           None)
+                return h._send(200, {"data": {"secret_id_accessor": acc}}) if acc else h._err(404)
+            if rest == "custom-secret-id":
+                sid = body.get("secret_id")
+                # comme OpenBao 2.7.2 (revue I3 des tâches 5-7, essai P4) : un
+                # secret_id déjà enregistré est refusé en 500
+                if sid in (self.roles.get(rid) or {}).get("secret_ids", ()):
+                    return h._err(500, "SecretID is already registered")
+                self.add_role(rid, sid)
+                self.accessors.setdefault("acc-" + secrets.token_hex(4), (rid, sid))
+                self.events.append(("custom-secret-id", role))
+                return h._send(200, {"data": {"secret_id": sid}})
+            if rest == "secret-id" and m in ("POST", "PUT"):
+                sid, acc = "sid-" + secrets.token_hex(8), "acc-" + secrets.token_hex(4)
+                self.add_role(rid, sid)
+                self.accessors[acc] = (rid, sid)
+                data = {"secret_id": sid, "secret_id_accessor": acc}
+                if rec["headers"].get("x-vault-wrap-ttl"):
+                    w = self.wrap(data, f"auth/approle/role/{role}/secret-id")
+                    return h._send(200, {"wrap_info": {"token": w, "ttl": 300,
+                                                       "creation_path": f"auth/approle/role/{role}/secret-id"}})
+                return h._send(200, {"data": data})
+            if rest == "secret-id-accessor/destroy":
+                acc = body.get("secret_id_accessor")
+                r_s = self.accessors.pop(acc, None)
+                if r_s:
+                    self.roles[r_s[0]]["secret_ids"].discard(r_s[1])
+                self.events.append(("destroy-accessor", acc))
+                return h._send(204)
+        if path == "sys/capabilities-self" and tok:
+            # comme la politique de la console : patch en plus sur metadata ;
+            # les chemins d'administration lui sont refusés (sauf instantané
+            # fabriqué, tâche 11)
+            def caps(p):
+                if any(p.startswith(d) for d in self.denied):
+                    return ["deny"]
+                if admin_path(p) and not self.crafted_admin:
+                    return ["deny"]
+                return ["create", "read", "update", "patch", "delete", "list"]
+            out = {p: caps(p) for p in body.get("paths", [])}
+            return h._send(200, dict(out, data=dict(out)))
+        if path == "auth/token/accessors" and tok and m == "LIST":
+            return h._send(200, {"data": {"keys": [token_accessor(t) for t in self.tokens]}})
+        if path == "auth/token/lookup-accessor" and tok:
+            t = next((t for t in self.tokens if token_accessor(t) == body.get("accessor")), None)
+            if t is None:
+                return h._err(400, "invalid accessor")
+            return h._send(200, {"data": {"accessor": body["accessor"], "policies": self.tokens[t]["policies"]}})
+        if path == "sys/auth" and tok:
+            return h._send(200, {"data": dict(self.auth_mounts)})
+        if path.startswith("sys/policies/acl/") and tok:
+            name = path.split("/", 3)[3]
+            if m == "GET":
+                text = self.default_policy if name == "default" else self.policies.get(name)
+                return h._send(200, {"data": {"name": name, "policy": text}}) if text is not None else h._err(404)
+            if m == "DELETE":
+                self.policies.pop(name, None)
+            else:
+                self.policies[name] = body.get("policy")
+            self.events.append(("policy-" + m.lower(), name))
+            return h._send(204)
+        # entités : comme OpenBao 2.7.2 (essai P4), une entité créée par
+        # `entity_alias` s'appelle `entity_<id>` ; recherche par alias
+        if path.startswith("auth/token/create/") and tok and body.get("entity_alias"):
+            key = (TOKEN_ACCESSOR, body["entity_alias"])
+            if not any(key in e["aliases"] for e in self.entities.values()):
+                eid = secrets.token_hex(8)
+                self.entities[eid] = {"name": f"entity_{eid}", "aliases": {key}}
+        if path == "identity/lookup/entity" and tok:
+            key = (body.get("alias_mount_accessor"), body.get("alias_name"))
+            eid = next((i for i, e in self.entities.items() if key in e["aliases"]), None)
+            return h._send(200, {"data": {"id": eid, "name": self.entities[eid]["name"]}}) if eid else h._send(204)
+        if path.startswith("identity/entity/name/") and tok:
+            name = path.split("/", 3)[3]
+            eid = next((i for i, e in self.entities.items() if e["name"] == name), None)
+            if eid is None:
+                return h._err(404)
+            if m == "DELETE":
+                del self.entities[eid]
+                return h._send(204)
+            return h._send(200, {"data": {"id": eid, "name": name}})
+        if path.startswith("identity/entity/id/") and tok:
+            eid = path.split("/", 3)[3]
+            if m == "DELETE":
+                self.entities.pop(eid, None)
+                self.events.append(("entity-delete", eid))
+                return h._send(204)
+            if eid not in self.entities:
+                return h._err(404)
+            # comme `vault read identity/entity/id/<id>` : politiques et alias
+            # (accesseur et chemin du montage, nom)
+            paths = {v["accessor"]: k for k, v in self.auth_mounts.items()}
+            e = self.entities[eid]
+            return h._send(200, {"data": {"id": eid, "name": e["name"],
+                                          "policies": list(self.entity_policies.get(eid) or []),
+                                          "aliases": [{"mount_accessor": acc, "mount_path": "auth/" + paths.get(acc, "?"),
+                                                       "name": n, "canonical_id": eid}
+                                                      for acc, n in sorted(e["aliases"])]}})
+        if path == "sys/rotate/root" and tok:
+            self.events.append(("rotate-root", None))
+            return h._send(204)
+        if path == "sys/wrapping/lookup":
+            w = self.wraps.get(body.get("token"))
+            if not w:
+                return h._err(400, MSG_WRAP)
+        return super()._route(h, rec, path, body, raw)
+
+
+class FakeHost:
+    """L'hôte de l'agent : commandes notées, openssl réel, systemctl et
+    podman simulés. `on_start` est appelé au démarrage de l'unité de B1."""
+
+    def __init__(self, paths, digest=None):
+        self.p = paths
+        self.cmds = []
+        self.digest = digest
+        self.uids = {}
+        self.active = "inactive"
+        self.on_start = None
+        self.on_restart = None
+        self.secrets = {}                    # nom -> octets (secret podman)
+        self.fail = {}                       # premier mot-clé de commande -> code de sortie
+        self.chowns = []
+
+    def run(self, argv, input=None, check=True, timeout=600):
+        self.cmds.append(list(argv))
+        key = " ".join(argv[:3])
+        for k, rc in list(self.fail.items()):
+            if key.startswith(k):
+                del self.fail[k]
+                if check:
+                    import importlib
+                    raise importlib.import_module("hsa").AgentError("host-command-failed", f"{k} failed")
+                return subprocess.CompletedProcess(argv, rc, "", "failed")
+        out = ""
+        if argv[0] == "openssl":
+            return subprocess.run(argv, input=input, capture_output=True, text=True, check=True)
+        if argv[:2] == ["podman", "load"]:
+            out = "Loaded image: dp.example/containers/openbao:9.9.9-1\n"
+        elif argv[:3] == ["podman", "image", "inspect"]:
+            out = (self.digest or "") + "\n"
+        elif argv[:3] == ["podman", "secret", "create"]:
+            self.secrets[argv[3]] = Path(argv[4]).read_bytes()
+        elif argv[:3] == ["podman", "secret", "rm"]:
+            self.secrets.pop(argv[3], None)
+        elif argv[:1] == ["useradd"]:
+            self.uids[argv[-1]] = 990
+        elif argv[:2] == ["systemctl", "is-active"]:
+            out = self.active + "\n"
+        elif argv[:2] == ["systemctl", "enable"] or argv[:2] == ["systemctl", "start"] and argv[-1].startswith(
+                "harvester-ops-openbao"):
+            self.active = "active"
+            if self.on_start:
+                self.on_start()
+        elif argv[:2] == ["systemctl", "restart"]:
+            if self.on_restart:
+                self.on_restart()
+        elif argv[:2] == ["systemctl", "disable"] or argv[:2] == ["systemctl", "stop"] and argv[-1].startswith(
+                "harvester-ops-openbao"):
+            self.active = "inactive"
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    def chown(self, path, uid, gid):
+        self.chowns.append((str(path), uid, gid))
+
+    def uid_of(self, user):
+        return self.uids.get(user)
+
+    def service_owner(self):
+        return None
+
+    def group_gid(self, name):
+        return None
+
+    def ran(self, *prefix):
+        return [c for c in self.cmds if c[:len(prefix)] == list(prefix)]
+
+
+@functools.lru_cache(maxsize=None)
+def cosign_test_key():
+    """Paire RSA de test (une par processus) : (clé privée, clé publique),
+    qui tient le rôle de la clé de l'Application Collection."""
+    d = Path(tempfile.mkdtemp(prefix="hops-test-cosign-"))
+    priv, pub = d / "cosign.key", d / "cosign.pub"
+    subprocess.run(["openssl", "genrsa", "-out", str(priv), "2048"], check=True, capture_output=True)
+    subprocess.run(["openssl", "rsa", "-in", str(priv), "-pubout", "-out", str(pub)], check=True, capture_output=True)
+    return priv, pub
+
+
+def cosign_sign(payload, key=None):
+    """Signature cosign d'une charge utile (base64), comme `cosign sign`
+    avec une clé RSA : PKCS#1 v1.5 sur SHA-256."""
+    key = key or cosign_test_key()[0]
+    r = subprocess.run(["openssl", "dgst", "-sha256", "-sign", str(key)], input=payload, check=True,
+                       capture_output=True)
+    return base64.b64encode(r.stdout).decode()
+
+
+def cosign_payload(digest, reference):
+    return json.dumps({"critical": {"identity": {"docker-reference": reference},
+                                    "image": {"docker-manifest-digest": digest},
+                                    "type": "cosign container image signature"},
+                       "optional": {"creator": "test"}}, separators=(",", ":")).encode()
+
+
+def add_signature(reg, repo, digest, reference=None, payload=None, signature=None):
+    """Étiquette sha256-<hex>.sig du faux registre, telle que cosign la pose."""
+    payload = payload if payload is not None else cosign_payload(digest, reference or f"{reg.host}/{repo}")
+    reg.blobs[t175.sha(payload)] = payload
+    cfg = b"{}"
+    reg.blobs[t175.sha(cfg)] = cfg
+    man = json.dumps({"schemaVersion": 2, "mediaType": op.M_OCI,
+                      "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": t175.sha(cfg),
+                                 "size": len(cfg)},
+                      "layers": [{"mediaType": ob.SIMPLESIGNING, "digest": t175.sha(payload), "size": len(payload),
+                                  "annotations": {ob.SIG_ANNOTATION: signature or cosign_sign(payload)}}]}).encode()
+    reg.manifests[(repo, f"sha256-{digest[7:]}.sig")] = (man, op.M_OCI)
+
+
+def make_registry(tag="9.9.9-1", version="9.9.9", repo="containers/openbao", signed=True):
+    """Faux registre qui porte une image OpenBao (index amd64 + arm64),
+    signée par la clé de test (`signed`)."""
+    reg = t175.FakeRegistry(user="svc", password="Pw-AppCo-777")
+    digs = {}
+    for arch in ("amd64", "arm64"):
+        layer = t175.payload(3000, arch.encode())
+        reg.blobs[t175.sha(layer)] = layer
+        cfg = json.dumps({"architecture": arch, "os": "linux", "config": {"Labels": {ob.VERSION_LABEL: version}},
+                          "rootfs": {"type": "layers", "diff_ids": [t175.sha(layer)]}}).encode()
+        reg.blobs[t175.sha(cfg)] = cfg
+        man = json.dumps({"schemaVersion": 2, "mediaType": op.M_OCI,
+                          "config": {"mediaType": op.CONFIG_TYPE[op.M_OCI], "digest": t175.sha(cfg), "size": len(cfg)},
+                          "layers": [{"mediaType": op.LAYER_TYPE[op.M_OCI], "digest": t175.sha(layer),
+                                      "size": len(layer)}]}).encode()
+        reg.manifests[(repo, t175.sha(man))] = (man, op.M_OCI)
+        digs[arch] = (t175.sha(man), len(man))
+    idx = json.dumps({"schemaVersion": 2, "mediaType": op.M_OCI_INDEX, "manifests": [
+        {"mediaType": op.M_OCI, "digest": d, "size": n, "platform": {"os": "linux", "architecture": a}}
+        for a, (d, n) in digs.items()]}).encode()
+    reg.manifests[(repo, tag)] = (idx, op.M_OCI_INDEX)
+    reg.manifests[(repo, t175.sha(idx))] = (idx, op.M_OCI_INDEX)
+    reg.index_digest = t175.sha(idx)
+    reg.amd64 = digs["amd64"][0]
+    if signed:
+        add_signature(reg, repo, reg.index_digest)
+    return reg
+
+
+def make_bundle(out_dir, tag="9.9.9-1", version="9.9.9"):
+    """Paquet valide (rendu par openbao_bundle.build) ; (chemin, infos)."""
+    root = Path(__file__).resolve().parents[2]
+    reg = make_registry(tag, version)
+    try:
+        src = op.Registry(reg.host, {"username": "svc", "password": "Pw-AppCo-777"}, plain_http=True)
+        tpl = (root / "config" / "openbao" / "openbao.hcl.tpl").read_text()
+        got = ob.build(src, reg.host, "containers/openbao", tag, tpl, out_dir, cosign_key=cosign_test_key()[1])
+    finally:
+        reg.close()
+    return Path(got["path"]), got
+
+
+def new_wrap_token():
+    return new_token()

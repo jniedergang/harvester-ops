@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import calendar
 import contextlib
 import time
 import uuid
@@ -63,6 +64,7 @@ log_notes   = logging.getLogger("harvester-ops.notes")
 log_capi    = logging.getLogger("harvester-ops.capi")
 log_tf      = logging.getLogger("harvester-ops.terraform")
 
+import atexit
 import base64
 import sqlite3
 import yaml
@@ -159,6 +161,19 @@ BIN_DIR = _resolve_bin_dir()
 # de web/ du même nom garde la priorité.
 if str(BIN_DIR / "lib") not in sys.path:
     sys.path.append(str(BIN_DIR / "lib"))
+import secret_store as _sst  # noqa: E402  (2.9.0 : magasin de secrets)
+import secret_classes as _ssc  # noqa: E402  (2.9.0 : classes de secrets)
+# 2.9.0 : seule la configuration de la console désigne OpenBao. `VAULT_*` et
+# `BAO_*` hérités de l'environnement sont retirés du processus, donc de tous
+# les outils qu'il lance (un `BAO_TOKEN` d'administrateur ne doit jamais
+# atteindre un sous-processus).
+for _k in [k for k in os.environ if k.startswith(("VAULT_", "BAO_"))]:
+    os.environ.pop(_k, None)
+# Revue I6 : tout ce que la console lance hérite de cette marque et ne se
+# connecte pas à OpenBao ; il reçoit ses copies de travail (_spawn_secret_env).
+# Jamais écrasée : un outil lancé par la console qui charge ce module (la CLI
+# bare-metal) reste un outil lancé.
+os.environ.setdefault(_sst.SPAWNED_ENV, str(os.getpid()))
 import longhorn_room  # noqa: E402
 # garde anti-SSRF des téléchargements (1.99.0), dans bin/lib depuis la prochaine
 # version KVM : la console (ISO, images KVM) et la CLI KVM partagent la même.
@@ -277,6 +292,11 @@ if _PROMETHEUS_AVAILABLE:
         "RPO objective of a replication plan.",
         labelnames=("plan", "source", "target"),
     )
+    # 2.9.0 (plan, « Cache et pannes ») : sonde sys/health du magasin de secrets
+    metric_openbao_up = Gauge(
+        "harvester_ops_openbao_up",
+        "1 when the OpenBao secret store answers unsealed (0 when inactive or down).",
+    )
 else:
     class _NoopMetric:
         def labels(self, **kw): return self
@@ -295,6 +315,7 @@ else:
     metric_repl_plans_followed = _NoopMetric()
     metric_repl_rpo_held = _NoopMetric()
     metric_repl_rpo_objective = _NoopMetric()
+    metric_openbao_up = _NoopMetric()
 
 
 @app.route("/metrics")
@@ -412,12 +433,34 @@ def _stage_kubeconfig(src_kc, ws):
     with shell access. Now it's strict 0600. v1.5.7."""
     import shutil as _shutil
     dst = ws / "kubeconfig"
+    if _sst.is_active():
+        # 2.9.0 (point 263) : OpenBao actif, la copie vit sur tmpfs et
+        # l'espace n'en garde qu'un lien : jamais d'identifiants sur disque.
+        # Revue I3 : une copie par espace, tenue par l'action (fil) qui l'a
+        # préparée et effacée quand elle se termine.
+        tmp = _tf_tmpfs_copy("tf-kubeconfig", Path(src_kc).read_text(), ("tf-ws", str(ws)))
+        if dst.is_symlink() or dst.exists():
+            dst.unlink()
+        dst.symlink_to(tmp)
+        return dst
+    if dst.is_symlink():
+        # lien laissé par OpenBao (désactivé depuis) : jamais suivi (revue I3)
+        dst.unlink()
     _shutil.copyfile(src_kc, dst)
     try:
         os.chmod(dst, 0o600)
     except OSError:
         pass
     return dst
+
+
+def _tf_tmpfs_copy(purpose, value, group):
+    """Copie tmpfs d'un espace Terraform (OpenBao actif), tenue par le fil
+    courant (l'action) et effacée à sa fin, au plus tard à l'arrêt."""
+    st = _sst.store()
+    tmp = _sst.write_private_copy(_sst.secret_files_dir(st.settings), purpose, value)
+    st.openbao.adopt(tmp, group, ephemeral=True)
+    return tmp
 
 
 # Path-param keys we validate as RFC 1123 labels. URL paths that carry
@@ -1046,6 +1089,19 @@ ROLES_PATH = Path(os.environ.get(
 
 ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
 
+
+# 2.9.0 (relecture finale I9) : les actions du magasin de secrets portent des
+# noms et chemins de secrets (libellé, étapes, résultat) ; réservées à
+# l'administrateur dans la liste, le détail, le flux et l'Activité
+SECRETS_ACTION_PREFIX = "secrets:"
+
+
+def _action_hidden(label):
+    # relecture des corrections finales m10 : les journaux de l'agent des
+    # secrets (`secrets-agent-<date>.log`, dont l'action vaut le nom) aussi
+    return (str(label or "").startswith((SECRETS_ACTION_PREFIX, "secrets-agent-"))
+            and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"])
+
 # Chemins réservés à `admin`. Comparés au chemin de la requête, préfixe.
 # Ce sont les gestes qui coupent un service, changent la configuration de
 # l'outil, ou touchent au matériel.
@@ -1075,9 +1131,14 @@ ADMIN_ONLY_PREFIXES = (
     "/api/kubeovn/",            # réseaux kube-ovn : un changement peut couper des VMs
     "/api/addons/",             # v1.57.0 : activer un add-on installe un chart sur le cluster
     "/api/rancher/",            # v1.79.0 : Rancher réglés, enregistrement SSO, chart RBAC
+    "/api/secrets/",            # 2.9.0 : magasin de secrets OpenBao (gestes d'administration)
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
+                       # 2.9.0 : remettre l'état chiffré d'une déclaration en clair
+                       "/decrypt-state",
+                       # 2.9.0 : oublier les secrets gardés d'un déroulé arrêté
+                       "/forget-secrets",
                        # v1.43.0 : une maintenance déplace ou arrête des VMs.
                        "/maintenance")
 
@@ -1205,6 +1266,9 @@ def current_role():
 # Chemins dont la simple LECTURE est réservée aux admins : savoir qui
 # détient l'administration d'un cluster n'a pas à être public.
 ADMIN_ONLY_READ_PREFIXES = ("/api/harvester-users", "/api/users",
+                            # 2.9.0 : copie hors ligne de la clé de descellement de B1
+                            # (export, téléchargement unique, acquittement), toutes méthodes
+                            "/api/secrets/offline-copy/",
                             # v1.59.0 : la configuration d'un add-on peut porter des mots de passe
                             "/api/addons/",
                             # v1.67.0 : un paquet de support porte les journaux du cluster,
@@ -1232,6 +1296,14 @@ def required_role_for(path, method):
     # en opérateur)
     if path.startswith("/api/replication/"):
         return _replication_required_role(path, method)
+    # 2.9.0 : magasin de secrets. Bandeau de panne pour tous ; état pour les
+    # opérateurs ; tout le reste (noms, versions, gestes) à l'administrateur
+    if path.startswith("/api/secrets/") and method in ("GET", "HEAD", "OPTIONS"):
+        if path == "/api/secrets/banner":
+            return "viewer"
+        if path == "/api/secrets/status":
+            return "operator"
+        return "admin"
     if method in ("GET", "HEAD", "OPTIONS"):
         if path.startswith("/api/capi/") and path.endswith(OPERATOR_READ_SUFFIXES):
             return "operator"
@@ -1461,8 +1533,16 @@ def current_cluster_identity():
 def _identity_dir():
     """Répertoire privé des copies. Repli sur un temporaire quand
     /var/lib n'est pas inscriptible (déploiement en rootfs read-only)."""
-    for candidate in (IDENTITY_DIR,
-                      Path(tempfile.gettempdir()) / "harvester-ops-identities"):
+    candidates = (IDENTITY_DIR, Path(tempfile.gettempdir()) / "harvester-ops-identities")
+    if _sst.is_active():
+        # 2.9.0 (point 263) : OpenBao actif, les copies usurpées (qui portent
+        # les identifiants du cluster) vont sur tmpfs, jamais sous /var/lib
+        try:
+            candidates = (_sst.secret_files_dir(_sst.store().settings) / "identities",)
+        except _sst.SecretError as e:
+            log.warning("délégation d'identité : %s", e)
+            return None
+    for candidate in candidates:
         try:
             candidate.mkdir(parents=True, exist_ok=True)
             os.chmod(candidate, 0o700)
@@ -1472,12 +1552,91 @@ def _identity_dir():
     return None
 
 
+class IdentityDelegationError(RuntimeError):
+    """OpenBao actif et copie usurpée impossible (pas de tmpfs) : l'appel est
+    refusé plutôt que fait avec le kubeconfig partagé de la console (revue
+    I7 de la 2.9.0)."""
+
+
+@app.errorhandler(IdentityDelegationError)
+def _identity_delegation_refused(e):
+    return jsonify({"error": "identity delegation impossible: no private working directory for the copy",
+                    "code": "identity-delegation-unavailable"}), 503
+
+
+@app.errorhandler(_sst.SecretError)
+def _secret_store_refused(e):
+    """2.9.0 : un secret illisible ou une écriture refusée par OpenBao ; le
+    message porte la classe, le nom et le code, jamais une valeur. Erreurs
+    du client (valeur trop grosse, classe non migrable, chemin désigné par
+    une autre déclaration) : 413, 400, 409 (revue M9 de la tâche 8)."""
+    status = _SECRET_ERROR_STATUS.get(e.code, 503)
+    return jsonify({"error": str(e)[:300], "code": e.code}), status
+
+
+_SECRET_ERROR_STATUS = {"secret-too-big": 413, "class-not-migratable": 400, "secret-path-owned": 409}
+
+
+def _secret_migrated(cls):
+    """La classe est-elle migrée dans OpenBao (support actif) ? Un secret
+    nouveau d'une classe migrée y va directement (plan, « Migration »)."""
+    try:
+        return _sst.store().migrated(cls)
+    except Exception:                          # noqa: BLE001 : réglages illisibles = local
+        return False
+
+
+def _secret_actor():
+    """Personne de la console pour l'en-tête X-Hops-Actor (None hors requête)."""
+    try:
+        return current_user() or None
+    except RuntimeError:                       # fil d'une action, hors requête
+        return None
+
+
+def _secret_put(cls, path, field, value):
+    """2.9.0 tâche 8 : écrit un secret nouveau dans OpenBao quand sa classe
+    est migrée et rend sa référence ; None quand la classe est locale (ou
+    pour une valeur de plus de 1 Mio, qui reste locale pour ce nom) :
+    l'appelant écrit alors en local comme avant. SecretError si OpenBao
+    refuse (gestionnaire 503)."""
+    if not _secret_migrated(cls):
+        return None
+    if isinstance(value, bytes):
+        value = value.decode()
+    try:
+        return _sst.store().put(cls, path, field, value, actor=_secret_actor())
+    except _sst.SecretError as e:
+        if e.code == "secret-too-big":
+            return None
+        raise
+    except ValueError:                         # nom qui ne fait pas une référence : reste local
+        return None
+
+
+def _secret_forget(value):
+    """Retire de OpenBao le secret désigné par `value` quand c'est une
+    référence (cluster, Rancher ou hôte supprimé), au mieux : un échec est
+    journalisé, jamais bloquant."""
+    if not (isinstance(value, str) and _sst.is_openbao_ref(value)):
+        return
+    try:
+        _sst.store().delete(value, actor=_secret_actor())
+    except (_sst.SecretError, _sst.SecretMissing, ValueError) as e:
+        log.warning("secret %s not removed from OpenBao: %s", value.split("#")[0], getattr(e, "code", e))
+
+
 def _identity_kubeconfig(src_kc, identity):
     """Copie de `src_kc` portant `as`/`as-groups`. Rend le chemin d'origine
     quand il n'y a rien à usurper, pour que le chemin nominal soit inchangé.
 
     La copie contient les identifiants du cluster : répertoire 0700,
     fichier 0600, et jamais de chemin ni de secret dans une réponse.
+    2.9.0 (revue I2) : tirée d'une copie partagée d'OpenBao, elle suit le
+    même bail (une par cluster et par personne, rendue avec la copie dont
+    elle dérive, effacée à l'arrêt) ; le répertoire cible fait partie de la
+    clé, une copie faite sous /var/lib n'est plus servie quand OpenBao est
+    actif. Revue I7 : OpenBao actif et copie impossible -> refus.
     """
     if not identity or not identity.get("user") or not src_kc:
         return src_kc
@@ -1486,13 +1645,18 @@ def _identity_kubeconfig(src_kc, identity):
     except OSError:
         return src_kc
     groups = tuple(identity.get("groups") or ())
-    key = (str(src_kc), mtime, identity["user"], groups)
+    bao = _sst.store().openbao if _sst.is_active() else None
+    source = bao.group_of(src_kc) if bao is not None else None
+    group = ("identity", source, identity["user"], groups) if source else None
     with _identity_lock:
-        cached = _identity_cache.get(key)
-        if cached and cached.exists():
-            return str(cached)
         target_dir = _identity_dir()
+        key = (str(src_kc), mtime, identity["user"], groups, str(target_dir))
+        cached = _identity_cache.get(key)
+        if cached and cached.exists() and (group is None or bao.hold(cached)):
+            return str(cached)
         if target_dir is None:
+            if bao is not None:
+                raise IdentityDelegationError("no private directory for the impersonated copy")
             log.warning("délégation d'identité : aucun répertoire inscriptible,"
                         " appel avec le kubeconfig partagé")
             return src_kc
@@ -1516,9 +1680,15 @@ def _identity_kubeconfig(src_kc, identity):
             os.replace(tmp, dst)
             os.chmod(dst, 0o600)
         except Exception as e:
+            if bao is not None:
+                raise IdentityDelegationError(f"impersonated copy failed ({type(e).__name__})") from None
             log.warning("délégation d'identité impossible (%s) : appel avec le"
                         " kubeconfig partagé", e)
             return src_kc
+        if group is not None:
+            bao.adopt(dst, group)
+            for k in [k for k, v in _identity_cache.items() if not v.exists()]:
+                del _identity_cache[k]
         _identity_cache[key] = dst
         return str(dst)
 
@@ -1622,6 +1792,15 @@ class ActionRun:
         self.proc = None
         self._cond = threading.Condition()
         self._closed = False
+        # 2.9.0 (revue I1 des tâches 5-7) : bail de l'action sur les copies
+        # de travail des secrets (kubeconfig, clé), porté par l'action et non
+        # par le fil : les copies que le fil de la requête vient de recevoir
+        # passent à l'action, rendues à sa fin (close)
+        self.secret_lease = None
+        if _sst._STORE is not None and _sst._STORE._bao is not None:
+            self.secret_lease = _sst.Lease()
+            with contextlib.suppress(Exception):
+                _sst._STORE.lease_thread_holds(self.secret_lease)
         # v1.6.0: bump the in-flight gauge; close() will decrement.
         metric_actions_in_flight.inc()
 
@@ -1645,10 +1824,26 @@ class ActionRun:
             self.progress_ver += 1
             self._cond.notify_all()
 
+    def hold_secrets(self, *paths):
+        """L'action tient celles des `paths` (arguments compris, `--opt=chemin`)
+        qui sont des copies de travail du magasin, jusqu'à sa fin."""
+        st = _sst._STORE
+        if st is None or not paths:
+            return 0
+        if self.secret_lease is None:
+            self.secret_lease = _sst.Lease()
+        try:
+            return st.hold_for(paths, self.secret_lease)
+        except Exception:                      # noqa: BLE001 : jamais bloquant pour l'action
+            return 0
+
     def close(self):
         with self._cond:
             self._closed = True
             self._cond.notify_all()
+        if self.secret_lease is not None and _sst._STORE is not None:
+            with contextlib.suppress(Exception):
+                _sst._STORE.release(self.secret_lease)
         try:
             _actions_persist(self)
         except Exception:
@@ -2163,7 +2358,10 @@ def run_action_thread(run: ActionRun):
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
 
+    secret_env, secret_map = {}, None
     try:
+        secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
+                                                   getattr(run, "secret_refs", ()), getattr(run, "secret_files", None))
         run.proc = subprocess.Popen(
             run.cmd,
             stdout=subprocess.PIPE,
@@ -2172,9 +2370,11 @@ def run_action_thread(run: ActionRun):
             bufsize=1,
             env={**os.environ, "NO_COLOR": "1",
                  "HARVESTER_OPS_CONFIG": str(CONFIG_PATH),
-                 **getattr(run, "identity_env", {})},
+                 **getattr(run, "identity_env", {}), **secret_env},
         )
-    except FileNotFoundError as e:
+    except (FileNotFoundError, _sst.SecretError) as e:
+        if secret_map:
+            secret_map.unlink(missing_ok=True)
         run.status = "error"
         run.exit_code = 127
         run.emit({"type": "log", "level": "error", "message": str(e), "ts": time.time()})
@@ -2212,6 +2412,8 @@ def run_action_thread(run: ActionRun):
     rc = run.proc.wait()
     t_err.join(timeout=5)
     t_out.join(timeout=5)
+    if secret_map:
+        secret_map.unlink(missing_ok=True)
 
     run.exit_code = rc
     run.status = "done" if rc == 0 else "error"
@@ -2284,6 +2486,7 @@ def start_action(action, cluster, dry_run=False, interactive=False,
 
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, action, cluster, cmd, dry_run=dry_run)
+    run.hold_secrets(*cmd)                     # copies remises à l'outil (revue I1 des tâches 5-7)
     # Identité capturée ICI, dans le thread de la requête : le thread de
     # travail ne la retrouverait pas, et l'action repartirait avec le
     # kubeconfig partagé, administrateur.
@@ -2781,6 +2984,21 @@ def _update_hand_over(name, chk, b, kind, steps):
                         "busy": [{"id": a["id"], "action": a["action"], "cluster": a["cluster"]}
                                  for a in busy]}), 409
     older = kind == "rollback" or bool(b.get("allow_older"))
+    # 2.9.0 (relecture finale I1) : une console plus ancienne lirait les
+    # références `openbao:` comme des chemins ou des valeurs, et ne saurait
+    # pas lire un état chiffré ; retour en local exigé d'abord
+    try:
+        below = _su.parse_version(chk["version"])[:3] < _sst.FIRST_OPENBAO_VERSION
+    except _su.UpdateError:
+        below = True
+    if older and below:
+        blockers = _sst.openbao_blockers(_state_dir(), TF_WORKSPACES)
+        if blockers:
+            return jsonify({"error": f"{chk['version']} cannot read secrets kept in OpenBao or encrypted "
+                                     "OpenTofu states: bring everything back to local first",
+                            "code": "secrets-in-openbao", "blockers": blockers,
+                            "steps": list(_sst.BACK_TO_LOCAL_STEPS),
+                            "hint": "; ".join(_sst.BACK_TO_LOCAL_STEPS)}), 409
     with _update_lock:
         if (d / _su.REQUEST).exists():
             return jsonify({"error": "an update is already requested"}), 409
@@ -4618,7 +4836,8 @@ def _cluster_of_kubeconfig(kc):
         return "?"
     try:
         for c in load_config().get("clusters", []):
-            if c.get("kubeconfig") == str(kc):
+            if c.get("kubeconfig") == str(kc) or (_sst.is_ref(c.get("kubeconfig"))
+                                                   and _cluster_kubeconfig_path(c, missing_ok=True) == str(kc)):
                 return c["name"]
     except Exception:
         pass
@@ -5515,7 +5734,7 @@ def api_network_fabric_node_detail(cluster, node):
            "-o", "StrictHostKeyChecking=accept-new",
            "-p", str(ssh.get("port", 22))]
     if ssh.get("key"):
-        cmd += ["-i", str(ssh["key"])]
+        cmd += ["-i", str(_cluster_ssh_key_path(ssh))]
     cmd += [f"{ssh.get('user', 'rancher')}@{target.get('ip')}",
             _FABRIC_DETAIL_CMD]
     try:
@@ -5838,7 +6057,7 @@ def _fabric_ssh_base(cluster, node):
             "-o", "StrictHostKeyChecking=accept-new",
             "-p", str(ssh.get("port", 22))]
     if ssh.get("key"):
-        base += ["-i", str(ssh["key"])]
+        base += ["-i", str(_cluster_ssh_key_path(ssh))]
     return base + [f"{ssh.get('user', 'rancher')}@{target.get('ip')}"]
 
 
@@ -6471,8 +6690,8 @@ def _cluster_for_server(server_url):
     host = urlparse(str(server_url)).hostname
     for c in load_config().get("clusters", []):
         try:
-            kc = yaml.safe_load(Path(c["kubeconfig"]).read_text()) or {}
-        except (OSError, KeyError, yaml.YAMLError):
+            kc = yaml.safe_load(Path(_cluster_kubeconfig_path(c, missing_ok=True)).read_text()) or {}
+        except (OSError, KeyError, TypeError, yaml.YAMLError):
             continue
         for entry in kc.get("clusters") or []:
             if urlparse((entry.get("cluster") or {}).get("server") or "").hostname == host:
@@ -6492,7 +6711,7 @@ def _join_cluster(server_url, cluster=None):
     entry = next((c for c in load_config().get("clusters", []) if c.get("name") == cluster), None)
     if not entry or not host:
         return None
-    server = _kubeconfig_server(entry.get("kubeconfig") or "")
+    server = _kubeconfig_server(_cluster_kubeconfig_path(entry, missing_ok=True) or "")
     if server and urlparse(server).hostname == host:
         return cluster
     kc = _kubectl_for_cluster(cluster)
@@ -6549,9 +6768,16 @@ def _bm_cluster_files(name):
     `<état>/ssh/<nom>_id` (0600), sa publique, les clés d'hôte vues au
     premier contact, et le kubeconfig `<état>/kubeconfigs/<nom>.yaml`."""
     d = _state_ssh_dir()
-    return {"key": d / f"{name}_id", "pub": d / f"{name}_id.pub",
-            "known_hosts": d / f"{name}_known_hosts",
-            "kubeconfig": _state_kubeconfigs_dir() / f"{name}.yaml"}
+    out = {"key": d / f"{name}_id", "pub": d / f"{name}_id.pub",
+           "known_hosts": d / f"{name}_known_hosts",
+           "kubeconfig": _state_kubeconfigs_dir() / f"{name}.yaml"}
+    # 2.9.0 tâche 8 : classe migrée -> la clé privée et le kubeconfig ne
+    # touchent jamais le disque persistant ; copies de travail sur tmpfs le
+    # temps de l'installation, rangées dans OpenBao à la déclaration
+    for cls, k in (("ssh-cluster", "key"), ("kubeconfig", "kubeconfig")):
+        if _secret_migrated(cls):
+            out[k] = _sst.secret_files_dir(_sst.store().settings) / f"bm-{name}-{k}"
+    return out
 
 
 def _bm_cluster_keypair(name):
@@ -6562,9 +6788,17 @@ def _bm_cluster_keypair(name):
     f = _bm_cluster_files(name)
     for k in ("key", "pub", "known_hosts"):
         f[k].unlink(missing_ok=True)
+    Path(str(f["key"]) + ".pub").unlink(missing_ok=True)
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"harvester-ops:{name}",
                     "-f", str(f["key"])], check=True, capture_output=True, timeout=30)
     os.chmod(f["key"], 0o600)
+    made_pub = Path(str(f["key"]) + ".pub")
+    if made_pub != f["pub"]:                   # clé privée sur tmpfs : la publique reste dans l'état
+        shutil.copyfile(made_pub, f["pub"])
+        made_pub.unlink(missing_ok=True)
+        # rangée dans OpenBao dès sa création : une installation coupée avant
+        # la déclaration ne perd pas la seule clé du cluster installé
+        _secret_put("ssh-cluster", name, "private_key", f["key"].read_text())
     return f
 
 
@@ -6573,7 +6807,7 @@ def _bm_join_pubkey(cluster):
     console (`ssh.generated`) : le nouveau nœud reçoit la même. None sinon."""
     entry = next((c for c in load_config().get("clusters", []) if c.get("name") == cluster), None)
     ssh = (entry or {}).get("ssh") or {}
-    key = ssh.get("key")
+    key = _cluster_ssh_key_path(ssh) if ssh.get("generated") else ssh.get("key")
     if not (ssh.get("generated") and key and Path(key).is_file()):
         return None
     try:
@@ -6664,10 +6898,33 @@ def _bm_declare_cluster(name, kubeconfig, key, hostname, ip):
     cluster["kubeconfig"] = str(kubeconfig)
     # clé créée par la console : un nœud qui rejoint reçoit la même
     cluster["ssh"]["generated"] = True
+    # 2.9.0 tâche 8 : classes migrées -> la déclaration porte les références
+    # (copies de travail tmpfs effacées une fois la déclaration écrite).
+    # Revue C1 : le nom est vérifié AVANT d'écrire dans OpenBao, sous le
+    # verrou des déclarations (un cluster du même nom créé pendant les ~20
+    # min de l'installation garde son secret) ; revue M6 : une copie tmpfs
+    # que OpenBao n'a pas prise (classe rendue au local, valeur refusée)
+    # est écrite à l'emplacement persistant d'avant, jamais laissée sur tmpfs
+    moved = []
     with CONFIG_LOCK:
         if any(c.get("name") == name for c in load_config().get("clusters", [])):
             raise ValueError(f"cluster '{name}' already exists")
+        for cls, field, src, setter, keep in (
+                ("kubeconfig", "kubeconfig", Path(kubeconfig), lambda r: cluster.__setitem__("kubeconfig", r),
+                 _state_kubeconfigs_dir() / f"{name}.yaml"),
+                ("ssh-cluster", "private_key", Path(key), lambda r: cluster["ssh"].__setitem__("key", r),
+                 _state_ssh_dir() / f"{name}_id")):
+            ref = _secret_put(cls, name, field, src.read_text()) if _secret_migrated(cls) else None
+            if ref:
+                setter(ref)
+                moved.append(src)
+            elif src.name.startswith("bm-") and src != keep:
+                _bm_write_private(keep, src.read_bytes())
+                setter(str(keep))
+                moved.append(src)
         _write_console_cluster(cluster)
+    for src in moved:
+        src.unlink(missing_ok=True)
     return cluster
 
 
@@ -7460,7 +7717,8 @@ def _baremetal_install_steps(run, opts, state):
                                        f"{_BM_OS_USER} to read its kubeconfig")
             _bm_declare_cluster(name, files["kubeconfig"], files["key"], opts["hostname"],
                                 opts.get("ip") or opts["vip"])
-            kubeconfig = files["kubeconfig"]
+            # 2.9.0 : kubeconfig rangé dans OpenBao -> copie de travail
+            kubeconfig = _cluster_kubeconfig_path(name, missing_ok=True) or files["kubeconfig"]
             step("declare", "done", f"{name} déclaré dans la console")
         # sautés s'il n'y en a pas : aucune étape affichée
         if pools:
@@ -9062,9 +9320,85 @@ def _kubectl_for_cluster(cluster):
         if c["name"] == cluster:
             if _sso_session() is not None:
                 return _sso_kubeconfig(cluster, c)
-            return _identity_kubeconfig(c["kubeconfig"],
+            return _identity_kubeconfig(_cluster_kubeconfig_path(c),
                                         current_cluster_identity())
     return None
+
+
+def _cluster_kubeconfig_path(cluster, purpose="kubectl", missing_ok=False):
+    """Chemin du kubeconfig de la console pour un cluster (nom ou entrée de
+    la configuration), seul lecteur du champ `kubeconfig` (2.9.0) : le
+    fichier rangé, ou une copie tmpfs partagée quand le champ porte une
+    référence du magasin de secrets (OpenBao). None pour un cluster inconnu.
+    `missing_ok` : None aussi quand le secret est illisible (OpenBao coupé),
+    pour les tâches de fond qui passent au cluster suivant."""
+    entry = cluster if isinstance(cluster, dict) else next(
+        (c for c in load_config_ro().get("clusters", []) if c.get("name") == cluster), None)
+    if not entry:
+        return None
+    try:
+        return _sst.path_of(entry.get("kubeconfig"), purpose)
+    except (_sst.SecretError, _sst.SecretMissing) as e:
+        if not missing_ok:
+            raise
+        log.warning("kubeconfig of %s unavailable: %s", entry.get("name"), e)
+        return None
+
+
+def _cluster_ssh_key_path(ssh, purpose="ssh-cluster"):
+    """Chemin de la clé SSH d'un cluster (bloc `ssh` de son entrée), seul
+    lecteur du champ `ssh.key` (2.9.0) : le fichier rangé, ou une copie
+    tmpfs quand le champ porte une référence du magasin de secrets."""
+    key = (ssh or {}).get("key")
+    return _sst.path_of(key, purpose) if key else key
+
+
+def _spawn_secret_env(clusters, refs=(), files=None):
+    """Revue I6 : un outil lancé par la console ne se connecte pas à OpenBao.
+    Pour les clusters de l'action dont le kubeconfig ou la clé SSH porte une
+    référence, la console remet des copies de travail tmpfs (tenues par le
+    fil courant, celui qui attend l'outil) et un fichier de correspondance
+    {référence: chemin}, nommé par HARVESTER_OPS_SECRET_FILES. Rend (env,
+    fichier de correspondance à effacer quand l'outil a fini) ; ({}, None)
+    sans OpenBao ou sans référence. Un secret illisible n'est pas remis :
+    l'outil le dit (`openbao-spawned-no-file`) pour ce cluster seulement."""
+    if not _sst.is_active():
+        return {}, None
+    # 2.9.0 tâche 8 : `kvm:<hôte>` remet la clé de l'hôte KVM ; `refs` des
+    # références de plus (secrets de la réplication) ; `files` des copies
+    # déjà écrites par l'appelant ({référence: chemin}, clé d'un hôte ajouté)
+    names = {c for c in clusters or () if c}
+    wanted = list(refs or ())
+    for n in sorted(names):
+        if n.startswith("kvm:") and _kvm_check_host(n[4:]):
+            try:
+                v = _kd.load(_state_dir(), n[4:]).get("ssh_key")
+            except (OSError, ValueError):
+                v = None
+            if isinstance(v, str) and _sst.is_ref(v):
+                wanted.append(v)
+    refs = dict(files or {})
+    for v in wanted:
+        if v not in refs:
+            try:
+                refs[v] = str(_sst.store().shared_file(v, "tool"))
+            except (_sst.SecretError, _sst.SecretMissing) as e:
+                log.warning("secret %s not handed to the tool: %s", v.split("#")[0], getattr(e, "code", e))
+    for entry in load_config_ro().get("clusters", []):
+        if entry.get("name") not in names:
+            continue
+        for v in (entry.get("kubeconfig"), (entry.get("ssh") or {}).get("key")
+                  if isinstance(entry.get("ssh"), dict) else None):
+            if isinstance(v, str) and _sst.is_ref(v) and v not in refs:
+                try:
+                    refs[v] = str(_sst.store().shared_file(v, "tool"))
+                except (_sst.SecretError, _sst.SecretMissing) as e:
+                    log.warning("secret of %s not handed to the tool: %s", entry.get("name"), e)
+    if not refs:
+        return {}, None
+    mp = _sst.write_private_copy(_sst.secret_files_dir(_sst.store().settings), "secret-files",
+                                 json.dumps(refs))
+    return {_sst.FILES_ENV: str(mp)}, mp
 
 
 _KUBE_SYSTEM_MISS = {}         # cluster -> horodatage du dernier échec
@@ -9080,11 +9414,12 @@ def _kube_system_uid(entry):
     # et la sonde TCP de deux secondes plutôt que le délai de kubectl.
     if time.time() - _KUBE_SYSTEM_MISS.get(name, 0) < 60:
         return None
-    if _cluster_reachable(entry["kubeconfig"]) is False:
+    kc = _cluster_kubeconfig_path(entry, missing_ok=True)
+    if not kc or _cluster_reachable(kc) is False:
         _KUBE_SYSTEM_MISS[name] = time.time()
         return None
     try:
-        out = _kubectl_run(["kubectl", "--kubeconfig", entry["kubeconfig"], "get", "namespace",
+        out = _kubectl_run(["kubectl", "--kubeconfig", kc, "get", "namespace",
                               "kube-system", "-o", "jsonpath={.metadata.uid}"],
                              capture_output=True, text=True, timeout=10)
     except (subprocess.TimeoutExpired, OSError):
@@ -9113,10 +9448,13 @@ def _node_uids(entry):
     seen = _NODE_UIDS.get(name)
     if seen and time.time() - seen[0] < 600:
         return seen[1]
-    if time.time() - _KUBE_SYSTEM_MISS.get(name, 0) < 60 or _cluster_reachable(entry["kubeconfig"]) is False:
+    if time.time() - _KUBE_SYSTEM_MISS.get(name, 0) < 60:
+        return frozenset()
+    kc = _cluster_kubeconfig_path(entry, missing_ok=True)
+    if not kc or _cluster_reachable(kc) is False:
         return frozenset()
     try:
-        out = _kubectl_run(["kubectl", "--kubeconfig", entry["kubeconfig"], "get", "nodes",
+        out = _kubectl_run(["kubectl", "--kubeconfig", kc, "get", "nodes",
                               "-o", "jsonpath={.items[*].metadata.uid}"],
                              capture_output=True, text=True, timeout=10)
     except (subprocess.TimeoutExpired, OSError):
@@ -10765,7 +11103,8 @@ def _folder_action(label, sub, objects=None, undoable=False, chosen=False, resul
     if spec is None and objects is not None:
         spec = _folder_spec(objects, chosen)
     run, err = _cli_action(FOLDERS_CLUSTER, f"folders:{label}", _folders_cmd(*sub), "harvester-folders",
-                           spec=spec, check_busy=False, id_arg=True, after=_folders_after, setup=setup)
+                           spec=spec, check_busy=False, id_arg=True, after=_folders_after, setup=setup,
+                           secret_clusters=tuple((spec or {}).get("kubeconfigs") or ()))
     if err:
         return err
     # rangée dès le départ (et non à la fin seulement) : une console arrêtée
@@ -11939,8 +12278,8 @@ def _usage_sample_once(collect=None, now=None):
     from datetime import timedelta
     collect = collect or _gpus_collect
     now = now or _bookings_now()
-    clusters = [(c.get("name"), c.get("kubeconfig")) for c in load_config_ro().get("clusters", [])
-                if c.get("name")]
+    clusters = [(c.get("name"), _cluster_kubeconfig_path(c, missing_ok=True))
+                for c in load_config_ro().get("clusters", []) if c.get("name")]
 
     def one(item):
         name, kc = item
@@ -12429,7 +12768,7 @@ def _kvm_base(*sub):
             f"--state-dir={_state_dir()}"]
 
 
-def _kvm_action(host, label, cmd, cleanup=None, cluster=None, waits=False):
+def _kvm_action(host, label, cmd, cleanup=None, cluster=None, waits=False, secret_files=None):
     """Action suivie du script KVM. `cluster` : étiquette d'une action qui ne
     vise aucun hôte (modèles : KVM_TEMPLATES_TAG) ; elle ne fait alors pas
     avancer de génération de relevés (aucun fichier survey-gen créé).
@@ -12471,7 +12810,8 @@ def _kvm_action(host, label, cmd, cleanup=None, cluster=None, waits=False):
         if not refreshed:
             refresh_views()
     run, err = _cli_action(cluster or f"kvm:{host}", label, cmd, "harvester-kvm", after=after,
-                           check_busy=False, capture=True, setup=setup)
+                           check_busy=False, capture=True, setup=setup,
+                           secret_clusters=(f"kvm:{host}",) if host else (), secret_files=secret_files)
     if err:
         if cleanup:
             cleanup()
@@ -12540,9 +12880,21 @@ def api_kvm_host_add():
         return _kvm_err("the private key file is missing")
     if len(data) > KVM_KEY_MAX:
         return _kvm_err("the SSH key file is too large")
-    try:                                       # jamais la clé dans /tmp : ssh/ est forcé en 0700
-        wd = _kd.ensure_ssh_dir(state)
-    except OSError:
+    try:
+        text = data.decode(errors="strict")
+    except UnicodeDecodeError:
+        return _kvm_err("the SSH key file is not a text private key")
+    migrated = _secret_migrated("ssh-kvm")
+    try:
+        # jamais la clé dans /tmp : ssh/ est forcé en 0700 ; classe migrée ->
+        # copie sur tmpfs, jamais sur le disque persistant, même le temps de
+        # l'action (une console tuée pendant l'ajout la laisserait, revue M5)
+        if migrated:
+            wd = _sst.secret_files_dir(_sst.store().settings) / "kvm-add"
+            wd.mkdir(mode=0o700, parents=True, exist_ok=True)
+        else:
+            wd = _kd.ensure_ssh_dir(state)
+    except (OSError, _sst.SecretError):
         return _kvm_err("no private work directory for the key: check the console state", 503)
     fd, key_path = tempfile.mkstemp(prefix="kvm-key-", dir=str(wd))   # 0600
     with os.fdopen(fd, "wb") as out:
@@ -12558,7 +12910,24 @@ def api_kvm_host_add():
         f"--name={name}", f"--address={decl['address']}", f"--port={decl['port']}",
         f"--user={decl['user']}", f"--ssh-key={key_path}", f"--fingerprint={fp}",
     ] + [f"--label={k}={v}" for k, v in sorted(decl["labels"].items())]
-    run, err = _kvm_action(name, f"kvm:host-add:{name}", cmd, cleanup=cleanup)
+    # 2.9.0 tâche 8 : classe ssh-kvm migrée -> la clé va dans OpenBao, la
+    # déclaration porte sa référence ; l'outil lit la copie privée pour ses tests
+    try:
+        ref = _secret_put("ssh-kvm", name, "private_key", text if text.endswith("\n") else text + "\n")
+    except _sst.SecretError:
+        cleanup()
+        raise
+    files = None
+    if ref:
+        cmd.append("--key-in-store")
+        files = {ref: key_path}
+        drop = cleanup
+
+        def cleanup():                         # ajout refusé : la clé ne reste pas dans OpenBao
+            drop()
+            if not _kd.decl_path(state, name).exists():
+                _secret_forget(ref)
+    run, err = _kvm_action(name, f"kvm:host-add:{name}", cmd, cleanup=cleanup, secret_files=files)
     if err:
         return err
     return jsonify({"action_id": run.id, "host": name}), 202
@@ -12583,8 +12952,20 @@ def api_kvm_host_remove(host):
     # requête n'a pas à les attendre)
     threading.Thread(target=_kvm_vnc_cut_host, args=(host,), daemon=True,
                      name=f"kvm-vnc-cut-{host}").start()
+    try:
+        key_value = _kd.load(_state_dir(), host).get("ssh_key")
+    except (OSError, ValueError):
+        key_value = None
+
+    def removed():
+        _kvm_vnc_cut_host(host)
+        # 2.9.0 : clé migrée retirée d'OpenBao une fois l'hôte retiré
+        if not _kd.decl_path(_state_dir(), host).exists():
+            _secret_forget(key_value)
+            with contextlib.suppress(Exception):
+                _sst.FileStore(_state_dir()).erase_original("ssh-kvm", host, "private_key")
     run, err = _kvm_action(host, f"kvm:host-remove:{host}", _kvm_base("host", "remove") + [host],
-                           cleanup=lambda: _kvm_vnc_cut_host(host))
+                           cleanup=removed)
     if err:
         return err
     return jsonify({"action_id": run.id, "host": host}), 202
@@ -12939,9 +13320,14 @@ def api_clusters_create():
                 yaml.safe_load(content)   # validate YAML structure
             except (yaml.YAMLError, UnicodeDecodeError) as e:
                 return jsonify({"error": "kubeconfig is not valid YAML", "detail": str(e)}), 400
-            kc_path = _state_kubeconfigs_dir() / f"{cluster['name']}.yaml"
-            _bm_write_private(kc_path, content)
-            cluster["kubeconfig"] = str(kc_path)
+            # 2.9.0 : classe migrée -> directement dans OpenBao, la déclaration porte la référence
+            ref = _secret_put("kubeconfig", cluster["name"], "kubeconfig", content)
+            if ref:
+                cluster["kubeconfig"] = ref
+            else:
+                kc_path = _state_kubeconfigs_dir() / f"{cluster['name']}.yaml"
+                _bm_write_private(kc_path, content)
+                cluster["kubeconfig"] = str(kc_path)
         elif data.get("kubeconfig"):
             # Path-only mode (legacy/CLI flow)
             cluster["kubeconfig"] = data["kubeconfig"]
@@ -12950,9 +13336,14 @@ def api_clusters_create():
 
         # Save SSH key
         if ssh_file:
-            key_path = _state_ssh_dir() / f"{cluster['name']}_id"
-            _bm_write_private(key_path, ssh_file.read())
-            cluster["ssh"]["key"] = str(key_path)
+            key_data = ssh_file.read()
+            ref = _secret_put("ssh-cluster", cluster["name"], "private_key", key_data)
+            if ref:
+                cluster["ssh"]["key"] = ref
+            else:
+                key_path = _state_ssh_dir() / f"{cluster['name']}_id"
+                _bm_write_private(key_path, key_data)
+                cluster["ssh"]["key"] = str(key_path)
 
         _write_console_cluster(cluster)
 
@@ -12994,9 +13385,20 @@ def api_clusters_update(name):
         if original.get("folder") is not None:
             cluster["folder"] = original["folder"]
         # Rename handling: if cluster name changed, move kubeconfig/sshkey files
+        moved_refs = []
         if cluster["name"] != name:
             if any(c.get("name") == cluster["name"] for c in load_config().get("clusters", [])):
                 return jsonify({"error": f"cluster '{cluster['name']}' already exists"}), 409
+            # 2.9.0 (revue C1 de la tâche 8) : un secret rangé dans OpenBao
+            # sous l'ancien nom suit le cluster comme ses fichiers locaux
+            # (copie vérifiée sous le nouveau nom, original gardé déplacé,
+            # ancien chemin retiré après l'écriture de la déclaration)
+            try:
+                moved_refs = _cluster_secrets_rename(name, cluster)
+            except (_sst.SecretError, _sst.SecretMissing) as e:
+                return jsonify({"error": f"cluster secrets not moved to the new name: "
+                                         f"{getattr(e, 'code', 'openbao-missing')}",
+                                "code": getattr(e, "code", "openbao-missing")}), 409
             old_kc = Path(cluster["kubeconfig"])
             if old_kc.exists() and old_kc.is_relative_to(kc_dir):
                 new_kc = kc_dir / f"{cluster['name']}.yaml"
@@ -13006,7 +13408,13 @@ def api_clusters_update(name):
                 except OSError:
                     pass
             old_key = Path(cluster["ssh"].get("key") or "")
-            if old_key.exists() and old_key.is_relative_to(ssh_dir):
+            if any(cls == "ssh-cluster" for cls, _old, _new in moved_refs):
+                # clé dans OpenBao : sa publique et les clés d'hôte vues suivent
+                for old_sib, new_sib in ((f"{name}_id.pub", f"{cluster['name']}_id.pub"),
+                                         (f"{name}_known_hosts", f"{cluster['name']}_known_hosts")):
+                    with contextlib.suppress(OSError):
+                        (ssh_dir / old_sib).rename(ssh_dir / new_sib)
+            elif old_key.exists() and old_key.is_relative_to(ssh_dir):
                 new_key = ssh_dir / f"{cluster['name']}_id"
                 try:
                     old_key.rename(new_key)
@@ -13021,8 +13429,44 @@ def api_clusters_update(name):
                             (ssh_dir / old_sib).rename(ssh_dir / new_sib)
                         except OSError:
                             pass
-        _save_cluster(origin, cluster, raw, idx, old_name=name)
+        try:
+            _save_cluster(origin, cluster, raw, idx, old_name=name)
+        except BaseException:
+            for _cls, _old, new_ref in moved_refs:   # copies sous le nouveau nom retirées
+                _secret_forget(new_ref)
+            raise
+    for cls, old_ref, _new in moved_refs:
+        _secret_forget(old_ref)
+        with contextlib.suppress(Exception):
+            _sst.FileStore(_state_dir()).rename_original(cls, name, cluster["name"], _ssc.FIELDS[cls])
     return jsonify({"cluster": dict(cluster, origin=origin)})
+
+
+def _cluster_secrets_rename(old_name, cluster):
+    """Secrets d'un cluster renommé rangés dans OpenBao sous l'ancien nom :
+    copiés sous le nouveau (`cas=0`, relus), la déclaration `cluster` porte
+    les nouvelles références. Rend [(classe, ancienne, nouvelle)]. Un échec
+    défait les copies déjà faites et remonte (SecretError)."""
+    done = []
+    slots = (("kubeconfig", lambda: cluster.get("kubeconfig"), lambda r: cluster.__setitem__("kubeconfig", r)),
+             ("ssh-cluster", lambda: (cluster.get("ssh") or {}).get("key"),
+              lambda r: cluster.setdefault("ssh", {}).__setitem__("key", r)))
+    try:
+        for cls, get, put in slots:
+            ref = get()
+            if not (isinstance(ref, str) and _sst.is_openbao_ref(ref)):
+                continue
+            _c, path, _f = _sst.parse_ref(ref)
+            if path != old_name:
+                continue
+            new_ref = _sst.store().move(ref, cluster["name"], actor=_secret_actor())
+            put(new_ref)
+            done.append((cls, ref, new_ref))
+    except BaseException:
+        for _cls, _old, new_ref in done:
+            _secret_forget(new_ref)
+        raise
+    return done
 
 
 @app.route("/api/clusters/<name>", methods=["DELETE"])
@@ -13058,6 +13502,16 @@ def api_clusters_delete(name):
             _atomic_write_config(raw)
         else:
             _delete_console_cluster(name)
+    if origin != "config":
+        # 2.9.0 : secrets migrés de ce cluster retirés d'OpenBao (hors du
+        # verrou des déclarations : OpenBao coupé ne bloque pas les autres
+        # écritures, revue M10), originaux gardés effacés ; un chemin qu'une
+        # autre déclaration désigne n'est jamais retiré (revue C1)
+        for cls, field, value in (("kubeconfig", "kubeconfig", removed.get("kubeconfig")),
+                                  ("ssh-cluster", "private_key", (removed.get("ssh") or {}).get("key"))):
+            _secret_forget(value)
+            with contextlib.suppress(Exception):
+                _sst.FileStore(_state_dir()).erase_original(cls, name, field)
     return jsonify({"removed": name})
 
 
@@ -13082,11 +13536,33 @@ def api_clusters_upload_kubeconfig(name):
         refused = _read_only_refusal(origin)
         if refused:
             return refused
+        # 2.9.0 : les kubeconfigs de config.yaml restent locaux (installateur)
+        ref = _secret_put("kubeconfig", name, "kubeconfig", content) if origin == "console" else None
+        if ref:
+            old_local = cluster.get("kubeconfig")
+            cluster["kubeconfig"] = ref
+            _save_cluster(origin, cluster, raw, idx)
+            # revue M4 : l'ancien fichier en clair d'un cluster resté local
+            # (classe migrée en partie) ne survit pas à son remplacement
+            _drop_replaced_local(old_local, _origin_dirs(origin)[0])
+            return jsonify({"cluster": name, "kubeconfig": ref, "origin": origin})
         kc_path = _origin_dirs(origin)[0] / f"{name}.yaml"
         _bm_write_private(kc_path, content)
         cluster["kubeconfig"] = str(kc_path)
         _save_cluster(origin, cluster, raw, idx)
     return jsonify({"cluster": name, "kubeconfig": str(kc_path), "origin": origin})
+
+
+def _drop_replaced_local(value, own_dir):
+    """Fichier local d'un secret que sa référence `openbao:` vient de
+    remplacer : effacé s'il est dans le répertoire de la console (jamais un
+    fichier de l'opérateur, jamais une référence)."""
+    if not value or not isinstance(value, str) or _sst.is_ref(value):
+        return
+    p = Path(value) if os.path.isabs(value) else _state_dir() / value
+    with contextlib.suppress(OSError, ValueError):
+        if p.is_file() and not p.is_symlink() and p.resolve().is_relative_to(Path(own_dir).resolve()):
+            p.unlink()
 
 
 @app.route("/api/clusters/<name>/sshkey", methods=["POST"])
@@ -13109,12 +13585,20 @@ def api_clusters_upload_sshkey(name):
         refused = _read_only_refusal(origin)
         if refused:
             return refused
-        key_path = _origin_dirs(origin)[1] / f"{name}_id"
-        _bm_write_private(key_path, raw_key)
+        ref = _secret_put("ssh-cluster", name, "private_key", raw_key) if origin == "console" else None
+        old_local = (cluster.get("ssh") or {}).get("key")
+        if ref:
+            key_path = ref
+        else:
+            key_path = _origin_dirs(origin)[1] / f"{name}_id"
+            _bm_write_private(key_path, raw_key)
         cluster.setdefault("ssh", {})["key"] = str(key_path)
         # une clé téléversée n'est plus celle que la console a créée
         cluster["ssh"].pop("generated", None)
         _save_cluster(origin, cluster, raw, idx)
+        if ref:
+            # revue M4 : l'ancien fichier en clair ne survit pas à son remplacement
+            _drop_replaced_local(old_local, _origin_dirs(origin)[1])
     return jsonify({"cluster": name, "ssh_key": str(key_path), "origin": origin})
 
 
@@ -13126,7 +13610,7 @@ def api_clusters_test_kubeconfig(name):
     cluster = next((c for c in cfg.get("clusters", []) if c["name"] == name), None)
     if not cluster:
         return jsonify({"error": f"cluster '{name}' not found"}), 404
-    kc = _identity_kubeconfig(cluster.get("kubeconfig", ""),
+    kc = _identity_kubeconfig(_cluster_kubeconfig_path(cluster) or "",
                               current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"ok": False, "error": f"kubeconfig file not found: {kc}"}), 404
@@ -13156,7 +13640,7 @@ def api_clusters_test_ssh(name):
     if not cluster:
         return jsonify({"error": f"cluster '{name}' not found"}), 404
     ssh_user = cluster.get("ssh", {}).get("user", "rancher")
-    ssh_key  = cluster.get("ssh", {}).get("key", "")
+    ssh_key  = _cluster_ssh_key_path(cluster.get("ssh")) or ""
     ssh_port = cluster.get("ssh", {}).get("port", 22)
 
     def _probe(node):
@@ -13215,7 +13699,7 @@ def api_connection_test(cluster):
     if not cluster_cfg:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
 
-    kc_path = _identity_kubeconfig(cluster_cfg.get("kubeconfig", ""),
+    kc_path = _identity_kubeconfig(_cluster_kubeconfig_path(cluster_cfg) or "",
                                    current_cluster_identity())
     result = {
         "cluster": cluster,
@@ -13302,7 +13786,7 @@ def api_connection_test(cluster):
 
     # 4. SSH reachability per node
     ssh_user = cluster_cfg.get("ssh", {}).get("user", "rancher")
-    ssh_key  = cluster_cfg.get("ssh", {}).get("key", "")
+    ssh_key  = _cluster_ssh_key_path(cluster_cfg.get("ssh")) or ""
     ssh_port = cluster_cfg.get("ssh", {}).get("port", 22)
 
     def _probe_node(node):
@@ -13458,7 +13942,7 @@ def api_status_helper(cluster, namespace):
 @requires_auth
 def api_actions_list():
     with ACTIONS_LOCK:
-        return jsonify({"actions": [a.to_dict() for a in ACTIONS.values()]})
+        return jsonify({"actions": [a.to_dict() for a in ACTIONS.values() if not _action_hidden(a.action)]})
 
 
 @app.route("/api/action", methods=["POST"])
@@ -13504,8 +13988,10 @@ def api_action_get(run_id):
         # v1.6.5: fall back to SQLite — the run may have been GC'd from
         # memory or predate the current Flask process.
         d, _events = _actions_db_get(run_id)
-        if d:
+        if d and not _action_hidden(d.get("action")):
             return jsonify(d)
+        abort(404)
+    if _action_hidden(run.action):
         abort(404)
     return jsonify(run.to_dict())
 
@@ -13586,7 +14072,7 @@ def api_stream(run_id):
         # v1.6.5: replay persisted events for runs no longer in memory so
         # the Activity "details" panel works across restarts and the 1h GC.
         d, events = _actions_db_get(run_id)
-        if not d:
+        if not d or _action_hidden(d.get("action")):
             abort(404)
 
         def gen_db():
@@ -13596,6 +14082,8 @@ def api_stream(run_id):
 
         return Response(stream_with_context(gen_db()), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    if _action_hidden(run.action):
+        abort(404)
 
     def gen():
         # Replay any events we already have. v1.46.0 : par numéro absolu
@@ -13690,7 +14178,7 @@ def api_activity():
     nested = not filtering
 
     def keep(e):
-        return _activity_matches(e, f_cluster, f_status, f_action, f_q)
+        return not _action_hidden(e.get("action")) and _activity_matches(e, f_cluster, f_status, f_action, f_q)
 
     with ACTIONS_LOCK:
         runs = list(ACTIONS.values())
@@ -13767,6 +14255,8 @@ def api_activity():
     # présentes, y compris pour un cluster retiré de la configuration dont
     # l'historique existe encore.
     facets = _activity_facets()
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        facets = dict(facets, actions=[a for a in facets.get("actions") or [] if not _action_hidden(a)])
     return jsonify({
         "in_progress": in_progress,
         "actions_done": done[:limit],
@@ -13821,7 +14311,7 @@ def api_log_content(filename):
             abort(403)
     except (OSError, ValueError):
         abort(404)
-    if not safe.exists():
+    if not safe.exists() or _action_hidden(safe.stem):
         abort(404)
     try:
         content = safe.read_text(errors="replace")
@@ -16115,7 +16605,7 @@ def _build_bundle(job: BundleJob):
         status_data = {}
         for c in cfg.get("clusters", []):
             cname = c["name"]
-            kc = _identity_kubeconfig(c.get("kubeconfig", ""),
+            kc = _identity_kubeconfig(_cluster_kubeconfig_path(c, "bundle", missing_ok=True) or "",
                                       getattr(job, "identity", None))
             if not Path(kc).exists():
                 continue
@@ -17271,7 +17761,7 @@ def api_capi_install(cluster):
     cluster_cfg = next((c for c in cfg.get("clusters", []) if c["name"] == cluster), None)
     if not cluster_cfg:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    kc = _identity_kubeconfig(cluster_cfg.get("kubeconfig", ""),
+    kc = _identity_kubeconfig(_cluster_kubeconfig_path(cluster_cfg) or "",
                               current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"error": "kubeconfig missing"}), 400
@@ -17338,13 +17828,17 @@ def api_capi_install(cluster):
                         f"{compat_warning['target_version']} — proceeding anyway"),
             "ts": time.time(),
         })
+    key_path = _cluster_ssh_key_path(ssh) or ""
+    # copies résolues par le fil de la requête, utilisées par le fil de
+    # l'action : tenues par l'action jusqu'à sa fin (revue I1 des tâches 5-7)
+    run.hold_secrets(kc, key_path)
     with ACTIONS_LOCK:
         ACTIONS[run_id] = run
     threading.Thread(
         target=_capi_install_runner,
         args=(run, cluster, kc, nodes_ips,
               ssh.get("user", "rancher"),
-              ssh.get("key", ""),
+              key_path,
               ssh.get("port", 22),
               dry_run),
         daemon=True,
@@ -17618,7 +18112,8 @@ _UNSET = object()
 
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
                 capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
-                setup=None, parent=None, cluster_user=_UNSET, sink=None, busy_match=None):
+                setup=None, parent=None, cluster_user=_UNSET, sink=None, busy_match=None,
+                secret_clusters=(), secret_refs=(), secret_files=None):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
@@ -17639,7 +18134,11 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     sinon lu dans la requête. 2.7.0 : `sink(objet)`, l'objet JSON de stdout
     rendu en mémoire à l'appelant et jamais gardé (jeton, voir le relais).
     2.7.1 : `busy_match(action)`, toute action en cours qu'il retient bloque
-    aussi (contrôlé sous le même verrou que l'inscription)."""
+    aussi (contrôlé sous le même verrou que l'inscription).
+    2.9.0 : l'outil ne se connecte pas à OpenBao ; il reçoit les copies de
+    travail des secrets du cluster, des `busy_clusters`, des
+    `secret_clusters` (`kvm:<hôte>` pour un hôte KVM), des `secret_refs` et
+    les copies `secret_files` déjà écrites ({référence: chemin})."""
     wd = _capi_work_dir()
     spec_file = None
     if spec is not None:
@@ -17656,8 +18155,12 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
                        and not a.partition("=")[2].startswith("/")
                        and a not in ("--kubeconfig", "--db")]
     run = ActionRun(run_id, label, cluster, public, dry_run=dry_run)
+    run.hold_secrets(*cmd)                     # copies remises à l'outil (revue I1 des tâches 5-7)
     run.cluster_user = ((current_cluster_identity() or {}).get("user") if cluster_user is _UNSET
                         else cluster_user)
+    run.secret_clusters = tuple(c for c in (*(busy_clusters or ()), *(secret_clusters or ())) if c)
+    run.secret_refs = tuple(secret_refs or ())
+    run.secret_files = dict(secret_files or {})
     if setup is not None:
         setup(run)
     with ACTIONS_LOCK:
@@ -23111,7 +23614,7 @@ def api_capi_uninstall(cluster):
     cluster_cfg = next((c for c in cfg.get("clusters", []) if c["name"] == cluster), None)
     if not cluster_cfg:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    kc = _identity_kubeconfig(cluster_cfg.get("kubeconfig", ""),
+    kc = _identity_kubeconfig(_cluster_kubeconfig_path(cluster_cfg) or "",
                               current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"error": "kubeconfig missing"}), 400
@@ -23142,7 +23645,7 @@ def api_capi_uninstall(cluster):
         target=_capi_uninstall_runner,
         args=(run, cluster, kc, nodes_ips,
               ssh.get("user", "rancher"),
-              ssh.get("key", ""),
+              _cluster_ssh_key_path(ssh) or "",
               ssh.get("port", 22),
               keep_cm, dry_run),
         daemon=True,
@@ -23515,6 +24018,7 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     last_error = None
     out_file = None
+    secret_map = None
     if run.cancel_requested:
         # v1.99.0 : annulée avant le départ de la commande : rien n'est lancé
         run.status, run.error_summary = "cancelled", "cancelled before the command started: nothing done"
@@ -23526,8 +24030,11 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
         # dans le try : une erreur ici (disque plein) laissait l'action
         # « running » pour toujours
         out_file = tempfile.TemporaryFile() if capture and sink is None else None
+        secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
+                                                   getattr(run, "secret_refs", ()), getattr(run, "secret_files", None))
         proc = subprocess.Popen(cmd, stdout=out_file or (subprocess.PIPE if sink is not None else subprocess.DEVNULL),
-                                stderr=subprocess.PIPE, text=True)
+                                stderr=subprocess.PIPE, text=True,
+                                **({"env": {**os.environ, **secret_env}} if secret_env else {}))
         run.proc = proc          # annulable depuis le dock : le script défait tout
         got = []
         reader = None
@@ -23609,6 +24116,8 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
     finally:
         if out_file is not None:
             out_file.close()
+        if secret_map:
+            secret_map.unlink(missing_ok=True)
     run.ended_at = time.time()
     run.emit({"type": "status", "status": run.status,
               "exit_code": run.exit_code, "ts": time.time()})
@@ -23618,7 +24127,9 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
 def _start_transfer(label, cluster, clusters, public_cmd, cmd, result=None):
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, label, cluster, public_cmd)
+    run.hold_secrets(*cmd)                     # copies remises à l'outil (revue I1 des tâches 5-7)
     run.result = dict(result or {})
+    run.secret_clusters = tuple(c for c in clusters or () if c)       # 2.9.0 : copies des deux clusters
     _ident = current_cluster_identity()
     run.cluster_user = (_ident or {}).get("user")
     with ACTIONS_LOCK:
@@ -24998,7 +25509,7 @@ def _vnc_classify_loss(cluster, namespace, name, uid):
     a-t-il pris la place ? KubeVirt n'en accepte qu'un, et sans cette
     distinction les deux consoles se la reprenaient en boucle."""
     cfg = load_config()
-    kc = next((c["kubeconfig"] for c in cfg.get("clusters", [])
+    kc = next((_cluster_kubeconfig_path(c, "vnc") for c in cfg.get("clusters", [])
                if c["name"] == cluster), None)
     reason = "lost"
     if kc:
@@ -25111,7 +25622,7 @@ def ws_vnc(ws, cluster, namespace, name):
         log_vnc.warning("rejected /ws/vnc for %s/%s: ticket of another user", namespace, name)
         ws.close(message="invalid or expired ticket"); return
     cfg = load_config()
-    kc = next((c["kubeconfig"] for c in cfg.get("clusters", [])
+    kc = next((_cluster_kubeconfig_path(c, "vnc") for c in cfg.get("clusters", [])
                if c["name"] == cluster), None)
     if not kc:
         ws.close(message="unknown cluster"); return
@@ -27785,7 +28296,7 @@ def ws_serial(ws, cluster, namespace, name):
     if not entry or not _vnc_ticket_user_ok(entry):
         ws.close(message="invalid or expired ticket"); return
     cfg = load_config()
-    kc = next((c["kubeconfig"] for c in cfg.get("clusters", []) if c["name"] == cluster), None)
+    kc = next((_cluster_kubeconfig_path(c, "serial") for c in cfg.get("clusters", []) if c["name"] == cluster), None)
     if not kc:
         ws.close(message="unknown cluster"); return
     try:
@@ -28344,7 +28855,20 @@ def _tf_kvm_stage(ws, host_decl):
     state = _state_dir()
     for rel, name in ((host_decl["ssh_key"], _tfk.KEY_FILE),
                       (host_decl["known_hosts"], _tfk.KNOWN_FILE)):
-        _tf_private_write(ws / name, _kd.resolve(state, rel).read_bytes())
+        # 2.9.0 : la clé de l'hôte par le magasin de secrets (référence) ou
+        # son fichier rangé sous l'état
+        src = _kd.key_path(state, rel, "tf-kvm-ssh") if name == _tfk.KEY_FILE else _kd.resolve(state, rel)
+        if name == _tfk.KEY_FILE and _sst.is_active():
+            # revue I4 : OpenBao actif, la clé reste sur tmpfs ; l'espace
+            # (disque) n'en porte qu'un lien, retiré avec elle au déstockage
+            tmp = _tf_tmpfs_copy("tf-kvm-key", src.read_text(), ("tf-kvm-key", str(ws)))
+            try:
+                (ws / name).unlink()
+            except FileNotFoundError:
+                pass
+            (ws / name).symlink_to(tmp)
+            continue
+        _tf_private_write(ws / name, src.read_bytes())
     # le script ssh strict que le provider lance (qemu+sshcmd, command=)
     _tf_private_write(ws / _tfk.WRAPPER_FILE, _tfk.ssh_wrapper(ws).encode())
     os.chmod(ws / _tfk.WRAPPER_FILE, 0o700)
@@ -28353,6 +28877,8 @@ def _tf_kvm_stage(ws, host_decl):
 def _tf_kvm_unstage(ws):
     for name in (_tfk.KEY_FILE, _tfk.KNOWN_FILE, _tfk.WRAPPER_FILE):
         try:
+            if (ws / name).is_symlink():
+                Path(os.readlink(ws / name)).unlink(missing_ok=True)    # copie tmpfs (revue I4)
             (ws / name).unlink()
         except FileNotFoundError:
             pass
@@ -28463,8 +28989,15 @@ def _tf_kvm_secret(ws, var):
     os.chmod(d, 0o700)
     f = d / var
     if not f.is_file():
-        _tf_private_write(f, _secrets.token_hex(32).encode())
-    return f.read_text().strip()
+        value = _secrets.token_hex(32)
+        ref = None
+        # 2.9.0 tâche 8 : classe tf-kvm migrée -> le jeton va dans OpenBao, le
+        # fichier porte sa référence (`<hôte>/<décl>/<variable>`)
+        if ws.parent.name == "decls" and ws.parent.parent.parent.name == ".kvm":
+            ref = _secret_put("tf-kvm", f"{ws.parent.parent.name}/{ws.name}/{var}", "value", value)
+        _tf_private_write(f, ((ref + "\n") if ref else value).encode())
+    # 2.9.0 : le fichier peut porter la référence du secret migré dans OpenBao
+    return _sst.resolve_value(f.read_text().strip())
 
 
 def _tf_kvm_env(ws, rendered):
@@ -28969,7 +29502,7 @@ def _terraform_cli_version():
     return "?"
 
 
-def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=()):
+def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(), stdin_text=None):
     """Invoke terraform with the right env vars (HARVESTER_KUBECONFIG) and
     return (rc, stdout, stderr).
 
@@ -28979,12 +29512,24 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
     with constraints-mismatch errors) and nothing is fetched from the
     Internet. `extra_env` : variables ajoutées (jeton RKE2 en TF_VAR_, jamais
     dans argv) ; `drop_env` : variables retirées (SSH_AUTH_SOCK : seule la
-    clé de l'hôte doit servir)."""
+    clé de l'hôte doit servir) ; `stdin_text` : entrée standard (`state
+    push -`, 2.9.0).
+
+    2.9.0 (tâche 9) : un espace qui porte `_encryption.tf` reçoit BAO_ADDR,
+    BAO_TOKEN (jeton enfant de la déclaration) et BAO_CACERT dans
+    l'environnement de ce seul processus, après le nettoyage de
+    _TF_ENV_KEEP ; jeton de la session de l'action, sinon un jeton créé et
+    révoqué pour cette commande. `-state-out` est refusé (essai 8 : la
+    destination serait écrite en clair)."""
+    # revue m9 des tâches 9-10 : `--state-out=...` vaut `-state-out` pour Go
+    if any(("-" + str(a).lstrip("-")).startswith(_TF_REFUSED_ARGS) for a in args):
+        return 126, "", "refused: -state-out writes the destination state in clear text"
     _tf_secure_ws(ws_dir)
     # 2.3.1 : dernier rempart, quel que soit le chemin qui a écrit les
     # fichiers (déclaration, ancien espace partagé, fichier posé à la main) :
     # OpenTofu ne se lance jamais sur une construction refusée.
-    refused = _tfg.check_workspace(ws_dir, known_headers=(_TF_HEADER,))
+    refused = _tfg.check_workspace(ws_dir, known_headers=(_TF_HEADER,),
+                                   known_encryption=_tf_known_encryption(ws_dir))
     if refused:
         log_tf.warning("terraform %s refused in %s: %s", args[0] if args else "?", ws_dir.name,
                        "; ".join(str(v) for v in refused[:5]))
@@ -29001,9 +29546,21 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
     for k in drop_env:
         env.pop(k, None)
     env.update(extra_env or {})
+    sess, temp = None, None
+    if (ws_dir / _tfe.ENCRYPTION_FILE).exists():
+        sess = _tf_bao_session_of(ws_dir)
+        if sess is None:
+            sess = temp = _TfBaoSession(_tf_ws_decl_id(ws_dir), timeout)
+        try:
+            env.update(sess.env())
+        except (_sst.SecretError, _oc.OpenBaoError, ValueError, KeyError) as e:
+            if temp is not None:
+                temp.revoke()
+            code = getattr(e, "code", None) or type(e).__name__
+            return 125, "", f"state encryption: OpenBao child token unavailable ({code})"
     try:
         # umask 077 : état, copies et plans que crée tofu naissent en 0600
-        r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env,
+        r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env, input=stdin_text,
                            capture_output=True, text=True, timeout=timeout, umask=0o077)
         # 2.3.0 : un espace dont le verrou a été écrit d'après un provider
         # téléchargé sur Internet (OpenTofu, avant le double miroir) refuse le
@@ -29016,12 +29573,16 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
             (ws_dir / ".terraform.lock.hcl").unlink()
             log_tf.warning("terraform lock file of %s did not match the local mirror: recreated",
                            ws_dir.name)
-            r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env,
+            r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env, input=stdin_text,
                                capture_output=True, text=True, timeout=timeout, umask=0o077)
+        if sess is not None:
+            return r.returncode, sess.scrub(r.stdout), sess.scrub(r.stderr)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
     finally:
+        if temp is not None:
+            temp.revoke()
         _tf_secure_ws(ws_dir)
 
 
@@ -29052,6 +29613,344 @@ def _tf_env(ws_dir):
 _TF_STALE_LOCK = "doesn't match any of the checksums previously recorded in the dependency lock file"
 
 
+# ---------------------------------------------------------------------------
+# 2.9.0 (tâche 9, décision 140, points 261 et 270) : états OpenTofu chiffrés
+# par le moteur transit d'OpenBao. La console écrit `_encryption.tf` dans
+# l'espace d'une déclaration (jamais le code de l'utilisateur, tf_guard le
+# refuse), crée un jeton enfant par action (rôle `hops-tf-<console>`,
+# politique fixe à gabarit, alias d'entité `tf-<décl>` : il ne vaut que
+# pour la clé de sa déclaration ; aucune politique écrite), le remet au
+# seul processus `tofu` par son environnement et le révoque à la fin de
+# l'action. Un état chiffré ne se lit plus en JSON : `tofu state list`,
+# `state pull`, `state push -`.
+# ---------------------------------------------------------------------------
+import openbao_client as _oc  # noqa: E402
+import openbao_policy as _opol  # noqa: E402
+import tf_encryption as _tfe  # noqa: E402
+
+TF_BAO_SESSION_TIMEOUT = 1800        # plus longue commande d'une action (apply KVM)
+TF_ADDRESSES_CACHE = ".hops-addresses.json"
+_TF_BAO_SESSIONS = {}                # str(espace) -> _TfBaoSession de l'action en cours
+_TF_BAO_LOCK = threading.Lock()
+_TF_SERVER_STATUS = {}               # adresse -> (instant, sys/seal-status)
+_TF_SERVER_TTL = 600
+_TF_REFUSED_ARGS = ("-state-out",)   # essai 8 : la destination serait écrite en clair
+
+
+class TfStateUnreadable(Exception):
+    """L'état chiffré d'un espace n'a pas pu être lu par OpenTofu."""
+
+    def __init__(self, code, detail=""):
+        super().__init__(f"{code}: {detail}"[:300])
+        self.code, self.detail = code, detail
+
+
+def _tf_ws_decl_id(ws):
+    """Identifiant de la déclaration d'un espace `.../decls/<id>`, ou None
+    (espace partagé d'un cluster : jamais chiffré)."""
+    ws = Path(ws)
+    return ws.name if ws.parent.name == "decls" and _tfs.ID_RE.match(ws.name) else None
+
+
+def _tf_settings():
+    """Réglages du magasin, relus à chaud (MultiStore._refresh)."""
+    st = _sst.store()
+    st.active()
+    return st.settings
+
+
+def _tf_console_id():
+    try:
+        return _tf_settings().get("console_id")
+    except Exception:                      # noqa: BLE001 : réglages illisibles = pas de chiffrement
+        return None
+
+
+def _tf_known_encryption(ws):
+    """Textes permis de `_encryption.tf` dans cet espace (tf_guard)."""
+    decl_id, cid = _tf_ws_decl_id(ws), _tf_console_id()
+    if not decl_id or not cid:
+        return ()
+    try:
+        return _tfe.all_blocks(cid, decl_id)
+    except ValueError:
+        return ()
+
+
+def _tf_bao_ca(settings):
+    """(chemin du fichier de CA pour BAO_CACERT, contenu PEM) ou (None, None)."""
+    p = Path(settings.get("ca_file") or (_sst.openbao_dir() / "ca.pem"))
+    try:
+        return (str(p), p.read_text()) if p.is_file() else (None, None)
+    except OSError:
+        return None, None
+
+
+class _TfBaoSession:
+    """Jeton enfant d'OpenTofu pour une déclaration, le temps d'une action.
+    Créé au premier besoin, recréé si son heure d'expiration est passée
+    (un jeton expiré au départ donne 403, indiscernable d'une mauvaise
+    clé : la console compare elle-même l'heure), révoqué à la fin."""
+
+    # revue m2 des tâches 9-10 : marge avant l'expiration lue dans la réponse
+    # (tofu peut mettre du temps à démarrer avant son premier appel transit)
+    MARGIN_S = 120
+
+    def __init__(self, decl_id, timeout=TF_BAO_SESSION_TIMEOUT, action=None, actor=None):
+        self.decl_id, self.timeout, self.action, self.actor = decl_id, int(timeout), action, actor
+        self.token, self.expires, self.addr, self.ca_file, self._ca_pem = None, 0.0, None, None, None
+        # revue m3 : une vue (autre fil) peut emprunter la session d'une action
+        self._lock = threading.RLock()
+        self._issued = []
+        self.granted = 0
+
+    def __repr__(self):
+        return f"<TfBaoSession {self.decl_id} {'open' if self.token else 'closed'}>"
+
+    def _open(self):
+        st = _sst.store()
+        client = st.bao_client(self.actor or None, self.action)     # réglages relus
+        s = st.settings
+        cid = s.get("console_id")
+        key = _tfe.key_name(cid, self.decl_id)
+        try:
+            client.transit_create(key)                 # idempotent (vu sur OpenBao 2.7.2)
+            ttl = _tfe.child_ttl(self.timeout)
+            role = _opol.tf_role(cid)
+            token, lease = client.token_create_child(role, [role], f"{ttl}s", entity_alias=_tfe.alias(self.decl_id),
+                                                     with_lease=True)
+        except _oc.OpenBaoError as e:
+            raise _sst.SecretError(e.code, "tf-state", self.decl_id, e.detail) from None
+        self.addr = s["addr"]
+        self.ca_file, self._ca_pem = _tf_bao_ca(s)
+        # durée accordée par le serveur (plafonnée par max_lease_ttl ou par
+        # le parent), pas celle demandée
+        granted = lease if lease and 0 < lease <= ttl else ttl
+        self.token, self.expires, self.granted = token, time.time() + granted, granted
+        self._issued.append(token)
+
+    def env(self):
+        with self._lock:
+            if self.token is None or time.time() >= self.expires - min(self.MARGIN_S, self.granted / 2):
+                self.revoke()
+                self._open()
+            return _tfe.env(self.addr, self.token, self.ca_file)
+
+    def revoke(self):
+        with self._lock:
+            tok, self.token = self.token, None
+        if not tok:
+            return
+        try:
+            c = _oc.Client(self.addr, ca_pem=self._ca_pem, timeout=10, actor=self.actor or "service",
+                           action=self.action)
+            c.set_token(tok)
+            c.revoke_self()
+        except Exception as e:             # noqa: BLE001 : jeton déjà expiré, OpenBao coupé
+            log_tf.warning("OpenTofu child token of %s not revoked: %s", self.decl_id, type(e).__name__)
+
+    def scrub(self, text):
+        if not text:
+            return text
+        for tok in list(self._issued):
+            text = text.replace(tok, "***")
+        return text
+
+
+@contextlib.contextmanager
+def _tf_bao_session(ws, decl_id, timeout=TF_BAO_SESSION_TIMEOUT, action=None, actor=None):
+    """Session d'une action sur l'espace `ws` : toutes les commandes `tofu`
+    de l'action dans cet espace partagent un jeton, révoqué à la sortie
+    (réussite, échec ou exception)."""
+    sess = _TfBaoSession(decl_id, timeout, action=action, actor=actor)
+    key = str(Path(ws))
+    with _TF_BAO_LOCK:
+        prev = _TF_BAO_SESSIONS.get(key)
+        _TF_BAO_SESSIONS[key] = sess
+    try:
+        yield sess
+    finally:
+        with _TF_BAO_LOCK:
+            if prev is None:
+                _TF_BAO_SESSIONS.pop(key, None)
+            else:
+                _TF_BAO_SESSIONS[key] = prev
+        sess.revoke()
+
+
+def _tf_bao_session_of(ws):
+    with _TF_BAO_LOCK:
+        return _TF_BAO_SESSIONS.get(str(Path(ws)))
+
+
+def _tf_server_status(settings):
+    """`sys/seal-status` du serveur (version), gardé 10 min par adresse.
+    OpenBaoError si le serveur ne répond pas."""
+    addr = settings.get("addr")
+    hit = _TF_SERVER_STATUS.get(addr)
+    if hit and time.time() - hit[0] < _TF_SERVER_TTL:
+        return hit[1]
+    _f, pem = _tf_bao_ca(settings)
+    status = _oc.Client(addr, ca_pem=pem, timeout=_oc.clamp_timeout(settings.get("timeout"))).seal_status()
+    _TF_SERVER_STATUS[addr] = (time.time(), status)
+    return status
+
+
+def _tf_state_file(ws):
+    return Path(ws) / _tfst.STATE_FILE
+
+
+def _tf_encryption_prepare(ws, decl, mode):
+    """Écrit (ou retire) `_encryption.tf` avant la première commande de
+    l'action. Rend {"encrypt", "migrate", "decrypt", "warning", "refuse",
+    "message"} :
+    - état clair existant et chiffrement voulu : bloc de migration (repli
+      `unencrypted`), `migrate` vrai ; le bloc définitif est posé à la fin
+      de l'action (_tf_encryption_finalize) ;
+    - `decrypt-state` : bloc de retour en clair ;
+    - pas de chiffrement : le fichier est retiré (l'état est clair)."""
+    out = {"encrypt": False, "migrate": False, "decrypt": False, "warning": None, "refuse": None,
+           "message": ""}
+    f = Path(ws) / _tfe.ENCRYPTION_FILE
+    st = _sst.store()
+    active = st.active()
+    s = st.settings
+    encrypted = _tfst.state_encrypted(ws)
+    if mode == "decrypt-state":
+        if not encrypted:
+            out.update(refuse="tf-state-not-encrypted", message="the state of this declaration is not encrypted")
+            return out
+        if TF_FLAVOR != "opentofu" or not active:
+            out.update(refuse="tf-state-encrypted-openbao-inactive" if TF_FLAVOR == "opentofu"
+                       else _tfe.WARN_NEEDS_OPENTOFU,
+                       message="the encrypted state is read with OpenTofu and OpenBao only")
+            return out
+        _tf_private_write(f, _tfe.block(s["console_id"], decl["id"], "migrate-out").encode())
+        out.update(encrypt=True, decrypt=True)
+        return out
+    warning, acked = None, False
+    if active and TF_FLAVOR == "opentofu" and not encrypted:
+        try:
+            status = _tf_server_status(s)
+        except _oc.OpenBaoError as e:
+            out.update(refuse=e.code, message=f"OpenBao at {s.get('addr')} does not answer ({e.code}): "
+                                              "the state encryption cannot be decided")
+            return out
+        warning = _tfe.server_verdict(s.get("mode"), status)
+        acked = bool(warning) and _tfe.ack_matches(s.get("tf_vault_ack"), s.get("addr"), status)
+    d = _tfe.decide(TF_FLAVOR, active, encrypted, warning, acked)
+    out.update(warning=d["warning"], refuse=d["refuse"])
+    if d["refuse"]:
+        out["message"] = ("the state of this declaration is encrypted: it needs OpenTofu"
+                          if d["refuse"] == _tfe.WARN_NEEDS_OPENTOFU
+                          else "the state of this declaration is encrypted and OpenBao is not active")
+        return out
+    if not d["encrypt"]:
+        f.unlink(missing_ok=True)
+        return out
+    sf = _tf_state_file(ws)
+    plain = sf.is_file() and sf.stat().st_size > 0 and not encrypted
+    _tf_private_write(f, _tfe.block(s["console_id"], decl["id"], "migrate-in" if plain else "enforced").encode())
+    out.update(encrypt=True, migrate=plain)
+    return out
+
+
+def _tf_encryption_finalize(ws, decl_id):
+    """Fin d'action : un espace resté au bloc de migration dont l'état est
+    désormais chiffré passe au bloc définitif (`enforced`)."""
+    f = Path(ws) / _tfe.ENCRYPTION_FILE
+    cid = _tf_console_id()
+    try:
+        if cid and f.is_file() and f.read_text() == _tfe.block(cid, decl_id, "migrate-in") \
+                and _tfst.state_encrypted(ws):
+            _tf_private_write(f, _tfe.block(cid, decl_id, "enforced").encode())
+    except (OSError, ValueError) as e:
+        log_tf.warning("state encryption block of %s: %s", decl_id, e)
+
+
+def _tf_encryption_view(ws):
+    """Pour l'affichage d'une déclaration : état chiffré ou clair, bloc
+    écrit, avertissement Terraform. Sans appel réseau."""
+    ws = Path(ws) if ws else None
+    if ws is None or not ws.exists():
+        return {"state": "none", "block": None, "warning": None}
+    sf = _tf_state_file(ws)
+    state = "encrypted" if _tfst.state_encrypted(ws) else ("plain" if sf.is_file() else "none")
+    blk = None
+    f = ws / _tfe.ENCRYPTION_FILE
+    cid, decl_id = _tf_console_id(), _tf_ws_decl_id(ws)
+    if f.is_file() and cid and decl_id:
+        try:
+            text = f.read_text()
+            blk = next((m for m in _tfe.MODES if _tfe.block(cid, decl_id, m) == text), "unknown")
+        except (OSError, UnicodeDecodeError):          # revue m14 des tâches 9-10
+            blk = "unreadable"
+    warning = _tfe.WARN_NEEDS_OPENTOFU if TF_FLAVOR != "opentofu" and _sst.is_active() else None
+    return {"state": state, "block": blk, "warning": warning}
+
+
+def _tf_addresses(ws, tf=None, fresh=False):
+    """Adresses gérées de l'état d'un espace. État clair : lu en JSON
+    (tf_state). État chiffré : `tofu state list` (jeton enfant), gardé à
+    côté de l'état (`.hops-addresses.json`, adresses seules) tant que l'état
+    ne change pas (date, taille et inode : revue m4 des tâches 9-10).
+    `fresh` : jamais le cache (avant une suppression). TfStateUnreadable si
+    OpenTofu ne peut pas le lire."""
+    ws = Path(ws)
+    try:
+        return _tfst.addresses(ws)
+    except _tfst.StateEncrypted:
+        pass
+    sf = _tf_state_file(ws)
+    try:
+        sst = sf.stat()
+        stamp = f"{sst.st_mtime_ns}:{sst.st_size}:{sst.st_ino}"
+    except OSError:
+        return []
+    cache = ws / TF_ADDRESSES_CACHE
+    if tf is None and not fresh:
+        try:
+            c = json.loads(cache.read_text())
+            if c.get("state_stamp") == stamp and isinstance(c.get("addresses"), list):
+                return list(c["addresses"])
+        except (OSError, ValueError):
+            pass
+
+    def lister(w):
+        rc, out, err = tf(["state", "list"], 60) if tf else _tf_run_cmd(w, "", ["state", "list"], timeout=60)
+        if rc != 0:
+            raise TfStateUnreadable("tf-state-unreadable", (err or out or "").strip()[:200])
+        return out
+
+    addrs = _tfst.addresses(ws, lister)
+    try:
+        _tf_private_write(cache, json.dumps({"state_stamp": stamp, "addresses": addrs}).encode())
+    except OSError:
+        pass
+    return addrs
+
+
+def _tf_state_io(ws, encrypted, tf):
+    """(lire, écrire) de l'état d'un espace pour tf_state.move : fichier JSON
+    pour un espace clair, `tofu state pull` / `tofu state push -` pour un
+    espace chiffré (sortie et entrée gardées en mémoire, jamais un fichier
+    en clair)."""
+    if not encrypted:
+        return _tfst.read_file_state, _tfst.write_file_state
+
+    def read(w):
+        rc, out, err = tf(["state", "pull"], 120)
+        if rc != 0:
+            raise TfStateUnreadable("tf-state-unreadable", (err or "").strip()[:200])
+        return json.loads(out) if out.strip() else None
+
+    def write(w, data):
+        rc, _out, err = tf(["state", "push", "-"], 120, stdin=json.dumps(data))
+        if rc != 0:
+            raise TfStateUnreadable("tf-state-push-failed", (err or "").strip()[:200])
+    return read, write
+
+
 @app.route("/api/terraform/<cluster>/state")
 @requires_auth
 def api_terraform_state(cluster):
@@ -29069,10 +29968,15 @@ def api_terraform_state(cluster):
     # lancer Terraform ni d'un `init` pour lister).
     ws = _tf_workspace_dir(cluster)
     spaces = [(None, ws)] + _tf_decl_workspaces(cluster)
-    resources, detail = [], []
+    resources, detail, state_errors = [], [], []
     for decl_id, space in spaces:
         decl = TF_DECLS.get(decl_id) if decl_id else None
-        for addr in _tfst.addresses(space):
+        try:
+            space_addrs = _tf_addresses(space)
+        except TfStateUnreadable as e:
+            state_errors.append({"workspace": decl_id or "shared", "code": e.code})
+            continue
+        for addr in space_addrs:
             local = addr.split(".", 1)[1] if "." in addr else addr
             side = space / f"{local}.json"
             d = {"address": addr, "local_name": local, "has_sidecar": False,
@@ -29094,7 +29998,7 @@ def api_terraform_state(cluster):
     return jsonify({
         "initialized": initialized, "workspace": str(ws),
         "resources": resources, "resources_detail": detail,
-        "resource_count": len(resources),
+        "resource_count": len(resources), "state_errors": state_errors,
     })
 
 
@@ -29375,6 +30279,17 @@ def api_tf_declarations():
     return jsonify({"declarations": [_tf_decl_for_role(_tf_decl_view(d)) for d in TF_DECLS.list(cluster, family)]})
 
 
+def _tf_decl_id_for_create(requested):
+    """Identifiant d'une nouvelle déclaration : celui du navigateur (reprise
+    localStorage d'avant la v1.54) sauf s'il désigne une déclaration
+    supprimée dont la clé transit est gardée (relecture finale I5 : elle
+    reprendrait cette clé, que le balayage retirerait) ; sinon tiré ici."""
+    requested = str(requested or "")
+    if requested and requested not in (_secrets_settings().get("tf_keys_retired") or {}):
+        return requested
+    return uuid.uuid4().hex[:12]
+
+
 @app.route("/api/tf-declarations", methods=["POST"])
 @requires_auth
 @_rate_limit("60/minute")
@@ -29397,7 +30312,7 @@ def api_tf_declaration_create():
                               current_role())
     if denied:
         return jsonify(denied), 403
-    decl_id = str(data.get("id") or uuid.uuid4().hex[:12])
+    decl_id = _tf_decl_id_for_create(data.get("id"))
     try:
         d = TF_DECLS.create(decl_id, cluster, data.get("name"), data.get("description") or "",
                             data.get("resources") or [], user=current_user() or "",
@@ -29519,10 +30434,36 @@ def api_tf_declaration_delete(decl_id):
     if why == "running":
         return jsonify({"error": "this declaration is running", "code": "running",
                         "hint": "wait for the current plan, apply or destroy to end"}), 409
+    if why == "state-unreadable":
+        return jsonify({"error": "the encrypted state of this declaration cannot be read: "
+                                 "is OpenBao reachable?", "code": "tf-state-unreadable"}), 503
     if isinstance(why, list):
         return jsonify({"error": "declaration still has deployed resources",
                         "code": "deployed", "deployed": why}), 409
     return jsonify({"error": "declaration not found"}), 404
+
+
+def _tf_purge_clear_copies(ws):
+    """Revue des tâches 9-10 (I1) : une fois l'état chiffré, aucune copie en
+    clair ne reste dans l'espace : le plan gardé (`tfplan`, qui porte l'état
+    d'avant et les valeurs prévues, périmé de toute façon) et tout
+    `terraform.tfstate.*` en clair (copies `.pre-move-*` d'un déplacement,
+    `.backup`). Une copie chiffrée est gardée. Rend les noms retirés."""
+    removed = []
+    for name in ("tfplan", "tfplan.meta"):
+        f = ws / name
+        if f.is_file() or f.is_symlink():
+            f.unlink(missing_ok=True)
+            removed.append(name)
+    for f in sorted(ws.glob("terraform.tfstate.*")):
+        try:
+            clear = f.is_symlink() or not _tfe.is_encrypted(f.read_text())
+        except (OSError, UnicodeDecodeError):
+            clear = True
+        if clear:
+            f.unlink(missing_ok=True)
+            removed.append(f.name)
+    return removed
 
 
 def _tf_decl_remove(decl_id):
@@ -29538,7 +30479,10 @@ def _tf_decl_remove(decl_id):
             return False, "running"
     try:
         ws = _tf_decl_ws(d, create=False)
-        deployed = _tfst.addresses(ws) if ws.exists() else []
+        try:
+            deployed = _tf_addresses(ws, fresh=True) if ws.exists() else []
+        except TfStateUnreadable:
+            return False, "state-unreadable"
         if deployed:
             return False, deployed
         TF_DECLS.delete(decl_id)
@@ -29547,6 +30491,7 @@ def _tf_decl_remove(decl_id):
             _shutil.rmtree(ws, ignore_errors=True)
     finally:
         _flock_release(fd)
+    _tf_entity_remove_start(decl_id)
     return True, None
 
 
@@ -29652,7 +30597,7 @@ def _tf_render_resources(resources, target_kind="harvester"):
     caractères de son code, `resource_harvester_ssh_`, audit D6)."""
     # 2.3.1 : `_providers` est le fichier de la console (une ressource de ce
     # nom écrasait l'en-tête et ses providers)
-    rendered, errors, seen = [], [], {"_providers"}
+    rendered, errors, seen = [], [], {"_providers", "_encryption"}
     target_kind = target_kind or "harvester"
     taken = {}                       # adresse -> rang, pour les ressources KVM
     for i, res in enumerate(resources or []):
@@ -29846,7 +30791,8 @@ def _tf_apply_declaration_runner(run, cluster, kc, rendered, dry_run,
 
 
 # Fichiers d'un espace de déclaration qui ne décrivent pas une ressource.
-_TF_KEEP = {"_providers.tf", "kubeconfig", "terraformrc", "tfplan", "tfplan.meta", ".outputs.json"}
+_TF_KEEP = {"_providers.tf", "kubeconfig", "terraformrc", "tfplan", "tfplan.meta", ".outputs.json",
+            "_encryption.tf", ".hops-addresses.json"}
 
 
 def _tf_decl_hash(rendered):
@@ -29892,7 +30838,11 @@ def _tf_decl_view(decl):
         ws = _tf_decl_ws(decl, create=False)
     except ValueError:
         pass
-    d["deployed"] = _tfst.addresses(ws) if ws and ws.exists() else []
+    try:
+        d["deployed"] = _tf_addresses(ws) if ws and ws.exists() else []
+    except TfStateUnreadable as e:
+        d["deployed"], d["state_error"] = None, e.code
+    d["encryption"] = _tf_encryption_view(ws)
     # sorties non sensibles du dernier apply (adresses des nœuds RKE2...)
     d["outputs"] = None
     if ws and (ws / ".outputs.json").exists():
@@ -29968,7 +30918,8 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
         raise TfLaunchError(409, {"error": "plan outdated",
                                   "hint": "the declaration changed since this plan; plan again"})
     label = {"plan": "tf-plan-decl", "apply": "tf-apply-decl",
-             "destroy": "tf-destroy-decl", "destroy-plan": "tf-destroy-decl"}[mode]
+             "destroy": "tf-destroy-decl", "destroy-plan": "tf-destroy-decl",
+             "decrypt-state": "tf-decrypt-state-decl"}[mode]
     if target_kind == "kvm" and (not _tf_libvirt_binary() or not _tf_libvirt_version()):
         raise TfLaunchError(503, {"error": "the libvirt Terraform provider is not installed",
                                   "hint": "it ships with the harvester-ops package; see the Installation tab"})
@@ -30020,8 +30971,11 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
     déclaration (toute cible)."""
     kvm = (decl.get("target_kind") or "harvester") == "kvm"
     try:
-        return _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash,
-                                    use_saved_plan, user)
+        # 2.9.0 : un jeton enfant d'OpenTofu pour toute l'action, révoqué à
+        # la sortie (réussite, échec, exception)
+        with _tf_bao_session(_tf_decl_ws(decl), decl["id"], action=run.id, actor=user or None):
+            return _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash,
+                                        use_saved_plan, user)
     except Exception as e:                 # noqa: BLE001 : l'action ne reste pas « en cours »
         log_tf.exception("declaration %s", decl.get("id"))
         if run.status not in ("done", "error"):
@@ -30034,6 +30988,10 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
                 msg = _tf_kvm_scrub(msg, TF_WORKSPACES)
             _close_err(run, "internal", msg[:300])
     finally:
+        try:
+            _tf_encryption_finalize(_tf_decl_ws(decl, create=False), decl["id"])
+        except ValueError:
+            pass
         if kvm:
             try:
                 ws = _tf_decl_ws(decl, create=False)
@@ -30101,22 +31059,52 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
         (ws / "_providers.tf").write_text(_TF_HEADER)
         kcp = str((ws / "kubeconfig").resolve())
 
-    def tf(args, timeout):
+    def tf(args, timeout, stdin=None):
+        more = {"stdin_text": stdin} if stdin is not None else {}
         if not kvm:
-            return _tf_run_cmd(ws, kcp, args, timeout=timeout)
-        rc, out, err = _tf_run_cmd(ws, kcp, args, timeout=timeout, extra_env=env, drop_env=drop)
-        if args and args[0] == "show":           # JSON lu par la console, jamais renvoyé tel quel
+            return _tf_run_cmd(ws, kcp, args, timeout=timeout, **more)
+        rc, out, err = _tf_run_cmd(ws, kcp, args, timeout=timeout, extra_env=env, drop_env=drop, **more)
+        if args and args[0] in ("show", "state"):    # JSON lu par la console, jamais renvoyé tel quel
             return rc, out, _tf_kvm_scrub(err, ws)
         return rc, _tf_kvm_scrub(out, ws), _tf_kvm_scrub(err, ws)
+
+    # 2.9.0 (tâche 9) : chiffrement de l'état décidé et `_encryption.tf`
+    # écrit avant la première commande
+    enc = _tf_encryption_prepare(ws, decl, mode)
+    if enc["refuse"]:
+        return _close_err(run, "preflight", f"{enc['refuse']}: {enc['message']}")
+    if enc["warning"]:
+        run.result = dict(run.result or {}, encryption_warning=enc["warning"])
+        step("encryption", "warn", enc["warning"] + (
+            ": the state stays in clear text (OpenTofu encrypts the state, Terraform does not)"
+            if enc["warning"] == _tfe.WARN_NEEDS_OPENTOFU else
+            ": this server is not a verified OpenBao or Vault 1.14; the state stays in clear text "
+            "until an administrator acknowledges it (harvester-secrets tf-encryption ack-vault)"))
+    elif enc["encrypt"] and not enc["decrypt"]:
+        step("encryption", "done", "state encrypted with the OpenBao transit key "
+                                   + _tfe.key_name(_tf_console_id(), decl["id"]))
 
     # Reprise : ce qui a été appliqué avant la v1.54 vit dans l'état partagé
     # (Harvester seulement : une cible KVM n'a jamais eu d'état partagé).
     shared = None if kvm else _tf_workspace_dir(cluster)
     wanted = {r[4] for r in rendered}
     lock_file = shared / ".terraform.tfstate.lock.info" if shared else None
-    if shared and wanted - set(_tfst.addresses(ws)) and not lock_file.exists():
+
+    def adopt():
+        if not (shared and wanted - set(_tf_addresses(ws, tf if enc["encrypt"] else None))
+                and not lock_file.exists()):
+            return
+        # espace chiffré : `state pull` / `state push -`, jamais un fichier
+        # d'état clair (essai 8)
+        read, write = _tf_state_io(ws, enc["encrypt"], tf)
+
+        def read_any(w):
+            return read(w) if Path(w) == Path(ws) else _tfst.read_file_state(w)
+
+        def write_any(w, data):
+            return write(w, data) if Path(w) == Path(ws) else _tfst.write_file_state(w, data)
         with TF_STATE_LOCK:
-            moved = _tfst.move(shared, ws, wanted)
+            moved = _tfst.move(shared, ws, wanted, read=read_any, write=write_any)
         for a in moved:
             local = a.split(".", 1)[1]
             for ext in (".tf", ".json"):
@@ -30124,6 +31112,9 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
         if moved:
             step("adopt", "done", f"{len(moved)} resource(s) taken over from the shared workspace: "
                                   + ", ".join(moved))
+
+    if not enc["encrypt"]:
+        adopt()
 
     # Les fichiers de l'espace suivent la déclaration : ce qui n'y est plus
     # disparaît, et sera détruit par l'apply (le plan le montre).
@@ -30152,6 +31143,33 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
             return _close_err(run, "init", err.strip()[:400] or out.strip()[:400])
         step("init", "done", "providers ready")
 
+    if enc["migrate"] or enc["decrypt"]:
+        # migration d'un état (essai 8) : `apply -refresh-only` sans aucun
+        # changement de ressource ; à l'aller le bloc de migration lit
+        # l'état clair et l'écrit chiffré, au retour l'inverse
+        sid = "decrypt-state" if enc["decrypt"] else "encrypt-state"
+        step(sid, "running", "apply -refresh-only")
+        rc, out, err = tf(["apply", "-refresh-only", "-auto-approve", "-input=false", "-no-color"],
+                          1800 if kvm else 900)
+        if rc != 0:
+            return _close_err(run, sid, err.strip()[:400] or out.strip()[:400])
+        if _tfst.state_encrypted(ws) == bool(enc["decrypt"]):
+            return _close_err(run, sid, "the state was not rewritten "
+                                        + ("in clear text" if enc["decrypt"] else "encrypted"))
+        if enc["decrypt"]:
+            (ws / _tfe.ENCRYPTION_FILE).unlink(missing_ok=True)
+            (ws / TF_ADDRESSES_CACHE).unlink(missing_ok=True)
+            step(sid, "done", "state written in clear text, encryption block removed")
+            return done({"encryption": "plain", "deployed": _tf_addresses(ws)})
+        purged = _tf_purge_clear_copies(ws)
+        step(sid, "done", "state encrypted" + (f"; clear copies removed: {', '.join(purged)}" if purged else ""))
+    if enc["encrypt"]:
+        try:
+            adopt()
+        except (TfStateUnreadable, ValueError) as e:
+            return _close_err(run, "adopt", str(e)[:300])
+        _tf_purge_clear_copies(ws)
+
     if destroying:
         args = (["plan", "-destroy", "-input=false", "-no-color"] if mode == "destroy-plan"
                 else ["destroy", "-input=false", "-no-color", "-auto-approve"])
@@ -30166,11 +31184,11 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
             return _close_err(run, "destroy", err.strip()[:400] or out.strip()[:400])
         if mode == "destroy":
             for f in list(ws.glob("*.tf")) + list(ws.glob("*.json")) + [ws / "tfplan", ws / "tfplan.meta"]:
-                if f.name != "_providers.tf":
+                if f.name not in ("_providers.tf", _tfe.ENCRYPTION_FILE, TF_ADDRESSES_CACHE):
                     f.unlink(missing_ok=True)       # .outputs.json compris
             TF_DECLS.mark_applied(decl["id"], "destroyed", user)
         step("destroy", "done", f"declaration '{name}' destroyed" if mode == "destroy" else "destroy plan ready")
-        return done({"deployed": _tfst.addresses(ws)})
+        return done({"deployed": _tf_addresses(ws, tf if enc["encrypt"] else None)})
 
     summary = None
     if not (use_saved_plan and (ws / "tfplan").exists()):
@@ -30223,7 +31241,7 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
     if kvm:
         _tf_save_outputs(ws, tf, _tfk.output_names(rendered))
     step("apply", "done", f"declaration '{name}' applied ({len(rendered)} resources)")
-    return done({"plan": summary, "deployed": _tfst.addresses(ws)})
+    return done({"plan": summary, "deployed": _tf_addresses(ws, tf if enc["encrypt"] else None)})
 
 
 def _tf_save_outputs(ws, tf, wanted=None):
@@ -30877,7 +31895,12 @@ def api_terraform_destroy(cluster):
         # v1.54.0 : tout ce que Terraform gère sur ce cluster, c'est l'espace
         # partagé ET l'état de chaque déclaration.
         spaces = [(None, _tf_workspace_dir(cluster))] + _tf_decl_workspaces(cluster)
-        spaces = [(i, w) for i, w in spaces if (w / ".terraform").exists() and _tfst.addresses(w)]
+        def managed(w):
+            try:
+                return bool(_tf_addresses(w))
+            except TfStateUnreadable:
+                return True                     # illisible : tenté, OpenTofu dira pourquoi
+        spaces = [(i, w) for i, w in spaces if (w / ".terraform").exists() and managed(w)]
         if not spaces:
             return _close_err(run, "preflight", "nothing managed by Terraform on this cluster")
         args = ["plan", "-destroy", "-no-color"] if dry_run \
@@ -31543,7 +32566,8 @@ def _repl_action(plan, op, cmd, role, cluster=None, busy=True, busy_clusters=Non
                        capture=True,
                        busy_clusters=busy_clusters or (plan["source_cluster"], plan["target_cluster"]),
                        busy_prefix=f"replication:{plan['id']}:", summarize=_repl_summarize, id_arg=True,
-                       setup=setup)
+                       setup=setup, secret_clusters=(plan["source_cluster"], plan["target_cluster"]),
+                       secret_refs=_replication_secret_refs())
 
 
 def _repl_accepted(run, plan_id, **extra):
@@ -31937,6 +32961,9 @@ def api_replication_plan_create():
     def setup(run):
         run.required_role = "operator"
         run.cancel_waits = True
+    if (recovery or {}).get("hooks"):
+        # le plan n'a pas encore d'identifiant : chemin `new-<aléa>/<action>`
+        recovery = dict(recovery, hooks=_repl_hooks_to_refs(recovery["hooks"], f"new-{uuid.uuid4().hex[:12]}"))
     run, err = _cli_action(plan["source_cluster"], f"replication:create:{plan['name']}",
                            _repl_base("plan", "create") + argv, REPLICATION_TOOL,
                            spec={"recovery": recovery} if recovery else None,
@@ -32353,6 +33380,8 @@ def api_replication_settings(plan_id):
     err = _repl_budget_error(dict(plan, options=opts))
     if err:
         return err
+    if (spec.get("recovery") or {}).get("hooks"):
+        spec["recovery"] = dict(spec["recovery"], hooks=_repl_hooks_to_refs(spec["recovery"]["hooks"], plan["id"]))
     run, err = _repl_action(plan, "settings", _repl_base("plan", "set", plan["id"]) + argv, "operator",
                             busy_clusters=("",), spec=spec or None)
     if err:
@@ -32550,7 +33579,60 @@ def _repl_simple_action(label, cmd, role, spec=None, busy_clusters=None, setup_e
     return _cli_action(busy_clusters[0] if busy_clusters else "", label, cmd, REPLICATION_TOOL, spec=spec,
                        after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=bool(busy_clusters),
                        capture=True, busy_clusters=busy_clusters, busy_prefix=label if busy_clusters else None,
-                       summarize=_repl_summarize, id_arg=True, setup=setup)
+                       summarize=_repl_summarize, id_arg=True, setup=setup,
+                       secret_refs=_replication_secret_refs())
+
+
+def _repl_hooks_to_refs(hooks, plan_key):
+    """2.9.0 tâche 8 : classe `replication-hook` migrée -> chaque en-tête
+    secret nouveau d'une action annexe va dans OpenBao
+    (`replication-hook/<plan>/<action>#hdr_<nom>`) et la demande remise à
+    l'outil porte sa référence. `********` (valeur gardée) et les références
+    passent tels quels. Classe locale : inchangé."""
+    if not hooks or not _secret_migrated("replication-hook"):
+        return hooks
+    return _sst.hooks_to_refs(hooks, plan_key, _secret_put, keep=(_rp.MASK,))
+
+
+def _repl_notify_checked(body, stored):
+    """Le réglage contrôlé (normalize) : avec les valeurs des secrets rangés
+    dans OpenBao quand la classe `replication-notify` est migrée, pour que
+    les adresses soient contrôlées (address_refusal) avant toute écriture."""
+    if not _secret_migrated("replication-notify"):
+        return _rn.normalize(body, stored)
+    return _rn.normalize(body, _rn.resolve_secrets(stored or {}))
+
+
+def _repl_notify_to_refs(body, norm, stored):
+    """2.9.0 tâche 8 : classe `replication-notify` migrée -> chaque secret
+    nouveau du réglage contrôlé `norm` va dans OpenBao et le réglage remis à
+    l'outil (qui ne se connecte pas) porte sa référence ; un secret inchangé
+    garde la sienne. Classe locale : `body`, inchangé."""
+    import copy
+    if not _secret_migrated("replication-notify"):
+        return body
+    resolved = _rn.resolve_secrets(stored or {})
+    out = copy.deepcopy(norm)
+
+    def key(c, secret):
+        return (c.get("id"), secret if isinstance(secret, str) else ("header", secret[1]))
+    refs = {key(c, s): v for c, s, v in _rn.secret_slots(stored)}
+    values = {key(c, s): v for c, s, v in _rn.secret_slots(resolved)}
+    for c, secret, value in _rn.secret_slots(out):
+        if _sst.is_ref(value):
+            continue
+        k = key(c, secret)
+        old = refs.get(k)
+        if _sst.is_ref(old) and values.get(k) == value:
+            new = old
+        else:
+            new = _secret_put("replication-notify", _ssc.NOTIFY_PATH, _ssc.notify_field(c["id"], secret), value) \
+                or value
+        if isinstance(secret, tuple):
+            c["secret_headers"][secret[1]] = new
+        else:
+            c[secret] = new
+    return out
 
 
 @app.route("/api/replication/notify", methods=["PUT"])
@@ -32567,11 +33649,13 @@ def api_replication_notify_set():
     if err:
         return err
     try:
-        _rn.address_refusal(_rn.normalize(body, _repl_notify_stored()),
-                            _rh.allowlist(load_config_ro(), "notifications"))
+        stored = _repl_notify_stored()
+        checked = _repl_notify_checked(body, stored)
+        _rn.address_refusal(checked, _rh.allowlist(load_config_ro(), "notifications"))
     except _rn.NotifyError as e:
         return _repl_err(str(e), 400, e.code)
-    run, err = _repl_simple_action("replication:notify:set", _repl_base("notify", "set"), "admin", spec=body)
+    spec = _repl_notify_to_refs(body, checked, stored)
+    run, err = _repl_simple_action("replication:notify:set", _repl_base("notify", "set"), "admin", spec=spec)
     if err:
         return err
     return jsonify({"action_id": run.id}), 202
@@ -32888,9 +33972,15 @@ class ReplicationFollowerSupervisor:
     POLL_S = 2
     LOG_MAX = 10 * 1024 * 1024
 
+    SECRETS_REFRESH_S = 60
+
     def __init__(self, cmd, log_path, enabled, grace, popen=subprocess.Popen, clock=time.monotonic,
-                 wall=time.time, ready=None, reopen_signal=signal.SIGUSR1):
+                 wall=time.time, ready=None, reopen_signal=signal.SIGUSR1, secret_env=None):
         self._cmd, self._log_path, self._enabled, self._grace = cmd, log_path, enabled, grace
+        # revue I6 : le suiveur ne se connecte pas à OpenBao ; ses secrets de
+        # notification lui viennent de copies tmpfs tenues à jour par la console
+        self._secret_env = secret_env
+        self._secrets_at = None
         self._popen, self._clock, self._wall, self._ready = popen, clock, wall, ready
         self._reopen_signal = reopen_signal
         self.rotations = 0
@@ -32940,6 +34030,9 @@ class ReplicationFollowerSupervisor:
                     self._exited(rc)
                 else:
                     self._rotate_if_needed()
+                    if (self._secret_env is not None and self._secrets_at is not None
+                            and self._clock() - self._secrets_at >= self.SECRETS_REFRESH_S):
+                        self._refresh_secrets()
             metric_repl_follower_up.set(1 if self.running() else 0)
 
     def _rotate_if_needed(self):
@@ -32969,11 +34062,25 @@ class ReplicationFollowerSupervisor:
             pass
         return open(path, "a", buffering=1)
 
+    def _refresh_secrets(self):
+        """Copies de travail du suiveur réécrites (rotation, nouvelle valeur) ;
+        rend l'environnement qui les nomme."""
+        if self._secret_env is None:
+            return {}
+        self._secrets_at = self._clock()
+        try:
+            return self._secret_env() or {}
+        except Exception as e:                    # noqa: BLE001 : le suiveur part quand même
+            log_watch.warning("replication follower: secrets not refreshed: %s", e)
+            return {}
+
     def _spawn(self):
         try:
+            extra = self._refresh_secrets()
             with self._open_log() as log_f:
                 self.proc = self._popen(self._cmd(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                        stderr=log_f, start_new_session=True)
+                                        stderr=log_f, start_new_session=True,
+                                        **({"env": {**os.environ, **extra}} if extra else {}))
         except OSError as e:
             self.proc = None
             self._backoff(f"cannot start the follower: {type(e).__name__}")
@@ -33070,6 +34177,1274 @@ def _replication_follower_health():
     return sup.health()
 
 
+def _secret_refs_in(obj, out):
+    """Références du magasin de secrets trouvées dans un document JSON."""
+    if isinstance(obj, str):
+        if _sst.is_ref(obj):
+            out.add(obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _secret_refs_in(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _secret_refs_in(v, out)
+    return out
+
+
+SECRETS_TOOL = "harvester-secrets.py"
+SECRET_ORIGINALS_CHECK_S = 3600
+SECRET_ORIGINALS_PREFIX = "secrets:expire-originals:"
+
+
+def _secret_originals_due(now=None):
+    """(classes, jours) : classes migrées dont un original gardé a dépassé
+    le délai de garde (`originals_keep_days`, 7 par défaut, 1 à 30). Ne lit
+    aucune valeur (dates des originaux seulement)."""
+    if not _sst.is_active():
+        return [], 0
+    now = time.time() if now is None else now
+    settings = _sst.store().settings
+    days = settings["originals_keep_days"]
+    fs = _sst.FileStore(_state_dir())
+    due = []
+    # toutes les classes, marquées ou non : une classe dont la marque est
+    # tombée (retour partiel, renommage) garde ses originaux soumis au même
+    # délai (revue M3)
+    for cls in sorted(set(settings.get("migrated") or {}) | set(_ssc.MIGRATABLE)):
+        if cls == "plan-run":
+            continue
+        try:
+            ad = _ssc.adapter(cls)
+            originals = ad.originals(fs) if ad.originals else []
+        except (ValueError, OSError):
+            continue
+        if any(now - float(o.get("at") or 0) >= days * 86400 for o in originals):
+            due.append(cls)
+    return due, days
+
+
+def _secret_originals_sweep(now=None):
+    """Délai de garde (plan, « Migration ») : pour chaque classe due, une
+    action suivie `harvester-secrets confirm --class C --older-than-days N`
+    (jamais deux à la fois pour une classe). Rend les actions lancées."""
+    started = []
+    script = BIN_DIR / SECRETS_TOOL
+    if not script.is_file():
+        return started
+    due, days = _secret_originals_due(now)
+    for cls in due:
+        label = f"{SECRET_ORIGINALS_PREFIX}{cls}"
+        with ACTIONS_LOCK:
+            if any(r.action == label and r.status in ("starting", "running") for r in ACTIONS.values()):
+                continue
+        with app.app_context():
+            run, err = _cli_action("", label, [sys.executable, str(script), "--actor", "service", "confirm",
+                                               "--class", cls, "--older-than-days", str(days)],
+                                   "harvester-secrets", check_busy=False, capture=True, cluster_user=None,
+                                   id_arg=True)
+        if run is not None:
+            started.append(run)
+    return started
+
+
+def _secret_originals_loop():
+    time.sleep(120)                            # après la vague de démarrage
+    while True:
+        try:
+            _secret_originals_sweep()
+        except Exception as e:                 # noqa: BLE001 : la tâche de fond ne tombe jamais
+            log.warning("secret originals sweep failed: %s", e)
+        time.sleep(SECRET_ORIGINALS_CHECK_S)
+
+
+def _start_secret_originals_sweeper():
+    if IS_READ_WORKER:
+        return None
+    t = threading.Thread(target=_secret_originals_loop, daemon=True, name="secret-originals")
+    t.start()
+    return t
+
+
+# 2.9.0 (décision 275, revue I4 des tâches 5-7) : copie hors ligne de la clé
+# de descellement de B1. L'administrateur tape l'identifiant de la console
+# pour confirmer ; l'agent remet la clé en service une fois (fichier root,
+# lecture seule pour la console) ; un seul téléchargement, puis la copie est
+# effacée ; l'acquittement n'est accepté qu'après la remise. Chaque geste est
+# une action suivie ; la clé ne passe jamais par un journal, actions.db ni
+# une étape.
+SECRET_OFFLINE_EXPORT = "unseal-export.key"
+SECRET_OFFLINE_EXPORT_ACTION = "secrets:offline-copy-export"
+_UNSEAL_KEY_ID_RE = re.compile(r"^hops-[0-9]{8}-[0-9]{1,4}$")
+_OFFLINE_DOWNLOADED = set()
+_OFFLINE_LOCK = threading.Lock()
+
+
+def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=(), clear_cache=False):
+    """Action suivie `harvester-secrets ...`. `private` : valeurs tapées
+    (jeton d'enveloppe, CA) remises à l'outil par un fichier 0600 sur tmpfs
+    (`--spec`), effacé à la fin de l'action ; jamais en argument.
+    `clear_cache` : l'action change des valeurs que la console garde en
+    cache (rotation d'une clé KVM, retour de version, restauration) ; le
+    cache et les copies partagées sont vidés à la fin (relecture finale I10)."""
+    script = BIN_DIR / SECRETS_TOOL
+    cmd_tail, spec = [], None
+    if private:
+        try:
+            spec = _sst.write_private_copy(_sst.secret_files_dir(_secrets_settings()), "secrets-spec",
+                                           json.dumps(private))
+        except _sst.SecretError as e:
+            return None, (jsonify({"error": str(e), "code": e.code}), 503)
+        cmd_tail = ["--spec", str(spec)]
+
+    def _after():
+        if spec:
+            Path(spec).unlink(missing_ok=True)
+        if clear_cache:
+            try:
+                _sst.store().clear_cache()
+            except Exception as e:              # noqa: BLE001 : jamais l'issue de l'action
+                log.warning("secret cache not emptied: %s", type(e).__name__)
+    after = _after if (spec or clear_cache) else None
+    who = actor or (current_user() if _has_request() else None) or "console"
+    run, err = _cli_action("", label, [sys.executable, str(script), "--actor", who, *args, *cmd_tail],
+                           "harvester-secrets", check_busy=False, capture=True, cluster_user=None, after=after,
+                           secret_clusters=secret_clusters, id_arg=True)
+    if run is None and after:
+        after()
+    return run, err
+
+
+def _has_request():
+    from flask import has_request_context
+    return has_request_context()
+
+
+def _secrets_b1_refusal():
+    if (_sst.load_settings(_state_dir()) or {}).get("mode") != "b1":
+        return jsonify({"error": "the unseal key belongs to mode B1", "code": "b1-only"}), 409
+    return None
+
+
+@app.route("/api/secrets/offline-copy/export", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_offline_copy_export():
+    refused = _secrets_b1_refusal()
+    if refused:
+        return refused
+    data = request.get_json(force=True, silent=True) or {}
+    cid = (_sst.load_settings(_state_dir()) or {}).get("console_id") or ""
+    if not cid or str(data.get("confirm") or "") != cid:
+        return jsonify({"error": "type the console identifier to confirm the export of the unseal key",
+                        "code": "confirmation-required"}), 400
+    run, err = _secrets_tool_action(SECRET_OFFLINE_EXPORT_ACTION, ["offline-copy", "export"])
+    if err:
+        return err
+    return jsonify({"action_id": run.id}), 202
+
+
+@app.route("/api/secrets/offline-copy/download", methods=["GET"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_offline_copy_download():
+    """Téléchargement UNIQUE de la clé remise par l'action d'export
+    `?action=<id>` ; la copie de l'agent est effacée aussitôt (action
+    suivie). Jamais en cache, jamais dans un journal."""
+    aid = str(request.args.get("action") or "")
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(aid)
+    if run is None or run.action != SECRET_OFFLINE_EXPORT_ACTION or run.status != "done":
+        return jsonify({"error": "no finished export action with this id", "code": "offline-copy-no-export"}), 404
+    key_id = str(((run.result or {}).get("output") or {}).get("key_id") or "")
+    if not _UNSEAL_KEY_ID_RE.match(key_id):
+        return jsonify({"error": "the export did not name its key", "code": "offline-copy-no-export"}), 404
+    with _OFFLINE_LOCK:
+        if aid in _OFFLINE_DOWNLOADED:
+            return jsonify({"error": "this copy was already downloaded: export again",
+                            "code": "offline-copy-downloaded"}), 410
+        try:
+            data = (_sst.openbao_dir() / SECRET_OFFLINE_EXPORT).read_bytes()
+        except OSError:
+            return jsonify({"error": "the copy expired or was erased: export again",
+                            "code": "offline-copy-expired"}), 410
+        _OFFLINE_DOWNLOADED.add(aid)
+    _secrets_tool_action("secrets:offline-copy-done", ["offline-copy", "done"])
+    resp = Response(data, mimetype="application/octet-stream")
+    resp.headers["Content-Disposition"] = f'attachment; filename="harvester-ops-{key_id}.key"'
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Hops-Key-Id"] = key_id
+    return resp
+
+
+@app.route("/api/secrets/offline-copy/ack", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_offline_copy_ack():
+    refused = _secrets_b1_refusal()
+    if refused:
+        return refused
+    key_id = str((request.get_json(force=True, silent=True) or {}).get("key_id") or "")
+    if not _UNSEAL_KEY_ID_RE.match(key_id):
+        return jsonify({"error": "key_id expected (hops-AAAAMMJJ-N)", "code": "bad-input"}), 400
+    run, err = _secrets_tool_action(f"secrets:offline-copy-ack:{key_id}", ["offline-copy", "ack", "--key-id", key_id])
+    if err:
+        return err
+    return jsonify({"action_id": run.id}), 202
+
+
+# 2.9.0 (tâche 9, point 270 B) : un Vault plus récent que 1.14 en mode A
+# chiffre les états après acquittement de l'administrateur (l'outil lit la
+# version du serveur et la garde avec l'acquittement).
+@app.route("/api/secrets/tf-encryption/ack", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_tf_encryption_ack():
+    run, err = _secrets_tool_action("secrets:tf-encryption-ack", ["tf-encryption", "ack-vault"])
+    if err:
+        return err
+    _TF_SERVER_STATUS.clear()
+    return jsonify({"action_id": run.id}), 202
+
+
+def _tf_entity_remove_start(decl_id, trial=False):
+    """Déclaration supprimée, OpenBao actif : son entité d'identité
+    `tf-<décl>` est retirée par l'agent en B1, ou notée à retirer dans la
+    fiche du mode A, et sa clé transit gardée 30 jours (décision 278 ;
+    `trial` : déclaration d'un essai, clé retirée tout de suite). Action
+    suivie `harvester-secrets tf-entity-remove`, idempotente (revue I2 des
+    tâches 9-10 : lancée même pour un état jamais chiffré, une vue ou un
+    plan a pu créer l'entité). Rend l'action ou None (OpenBao inactif,
+    outil absent)."""
+    script = BIN_DIR / SECRETS_TOOL
+    if not script.is_file() or not _sst.is_active() or not _tfs.ID_RE.match(str(decl_id or "")):
+        return None
+    if TF_FLAVOR != "opentofu":
+        return None                     # Terraform : jamais de bloc, ni clé ni entité
+    from flask import has_request_context
+    user = (current_user() or "console") if has_request_context() else "service"
+    ctx = app.app_context() if not has_request_context() else contextlib.nullcontext()
+    with ctx:
+        run, _err = _cli_action("", f"secrets:tf-entity-remove:{decl_id}",
+                                [sys.executable, str(script), "--actor", user, "tf-entity-remove", decl_id,
+                                 *(["--trial"] if trial else [])],
+                                "harvester-secrets", check_busy=False, capture=True, cluster_user=None,
+                                id_arg=True)
+    return run
+
+
+# ---------------------------------------------------------------------------
+# 2.9.0 tâches 11-12 : état du magasin de secrets, tâches de fond, routes de
+# l'onglet Secrets des Paramètres. Les lectures passent par le magasin dans
+# le processus (métadonnées seules, jamais de valeur) ; toute écriture est
+# une action suivie `harvester-secrets ...` (parité CLI et interface).
+# ---------------------------------------------------------------------------
+SECRETS_PROBE_S = 30
+SECRETS_HOUSEKEEPING_S = 300
+SECRETS_DAILY_S = 86400
+SNAPSHOT_STALE_S = 2 * 86400            # plan, tâche 11 : objet protégé en avertissement
+SNAPSHOT_RETRY_S = 3600
+_SECRETS_SNAPSHOT_TRIED = {"at": 0.0}     # dernier lancement planifié (relecture finale I8)
+AUDIT_LOW_BYTES = 1 << 30               # plan, « Audit » : 1 Gio libre ou 10 % du volume
+AUDIT_LOW_RATIO = 0.10
+SECRET_ID_ROTATE_S = 30 * 86400         # point 260 : la minuterie de l'agent tourne le secret_id à 30 jours
+SECRET_ID_OVERDUE_S = 32 * 86400
+KVM_KEY_OLD_S = 365 * 86400             # point 260 : avertissement au-delà d'un an
+SECRETS_SNAPSHOT_LABEL = "secrets:snapshot"
+_SECRETS_PROBE = {"at": None, "ok": None}
+_SECRETS_DAILY = {"at": 0.0}
+_SECRET_REF_RE = re.compile(r"^openbao:[a-z][a-z0-9-]{1,40}/[A-Za-z0-9._/-]{1,200}#[a-z0-9_]{1,64}$")
+_SNAP_NAME_RE = re.compile(r"^openbao-[0-9A-Za-z_.-]{1,80}\.snap$")
+
+
+def _secrets_settings():
+    return _sst.load_settings(_state_dir())
+
+
+def _record_console_paths():
+    """Revue m12 : la racine des espaces Terraform réellement employée
+    (TF_WORKSPACES, repli compris) écrite dans l'état, pour qu'un
+    `harvester-secrets` lancé à la main regarde les mêmes états."""
+    try:
+        _sst.record_console_paths(_state_dir(), tf_workspaces=TF_WORKSPACES)
+    except OSError as e:
+        log.warning("console paths not recorded: %s", type(e).__name__)
+
+
+def _secrets_raw():
+    """Réglages tels qu'écrits (clés hors DEFAULTS : copie hors ligne)."""
+    try:
+        doc = json.loads((_state_dir() / _sst.SETTINGS_FILE).read_text())
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _secrets_agent_dir():
+    return _state_dir() / "secrets-agent"
+
+
+def _secrets_health():
+    """`health.json` de l'agent (root, sans valeur), {} sans agent."""
+    try:
+        doc = json.loads((_secrets_agent_dir() / "health.json").read_text())
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _secret_id_age_s(health=None, now=None):
+    now = time.time() if now is None else now
+    try:
+        return int(now - (_sst.openbao_dir() / "secret-id").stat().st_mtime)
+    except OSError:
+        a = (health or {}).get("secret_id_age_s")
+        return int(a) if isinstance(a, (int, float)) else None
+
+
+def _secrets_store_status(s):
+    if not _sst.openbao_active(s):
+        return {"state": "inactive"}
+    try:
+        st = _sst.store()
+        bao = st.openbao
+        out = bao.status() if bao is not None else {"state": "inactive"}
+    except Exception as e:                  # noqa: BLE001 : l'état se lit toujours
+        return {"state": "down", "error": getattr(e, "code", type(e).__name__)}
+    if out.get("cache_left_s"):
+        out["cache_until"] = int(time.time() + out["cache_left_s"])
+    out["last_probe_at"] = _SECRETS_PROBE["at"]
+    return out
+
+
+def _snapshot_slot(hhmm, now):
+    """Dernière échéance HH:MM (heure de la console) passée à `now`."""
+    try:
+        h, m = (int(x) for x in str(hhmm).split(":"))
+    except ValueError:
+        h, m = 2, 30
+    lt = time.localtime(now)
+    slot = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, h, m, 0, 0, 0, -1))
+    return slot if slot <= now else slot - 86400
+
+
+def _secrets_warnings(s, health, store_st, now=None):
+    """Avertissements de l'onglet et de la vue Disaster Recovery : codes
+    stables et leurs faits (jamais de valeur)."""
+    now = time.time() if now is None else now
+    out = []
+    if not _sst.openbao_active(s):
+        return out
+    if store_st.get("state") in ("down", "degraded"):
+        out.append({"code": "openbao-" + store_st["state"], "level": "error" if store_st["state"] == "down"
+                    else "warn", "error": store_st.get("error"), "since": store_st.get("down_since")})
+    agent = (_secrets_agent_dir() / "agent.json").is_file()
+    if not agent:
+        out.append({"code": "agent-missing", "level": "warn"})
+    age = _secret_id_age_s(health, now)
+    if age is not None and age > SECRET_ID_OVERDUE_S:
+        out.append({"code": "secret-id-overdue", "level": "warn", "age_s": age})
+    if s.get("mode") == "b1":
+        if (_secrets_raw().get("offline_copy") or {}).get("pending"):
+            out.append({"code": "offline-copy-pending", "level": "warn"})
+        snaps = s.get("snapshots") if isinstance(s.get("snapshots"), dict) else {}
+        last_ok = snaps.get("last_ok_at")
+        if not s.get("snapshot_dir"):
+            out.append({"code": "snapshot-dir-unset", "level": "warn"})
+        elif not last_ok or now - float(last_ok) > SNAPSHOT_STALE_S:
+            out.append({"code": "snapshot-stale", "level": "warn", "last_ok_at": last_ok})
+        if snaps.get("last_error") and float(snaps.get("last_error_at") or 0) > float(last_ok or 0):
+            out.append({"code": "snapshot-failed", "level": "error", "error": snaps.get("last_error"),
+                        "at": snaps.get("last_error_at")})
+        audit = health.get("audit") if isinstance(health.get("audit"), dict) else None
+        if audit and audit.get("total"):
+            free, total = int(audit.get("free") or 0), int(audit["total"])
+            if free < AUDIT_LOW_BYTES or free < AUDIT_LOW_RATIO * total:
+                out.append({"code": "audit-space-low", "level": "error", "free": free, "total": total})
+    if s.get("tf_entities_pending"):
+        out.append({"code": "tf-entities-pending", "level": "info", "count": len(s["tf_entities_pending"])})
+    return out
+
+
+def _secrets_banner():
+    """Pour le bandeau global (tout rôle) : mode, état, depuis quand, jusqu'à
+    quand le cache tient. Aucune adresse, aucun nom."""
+    s = _secrets_settings()
+    st = _secrets_store_status(s)
+    return {"active": _sst.openbao_active(s), "mode": s.get("mode"), "state": st.get("state"),
+            "down_since": st.get("down_since"), "cache_until": st.get("cache_until"),
+            "error": st.get("error")}
+
+
+def _secrets_status(admin=False):
+    s = _secrets_settings()
+    health = _secrets_health()
+    st = _secrets_store_status(s)
+    raw_oc = _secrets_raw().get("offline_copy")
+    mig = {c: {k: v for k, v in (e or {}).items() if k in ("at", "by", "complete", "confirmed")}
+           for c, e in (s.get("migrated") or {}).items()}
+    out = {
+        "mode": s.get("mode"), "active": _sst.openbao_active(s), "addr": s.get("addr"),
+        "mount": s.get("mount"), "prefix": s.get("prefix"), "store": st,
+        "settings": {k: s.get(k) for k in ("cache_ttl_min", "timeout", "originals_keep_days",
+                                           "plan_secrets_keep_days", "snapshot_dir", "snapshot_time",
+                                           "snapshot_keep")},
+        "migrated": mig, "outage_test": s.get("outage_test"), "tf_vault_ack": s.get("tf_vault_ack"),
+        "tf_entities_pending": list(s.get("tf_entities_pending") or []),
+        "offline_copy": raw_oc if isinstance(raw_oc, dict) else None,
+        "snapshots": s.get("snapshots") if isinstance(s.get("snapshots"), dict) else None,
+        "agent": {"present": (_secrets_agent_dir() / "agent.json").is_file(),
+                  "health_at": health.get("at"), "version": health.get("agent_version"),
+                  "b1_installed": health.get("b1_installed"), "current_key": health.get("current_key"),
+                  "openbao_version": health.get("version"), "audit": health.get("audit"),
+                  "secret_id_age_s": _secret_id_age_s(health)},
+        "credentials": (_sst.openbao_dir() / "role-id").is_file(),
+        "tf_flavor": TF_FLAVOR,
+        "warnings": _secrets_warnings(s, health, st),
+    }
+    if admin:
+        out["console_id"] = s.get("console_id")
+    if out["active"] and s.get("mode") == "a" and TF_FLAVOR == "opentofu":
+        # point 270 B : Vault plus récent que 1.14, acquittement pour OpenTofu
+        try:
+            sst = _tf_server_status(s)
+            v = _tfe.server_version(sst)
+            out["tf_server"] = {"warning": _tfe.server_verdict("a", sst), "kind": _tfe.server_kind(sst),
+                                "version": f"{v[0]}.{v[1]}" if v else None,
+                                "acknowledged": _tfe.ack_matches(s.get("tf_vault_ack"), s.get("addr"), sst)}
+        except Exception as e:              # noqa: BLE001 : serveur muet, rien à acquitter
+            out["tf_server"] = {"error": getattr(e, "code", type(e).__name__)}
+    try:
+        last = json.loads((_secrets_agent_dir() / "status.json").read_text())
+        out["agent"]["last"] = {k: last.get(k) for k in ("op", "state", "message", "code", "requested_by")}
+    except (OSError, ValueError):
+        out["agent"]["last"] = None
+    return out
+
+
+def _secret_class_rows():
+    """Tableau des classes (ordre du point 255) : secrets locaux et dans
+    OpenBao (comptés sur les déclarations locales, aucune lecture d'OpenBao),
+    marque de migration, originaux gardés, barrières."""
+    s = _secrets_settings()
+    fs = _sst.FileStore(_state_dir(), tf_dir=TF_WORKSPACES, repl_db=_replication_db_path())
+    raw = _secrets_raw()
+    pending_copy = bool((raw.get("offline_copy") or {}).get("pending")) and s.get("mode") == "b1"
+    others = [c for c in (s.get("migrated") or {}) if c != "kubeconfig"]
+    ot = s.get("outage_test") or {}
+    gate = None
+    if not others:
+        gate = "migrate-another-first"
+    elif not ot.get("ok_at"):
+        gate = "outage-test-first"
+    elif (ot.get("addr"), ot.get("mode")) != (s.get("addr"), s.get("mode")):
+        gate = "outage-test-again"
+    rows = []
+    for cls in _ssc.MIGRATION_ORDER:
+        local = bao = 0
+        try:
+            items = fs.list_local(cls)
+        except (OSError, ValueError):
+            items = []
+        for path, field in items:
+            try:
+                v = fs.read_local(cls, path, field)
+            except (OSError, ValueError):
+                continue
+            if isinstance(v, str) and _sst.is_openbao_ref(v):
+                bao += 1
+            elif v is not None:
+                local += 1
+        try:
+            ad = _ssc.adapter(cls)
+            originals = ad.originals(fs) if ad.originals else []
+        except (ValueError, OSError):
+            originals = []
+        m = (s.get("migrated") or {}).get(cls)
+        rows.append({"class": cls, "local": local, "openbao": bao,
+                     "migrated": {k: m.get(k) for k in ("at", "by", "complete", "confirmed")} if m else None,
+                     "originals": len(originals),
+                     "originals_oldest": min((float(o.get("at") or 0) for o in originals), default=None),
+                     "gate": gate if cls == "kubeconfig" else None,
+                     "offline_copy_pending": pending_copy})
+    return rows
+
+
+def _secret_names(cls):
+    """Secrets d'une classe gardés dans OpenBao : références seules (nom et
+    champ), pour l'historique des versions."""
+    fs = _sst.FileStore(_state_dir(), tf_dir=TF_WORKSPACES, repl_db=_replication_db_path())
+    out = []
+    for path, field in fs.list_local(cls):
+        try:
+            v = fs.read_local(cls, path, field)
+        except (OSError, ValueError):
+            continue
+        if isinstance(v, str) and _sst.is_openbao_ref(v):
+            out.append({"ref": v, "name": path, "field": field})
+    return out
+
+
+def _secrets_rotation_view(now=None):
+    """Âges et gestes de rotation (point 260), sans valeur : secret_id, clé
+    de descellement, clés SSH des hôtes KVM, clés transit des états
+    chiffrés, et l'âge des secrets que la console ne possède pas."""
+    now = time.time() if now is None else now
+    s = _secrets_settings()
+    health = _secrets_health()
+    fs = _sst.FileStore(_state_dir(), tf_dir=TF_WORKSPACES, repl_db=_replication_db_path())
+    st = _sst.store() if _sst.openbao_active(s) else None
+
+    def age_of(cls, path, field):
+        try:
+            v = fs.read_local(cls, path, field)
+        except (OSError, ValueError):
+            return None, "local"
+        if isinstance(v, str) and _sst.is_openbao_ref(v):
+            try:
+                vs = st.versions(v) if st else []
+                t = max((x.get("created") or "" for x in vs), default="")
+                return (now - _iso_ts(t) if t else None), "openbao"
+            except Exception:              # noqa: BLE001 : OpenBao coupé : âge inconnu
+                return None, "openbao"
+        f = fs.local_file(cls, path, field)
+        try:
+            return (now - Path(f).stat().st_mtime) if isinstance(f, Path) else None, "local"
+        except OSError:
+            return None, "local"
+    kvm = []
+    for path, field in fs.list_local("ssh-kvm"):
+        a, where = age_of("ssh-kvm", path, field)
+        kvm.append({"host": path, "age_s": int(a) if a is not None else None, "store": where,
+                    "old": a is not None and a > KVM_KEY_OLD_S})
+    owned = []
+    for cls in ("rancher-oidc", "replication-notify", "kubeconfig", "ssh-cluster"):
+        for path, field in fs.list_local(cls):
+            a, where = age_of(cls, path, field)
+            owned.append({"class": cls, "name": path, "field": field, "store": where,
+                          "age_s": int(a) if a is not None else None})
+    transit = []
+    for d in _tf_encrypted_decls():
+        transit.append({"decl": d, "key": _tfe.key_name(s.get("console_id") or "", d) if s.get("console_id") else None})
+    keys = health.get("keys") if isinstance(health.get("keys"), list) else []
+    cur = health.get("current_key")
+    return {"mode": s.get("mode"), "active": _sst.openbao_active(s),
+            "secret_id": {"age_s": _secret_id_age_s(health, now), "rotate_every_s": SECRET_ID_ROTATE_S,
+                          "agent": (_secrets_agent_dir() / "agent.json").is_file()},
+            "unseal_key": {"current": cur, "created": next((k.get("created") for k in keys if k.get("id") == cur),
+                                                           None)} if s.get("mode") == "b1" else None,
+            "kvm": kvm, "kvm_old_s": KVM_KEY_OLD_S, "transit": transit, "owned": owned}
+
+
+def _iso_ts(text):
+    try:
+        import calendar
+        return calendar.timegm(time.strptime(str(text)[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return 0
+
+
+def _tf_encrypted_decls():
+    """Déclarations dont l'état est chiffré (clés de premier niveau du
+    fichier, jamais le contenu)."""
+    out = set()
+    root = Path(TF_WORKSPACES)
+    for f in list(root.glob("*/decls/*/terraform.tfstate")) + list(root.glob(".kvm/*/decls/*/terraform.tfstate")):
+        try:
+            if not f.is_symlink() and _tfe.is_encrypted(f.read_text()):
+                out.add(f.parent.name)
+        except OSError:
+            continue
+    return sorted(out)
+
+
+def _secrets_inline_action(label, fn):
+    """Action suivie jouée dans le processus (geste sur la mémoire de la
+    console, sans outil : vider le cache)."""
+    run = ActionRun(uuid.uuid4().hex[:12], label, "", ["console"], dry_run=False)
+    run.result = {"by": current_user() or "console"}
+    run.required_role = "admin"
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    try:
+        msg = fn()
+        run.emit({"type": "step", "step_id": "done", "status": "done", "message": msg, "ts": time.time()})
+        run.status, run.exit_code = "done", 0
+    except Exception as e:                  # noqa: BLE001
+        run.emit({"type": "step", "step_id": "failed", "status": "error", "message": type(e).__name__,
+                  "ts": time.time()})
+        run.status, run.exit_code = "error", 1
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
+    run.close()
+    return run
+
+
+# -- tâches de fond -----------------------------------------------------------
+def _secrets_probe_tick():
+    """Sonde `sys/health` (sans jeton) : état du bandeau et métrique."""
+    s = _secrets_settings()
+    if not _sst.openbao_active(s):
+        metric_openbao_up.set(0)
+        return None
+    try:
+        bao = _sst.store().openbao
+        ok = bool(bao.probe()) if bao is not None else False
+    except Exception:                       # noqa: BLE001
+        ok = False
+    _SECRETS_PROBE.update(at=time.time(), ok=ok)
+    metric_openbao_up.set(1 if ok else 0)
+    return ok
+
+
+def _secrets_running(label):
+    with ACTIONS_LOCK:
+        return any(r.action == label and r.status in ("starting", "running") for r in ACTIONS.values())
+
+
+def _secrets_service_action(label, args):
+    with app.app_context():
+        run, _err = _secrets_tool_action(label, args, actor="service")
+    return run
+
+
+def _secrets_housekeeping_tick(now=None):
+    """Instantané planifié de B1 (point 259 : chaque jour à `snapshot_time`,
+    réessai horaire après un échec), puis une fois par jour : clés transit
+    échues (décision 278) et secrets orphelins. Rend les actions lancées."""
+    now = time.time() if now is None else now
+    s = _secrets_settings()
+    started = []
+    if not _sst.openbao_active(s) or not (BIN_DIR / SECRETS_TOOL).is_file():
+        return started
+    snaps = s.get("snapshots") if isinstance(s.get("snapshots"), dict) else {}
+    if s.get("mode") == "b1" and s.get("snapshot_dir"):
+        slot = _snapshot_slot(s.get("snapshot_time"), now)
+        last_ok = float(snaps.get("last_ok_at") or 0)
+        last_err = float(snaps.get("last_error_at") or 0)
+        # relecture finale I8 : le dernier lancement compte aussi, pour un
+        # outil qui échouerait sans rien ranger (jamais une action par passage)
+        tried = float(_SECRETS_SNAPSHOT_TRIED["at"] or 0)
+        if last_ok < slot and (last_err < slot or now - last_err >= SNAPSHOT_RETRY_S) \
+                and (tried < slot or now - tried >= SNAPSHOT_RETRY_S) \
+                and not _secrets_running(SECRETS_SNAPSHOT_LABEL):
+            _SECRETS_SNAPSHOT_TRIED["at"] = now
+            run = _secrets_service_action(SECRETS_SNAPSHOT_LABEL, ["snapshot"])
+            if run is not None:
+                started.append(run)
+    if now - _SECRETS_DAILY["at"] >= SECRETS_DAILY_S:
+        _SECRETS_DAILY["at"] = now
+        retired = s.get("tf_keys_retired") or {}
+        if any(isinstance(e, dict) and now >= float(e.get("at") or 0) + (0 if e.get("trial") else 30 * 86400)
+               for e in retired.values()) and not _secrets_running("secrets:tf-keys-sweep"):
+            run = _secrets_service_action("secrets:tf-keys-sweep", ["tf-keys", "sweep"])
+            if run is not None:
+                started.append(run)
+        if not _secrets_running("secrets:sweep-orphans"):
+            run = _secrets_service_action("secrets:sweep-orphans", [
+                "sweep-orphans", f"--tf-dir={TF_WORKSPACES}", f"--repl-db={_replication_db_path()}"])
+            if run is not None:
+                started.append(run)
+    return started
+
+
+def _secrets_background_loop():
+    time.sleep(90)                             # après la vague de démarrage
+    last_hk = 0.0
+    while True:
+        try:
+            _secrets_probe_tick()
+            if time.time() - last_hk >= SECRETS_HOUSEKEEPING_S:
+                last_hk = time.time()
+                _secrets_housekeeping_tick()
+        except Exception as e:                 # noqa: BLE001 : la tâche de fond ne tombe jamais
+            log.warning("secret store housekeeping failed: %s", type(e).__name__)
+        time.sleep(SECRETS_PROBE_S)
+
+
+def _start_secrets_background():
+    if IS_READ_WORKER:
+        return None
+    t = threading.Thread(target=_secrets_background_loop, daemon=True, name="secrets-background")
+    t.start()
+    return t
+
+
+# -- lectures -----------------------------------------------------------------
+@app.route("/api/secrets/banner", methods=["GET"])
+@requires_auth
+def api_secrets_banner():
+    return jsonify(_secrets_banner())
+
+
+@app.route("/api/secrets/status", methods=["GET"])
+@requires_auth
+def api_secrets_status():
+    return jsonify(_secrets_status(admin=current_role() == "admin"))
+
+
+@app.route("/api/secrets/classes", methods=["GET"])
+@requires_auth
+def api_secrets_classes():
+    return jsonify({"classes": _secret_class_rows(), "order": list(_ssc.MIGRATION_ORDER)})
+
+
+@app.route("/api/secrets/secrets", methods=["GET"])
+@requires_auth
+def api_secrets_names():
+    cls = str(request.args.get("class") or "")
+    if cls not in _ssc.MIGRATABLE or cls == "plan-run":
+        return jsonify({"error": "unknown secret class", "code": "bad-input"}), 400
+    return jsonify({"class": cls, "secrets": _secret_names(cls)})
+
+
+@app.route("/api/secrets/versions", methods=["GET"])
+@requires_auth
+def api_secrets_versions():
+    """Historique d'un secret (décision 274) : version, date, auteur, action ;
+    métadonnées seules, jamais la valeur."""
+    ref = str(request.args.get("ref") or "")
+    if not _SECRET_REF_RE.match(ref) or ".." in ref:
+        return jsonify({"error": "openbao: reference expected", "code": "bad-input"}), 400
+    try:
+        vs = _sst.store().versions(ref)
+    except _sst.SecretError as e:
+        return jsonify({"error": str(e), "code": e.code}), 503
+    except _sst.SecretMissing:
+        return jsonify({"error": "no such secret", "code": "openbao-missing"}), 404
+    clean = [{k: v.get(k) for k in ("version", "created", "actor", "action", "deleted", "destroyed")} for v in vs]
+    return jsonify({"ref": ref, "versions": clean})
+
+
+@app.route("/api/secrets/rotation", methods=["GET"])
+@requires_auth
+def api_secrets_rotation():
+    return jsonify(_secrets_rotation_view())
+
+
+@app.route("/api/secrets/snapshots", methods=["GET"])
+@requires_auth
+def api_secrets_snapshots():
+    s = _secrets_settings()
+    health = _secrets_health()
+    d = s.get("snapshot_dir")
+    files = []
+    if isinstance(d, str) and os.path.isabs(d):
+        try:
+            for n in sorted(os.listdir(d)):
+                if not _SNAP_NAME_RE.match(n):
+                    continue
+                st_ = os.lstat(os.path.join(d, n))
+                if _stat.S_ISREG(st_.st_mode):
+                    files.append({"file": n, "bytes": st_.st_size, "at": int(st_.st_mtime), "where": "dir"})
+        except OSError:
+            pass
+    agent = [dict(f, where="agent") for f in (health.get("snapshots") or []) if isinstance(f, dict)]
+    return jsonify({"mode": s.get("mode"), "dir": d, "time": s.get("snapshot_time"), "keep": s.get("snapshot_keep"),
+                    "last": s.get("snapshots") if isinstance(s.get("snapshots"), dict) else None,
+                    "files": files, "agent_files": agent, "current_key": health.get("current_key"),
+                    "keys": health.get("keys") or [], "stale_after_s": SNAPSHOT_STALE_S})
+
+
+@app.route("/api/secrets/tf-keys", methods=["GET"])
+@requires_auth
+def api_secrets_tf_keys():
+    s = _secrets_settings()
+    rows = []
+    now = time.time()
+    for decl, e in sorted((s.get("tf_keys_retired") or {}).items()):
+        if not isinstance(e, dict) or not s.get("console_id"):
+            continue
+        at = int(e.get("at") or 0)
+        due = at if e.get("trial") else at + 30 * 86400
+        rows.append({"decl": decl, "key": _tfe.key_name(s["console_id"], decl), "retired_at": at,
+                     "delete_after": due, "due": now >= due, "trial": bool(e.get("trial")),
+                     "error": e.get("error")})
+    return jsonify({"keep_days": 30, "keys": rows, "entities_pending": list(s.get("tf_entities_pending") or [])})
+
+
+@app.route("/api/secrets/bundles", methods=["GET"])
+@requires_auth
+def api_secrets_bundles():
+    """Paquets OpenBao déposés par install.sh (staged/), noms seuls."""
+    import openbao_bundle as _obn
+    d = _secrets_agent_dir() / "staged"
+    names = []
+    try:
+        names = sorted(n for n in os.listdir(d) if _obn.NAME_RE.match(n))
+    except OSError:
+        pass
+    return jsonify({"bundles": names, "agent": (_secrets_agent_dir() / "agent.json").is_file()})
+
+
+@app.route("/api/secrets/assistant", methods=["GET"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_secrets_assistant():
+    """Commandes `bao` du mode A, rendues par l'outil (aucune valeur : le
+    `secret_id` est emballé chez le client)."""
+    addr, cidr = str(request.args.get("addr") or ""), str(request.args.get("cidr") or "")
+    mount = str(request.args.get("mount") or "harvester-ops")
+    prefix = str(request.args.get("prefix") or "")
+    argv = [sys.executable, str(BIN_DIR / SECRETS_TOOL), "assistant", "--addr", addr, "--console-cidr", cidr,
+            "--mount", mount] + (["--prefix", prefix] if prefix else [])
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+                           env={k: v for k, v in os.environ.items() if not k.startswith(("VAULT_", "BAO_"))})
+        doc = json.loads(r.stdout or "{}")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return jsonify({"error": "the assistant could not run", "code": "assistant-failed"}), 500
+    return jsonify(doc), (200 if r.returncode == 0 else 400)
+
+
+# -- gestes (administrateur, actions suivies) ------------------------------------
+def _secrets_body():
+    return request.get_json(force=True, silent=True) or {}
+
+
+def _secrets_accepted(run, err):
+    if err:
+        return err
+    return jsonify({"action_id": run.id}), 202
+
+
+def _secrets_confirm_ok(data):
+    cid = _secrets_settings().get("console_id") or ""
+    return bool(cid) and str(data.get("confirm") or "") == cid
+
+
+_SECRETS_ADDR_RE = re.compile(r"^https?://[A-Za-z0-9.:\[\]-]{1,253}(:[0-9]{1,5})?/?$")
+_SECRETS_MOUNT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+_SECRETS_PREFIX_RE = re.compile(r"^[a-z0-9][a-z0-9/_-]{0,126}$")
+
+
+def _secrets_target_args(data):
+    """--addr/--mount/--prefix contrôlés (aucun texte libre ne part tel quel)."""
+    args = []
+    if data.get("addr"):
+        if not _SECRETS_ADDR_RE.match(str(data["addr"])):
+            return None, "addr: https://host:port expected"
+        args += ["--addr", str(data["addr"])]
+    if data.get("mount"):
+        if not _SECRETS_MOUNT_RE.match(str(data["mount"])):
+            return None, "mount: lowercase name expected"
+        args += ["--mount", str(data["mount"])]
+    if data.get("prefix"):
+        if not _SECRETS_PREFIX_RE.match(str(data["prefix"])) or ".." in str(data["prefix"]):
+            return None, "prefix: lowercase path expected"
+        args += ["--prefix", str(data["prefix"])]
+    return args, None
+
+
+def _secrets_private(data):
+    private = {k: str(data[k]) for k in ("wrap_token", "ca_pem") if isinstance(data.get(k), str) and data[k]}
+    if len(private.get("ca_pem", "")) > 65536 or len(private.get("wrap_token", "")) > 512:
+        return None
+    return private
+
+
+@app.route("/api/secrets/check", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_check():
+    data = _secrets_body()
+    mode = data.get("mode")
+    if mode not in ("a", "b1"):
+        return jsonify({"error": "mode a or b1 expected", "code": "bad-input"}), 400
+    args, why = _secrets_target_args(data) if mode == "a" else ([], None)
+    private = _secrets_private(data)
+    if why or private is None:
+        return jsonify({"error": why or "value too long", "code": "bad-input"}), 400
+    extra = (["--transit"] if data.get("transit") else []) + (["--dry-run"] if data.get("dry_run") else [])
+    return _secrets_accepted(*_secrets_tool_action("secrets:check", ["check", "--mode", mode, *args, *extra],
+                                                   private=private))
+
+
+@app.route("/api/secrets/enable", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_enable():
+    import openbao_bundle as _obn
+    data = _secrets_body()
+    mode = data.get("mode")
+    if mode == "b1":
+        name = str(data.get("bundle") or "")
+        if not _obn.NAME_RE.match(name) or not (_secrets_agent_dir() / "staged" / name).is_file():
+            return jsonify({"error": "choose an OpenBao bundle deposited by install.sh", "code": "bad-input"}), 400
+        return _secrets_accepted(*_secrets_tool_action(
+            "secrets:enable-b1", ["enable", "--mode", "b1", "--bundle", str(_secrets_agent_dir() / "staged" / name)]))
+    if mode != "a":
+        return jsonify({"error": "mode a or b1 expected", "code": "bad-input"}), 400
+    args, why = _secrets_target_args(data)
+    private = _secrets_private(data)
+    role_id = str(data.get("role_id") or "")
+    if why or private is None or not re.match(r"^[A-Za-z0-9-]{8,64}$", role_id) or not data.get("addr") \
+            or not (private or {}).get("wrap_token"):
+        return jsonify({"error": why or "addr, role_id and the wrapping token are expected",
+                        "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action(
+        "secrets:enable-a", ["enable", "--mode", "a", "--role-id", role_id, *args], private=private))
+
+
+@app.route("/api/secrets/disable", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_disable():
+    data = _secrets_body()
+    if not _secrets_confirm_ok(data):
+        return jsonify({"error": "type the console identifier to confirm", "code": "confirmation-required"}), 400
+    args = ["disable"] + (["--remove-b1"] if data.get("remove_b1") else []) + \
+        (["--dry-run"] if data.get("dry_run") else [])
+    return _secrets_accepted(*_secrets_tool_action("secrets:disable", args))
+
+
+def _secrets_class_arg(data):
+    cls = str(data.get("class") or "")
+    return cls if cls in _ssc.MIGRATION_ORDER else None
+
+
+@app.route("/api/secrets/migrate", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_migrate():
+    data = _secrets_body()
+    cls, to = _secrets_class_arg(data), data.get("to")
+    if not cls or to not in ("openbao", "local"):
+        return jsonify({"error": "class and to (openbao or local) expected", "code": "bad-input"}), 400
+    args = ["migrate", "--to", to, "--class", cls]
+    if data.get("name"):
+        if not re.match(r"^[A-Za-z0-9._/-]{1,200}$", str(data["name"])) or ".." in str(data["name"]):
+            return jsonify({"error": "bad secret name", "code": "bad-input"}), 400
+        args += ["--name", str(data["name"])]
+    if data.get("replace_existing"):
+        args.append("--replace-existing")
+    if data.get("dry_run"):
+        args.append("--dry-run")
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:migrate-{to}:{cls}", args))
+
+
+@app.route("/api/secrets/confirm", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_confirm():
+    cls = _secrets_class_arg(_secrets_body())
+    if not cls:
+        return jsonify({"error": "class expected", "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:confirm:{cls}", ["confirm", "--class", cls]))
+
+
+@app.route("/api/secrets/outage-test", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_outage_test():
+    return _secrets_accepted(*_secrets_tool_action("secrets:outage-test", ["outage-test"]))
+
+
+@app.route("/api/secrets/cache/clear", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_cache_clear():
+    def clear():
+        _sst.store().clear_cache()
+        return "cache emptied: the next reads go to OpenBao"
+    run = _secrets_inline_action("secrets:cache-clear", clear)
+    return jsonify({"action_id": run.id}), 202
+
+
+@app.route("/api/secrets/rollback", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_rollback():
+    data = _secrets_body()
+    ref = str(data.get("ref") or "")
+    try:
+        version = int(data.get("version"))
+    except (TypeError, ValueError):
+        version = 0
+    if not _SECRET_REF_RE.match(ref) or ".." in ref or version < 1:
+        return jsonify({"error": "ref and version expected", "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action("secrets:rollback", ["rollback", ref, "--version", str(version)],
+                                                   clear_cache=True))
+
+
+@app.route("/api/secrets/rotate", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_rotate():
+    data = _secrets_body()
+    what, target = data.get("what"), str(data.get("target") or "")
+    if what not in ("secret-id", "unseal-key", "transit", "ssh-kvm"):
+        return jsonify({"error": "what: secret-id, unseal-key, transit or ssh-kvm", "code": "bad-input"}), 400
+    if what in ("transit", "ssh-kvm") and not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$", target):
+        return jsonify({"error": "target expected", "code": "bad-input"}), 400
+    if what == "unseal-key" and not _secrets_confirm_ok(data):
+        return jsonify({"error": "type the console identifier to confirm", "code": "confirmation-required"}), 400
+    args = ["rotate", what] + ([target] if what in ("transit", "ssh-kvm") else [])
+    label = f"secrets:rotate-{what}" + (f":{target}" if target and what in ("transit", "ssh-kvm") else "")
+    # rotation d'une clé KVM : l'outil reçoit la copie de la clé en service
+    # (il ne se connecte pas pour une lecture ordinaire, revue I6)
+    return _secrets_accepted(*_secrets_tool_action(label, args, secret_clusters=(
+        (f"kvm:{target}",) if what == "ssh-kvm" else ()), clear_cache=what == "ssh-kvm"))
+
+
+@app.route("/api/secrets/snapshot", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_snapshot():
+    if _secrets_running(SECRETS_SNAPSHOT_LABEL):
+        return jsonify({"error": "a snapshot is being taken", "code": "busy"}), 409
+    return _secrets_accepted(*_secrets_tool_action(SECRETS_SNAPSHOT_LABEL, ["snapshot"]))
+
+
+_SNAP_STAMP_RE = re.compile(r"(\d{8}T\d{6}Z)")
+
+
+def _secrets_restore_preflight(name):
+    """Relecture finale I2 : ce qu'une restauration casserait, lu AVANT tout
+    arrêt. Actions en cours (tuées avec la console) ; déclarations dont
+    l'état chiffré a été écrit après l'instantané (relecture des corrections
+    finales IMP-2 : la clé transit naît au premier chiffrement, souvent bien
+    après la création de la déclaration ; un état réécrit après l'instantané
+    peut demander une clé ou une version qu'il n'a pas, illisible ensuite ;
+    faux positifs sans danger) ; clés KVM tournées depuis (OpenBao rendrait
+    l'ancienne, que l'hôte refuse) ; classes migrées depuis (leurs secrets
+    n'existent pas dans l'instantané). Aucune valeur."""
+    m = _SNAP_STAMP_RE.search(name)
+    snap_at = None
+    if m:
+        try:
+            snap_at = calendar.timegm(time.strptime(m.group(1), "%Y%m%dT%H%M%SZ"))
+        except ValueError:
+            snap_at = None
+    busy = [{"id": a["id"], "action": a["action"], "cluster": a["cluster"]} for a in _update_busy_actions()
+            if not str(a["action"]).startswith(SECRETS_ACTION_PREFIX)]
+    since = snap_at if snap_at is not None else 0
+    rotated = {}
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB))
+        try:
+            for label, at in conn.execute(
+                    "SELECT action, started_at FROM actions WHERE status = 'done' AND started_at > ? "
+                    "AND action LIKE 'secrets:rotate-ssh-kvm:%'", (since,)):
+                rotated.setdefault(label, at)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        pass
+    tf = []
+    for decl, written in sorted(_sst.encrypted_state_times(TF_WORKSPACES).items()):
+        if snap_at is None or written > snap_at:
+            tf.append({"id": decl, "name": (TF_DECLS.get(decl) or {}).get("name"),
+                       "reason": "state written after the snapshot", "written_at": int(written)})
+    kvm = sorted(({"host": label.split(":", 2)[2], "rotated_at": at} for label, at in rotated.items()
+                  if label.startswith("secrets:rotate-ssh-kvm:")), key=lambda h: h["host"])
+    migrated = _secrets_settings().get("migrated") or {}
+    classes = sorted(c for c, e in migrated.items()
+                     if snap_at is None or float((e or {}).get("at") or 0) > snap_at)
+    return {"file": name, "snapshot_at": snap_at, "busy": busy, "tf_declarations": tf, "kvm_hosts": kvm,
+            "classes": classes, "risks": bool(tf or kvm or classes or snap_at is None)}
+
+
+@app.route("/api/secrets/restore/preflight", methods=["GET"])
+@requires_auth
+def api_secrets_restore_preflight():
+    name = str(request.args.get("file") or "")
+    if not _SNAP_NAME_RE.match(name):
+        return jsonify({"error": "snapshot file name expected", "code": "snapshot-bad-name"}), 400
+    return jsonify(_secrets_restore_preflight(name))
+
+
+@app.route("/api/secrets/restore", methods=["POST"])
+@requires_auth
+@_rate_limit("3/minute")
+def api_secrets_restore():
+    data = _secrets_body()
+    name = str(data.get("file") or "")
+    if not _SNAP_NAME_RE.match(name):
+        return jsonify({"error": "snapshot file name expected", "code": "snapshot-bad-name"}), 400
+    if not _secrets_confirm_ok(data):
+        return jsonify({"error": "type the console identifier to confirm", "code": "confirmation-required"}), 400
+    pre = _secrets_restore_preflight(name)
+    if pre["busy"] and not data.get("force"):
+        return jsonify(dict(pre, error="actions are running; the console stops during the restore and they "
+                                       "would be killed", code="actions-running")), 409
+    if pre["risks"] and data.get("ack_risks") is not True:
+        return jsonify(dict(pre, error="this restore breaks what is listed; acknowledge it to go on",
+                            code="restore-risks")), 409
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:restore:{name}", ["restore", name], clear_cache=True))
+
+
+_SECRETS_SETTABLE = ("cache_ttl_min", "timeout", "originals_keep_days", "plan_secrets_keep_days",
+                     "snapshot_dir", "snapshot_time", "snapshot_keep")
+
+
+@app.route("/api/secrets/settings", methods=["PUT"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_settings():
+    data = _secrets_body()
+    sets = []
+    for k in _SECRETS_SETTABLE:
+        if k in data:
+            v = "" if data[k] is None else str(data[k])
+            if "\n" in v or len(v) > 4096:
+                return jsonify({"error": f"{k}: bad value", "code": "bad-input"}), 400
+            sets += ["--set", f"{k}={v}"]
+    if not sets:
+        return jsonify({"error": "nothing to change", "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action("secrets:settings", ["settings", *sets]))
+
+
+@app.route("/api/secrets/tf-keys/delete", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_tf_keys_delete():
+    data = _secrets_body()
+    decl = str(data.get("decl") or "")
+    if not _tfs.ID_RE.match(decl) or str(data.get("confirm") or "") != decl:
+        return jsonify({"error": "type the declaration identifier again to delete its key",
+                        "code": "confirmation-required"}), 400
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:tf-key-delete:{decl}",
+                                                   ["tf-keys", "delete", decl, "--confirm", decl]))
+
+
+@app.route("/api/secrets/tf-entity-done", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_tf_entity_done():
+    decl = str(_secrets_body().get("decl") or "")
+    if not _tfs.ID_RE.match(decl):
+        return jsonify({"error": "declaration identifier expected", "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:tf-entity-done:{decl}",
+                                                   ["tf-entity-remove", decl, "--done"]))
+
+
+@app.route("/api/secrets/tf-entity-commands", methods=["GET"])
+@requires_auth
+def api_secrets_tf_entity_commands():
+    """Commandes `bao` du mode A pour retirer les entités notées (aucune valeur)."""
+    s = _secrets_settings()
+    rows = []
+    for decl in s.get("tf_entities_pending") or []:
+        try:
+            alias = _opol.tf_alias(decl)
+        except ValueError:
+            continue
+        rows.append({"decl": decl, "alias": alias, "commands": [
+            "ACCESSOR=$(bao auth list -format=json | jq -r '.\"token/\".accessor')",
+            f"ID=$(bao write -field=id identity/lookup/entity alias_name={alias} alias_mount_accessor=$ACCESSOR)",
+            "bao delete identity/entity/id/$ID"]})
+    return jsonify({"entities": rows})
+
+
+@app.route("/api/secrets/sweep-orphans", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_sweep_orphans():
+    args = ["sweep-orphans", f"--tf-dir={TF_WORKSPACES}", f"--repl-db={_replication_db_path()}"]
+    if _secrets_body().get("dry_run"):
+        args.append("--dry-run")
+    return _secrets_accepted(*_secrets_tool_action("secrets:sweep-orphans", args))
+
+
+@app.route("/api/tf-declarations/<decl_id>/decrypt-state", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_tf_declaration_decrypt_state(decl_id):
+    """Remet en clair l'état chiffré d'une déclaration (retour avant de
+    désactiver OpenBao, plan « États OpenTofu ») : action suivie,
+    `apply -refresh-only` avec le bloc de retour, puis le bloc retiré."""
+    d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
+    if d is None:
+        return jsonify({"error": "declaration not found"}), 404
+    kind = d.get("target_kind") or "harvester"
+    kc = None
+    if kind != "kvm":
+        kc = _kubectl_for_cluster(d["cluster"])
+        if not kc:
+            return jsonify({"error": f"unknown cluster: {d['cluster']}"}), 404
+    try:
+        run_id, _h = _tf_decl_launch(d["cluster"], kc, decl_id, "decrypt-state", user=current_user() or "",
+                                     cluster_user=(current_cluster_identity() or {}).get("user"),
+                                     target_kind=kind, role=current_role())
+    except TfLaunchError as e:
+        return jsonify(e.payload), e.status
+    return jsonify({"action_id": run_id}), 202
+
+
+def _replication_secret_refs(clusters=False):
+    """2.9.0 : références des secrets de la réplication (notifications,
+    en-têtes des actions annexes) et, avec `clusters`, celles du kubeconfig
+    et de la clé SSH des clusters des plans (le suiveur les lit par leur
+    nom). () sans OpenBao."""
+    if not _sst.is_active():
+        return ()
+    refs, names = set(), set()
+    try:
+        conn = _replication_conn()
+    except Exception:                          # noqa: BLE001 : réplication indisponible
+        return ()
+    try:
+        _secret_refs_in(_rdb.get_setting(conn, "notify") or {}, refs)
+        for opts, src, dst in conn.execute("SELECT options, source_cluster, target_cluster FROM plans"):
+            names |= {src, dst}
+            try:
+                _secret_refs_in(json.loads(opts or "{}"), refs)
+            except ValueError:
+                continue
+    finally:
+        conn.close()
+    if clusters:
+        for entry in load_config_ro().get("clusters", []):
+            if entry.get("name") in names:
+                for v in (entry.get("kubeconfig"), (entry.get("ssh") or {}).get("key")
+                          if isinstance(entry.get("ssh"), dict) else None):
+                    if isinstance(v, str) and _sst.is_openbao_ref(v):
+                        refs.add(v)
+    return tuple(sorted(refs))
+
+
+def _replication_follow_secret_env():
+    """Revue I6 : copies de travail des secrets de notification et des
+    en-têtes des actions annexes, pour le suiveur de réplication qui ne se
+    connecte pas à OpenBao. Fichiers stables sous
+    `<tmpfs>/replication-follow/` (nom tiré de la référence, jamais de la
+    valeur), réécrits quand la valeur change, retirés quand la référence
+    disparaît ; une valeur illisible (OpenBao coupé) garde la copie d'avant.
+    Rend {HARVESTER_OPS_SECRET_FILES: correspondance} ou {}."""
+    if not _sst.is_active():
+        return {}
+    refs = set(_replication_secret_refs(clusters=True))
+    d = _sst.secret_files_dir(_sst.store().settings) / "replication-follow"
+    d.mkdir(mode=0o700, exist_ok=True)
+    files = {}
+    for ref in sorted(refs):
+        f = d / hashlib.sha256(ref.encode()).hexdigest()[:16]
+        try:
+            value = _sst.store().get(ref)
+        except (_sst.SecretError, _sst.SecretMissing) as e:
+            log_watch.warning("replication follower: %s not refreshed: %s", ref.split("#")[0], e)
+            if f.exists():
+                files[ref] = str(f)
+            continue
+        try:
+            same = f.read_text() == value
+        except OSError:
+            same = False
+        if not same:
+            tmp = _sst.write_private_copy(d, "next", value)
+            os.replace(tmp, f)
+        files[ref] = str(f)
+    tmp = _sst.write_private_copy(d, "next", json.dumps(files))
+    os.replace(tmp, d / "files.json")
+    keep = {Path(p).name for p in files.values()} | {"files.json"}
+    for p in d.iterdir():
+        if p.name not in keep:
+            p.unlink(missing_ok=True)
+    return {_sst.FILES_ENV: str(d / "files.json")}
+
+
 def _replication_follow_lock(path):
     """Verrou exclusif (flock) du répertoire d'état, tenu toute la vie de la
     console : (descripteur, None) s'il est pris, (None, pid du détenteur)
@@ -33108,7 +35483,8 @@ def _start_replication_follower():
         REPLICATION_FOLLOWER_ELSEWHERE = None
         REPLICATION_FOLLOWER = ReplicationFollowerSupervisor(
             _replication_follow_cmd, _replication_follow_log,
-            _replication_follow_enabled, _replication_follow_grace, ready=_MODULE_READY)
+            _replication_follow_enabled, _replication_follow_grace, ready=_MODULE_READY,
+            secret_env=_replication_follow_secret_env)
         REPLICATION_FOLLOWER.start()
         # protection automatique : la console qui tient le verrou du suivi seulement
         if REPLICATION_AUTO_PROTECT is None:
@@ -33274,7 +35650,6 @@ _MODULE_READY.set()
 import deploy_chain as _dch  # noqa: E402
 import deploy_plans as _dpl  # noqa: E402
 import deploy_ready as _drd  # noqa: E402
-import secret_store as _sst  # noqa: E402
 
 DEPLOY_PREFIX = "deploy:"
 DEPLOY_POLL = float(os.environ.get("HARVESTER_OPS_DEPLOY_POLL", _dch.POLL_SECONDS))
@@ -33411,7 +35786,7 @@ def _deploy_console_kc(cluster):
     """Kubeconfig de la console pour un cluster (celui créé par une
     installation enchaînée : identité de la console, comme la série)."""
     c = _deploy_cluster_entry(cluster)
-    return c.get("kubeconfig") if c else None
+    return _cluster_kubeconfig_path(c, "deploy") if c else None
 
 
 def _deploy_vip_of(kc):
@@ -34274,6 +36649,9 @@ def _deploy_install_secrets_put(store, run_id, rows):
             if v:
                 path = f"{run_id}/bmc/{i}" if k == "bmc_password" else f"{run_id}/install/{i}"
                 store.put(_dch.SECRET_CLASS, path, k, str(v))
+                if k == "bmc_password" and o.get("bmc_host"):
+                    # 2.9.0 : la reprise retrouve le mot de passe de chaque BMC
+                    store.put(_dch.SECRET_CLASS, path, "bmc_host", str(o["bmc_host"]))
 
 
 def _deploy_install_secrets_get(store, run_id, rows):
@@ -35611,10 +37989,17 @@ def _deploy_cleanup_dry(created):
         if d is None:
             continue
         ws = _tf_decl_ws(d, create=False)
-        if ws.exists() and _tfst.addresses(ws):
+        try:
+            kept = ws.exists() and _tf_addresses(ws, fresh=True)
+        except TfStateUnreadable:
+            kept = True
+        if kept:
             continue                            # jamais : un essai n'applique rien
         TF_DECLS.delete(decl_id)
         _shutil.rmtree(ws, ignore_errors=True)
+        # revue I2 des tâches 9-10 : le plan de l'essai a tourné sous le bloc
+        # de chiffrement (clé transit et entité créées) ; aucun état durable
+        _tf_entity_remove_start(decl_id, trial=True)
 
 
 def _deploy_runner(run, cluster, kc, dctx, user, cluster_user, previous, install, store, lock_fd=None):
@@ -35639,7 +38024,8 @@ def _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, in
     res = None
     try:
         phases = _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install, store)
-        res = _dch.run(ctx, phases, previous=previous, secrets=store)
+        res = _dch.run(ctx, phases, previous=previous, secrets=store,
+                       keep_secrets=lambda status: _deploy_keep_secrets(store, run, status))
     except BaseException as e:
         log.exception("deploy %s", run.id)
         res = dict(run.result or {}, status="error", error_summary=type(e).__name__)
@@ -35669,6 +38055,220 @@ def _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, in
         run.ended_at = time.time()
         run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
         run.close()
+
+
+# 2.9.0 (tâche 10, décision 141, point 262) : OpenBao actif, les secrets d'un
+# déroulé sont gardés dans OpenBao (`plan-run/<action>/...`) ; un déroulé
+# arrêté reprenable les garde jusqu'à sa reprise, qui les lit au lieu de les
+# redemander, au plus `plan_secrets_keep_days` jours (7) ; un déroulé fini
+# les efface (`metadata delete`, versions comprises). Balayage au démarrage
+# (console arrêtée au mauvais moment) et à la tâche de fond. OpenBao inactif :
+# la mémoire de la 2.4.0, secrets redemandés.
+PLAN_SECRETS_FORGET_LABEL = "secrets:plan-run-forget:"
+PLAN_SECRETS_SWEEP_LABEL = "secrets:plan-run-sweep"
+PLAN_SECRETS_SWEEP_S = 3600
+PLAN_SECRETS_ORPHAN_S = 3600          # secrets sans action connue (lancement en cours)
+
+
+def _deploy_keep_secrets(store, run, status):
+    return bool(not run.dry_run and status in _dch.RESUMABLE and _sst.is_active(store))
+
+
+def _deploy_resume_fill(store, prev_id, secrets_, gitops):
+    """Secrets d'une reprise : ce que la requête n'apporte pas est lu dans
+    l'arbre du déroulé repris, dans OpenBao. Rend (secrets_, gitops, source,
+    code d'erreur) ; source = "openbao" si quelque chose y a été lu. Les
+    secrets d'installation tapés remplacent tous ceux gardés (nouvelle
+    saisie) ; ceux de GitOps nom par nom. OpenBao injoignable : le code,
+    rien de lu (l'appelant redemande les secrets, comportement 2.4.0)."""
+    secrets_, gitops = dict(secrets_ or {}), dict(gitops or {})
+    if not _sst.is_active(store):
+        return secrets_, gitops, None, None
+    try:
+        refs = store.refs(_dch.SECRET_CLASS, prev_id, backend="openbao")
+        values = {r: store.get(r) for r in refs}
+    except _sst.SecretError as e:
+        return secrets_, gitops, None, e.code
+    except _sst.SecretMissing:
+        return secrets_, gitops, None, None
+    bmc, install, found_g = {}, {}, {}
+    for ref, v in values.items():
+        _b, _c, path, field = _sst.parse_ref_full(ref)
+        parts = path.split("/")
+        if len(parts) == 3 and parts[1] == "bmc":
+            bmc.setdefault(parts[2], {})[field] = v
+        elif len(parts) == 3 and parts[1] == "install" and field in ("token", "password"):
+            install.setdefault(field, v)
+        elif len(parts) == 3 and parts[1] == "gitops" and field in GITOPS_SECRET_KEYS:
+            found_g.setdefault(parts[2], {})[field] = v
+    used = False
+    typed = any(secrets_.get(k) for k in ("token", "password", "bmc_password", "bmc_passwords"))
+    if not typed and (install or bmc):
+        secrets_.update(install)
+        per_host = {e["bmc_host"]: e["bmc_password"] for e in bmc.values()
+                    if e.get("bmc_host") and e.get("bmc_password")}
+        if per_host:
+            secrets_["bmc_passwords"] = per_host
+            secrets_["bmc_password"] = next(iter(per_host.values()))
+        used = True
+    for name, vals in found_g.items():
+        if name not in gitops:
+            gitops[name] = vals
+            used = True
+    return secrets_, gitops, "openbao" if used else None, None
+
+
+def _plan_secrets_age_s(store, run_id, now):
+    """Âge du plus récent secret d'un déroulé dans OpenBao (métadonnées
+    seules), ou None."""
+    import datetime as _dt
+    newest = None
+    for ref in store.refs(_dch.SECRET_CLASS, run_id, backend="openbao"):
+        for v in store.versions(ref):
+            try:
+                t = _dt.datetime.fromisoformat(str(v.get("created") or "").replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            ts = t.timestamp()
+            newest = ts if newest is None else max(newest, ts)
+    return None if newest is None else now - newest
+
+
+def _plan_secrets_verdict(store, run_id, now, keep_s):
+    """"keep" ou la raison de l'effacement des secrets d'un déroulé."""
+    prev, err = _deploy_previous(run_id)
+    if err:
+        age = _plan_secrets_age_s(store, run_id, now)
+        return "orphan" if age is not None and age > PLAN_SECRETS_ORPHAN_S else "keep"
+    if prev["status"] in ("starting", "running"):
+        return "keep"
+    if prev["dry_run"] or prev["status"] not in (*_dch.RESUMABLE, "interrupted"):
+        return "ended"
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(run_id)
+    ended = getattr(run, "ended_at", None) if run is not None else None
+    if ended is None:
+        d, _ev = _actions_db_get(run_id)
+        ended = (d or {}).get("ended_at") or (d or {}).get("started_at")
+    try:
+        ended = float(ended)
+    except (TypeError, ValueError):
+        return "keep"
+    return "expired" if now - ended > keep_s else "keep"
+
+
+def _plan_secrets_due(store=None, now=None):
+    """[(identifiant du déroulé, raison)] dont les secrets sont à effacer."""
+    store = store or _sst.store()
+    if not _sst.is_active(store):
+        return []
+    now = time.time() if now is None else now
+    keep_s = int(store.settings.get("plan_secrets_keep_days") or 7) * 86400
+    out = []
+    for rid in store.children(_dch.SECRET_CLASS):
+        if not _dch.RUN_ID_RE.match(rid):
+            continue
+        why = _plan_secrets_verdict(store, rid, now, keep_s)
+        if why != "keep":
+            out.append((rid, why))
+    return out
+
+
+def _plan_secrets_sweep(store=None, now=None, wait=False, forget=None, user=None):
+    """Une action suivie qui efface les secrets des déroulés finis ou
+    expirés ; None s'il n'y a rien à effacer (ou OpenBao inactif). La liste
+    est relue dans l'action (un déroulé repris entre-temps garde les
+    siens). `forget` (revue m7 des tâches 9-10) : l'identifiant d'UN
+    déroulé arrêté dont l'administrateur oublie les secrets avant le délai
+    (mémoire et OpenBao) ; refusé s'il tourne."""
+    store = store or _sst.store()
+    if forget is not None:
+        prev, err = _deploy_previous(forget)
+        if err or prev["status"] in ("starting", "running"):
+            return None
+        due_of = lambda: [(forget, "forgotten")]          # noqa: E731
+        label = f"{PLAN_SECRETS_FORGET_LABEL}{forget}"
+    else:
+        due_of = lambda: _plan_secrets_due(store, now)     # noqa: E731
+        label = PLAN_SECRETS_SWEEP_LABEL
+    due = due_of()
+    if not due:
+        return None
+    with ACTIONS_LOCK:
+        if any(r.action == label and r.status in ("starting", "running") for r in ACTIONS.values()):
+            return None
+    run = ActionRun(uuid.uuid4().hex[:12], label, "", [], dry_run=False)
+    run.result = {"by": user or "service"}
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    READ_SHARE.invalidate("_activity")
+
+    def body():
+        run.status = "running"
+        run.emit({"type": "status", "status": "running", "ts": time.time()})
+        removed, failed = [], []
+        for rid, why in due_of():
+            try:
+                store.forget_memory(_dch.SECRET_CLASS, rid)
+                n = (store.delete_tree(_dch.SECRET_CLASS, rid, backend="openbao", actor=user or "service",
+                                       action=run.id) if _sst.is_active(store) else 0)
+                removed.append(rid)
+                run.emit({"type": "step", "step_id": f"run-{rid}", "status": "done",
+                          "message": f"{n} secret(s) of run {rid} removed ({why})", "ts": time.time()})
+            except _sst.SecretError as e:
+                failed.append(rid)
+                run.emit({"type": "step", "step_id": f"run-{rid}", "status": "error",
+                          "message": f"run {rid}: {e.code}", "ts": time.time()})
+        run.result = dict(run.result, removed=removed, failed=failed)
+        run.exit_code = 1 if failed else 0
+        run.status = "error" if failed else "done"
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
+        run.close()
+    if wait:
+        body()
+    else:
+        threading.Thread(target=body, daemon=True, name="plan-secrets-sweep").start()
+    return run
+
+
+@app.route("/api/deploy/<cluster>/forget-secrets", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_deploy_forget_secrets(cluster):
+    """Revue m7 des tâches 9-10 : les secrets d'un déroulé arrêté (gardés
+    pour sa reprise jusqu'au délai) oubliés tout de suite, par un
+    administrateur ; action suivie. La reprise les redemandera."""
+    rid = str((request.get_json(force=True, silent=True) or {}).get("action_id") or "")
+    if not _dch.RUN_ID_RE.match(rid):
+        return jsonify({"error": "action_id expected", "code": "bad-input"}), 400
+    prev, err = _deploy_previous(rid)
+    if err or prev.get("cluster") != cluster:
+        return jsonify({"error": "no plan run with this id on this cluster", "code": "not-found"}), 404
+    if prev["status"] in ("starting", "running"):
+        return jsonify({"error": "the run is still running", "code": "deploy-running"}), 409
+    run = _plan_secrets_sweep(forget=rid, user=current_user() or "console")
+    if run is None:
+        return jsonify({"error": "nothing to forget", "code": "not-found"}), 404
+    return jsonify({"action_id": run.id}), 202
+
+
+def _plan_secrets_loop():
+    time.sleep(60)                             # après la vague de démarrage
+    while True:
+        try:
+            _plan_secrets_sweep()
+        except Exception as e:                 # noqa: BLE001 : la tâche de fond ne tombe jamais
+            log.warning("plan secrets sweep failed: %s", type(e).__name__)
+        time.sleep(PLAN_SECRETS_SWEEP_S)
+
+
+def _start_plan_secrets_sweeper():
+    if IS_READ_WORKER:
+        return None
+    t = threading.Thread(target=_plan_secrets_loop, daemon=True, name="plan-secrets")
+    t.start()
+    return t
 
 
 def _deploy_start(cluster, kc, dctx, dry_run=False, user="", cluster_user=None, previous=None,
@@ -36181,14 +38781,19 @@ def api_deploy_resume(cluster):
     gsec, gerr = _deploy_gitops_secrets(data.get("gitops_secrets"))
     if gerr:
         return jsonify({"error": gerr, "fields": ["gitops_secrets"]}), 400
+    if result.get("install") and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return jsonify({"error": "forbidden", "role": current_role(), "required": "admin",
+                        "hint": "a run with an installation is resumed by an administrator"}), 403
+    # 2.9.0 (décision 141) : secrets gardés dans OpenBao, plus redemandés
+    secrets_ = data.get("secrets") if isinstance(data.get("secrets"), dict) else {}
+    secrets_, gsec, from_bao, bao_err = _deploy_resume_fill(_sst.store(), data["action_id"], secrets_, gsec)
     if result.get("install"):
-        if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
-            return jsonify({"error": "forbidden", "role": current_role(), "required": "admin",
-                            "hint": "a run with an installation is resumed by an administrator"}), 403
-        secrets_ = data.get("secrets") if isinstance(data.get("secrets"), dict) else {}
         confirms = data.get("system_confirm") if isinstance(data.get("system_confirm"), dict) else {}
         install, ierr = _deploy_resume_install(result, cluster, secrets_, confirms)
         if ierr:
+            if bao_err and ierr[0].get("code") == "secrets-required":
+                return jsonify({"error": f"OpenBao does not answer ({bao_err}): type the secrets to resume",
+                                "code": bao_err, "fields": ierr[0].get("fields"), "secrets_prompt": True}), 503
             return jsonify(ierr[0]), ierr[1]
         vip = ((result.get("install") or {}).get("batch") or {}).get("vip") or ""
         store = _sst.store()
@@ -36210,7 +38815,30 @@ def api_deploy_resume(cluster):
         update_differing=result.get("update_differing") is True, role=current_role(), gitops_secrets=gsec)
     if status != 202 and store is not None:
         store.delete_tree(_dch.SECRET_CLASS, run_id)
+    if status != 202 and bao_err and any(f.get("code") == "gitops-secret-missing"
+                                         for f in (body.get("findings") or []) if isinstance(f, dict)):
+        # revue m13 des tâches 9-10 : même réponse que pour une installation
+        return jsonify({"error": f"OpenBao does not answer ({bao_err}): type the Git secrets to resume",
+                        "code": bao_err, "fields": ["gitops_secrets"], "secrets_prompt": True,
+                        "findings": body.get("findings")}), 503
+    if status == 202:
+        _deploy_resume_forget(data["action_id"])
+        if from_bao:
+            body = dict(body, secrets_source="openbao")
     return jsonify(body), status
+
+
+def _deploy_resume_forget(prev_id):
+    """Reprise lancée : les secrets du déroulé repris (copiés sous le nouveau)
+    sont effacés ; OpenBao coupé, le balayage s'en chargera."""
+    st = _sst.store()
+    st.forget_memory(_dch.SECRET_CLASS, prev_id)          # revue m6 des tâches 9-10
+    if not _sst.is_active(st):
+        return
+    try:
+        st.delete_tree(_dch.SECRET_CLASS, prev_id, backend="openbao")
+    except _sst.SecretError as e:
+        log.warning("secrets of resumed run %s kept for the sweep: %s", prev_id, e.code)
 
 
 # --- 2.7.0 : « Défaire le déploiement » (décision 128) ---------------------------
@@ -36424,8 +39052,12 @@ def _undo_details(kc, cluster, u, services):
     if d is None:
         return {"present": False}
     ws = _tf_decl_ws(d, create=False)
-    return {"present": True, "name": d["name"], "revision": d.get("revision"),
-            "resources": _tfst.addresses(ws) if ws.exists() else []}
+    try:
+        res = _tf_addresses(ws) if ws.exists() else []
+    except TfStateUnreadable as e:
+        return {"present": True, "name": d["name"], "revision": d.get("revision"), "resources": None,
+                "error": e.code}
+    return {"present": True, "name": d["name"], "revision": d.get("revision"), "resources": res}
 
 
 def _undo_include(undos, include):
@@ -37490,7 +40122,8 @@ def _registry_console_address(cluster):
     entry = _registry_cluster_entry(cluster)
     host = None
     try:
-        kc = yaml.safe_load(Path(entry["kubeconfig"]).read_text()) if entry and entry.get("kubeconfig") else None
+        kc_path = _cluster_kubeconfig_path(entry, "registry") if entry and entry.get("kubeconfig") else None
+        kc = yaml.safe_load(Path(kc_path).read_text()) if kc_path else None
         host = urlparse(((kc or {}).get("clusters") or [{}])[0].get("cluster", {}).get("server") or "").hostname
     except (OSError, ValueError, AttributeError, IndexError, yaml.YAMLError):
         host = None
@@ -37812,6 +40445,13 @@ if __name__ == "__main__":
     except Exception as _e:                      # noqa: BLE001
         log_watch.error("replication follower startup failed: %s", _e)
     _announce_setup()
+    _record_console_paths()                       # 2.9.0 : racine Terraform pour l'outil lancé à la main
+    try:
+        _start_secret_originals_sweeper()        # 2.9.0 : délai de garde des originaux migrés
+        _start_secrets_background()              # 2.9.0 : sonde, instantanés, clés transit, orphelins
+        _start_plan_secrets_sweeper()            # 2.9.0 : secrets des déroulés finis ou expirés
+    except Exception as _e:                      # noqa: BLE001
+        log.warning("secret originals sweeper startup failed: %s", _e)
     try:
         _tf_decl_startup_audit()
     except Exception as _e:                      # noqa: BLE001

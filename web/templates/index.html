@@ -199,6 +199,7 @@
 
     <!-- v1.56.0 : ce que le cluster (ou Rancher) a refusé de montrer -->
     <div class="access-notice" id="access-notice" role="status" hidden></div>
+    <div class="access-notice secrets-banner" id="secrets-banner" role="status" aria-live="polite" hidden></div>
 
     <!-- Navigation 2.0 : bandeau de la page d'un hôte (host-page.js), posé
          au-dessus de la section que l'adresse désigne -->
@@ -1077,6 +1078,7 @@
       <button class="settings-tab needs-admin" data-stab="accounts" data-i18n="settings.tab.accounts">Console accounts</button>
       <button class="settings-tab needs-admin" data-stab="artefacts" data-i18n="settings.tab.artefacts">Artefacts</button>
       <button class="settings-tab needs-admin" data-stab="registries" data-i18n="settings.tab.registries">Registries</button>
+      <button class="settings-tab needs-admin" data-stab="secrets" data-i18n="settings.tab.secrets">Secrets</button>
       <button class="settings-tab"        data-stab="support"    data-i18n="settings.tab.support">Support</button>
       <button class="settings-tab"        data-stab="about"      data-i18n="settings.tab.about">About</button>
     </div>
@@ -1104,6 +1106,13 @@
         <h4 data-i18n="regset.title">Bootstrap registries</h4>
         <p class="form-hint" data-i18n="regset.intro">The write port (5443) of the bootstrap registries accepts only the networks below: the console publishes there. The read port (443) stays open to the nodes of the child clusters.</p>
         <div id="registries-settings-body"><p class="form-hint">…</p></div>
+      </div>
+
+      <!-- 2.9.0 : magasin de secrets OpenBao (modes A et B1, classes, versions, rotation, instantanés) -->
+      <div class="settings-tab-content" id="stab-secrets">
+        <h4 data-i18n="sx.title">Secret store</h4>
+        <p class="form-hint" data-i18n="sx.intro">Where the console keeps its secrets: local files, or an OpenBao server (yours, or one the console runs beside itself).</p>
+        <div id="secrets-settings-body"><p class="form-hint">…</p></div>
       </div>
 
       <div class="settings-tab-content" id="stab-accounts">
@@ -1496,6 +1505,7 @@
 <script src="/static/js/console-update.js"></script>
 <script src="/static/js/console-accounts.js"></script>
 <script src="/static/js/rancher-servers.js"></script>
+<script src="/static/js/secrets.js"></script>
 <script src="/static/js/user-menu.js"></script>
 <script src="/static/js/access-notice.js"></script>
 <!-- Yjs notes module (ESM) -->

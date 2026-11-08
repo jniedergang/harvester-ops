@@ -21,11 +21,14 @@ l'exploitant : on ne fait jamais confiance à la première connexion
 (pas d'`accept-new` pour un hôte qui porte des VMs clientes).
 """
 
+import contextlib
+import fcntl
 import json
 import os
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 DECL_DIR = "kvm.d"
@@ -69,6 +72,21 @@ def decl_path(state, name):
 
 def key_rel(name):
     return f"{SSH_DIR}/{name}_id"
+
+
+def key_ref(name):
+    """Référence de la clé d'un hôte migrée dans OpenBao (2.9.0)."""
+    return f"openbao:ssh-kvm/{name}#private_key"
+
+
+def key_path(state, value, purpose="ssh-kvm"):
+    """Chemin de la clé d'un hôte : le fichier rangé sous l'état, ou une
+    copie de travail sur tmpfs quand la déclaration porte une référence du
+    magasin de secrets (2.9.0)."""
+    if isinstance(value, str) and value.startswith("openbao:"):
+        import secret_store
+        return Path(secret_store.path_of(value, purpose))
+    return resolve(state, value)
 
 
 def known_hosts_rel(name):
@@ -120,6 +138,9 @@ def check_decl(decl):
         return "invalid or missing user"
     for field, expected in (("ssh_key", key_rel(decl["name"])),
                             ("known_hosts", known_hosts_rel(decl["name"]))):
+        # 2.9.0 : la clé migrée dans OpenBao est désignée par sa référence
+        if field == "ssh_key" and decl.get(field) == key_ref(decl["name"]):
+            continue
         if decl.get(field) != expected:
             return f"{field} must be {expected}"
     if not _valid_uri(decl.get("uri", DEFAULT_URI)):
@@ -236,6 +257,30 @@ def write_private(path, data):
     return path
 
 
+@contextlib.contextmanager
+def decl_lock(state, wait=10.0):
+    """Verrou des déclarations d'hôtes KVM entre processus
+    (`<état>/kvm.d/.lock`, flock), le même que celui de harvester-kvm
+    (host_lock) et de harvester-folders : relire puis réécrire une
+    déclaration sous ce verrou. TimeoutError au-delà de `wait` secondes."""
+    d = decl_dir(state)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(d / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        end = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > end:
+                    raise TimeoutError("another KVM host declaration change is in progress: try again") from None
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
+
+
 def write(state, decl):
     """Écrit la déclaration (0600, répertoire 0700). DeclError si elle est
     invalide (dont des chemins de clé ou d'empreinte autres que ceux dérivés
@@ -350,7 +395,8 @@ def remove(state, name):
     # la déclaration d'abord : un retrait interrompu ne laisse jamais une
     # déclaration qui pointe vers une clé effacée
     path.unlink(missing_ok=True)
-    for rel in (key_rel(name), known_hosts_rel(name)):
+    # 2.9.0 : l'original gardé d'une clé migrée dans OpenBao part avec l'hôte
+    for rel in (key_rel(name), key_rel(name) + ".migrated", known_hosts_rel(name)):
         (Path(state) / rel).unlink(missing_ok=True)
     return existed
 

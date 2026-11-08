@@ -77,15 +77,45 @@ def decl_lock(state, wait=10.0):
         os.close(fd)                              # libère le verrou
 
 
+_REF_PREFIXES = ("openbao:", "local:")
+
+
+def _is_ref(v):
+    """Référence du magasin de secrets (2.9.0) : jamais un chemin, ni
+    résolue ni relativisée."""
+    return isinstance(v, str) and v.startswith(_REF_PREFIXES)
+
+
 def _map_paths(cluster, fn):
     out = dict(cluster)
-    if isinstance(out.get("kubeconfig"), str) and out["kubeconfig"]:
+    if isinstance(out.get("kubeconfig"), str) and out["kubeconfig"] and not _is_ref(out["kubeconfig"]):
         out["kubeconfig"] = fn(out["kubeconfig"])
     if isinstance(out.get("ssh"), dict):
         ssh = dict(out["ssh"])
-        if isinstance(ssh.get("key"), str) and ssh["key"]:
+        if isinstance(ssh.get("key"), str) and ssh["key"] and not _is_ref(ssh["key"]):
             ssh["key"] = fn(ssh["key"])
         out["ssh"] = ssh
+    return out
+
+
+def materialize(cluster, purpose="tool"):
+    """2.9.0 : l'entrée d'un cluster dont le kubeconfig ou la clé SSH porte
+    une référence du magasin de secrets, avec à la place un chemin de
+    travail (copie tmpfs gardée le temps du processus). Une entrée sans
+    référence est rendue telle quelle. Pour les outils de bin/ lancés seuls ;
+    la console passe par `_cluster_kubeconfig_path`."""
+    if not isinstance(cluster, dict):
+        return cluster
+    kc = cluster.get("kubeconfig")
+    key = (cluster.get("ssh") or {}).get("key") if isinstance(cluster.get("ssh"), dict) else None
+    if not (_is_ref(kc) or _is_ref(key)):
+        return cluster
+    import secret_store
+    out = dict(cluster)
+    if _is_ref(kc):
+        out["kubeconfig"] = secret_store.path_of(kc, f"{purpose}-kubeconfig")
+    if _is_ref(key):
+        out["ssh"] = dict(out["ssh"], key=secret_store.path_of(key, f"{purpose}-ssh"))
     return out
 
 

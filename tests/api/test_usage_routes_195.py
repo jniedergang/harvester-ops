@@ -135,7 +135,8 @@ def test_the_sampler_is_one_thread_never_in_a_reader_process(monkeypatch):
 def test_the_sampler_reuses_the_gpu_collector_and_reads_the_interval_setting():
     body = SRC.split("def _usage_sample_once(", 1)[1].split("\ndef ", 1)[0]
     assert "collect = collect or _gpus_collect" in body
-    assert 'c.get("kubeconfig")' in body and "_kubectl_for_cluster" not in body
+    # le kubeconfig de la console (2.9.0 : par son seul lecteur), jamais l'identité déléguée
+    assert "_cluster_kubeconfig_path(c" in body and "_kubectl_for_cluster" not in body
     assert 'os.environ.get("HARVESTER_OPS_USAGE_INTERVAL"' in SRC
 
 

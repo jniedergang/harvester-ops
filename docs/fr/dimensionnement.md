@@ -110,3 +110,12 @@ Chaque processus lecteur ajoute environ 175 Mo. Au-delà de 60 clusters, ou avec
 beaucoup de personnes chacune sur un cluster différent, mesurer avec le banc
 avant de s'engager sur un chiffre ; relever `HARVESTER_OPS_WATCH_INTERVAL`
 baisse la charge constante des surveillances.
+
+## OpenBao B1 (2.9.0)
+
+Le conteneur B1 tourne avec `--memory 512m --memory-swap 512m` ; mesuré sur
+la VM du client : 39 à 42 Mo occupés avec trois classes migrées. L'image
+prend 202 Mo sur disque une fois chargée, le paquet 59 Mo. Un instantané de
+ce magasin faisait de 58 à 86 Ko. Gardez au moins 1 Gio libre pour le
+journal d'audit sous `/var/lib/harvester-ops-openbao` (la console avertit
+sous 1 Gio ou 10 %).

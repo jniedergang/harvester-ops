@@ -3075,7 +3075,14 @@ def call_hook(hook, allow=None, clock=time.monotonic, resolver=None, connector=N
     import url_fetch_guard as ufg
     allow = rh.allow_for("hooks") if allow is None else allow
     headers = dict(hook.get("headers") or {})
-    headers.update(hook.get("secret_headers") or {})
+    # 2.9.0 : une valeur rangée dans le magasin de secrets arrive en référence
+    import secret_store
+    try:
+        secret_vals = {k: secret_store.resolve_value(v) for k, v in (hook.get("secret_headers") or {}).items()}
+    except (secret_store.SecretError, secret_store.SecretMissing) as e:
+        return {"ok": False, "status": None, "seconds": 0.0,
+                "error": f"secret header unavailable ({getattr(e, 'code', 'secret-missing')})"}
+    headers.update(secret_vals)
     body = hook.get("body") or ""
     method = hook.get("method") or "POST"
     data = body.encode() if body and method != "GET" else None
@@ -3094,7 +3101,8 @@ def call_hook(hook, allow=None, clock=time.monotonic, resolver=None, connector=N
     except Exception as e:                      # noqa: BLE001 : jamais d'exception vers la bascule
         error = type(e).__name__
     secs = round(clock() - t0, 3)
-    for v in rp.hook_secret_values([hook]):
+    for v in sorted(set(rp.hook_secret_values([hook])) | {str(x) for x in secret_vals.values() if x},
+                    key=len, reverse=True):
         error = error.replace(v, rp.MASK)
     ok = status is not None and 200 <= status < 300 and not error
     return {"ok": ok, "status": status, "seconds": secs, "error": error[:300]}

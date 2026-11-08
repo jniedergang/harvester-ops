@@ -248,6 +248,13 @@ class Agent:
                     _copy_bounded(sig_src, sig)
         info = su.inspect_archive(archive)
         self.status["to"] = info["version"]
+        # relecture des corrections finales m1 : la version lue dans l'archive
+        # est celle que la console a contrôlée (retour sous la 2.9.0 compris) ;
+        # une archive remplacée entre son garde et ce passage est refusée
+        if (req.get("version") is not None or req.get("allow_older")) \
+                and str(req.get("version") or "") != info["version"]:
+            raise su.UpdateError(f"the archive holds {info['version']}, not the requested "
+                                 f"{req.get('version') or '(none)'}")
         signers = su.signers_file(ETC_DIR, OPT_DIR)
         if sig is not None or not su.allow_unsigned(ETC_DIR / "update.conf"):
             su.verify_signature(archive, sig, signers, runner=self.run_cmd, in_image=self.verify_in_image)

@@ -284,6 +284,7 @@ show; the [changelog](CHANGELOG.md) tells each story.
 [Install](docs/en/install.md) ·
 [Bare-metal](docs/en/bare-metal.md) ·
 [Artefacts and registries](docs/en/artefacts.md) ·
+[Secret store](docs/en/secrets.md) ·
 [Sizing](docs/en/sizing.md) ·
 [Troubleshooting](docs/en/troubleshooting.md) ·
 [Changelog](CHANGELOG.md)

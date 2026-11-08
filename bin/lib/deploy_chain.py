@@ -46,8 +46,9 @@ Règles :
 - exception d'une phase ou d'un élément : `error`, avec le seul NOM de
   l'exception (règle de la série : aucun détail qui porterait un secret) ;
 - secrets du déroulé (`plan-run/<run_id>/...`) effacés à la fin, quelle
-  qu'en soit l'issue ; `ctx.run_id` (12 caractères hexadécimaux) est
-  contrôlé avant tout ;
+  qu'en soit l'issue, sauf `keep_secrets` (2.9.0 : déroulé reprenable,
+  secrets gardés dans OpenBao) ; `ctx.run_id` (12 caractères
+  hexadécimaux) est contrôlé avant tout ;
 - les messages des phases et des éléments vont dans les étapes et le
   résultat : l'appelant n'y met jamais une valeur, seulement des noms et
   des codes.
@@ -78,6 +79,8 @@ CHECKED_MESSAGE = "already done (checked)"
 POLL_SECONDS = 15
 SECRET_CLASS = "plan-run"
 EXIT_CODES = {"done": 0, "error": 1, "partial": 1, "cancelled": 3}
+# 2.9.0 : issues d'un déroulé qu'une reprise peut continuer
+RESUMABLE = ("error", "partial", "cancelled")
 RUN_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
@@ -236,9 +239,14 @@ def _run_items(ctx, ph, state, previous, progress=None):
     return PhaseOutcome(status, items=entries, message=msg)
 
 
-def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=None, order=ORDER):
+def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=None, order=ORDER,
+        keep_secrets=None):
     """Déroule les phases ; rend le résultat (voir l'en-tête du module).
-    `order` (2.7.0) : ordre des phases d'une autre chaîne (le Défaire)."""
+    `order` (2.7.0) : ordre des phases d'une autre chaîne (le Défaire).
+    `keep_secrets(statut)` (2.9.0, décision 141) : vrai pour un déroulé
+    arrêté reprenable dont les secrets sont gardés dans OpenBao jusqu'à sa
+    reprise (balayés au plus tard après le délai réglé) ; sinon, et
+    toujours sur exception, les secrets sont effacés."""
     if not isinstance(getattr(ctx, "run_id", None), str) or not RUN_ID_RE.match(ctx.run_id):
         # avant tout secret : l'effacement final ne pourrait pas le désigner
         raise ValueError("run_id must be 12 hexadecimal characters")
@@ -318,6 +326,24 @@ def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=Non
         ctx.set_result(dict(result))
         return result
     finally:
-        # Secrets du déroulé effacés quelle qu'en soit l'issue (décision 129)
+        # Secrets du déroulé effacés quelle qu'en soit l'issue (décision 129),
+        # sauf un déroulé reprenable qui les garde dans OpenBao (décision 141)
         store = secrets if secrets is not None else secret_store.store()
-        store.delete_tree(SECRET_CLASS, ctx.run_id)
+        kept = (keep_secrets is not None and result.get("status") in RESUMABLE
+                and keep_secrets(result["status"]))
+        if kept and hasattr(store, "forget_memory"):
+            # gardés pour la reprise : dans OpenBao seulement ; une copie en
+            # mémoire (OpenBao coupé à la saisie) ne serait jamais relue
+            # (revue m6 des tâches 9-10)
+            store.forget_memory(SECRET_CLASS, ctx.run_id)
+        if not kept:
+            # revue I3 des tâches 9-10 : un effacement refusé (secret_id
+            # tourné, droit retiré) ne change pas l'issue du déroulé ; il est
+            # dit en étape (le code seul) et le balayage des déroulés finis
+            # s'en charge
+            try:
+                store.delete_tree(SECRET_CLASS, ctx.run_id)
+            except Exception as e:                        # noqa: BLE001
+                code = getattr(e, "code", None) or type(e).__name__
+                ctx.emit_step("secrets-cleanup", "error",
+                              f"secrets of the run not erased ({code}); the background sweep will retry")

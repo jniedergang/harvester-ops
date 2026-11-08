@@ -398,6 +398,16 @@ avant 2.0.0, lire d'abord la note 2.0.0 « Rolling back to 1.101.x » du
 CHANGELOG ; avant 2.0.2, la console ne tourne pas sous Docker, donc sur un
 hôte Docker l'agent remet la version en cours.
 
+**Revenir sous la 2.9.0 avec OpenBao.** Un retour arrière (ou une
+installation qui autorise une version plus ancienne) vers une version
+antérieure à la 2.9.0 est refusé avec `secrets-in-openbao` tant que le
+magasin de secrets n'est pas local, qu'une classe est dans OpenBao ou qu'un
+état OpenTofu est chiffré. Ramenez d'abord toutes les classes en fichiers
+locaux, remettez en clair les états chiffrés et désactivez le magasin
+([secrets.md](secrets.md#désactiver-changer-de-mode-revenir-à-une-console-plus-ancienne)).
+`install.sh` lancé à la main avec une version plus ancienne n'est pas
+gardé.
+
 **Revenir de la 2.6.0 à la 2.5.0.** La 2.5.0 ne connaît pas les registres.
 Elle liste comme **invalides** un plan enregistré avec une phase Registre
 active ou des `registries` sur une entrée de cluster (« coming in 2.6+: set
@@ -453,6 +463,34 @@ vers la 2.8.3 est encore faite par l'agent déjà installé : pour appliquer le
 correctif tout de suite, installer la 2.8.3 avec `sudo ./install.sh
 --upgrade`. Revenir à une version plus ancienne réinstalle son agent et son
 installeur, sans ce correctif.
+
+## Agent du magasin de secrets et OpenBao (2.9.0)
+
+`install.sh` (installation et `--upgrade`) installe l'agent du magasin de
+secrets : `harvester-secrets-agent.path` et `.service` (root, liste fermée
+d'opérations, `ProtectHome=read-only`, `PrivateTmp=yes`) et
+`harvester-secrets-rotate.timer` (toutes les heures : fichier de santé,
+rotation du `secret_id` tous les 30 jours, rétention des anciennes clés et
+des anciens volumes). Sans OpenBao, ils ne font que rafraîchir
+`secrets-agent/health.json`. L'unité de la console crée
+`/var/lib/harvester-ops-snapshots` à chaque démarrage s'il manque (au compte
+de la console, avant le conteneur) et le monte dans le conteneur de la console pour les
+instantanés de B1.
+
+Pour le mode B1, construisez le paquet OpenBao avec votre compte de service
+de l'Application Collection (`harvester-secrets bundle`, voir
+[secrets.md](secrets.md#construire-le-paquet-b1)). Placez-le avec son
+`.sha256` sous `bundles/openbao/` de la version avant de lancer
+`install.sh` : il est vérifié et placé dans
+`/var/lib/harvester-ops/secrets-agent/staged/`. Mise à jour ultérieure de
+l'image OpenBao : `sudo /usr/local/bin/harvester-secrets upgrade-b1 --bundle
+<file>`. Quand B1 est posé, `install.sh --upgrade` met en file un
+rafraîchissement des politiques de l'agent et du jeton d'OpenTofu
+(Paramètres > Magasin de secrets le montre fait).
+
+Sur openSUSE, `sudo harvester-secrets` est introuvable (`secure_path` ne
+contient pas `/usr/local/bin`) : employez `sudo
+/usr/local/bin/harvester-secrets`.
 
 ## Déplacer harvops vers un autre hôte
 

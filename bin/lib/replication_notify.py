@@ -151,7 +151,9 @@ def _channel(raw, stored):
             raise NotifyError("secret-missing", "token: the homeserver changed, type the token again")
         out["token"] = _text(_secret(raw.get("token"), kept_token, "token"), "token", 1024)
     elif kind == "slack":
-        out["url"] = _url(_secret(raw.get("url"), old.get("url"), "url"), "url", ("https",))
+        url = _secret(raw.get("url"), old.get("url"), "url")
+        # 2.9.0 : une adresse rangée dans OpenBao est gardée par sa référence
+        out["url"] = url if _is_ref(url) else _url(url, "url", ("https",))
     elif kind == "webhook":
         url = raw.get("url")
         if old.get("url") and url == rh.mask_url(old["url"]):
@@ -265,6 +267,51 @@ def mask(cfg):
             c["secret_headers"] = {k: MASK for k in c["secret_headers"]}
         if c.get("kind") == "webhook" and c.get("url"):
             c["url"] = rh.mask_url(c["url"])    # un jeton dans la requête reste caché
+    return out
+
+
+def _is_ref(v):
+    return isinstance(v, str) and v.startswith(("openbao:", "local:"))
+
+
+def secret_slots(cfg):
+    """[(canal, secret, valeur)] des secrets d'un réglage, `secret` valant
+    `token`, `url`, `password` ou ("header", nom)."""
+    out = []
+    for c in (cfg or {}).get("channels") or []:
+        for f in SECRET_FIELDS.get(c.get("kind"), ()):
+            if c.get(f):
+                out.append((c, f, c[f]))
+        for k, v in (c.get("secret_headers") or {}).items():
+            if v:
+                out.append((c, ("header", k), v))
+    return out
+
+
+def _has_ref(cfg):
+    for c in (cfg or {}).get("channels") or []:
+        vals = [c.get(f) for f in SECRET_FIELDS.get(c.get("kind"), ())]
+        vals += list((c.get("secret_headers") or {}).values())
+        if any(isinstance(v, str) and v.startswith(("openbao:", "local:")) for v in vals):
+            return True
+    return False
+
+
+def resolve_secrets(cfg, actor=None):
+    """2.9.0 : le réglage avec les valeurs des secrets rangés par référence
+    dans le magasin (`openbao:replication-notify/global#<canal>__<secret>`).
+    Sans référence, le réglage est rendu tel quel (même objet). Seul point
+    de lecture des secrets de notification avant un envoi."""
+    if not _has_ref(cfg):
+        return cfg
+    import secret_store
+    out = copy.deepcopy(cfg)
+    for c in out.get("channels") or []:
+        for f in SECRET_FIELDS.get(c.get("kind"), ()):
+            if c.get(f):
+                c[f] = secret_store.resolve_value(c[f], actor)
+        if c.get("secret_headers"):
+            c["secret_headers"] = {k: secret_store.resolve_value(v, actor) for k, v in c["secret_headers"].items()}
     return out
 
 
@@ -434,8 +481,10 @@ def address_refusal(cfg, allow, resolver=None):
                 rh.check_address(f"http://{host}:{int(c.get('smtp_port') or 587)}/", allow, resolver=resolver,
                                  strict_dns=False)
             else:
-                rh.check_address(c.get("homeserver") if kind == "matrix" else c.get("url"), allow,
-                                 resolver=resolver, strict_dns=False)
+                addr = c.get("homeserver") if kind == "matrix" else c.get("url")
+                if _is_ref(addr):
+                    continue                    # adresse dans OpenBao : contrôlée par la console avant d'y être écrite
+                rh.check_address(addr, allow, resolver=resolver, strict_dns=False)
         except ufg.FetchRefused as e:
             raise NotifyError("notify-address", f"channel {c.get('id')}: {rh.refusal_text(e, 'notifications')}") \
                 from None
@@ -514,7 +563,7 @@ class Notifier:
             # premier tour (ou base remplacée) : rien d'ancien n'est envoyé
             db.set_setting(conn, self.CURSOR, top, by=self.by)
             return 0
-        cfg = db.get_setting(conn, "notify") or {}
+        cfg = resolve_secrets(db.get_setting(conn, "notify") or {})
         if not cfg.get("enabled") or not cfg.get("channels"):
             if top != cursor:
                 db.set_setting(conn, self.CURSOR, top, by=self.by)

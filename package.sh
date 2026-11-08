@@ -129,12 +129,36 @@ else
     providers="$(tar -xzOf "$bundle" --wildcards '*/turtles.json' 2>/dev/null \
         | python3 -c 'import json,sys; print(", ".join(p["name"]+" "+p["version"] for p in json.load(sys.stdin)["providers"]))' 2>/dev/null || echo "?")"
     ok "Cluster API bundle embedded: $(basename "$bundle") ($providers)"
-    python3 bin/harvester-provider-install.py "$TF_PROVIDER_VERSION" \
+    # 2.9.0 : l'archive est comparée à la somme épinglée dans
+    # scripts/embedded-providers.env (TF_PROVIDER_SHA256), quel que soit
+    # l'endroit d'où elle vient (GitHub, miroir HARVESTER_PROVIDER_BASE_URL) ;
+    # l'exception de développement n'est jamais héritée par un livrable
+    if [[ "${HARVESTER_PROVIDER_ALLOW_UNVERIFIED:-0}" == "1" && "${DEV_BUILD:-0}" != "1" ]]; then
+        err "HARVESTER_PROVIDER_ALLOW_UNVERIFIED=1 is set: refused for a deliverable (DEV_BUILD=1 for a development build)"
+        exit 1
+    fi
+    [[ "$TF_PROVIDER_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+        err "TF_PROVIDER_SHA256 missing or malformed in scripts/embedded-providers.env"; exit 1; }
+    tfp_log="$(mktemp "${DIST_DIR}/.tf-provider.XXXXXX")"
+    if ! python3 bin/harvester-provider-install.py "$TF_PROVIDER_VERSION" --arch amd64 \
+        --sha256 "$TF_PROVIDER_SHA256" \
         --dest "$WORK_DIR/bundles/terraform-provider" \
-        --source-label "embedded in harvester-ops ${VERSION}" 2>/dev/null
-    [[ -x "$WORK_DIR/bundles/terraform-provider/bin/terraform-provider-harvester" ]] || {
-        err "Terraform provider ${TF_PROVIDER_VERSION} could not be fetched"; exit 1; }
-    ok "Terraform provider embedded: v${TF_PROVIDER_VERSION} (checksum verified)"
+        --source-label "embedded in harvester-ops ${VERSION}" >/dev/null 2>"$tfp_log" \
+        || [[ ! -x "$WORK_DIR/bundles/terraform-provider/bin/terraform-provider-harvester" ]]; then
+        err "Terraform provider ${TF_PROVIDER_VERSION} could not be fetched or verified:"
+        grep '|error|' "$tfp_log" | cut -d'|' -f4- >&2 || true
+        rm -f "$tfp_log"
+        exit 1
+    fi
+    rm -f "$tfp_log"
+    tfp_meta="$WORK_DIR/bundles/terraform-provider/provider.json"
+    tfp_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sha256"])' "$tfp_meta")"
+    if [[ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("verified") is True)' "$tfp_meta")" == "True" ]]; then
+        ok "Terraform provider embedded: v${TF_PROVIDER_VERSION} (sha256 ${tfp_sha:0:12}... matches the checksum pinned in scripts/embedded-providers.env)"
+    else
+        err "Terraform provider ${TF_PROVIDER_VERSION}: not verified against the pinned checksum"
+        exit 1
+    fi
     # 2.3.0 : le provider libvirt des déclarations KVM, vérifié par la
     # signature GPG de la release (clé épinglée) puis par sa somme
     scripts/fetch-libvirt-provider.sh "$TF_LIBVIRT_PROVIDER_VERSION" "$TF_LIBVIRT_PROVIDER_FPR" \
@@ -156,6 +180,13 @@ else
     rm -rf "$rb_work"
     ok "Bootstrap registry images embedded ($(python3 -c 'import json,sys; print(", ".join(json.load(open(sys.argv[1]))["images"].values()))' "$WORK_DIR/bundles/registry/registry-images.json"))"
 fi
+# 2.9.0 : rien d'OpenBao dans le paquet principal. Le paquet OpenBao du mode
+# B1 (image de la SUSE Application Collection, sous abonnement) est construit
+# par le CLIENT avec son compte de service ou son registre miroir :
+#   harvester-secrets bundle --registry dp.apps.rancher.io --user <compte> \
+#       --password-stdin -o <répertoire>
+# puis posé dans bundles/openbao/ avant install.sh, ou téléversé depuis la
+# console. L'éditeur ne redistribue pas l'image (point 251).
 # web/ above already carries web/vendor (wheels). A second
 # `cp -r web/vendor "$WORK_DIR/web/vendor"` used to nest a duplicate
 # vendor/vendor/ (~35 MB of dead weight) because the target existed.

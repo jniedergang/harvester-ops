@@ -220,10 +220,16 @@ require_yq() {
 # contient les identifiants du cluster.
 # -----------------------------------------------------------------------------
 IDENTITY_WORKDIR=""
+# 2.9.0 : copies de travail des secrets du magasin (tmpfs), effacées à la sortie
+_HOPS_SECRET_FILES=()
+_HOPS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cleanup_cluster_identity() {
     [[ -n "$IDENTITY_WORKDIR" && -d "$IDENTITY_WORKDIR" ]] && rm -rf "$IDENTITY_WORKDIR"
     IDENTITY_WORKDIR=""
+    local f
+    for f in "${_HOPS_SECRET_FILES[@]}"; do rm -f -- "$f"; done
+    _HOPS_SECRET_FILES=()
 }
 
 apply_cluster_identity() {
@@ -303,6 +309,29 @@ _state_path() {
     fi
 }
 
+# 2.9.0 : un champ de la déclaration (kubeconfig, ssh.key) qui porte une
+# référence du magasin de secrets (`openbao:` ou `local:`) devient un chemin
+# de travail sur tmpfs (`harvester-secrets file`), effacé à la sortie du
+# script ; tout autre champ suit `_state_path`, comme avant.
+#   _secret_field VAR VALEUR
+# Revue M12 : la copie est effacée par `trap cleanup_cluster_identity EXIT`,
+# qui REMPLACE un trap EXIT déjà posé par le script appelant, et qui part à
+# la sortie d'un sous-shell si load_cluster y est appelé. Un script qui a son
+# propre trap EXIT doit y appeler cleanup_cluster_identity ; load_cluster
+# s'appelle dans le shell principal du script.
+_secret_field() {
+    local __var="$1" v="$2" p
+    if [[ "$v" =~ ^(openbao|local):[a-z0-9-]+/ ]]; then
+        p=$(python3 "$_HOPS_LIB_DIR/../harvester-secrets.py" file "$v") || {
+            log_error "Secret illisible / secret unreadable: ${v%%#*}"; return 1; }
+        _HOPS_SECRET_FILES+=("$p")
+        trap cleanup_cluster_identity EXIT
+        printf -v "$__var" '%s' "$p"
+    else
+        printf -v "$__var" '%s' "$(_state_path "$v")"
+    fi
+}
+
 load_cluster() {
     local name="$1"
     [[ -z "$name" ]] && { log_error "Nom de cluster requis / cluster name required"; return 1; }
@@ -319,9 +348,9 @@ load_cluster() {
     local f="$_CLUSTER_FILE" q="$_CLUSTER_Q"
 
     CLUSTER_NAME="$name"
-    KUBECONFIG_PATH=$(_state_path "$(yq -r "$q | .kubeconfig" "$f")")
+    _secret_field KUBECONFIG_PATH "$(yq -r "$q | .kubeconfig" "$f")" || return 1
     SSH_USER=$(yq -r "$q | .ssh.user // \"rancher\"" "$f")
-    SSH_KEY=$(_state_path "$(yq -r "$q | .ssh.key // \"\"" "$f")")
+    _secret_field SSH_KEY "$(yq -r "$q | .ssh.key // \"\"" "$f")" || return 1
     SSH_PORT=$(yq -r "$q | .ssh.port // 22" "$f")
 
     SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p $SSH_PORT"

@@ -424,6 +424,23 @@ polling. Les actions API directes (ops VM, apply Terraform, install
 CAPHV) utilisent le même mécanisme `ActionRun` + SSE, streamant les
 événements step/log au fil de leur progression.
 
+## Magasin de secrets (2.9.0)
+
+`bin/lib/secret_store.py` est le seul lecteur de tous les secrets de la
+console. Un champ porte soit une valeur ou un chemin (local, comme avant),
+soit une référence `openbao:<class>/<path>#<field>`.
+`bin/lib/openbao_client.py` (bibliothèque standard seulement) parle à
+OpenBao par AppRole, garde le jeton en mémoire et retente les erreurs
+réseau ; `VAULT_*` et `BAO_*` de l'environnement sont ignorées. Les valeurs
+lues sont gardées en cache en mémoire (15 min) ; les copies remises à
+`kubectl`, `ssh` et `tofu` sont des fichiers tmpfs effacés après l'action.
+Un outil lancé par la console ne se connecte jamais : il reçoit les copies
+de travail. L'agent de l'hôte `bin/harvester-secrets-agent.py` (root, un à
+la fois, liste fermée d'opérations) dépose le `secret_id`, pose et met à
+jour B1, fait tourner les clés et restaure les instantanés ; la console le
+sollicite par `<state>/secrets-agent/request.json`. Détails :
+[secrets.md](secrets.md).
+
 ## Modèle de confiance
 
 - Le conteneur dispose d'un accès `cluster-admin` complet via les

@@ -228,6 +228,16 @@ la cible (listé dans `left`). Après une bascule terminée, les sauvegardes
 se purgent à la main : voir « Purger les sauvegardes après une bascule
 terminée » dans la page des capacités.
 
+**Le magasin de secrets d'abord (2.9.0).** Quand la console garde ses
+secrets dans OpenBao, la fiche de reprise commence par OpenBao. En B1,
+restaurez avant toute chose le dernier instantané de
+`/var/lib/harvester-ops-snapshots` avec sa clé de descellement (la copie
+hors ligne) : Paramètres > Magasin de secrets > Instantanés, ou `sudo
+/usr/local/bin/harvester-secrets restore <file>`. En mode A, votre serveur
+et ses sauvegardes passent en premier. Sans OpenBao, la console ne peut pas
+lire les kubeconfigs et les clés qu'elle y a migrés. Voir
+[secrets.md](secrets.md).
+
 ## 13. Navigation par hôtes (2.0)
 
 Un **hôte** est un cluster Harvester entier ou un hyperviseur KVM, jamais un
@@ -909,3 +919,30 @@ Non vérifié en réel : un fournisseur d'identité de client autre que Dex
 cloud-init ; 2.8.1 la saute, l'essai au banc reste à faire), un plan enchaîné à une vraie installation de Harvester avec
 un secret Git, plus de deux clusters enfants, harv4 (deux clusters dans une
 exécution).
+
+## 19. Magasin de secrets (2.9.0)
+
+1. Choisir le mode : A (votre OpenBao ou Vault) ou B1 (OpenBao à côté de
+   la console). B1 demande le paquet OpenBao construit avec votre compte de
+   l'Application Collection.
+2. Paramètres > Magasin de secrets > Activer OpenBao : lancer les
+   vérifications, activer.
+3. B1 : exporter, télécharger et acquitter la copie hors ligne de la clé de
+   descellement ; régler le répertoire et l'heure (UTC) des instantanés.
+4. Migrer les classes une par une (onglet Classes), kubeconfig en dernier
+   après **Tester la panne** ; confirmer les originaux une fois que la
+   console fonctionne.
+5. Avant de ramener la console sous la 2.9.0, ou avant de désactiver :
+   ramener toutes les classes, remettre en clair les états chiffrés, puis
+   désactiver.
+
+Vu en réel (2.9.0) : le mode A sur OpenBao 2.7.2 (chaque vérification
+mise en échec une fois, puis activation, classes migrées, console
+redémarrée, valeurs identiques, retour en local) et sur Vault 1.14.2 (une
+partie des vérifications, activation, migration et retour), un kubeconfig de
+harv1 migré et employé pour démarrer et arrêter une VM, des pannes (cache
+chaud et froid, scellé, jeton révoqué, politique restreinte, audit plein),
+la corrélation d'audit par `X-Hops-Action`, B1 depuis l'Application
+Collection sur une VM de client (redémarrage descellé tout seul, rotations,
+instantané et restauration, mise à jour), des états OpenTofu chiffrés sur
+harvlab2, la rotation de clé KVM sur node2.

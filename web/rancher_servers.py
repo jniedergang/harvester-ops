@@ -216,6 +216,8 @@ class Store:
     def _abs(self, p):
         if not p:
             return None
+        if str(p).startswith(_REF_PREFIXES):       # 2.9.0 : référence du magasin, pas un chemin
+            return p
         return p if os.path.isabs(p) else str(self.state / p)
 
     def _file(self, sid):
@@ -420,7 +422,9 @@ class Store:
             raise ServerError("unknown Rancher", 404)
         if cur["origin"] == "config":
             raise ServerError("declared by the operator in config.yaml, read-only for the console", 409)
-        for p in (self._file(sid), self.dir / f"{sid}.ca.pem", self.dir / f"{sid}.oidc-secret"):
+        _forget_secret(self.state, _raw_secret(self.dir / f"{sid}.oidc-secret"))
+        for p in (self._file(sid), self.dir / f"{sid}.ca.pem", self.dir / f"{sid}.oidc-secret",
+                  self.dir / f"{sid}.oidc-secret.migrated"):
             Path(p).unlink(missing_ok=True)
         self._cache = (None, [])
         return cur
@@ -431,7 +435,14 @@ class Store:
             raise ServerError("unknown Rancher", 404)
         raw = self._raw(sid) or {}
         self._ensure_dir()
-        write_private(self.dir / f"{sid}.oidc-secret", client_secret.strip() + "\n")
+        # 2.9.0 tâche 8 : classe migrée -> le secret va dans OpenBao, le
+        # fichier porte sa référence (suivie par read_secret)
+        value = client_secret.strip()
+        ref = _store_new_secret(self.state, sid, value)
+        old = _raw_secret(self.dir / f"{sid}.oidc-secret")
+        write_private(self.dir / f"{sid}.oidc-secret", (ref or value) + "\n")
+        if old and old != ref:
+            _forget_secret(self.state, old)
         raw["sso"] = {"client_id": client_id, "secret_file": f"{STORE_DIR}/{sid}.oidc-secret",
                       "registered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.now())),
                       "redirect_uri": redirect_uri, "oidc_client": oidc_client}
@@ -444,7 +455,9 @@ class Store:
             raise ServerError("unknown Rancher", 404)
         raw = self._raw(sid) or {}
         raw.pop("sso", None)
+        _forget_secret(self.state, _raw_secret(self.dir / f"{sid}.oidc-secret"))
         (self.dir / f"{sid}.oidc-secret").unlink(missing_ok=True)
+        (self.dir / f"{sid}.oidc-secret.migrated").unlink(missing_ok=True)
         self._write(sid, raw)
         return self.get(cfg, sid, include_shadowed=True)
 
@@ -457,9 +470,57 @@ def _hours(v):
     return min(24, max(1, h))
 
 
-def read_secret(path):
+_REF_PREFIXES = ("openbao:", "local:")
+
+
+def _secret_store():
+    """bin/lib/secret_store (2.9.0), chargé seulement quand une référence
+    est rencontrée."""
+    try:
+        import secret_store
+    except ImportError:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin" / "lib"))
+        import secret_store
+    return secret_store
+
+
+def _store_new_secret(state, sid, value):
+    """Référence du secret écrit dans OpenBao quand la classe `rancher-oidc`
+    est migrée, None sinon (fichier local, comme avant). Une erreur
+    d'OpenBao remonte en ServerError 503, sans valeur."""
+    ss = _secret_store()
+    st = ss.store(state)
+    if not st.migrated("rancher-oidc"):
+        return None
+    try:
+        return st.put("rancher-oidc", sid, "client_secret", value)
+    except ss.SecretError as e:
+        if e.code == "secret-too-big":
+            return None
+        raise ServerError(f"secret store refused the OIDC secret ({e.code})", 503) from None
+    except ValueError:
+        return None
+
+
+def _forget_secret(state, value):
+    """Retire de OpenBao un secret désigné par référence (au mieux)."""
+    if not (isinstance(value, str) and value.startswith("openbao:")):
+        return
+    ss = _secret_store()
+    try:
+        ss.store(state).delete(value)
+    except (ss.SecretError, ss.SecretMissing, ValueError):
+        pass
+
+
+def _raw_secret(path):
+    """Ce qui est rangé : la référence elle-même (champ `secret_file` ou
+    contenu du fichier remplacé par sa référence), ou la valeur du fichier."""
     if not path:
         return None
+    if str(path).startswith(_REF_PREFIXES):
+        return str(path)
     try:
         s = Path(path).read_text().strip()
     except OSError:
@@ -467,9 +528,21 @@ def read_secret(path):
     return s or None
 
 
+def read_secret(path):
+    """Le secret du client OIDC. 2.9.0 : par le magasin de secrets quand il
+    est rangé par référence (OpenBao) ; une erreur d'OpenBao remonte avec
+    son code (refus de la connexion SSO, jamais de repli local)."""
+    s = _raw_secret(path)
+    if s and s.startswith(_REF_PREFIXES):
+        return _secret_store().read_value_file(s)
+    return s
+
+
 def sso_enabled(server):
+    """Le SSO est enregistré : identifiant du client et secret rangé (sans
+    lire OpenBao pour une simple liste)."""
     sso = server.get("sso") or {}
-    return bool(sso.get("client_id") and read_secret(sso.get("secret_file")))
+    return bool(sso.get("client_id") and _raw_secret(sso.get("secret_file")))
 
 
 def public(server):

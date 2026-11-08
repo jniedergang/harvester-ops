@@ -486,7 +486,8 @@ def cmd_host_add(args):
         raise UsageError("invalid fingerprint (expected SHA256:...)")
     name = args.name
     decl = {"name": name, "address": args.address, "port": args.port, "user": args.user,
-            "ssh_key": kvm_decl.key_rel(name), "known_hosts": kvm_decl.known_hosts_rel(name),
+            "ssh_key": kvm_decl.key_ref(name) if getattr(args, "key_in_store", False) else kvm_decl.key_rel(name),
+            "known_hosts": kvm_decl.known_hosts_rel(name),
             "uri": args.uri, "labels": labels}
     why = kvm_decl.check_decl(decl)
     if why:
@@ -504,8 +505,40 @@ def cmd_host_add(args):
         # revu sous le verrou : un ajout concurrent a pu finir entre-temps
         if kvm_decl.decl_path(state, name).exists():
             raise UsageError(f"host {name} is already declared (remove it first)")
+        stored_ref = _key_to_store(args, state, decl, name, key)
         step("validate", "done", f"{args.user}@{args.address}:{args.port}")
-        return _add_locked(args, state, decl, key)
+        try:
+            rc = _add_locked(args, state, decl, key)
+        finally:
+            # ajout défait (aucune déclaration ne désigne la clé) : retirée
+            if stored_ref and not kvm_decl.decl_path(state, name).exists():
+                _key_out_of_store(state, stored_ref)
+        return rc
+
+
+def _key_to_store(args, state, decl, name, key):
+    """Revue I4 de la tâche 8 : outil lancé seul sur une console dont la
+    classe ssh-kvm est migrée -> la clé va dans OpenBao, jamais sur le
+    disque (la console, elle, range la clé et passe --key-in-store). Sous le
+    verrou des hôtes, après le contrôle du nom. Rend la référence ou None."""
+    if getattr(args, "key_in_store", False):
+        return None
+    import secret_store as ss
+    try:
+        ref = ss.cli_put("ssh-kvm", name, "private_key", key if key.endswith("\n") else key + "\n",
+                         actor=os.environ.get("USER") or "cli", st=ss.store(str(state)))
+    except ss.SecretError as e:
+        raise UsageError(f"the key cannot be stored in OpenBao ({e.code}): nothing saved") from None
+    if ref:
+        args.key_in_store = True
+        decl["ssh_key"] = kvm_decl.key_ref(name)
+    return ref
+
+
+def _key_out_of_store(state, ref):
+    import secret_store as ss
+    with contextlib.suppress(Exception):
+        ss.store(str(state)).delete(ref)
 
 
 def _add_locked(args, state, decl, key):
@@ -536,7 +569,8 @@ def _add_locked(args, state, decl, key):
     try:
         step("save", "running", "saving the key, the pinned fingerprint and the declaration")
         try:
-            kvm_decl.write_key(state, name, key)
+            if not getattr(args, "key_in_store", False):
+                kvm_decl.write_key(state, name, key)
             kvm_decl.write_known_hosts(state, name, [match[0]["line"]])
             kvm_decl.write(state, decl)
         except (OSError, kvm_decl.DeclError) as e:
@@ -3166,6 +3200,9 @@ def build_parser():
     sp.add_argument("--user", required=True)
     sp.add_argument("--ssh-key", required=True, help="private key file (copied into the state directory)")
     sp.add_argument("--fingerprint", required=True, help="SHA256:... of the host key to pin")
+    sp.add_argument("--key-in-store", action="store_true",
+                    help="the key is already in the secret store (OpenBao, class ssh-kvm): the declaration "
+                         "takes its reference, --ssh-key is only read for the checks")
     sp.add_argument("--uri", default=kvm_decl.DEFAULT_URI)
     sp.add_argument("--label", action="append", metavar="KEY=VALUE")
     sp.add_argument("--keep-on-failure", action="store_true",

@@ -12,6 +12,13 @@ Le résumé d'un plan (`show -json`) dit, ressource par ressource, ce qui sera
 créé, modifié, remplacé ou détruit, et pour une modification quels réglages
 changent, valeurs sensibles masquées.
 
+2.9.0 (tâche 9) : un état chiffré par OpenTofu (OpenBao transit) ne se lit
+plus en JSON. `addresses` le refuse (`StateEncrypted`) sans `lister`, qui
+rend la sortie de `tofu state list` ; `move` prend la lecture et
+l'écriture de chaque espace (`tofu state pull` / `tofu state push -` pour
+un espace chiffré) et n'écrit jamais d'état en clair par-dessus un état
+chiffré.
+
 Ce module ne lance pas Terraform : il est essayé seul.
 """
 
@@ -25,6 +32,18 @@ STATE_FILE = "terraform.tfstate"
 SENSITIVE = "(sensitive)"
 
 
+class StateEncrypted(Exception):
+    """L'état de cet espace est chiffré : il se lit par OpenTofu."""
+
+    def __init__(self, ws):
+        super().__init__(f"the state of {Path(ws).name} is encrypted")
+        self.ws = Path(ws)
+
+
+def is_encrypted(state):
+    return isinstance(state, dict) and "encrypted_data" in state and "encryption_version" in state
+
+
 def _load(path):
     try:
         return json.loads(Path(path).read_text())
@@ -32,33 +51,70 @@ def _load(path):
         return None
 
 
+def state_encrypted(ws):
+    """Vrai si l'état de l'espace `ws` est chiffré (contenu jamais lu au-delà
+    de ses clés de premier niveau)."""
+    return is_encrypted(_load(Path(ws) / STATE_FILE))
+
+
 def _write(path, data):
     path = Path(path)
+    if is_encrypted(_load(path)):
+        # jamais un état clair par-dessus un état chiffré (essai 8 :
+        # `state mv -state-out` le faisait)
+        raise StateEncrypted(path.parent)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2) + "\n")
     os.replace(tmp, path)
+
+
+def read_file_state(ws):
+    """Lecture JSON de l'état d'un espace en clair ; StateEncrypted sinon."""
+    st = _load(Path(ws) / STATE_FILE)
+    if is_encrypted(st):
+        raise StateEncrypted(ws)
+    return st
+
+
+def write_file_state(ws, data):
+    Path(ws).mkdir(parents=True, exist_ok=True)
+    _write(Path(ws) / STATE_FILE, data)
 
 
 def address_of(res):
     return f"{res.get('type')}.{res.get('name')}"
 
 
-def addresses(ws):
-    """Les ressources gérées de l'état d'un espace de travail (module racine)."""
+def addresses(ws, lister=None):
+    """Les ressources gérées de l'état d'un espace de travail (module racine).
+    État chiffré : `lister(ws)` rend la sortie de `tofu state list` ; sans
+    lui, StateEncrypted (jamais une liste vide qui ferait croire l'espace
+    vide)."""
     st = _load(Path(ws) / STATE_FILE) or {}
+    if is_encrypted(st):
+        if lister is None:
+            raise StateEncrypted(ws)
+        import tf_encryption
+        return tf_encryption.parse_state_list(lister(ws))
     return sorted(address_of(r) for r in st.get("resources") or []
                   if r.get("mode") == "managed" and not r.get("module"))
 
 
-def move(src_ws, dst_ws, wanted):
+def move(src_ws, dst_ws, wanted, read=read_file_state, write=write_file_state):
     """Déplace de l'état de `src_ws` vers celui de `dst_ws` les ressources
     dont l'adresse est dans `wanted`. Rend les adresses déplacées. Une
-    adresse déjà présente dans la destination n'est pas touchée."""
+    adresse déjà présente dans la destination n'est pas touchée.
+
+    `read(ws)` rend l'état d'un espace (dict, ou None s'il n'y en a pas) et
+    `write(ws, état)` l'écrit : fichier JSON par défaut (refus d'un état
+    chiffré), `tofu state pull` / `tofu state push -` pour un espace
+    chiffré (l'appelant choisit par espace). Les copies `.pre-move-*` sont
+    celles des fichiers tels quels (un état chiffré reste chiffré)."""
     src_p, dst_p = Path(src_ws) / STATE_FILE, Path(dst_ws) / STATE_FILE
-    src = _load(src_p)
+    src = read(src_ws)
     if not src or not src.get("resources"):
         return []
-    dst = _load(dst_p) or {
+    dst = read(dst_ws) or {
         "version": src.get("version", 4), "terraform_version": src.get("terraform_version"),
         "serial": 0, "lineage": str(uuid.uuid4()), "outputs": {}, "resources": [],
         "check_results": None,
@@ -77,14 +133,14 @@ def move(src_ws, dst_ws, wanted):
     stamp = time.strftime("%Y%m%d%H%M%S")
     for p in (src_p, dst_p):
         if p.exists():
-            (p.parent / f"{p.name}.pre-move-{stamp}").write_text(p.read_text())
+            (p.parent / f"{p.name}.pre-move-{stamp}").write_bytes(p.read_bytes())
     dst["resources"] = list(dst.get("resources") or []) + moving
     dst["serial"] = int(dst.get("serial") or 0) + 1
     src["resources"] = staying
     src["serial"] = int(src.get("serial") or 0) + 1
     Path(dst_ws).mkdir(parents=True, exist_ok=True)
-    _write(dst_p, dst)
-    _write(src_p, src)
+    write(dst_ws, dst)
+    write(src_ws, src)
     return [address_of(r) for r in moving]
 
 
