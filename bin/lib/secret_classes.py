@@ -167,7 +167,7 @@ def local_location(cls, path, field, state_dir, tf_dir=None, repl_db=None):
     if cls == "replication-notify":
         if path != NOTIFY_PATH or "__" not in field:
             raise ValueError("replication-notify path is global, field <channel>__<secret>")
-        cid, _, secret = field.partition("__")
+        cid, _, secret = field.rpartition("__")       # un identifiant peut contenir "--" (revue M10)
         return ("notify", db, (cid.replace("_", "-"), secret))
     if cls == "replication-hook":
         if len(segs) != 2 or not field.startswith("hdr_"):

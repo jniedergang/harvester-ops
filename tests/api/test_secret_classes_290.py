@@ -121,3 +121,13 @@ def test_readers_are_named():
         for r in sc.spec(cls).readers:
             f, _, fn = r.partition(":")
             assert (ROOT / f).is_file() and fn, r
+
+
+@pytest.mark.parametrize("cid", ["a--b", "a-", "mx-1", "a--", "x"])
+@pytest.mark.parametrize("secret", ["token", "url", "password", ("header", "X-Api-Key")])
+def test_notify_field_round_trip(tmp_path, cid, secret):
+    """M10 : un identifiant de canal avec `--` (permis) se relit à l'identique."""
+    field = sc.notify_field(cid, secret)
+    kind, _db, (got_cid, got_secret) = sc.local_location("replication-notify", "global", field, tmp_path)
+    assert kind == "notify" and got_cid == cid
+    assert got_secret == (secret if isinstance(secret, str) else sc.header_field(secret[1]))

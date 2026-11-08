@@ -314,6 +314,11 @@ _state_path() {
 # de travail sur tmpfs (`harvester-secrets file`), effacé à la sortie du
 # script ; tout autre champ suit `_state_path`, comme avant.
 #   _secret_field VAR VALEUR
+# Revue M12 : la copie est effacée par `trap cleanup_cluster_identity EXIT`,
+# qui REMPLACE un trap EXIT déjà posé par le script appelant, et qui part à
+# la sortie d'un sous-shell si load_cluster y est appelé. Un script qui a son
+# propre trap EXIT doit y appeler cleanup_cluster_identity ; load_cluster
+# s'appelle dans le shell principal du script.
 _secret_field() {
     local __var="$1" v="$2" p
     if [[ "$v" =~ ^(openbao|local):[a-z0-9-]+/ ]]; then

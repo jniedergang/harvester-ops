@@ -82,6 +82,27 @@ ALLOWED = {
 }
 
 
+# Revue M11 : maille de la fonction ET nombre de lectures. Une lecture de
+# plus dans une grande fonction déjà permise (api_clusters_update...) fait
+# échouer le test ; une de moins demande de baisser le nombre. Absent = 1.
+COUNTS = {
+    ("key-file", "bin/lib/secret_classes.py", "local_location"): 2,
+    ("key-file", "bin/lib/secret_store.py", "list_local"): 2,
+    ("kubeconfig", "bin/harvester-containers.py", "targets_from"): 4,
+    ("kubeconfig", "bin/harvester-registry.py", "_cluster_kube"): 2,
+    ("kubeconfig", "bin/lib/cluster_decl.py", "_map_paths"): 4,
+    ("kubeconfig", "web/app.py", "_baremetal_install_steps"): 3,
+    ("kubeconfig", "web/app.py", "_cluster_of_kubeconfig"): 2,
+    ("kubeconfig", "web/app.py", "api_clusters_create"): 4,
+    ("kubeconfig", "web/app.py", "api_clusters_update"): 2,
+    ("oidc-secret", "bin/lib/secret_store.py", "list_local"): 2,
+    ("oidc-secret", "web/rancher_servers.py", "set_sso"): 2,
+    ("ssh-key", "bin/lib/cluster_decl.py", "_map_paths"): 4,
+    ("ssh-key", "bin/lib/node_images.py", "ssh_options"): 2,
+    ("ssh-key", "web/app.py", "api_clusters_update"): 5,
+}
+
+
 def _text(n):
     if isinstance(n, ast.Constant) and isinstance(n.value, str):
         return n.value
@@ -164,6 +185,16 @@ def _files():
         yield from sorted((ROOT / d).glob("*.py"))
 
 
+def _counts():
+    import collections
+    seen = collections.Counter()
+    for p in _files():
+        rel = p.relative_to(ROOT).as_posix()
+        for cat, fn, _line in scan_source(rel, p.read_text()):
+            seen[(cat, rel, fn)] += 1
+    return seen
+
+
 def violations():
     out = []
     for p in _files():
@@ -171,7 +202,18 @@ def violations():
         for cat, fn, line in scan_source(rel, p.read_text()):
             if (rel, fn) not in ALLOWED[cat]:
                 out.append(f"{rel}:{line} {fn} reads {cat} directly")
+    for (cat, rel, fn), n in _counts().items():
+        if (rel, fn) in ALLOWED[cat] and n > COUNTS.get((cat, rel, fn), 1):
+            out.append(f"{rel} {fn} reads {cat} {n} times, {COUNTS.get((cat, rel, fn), 1)} allowed")
     return out
+
+
+def test_counts_are_exact():
+    """Une lecture retirée : baisser le nombre (la liste reste exacte)."""
+    seen = _counts()
+    low = sorted(f"{cat}: {rel}:{fn} {seen[(cat, rel, fn)]} < {n}" for (cat, rel, fn), n in COUNTS.items()
+                 if seen[(cat, rel, fn)] < n)
+    assert low == []
 
 
 def test_no_direct_secret_read():

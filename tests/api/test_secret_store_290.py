@@ -734,3 +734,27 @@ def test_ca_file_setting_is_loaded_and_unreadable_ca_is_a_client_error(tmp_path,
     with pytest.raises(oc.OpenBaoError) as e:
         ss.default_client_factory(s)()
     assert e.value.code == "openbao-tls"
+
+
+def test_tool_copies_erased_on_sigterm(tmp_path):
+    """M6 : un outil tué par SIGTERM efface quand même ses copies tmpfs."""
+    import signal
+    import subprocess
+    import textwrap
+    code = textwrap.dedent(f"""
+        import sys, time
+        sys.path.insert(0, {str(ROOT / 'bin' / 'lib')!r})
+        import secret_store as ss
+        b = ss.OpenBaoStore({{"mount": "m", "prefix": "p"}}, None, files_dir=lambda: {str(tmp_path)!r})
+        b.get = lambda ref, actor=None: "v"
+        ss._STORE = type("S", (), {{"purge": b.purge}})()
+        print(b.shared_file("openbao:kubeconfig/h1#kubeconfig", "x"), flush=True)
+        time.sleep(30)
+    """)
+    p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True,
+                         env={k: v for k, v in os.environ.items() if k != ss.SPAWNED_ENV})
+    path = Path(p.stdout.readline().strip())
+    assert path.exists()
+    p.send_signal(signal.SIGTERM)
+    p.wait(10)
+    assert not path.exists()

@@ -36,6 +36,7 @@ import os
 import re
 import secrets as _secrets
 import sqlite3
+import sys
 import threading
 import time
 import weakref
@@ -305,8 +306,23 @@ def secret_files_dir(settings=None, mountinfo=None, env=None):
 _PURPOSE_RE = re.compile(r"[^a-z0-9-]")
 
 
+def _exit_on_term():
+    """Revue M6 : atexit ne tourne pas sur SIGTERM (signal d'annulation par
+    défaut). Un outil qui a écrit une copie de travail sort proprement sur
+    SIGTERM, ses copies sont alors effacées. Posé seulement si personne n'a
+    réglé SIGTERM (la console a le sien) et depuis le fil principal."""
+    import signal
+    try:
+        if (threading.current_thread() is threading.main_thread()
+                and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL):
+            signal.signal(signal.SIGTERM, lambda *_a: sys.exit(143))
+    except (ValueError, OSError):
+        pass
+
+
 def write_private_copy(directory, purpose, value):
     """Fichier 0600 neuf (O_EXCL, sans lien suivi) dans `directory`."""
+    _exit_on_term()
     name = f"{_PURPOSE_RE.sub('-', str(purpose).lower())[:40] or 'secret'}-{_secrets.token_hex(8)}"
     p = Path(directory) / name
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
