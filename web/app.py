@@ -1097,7 +1097,9 @@ SECRETS_ACTION_PREFIX = "secrets:"
 
 
 def _action_hidden(label):
-    return (str(label or "").startswith(SECRETS_ACTION_PREFIX)
+    # relecture des corrections finales m10 : les journaux de l'agent des
+    # secrets (`secrets-agent-<date>.log`, dont l'action vaut le nom) aussi
+    return (str(label or "").startswith((SECRETS_ACTION_PREFIX, "secrets-agent-"))
             and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"])
 
 # Chemins réservés à `admin`. Comparés au chemin de la requête, préfixe.
@@ -14309,7 +14311,7 @@ def api_log_content(filename):
             abort(403)
     except (OSError, ValueError):
         abort(404)
-    if not safe.exists():
+    if not safe.exists() or _action_hidden(safe.stem):
         abort(404)
     try:
         content = safe.read_text(errors="replace")

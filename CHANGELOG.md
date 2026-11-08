@@ -87,7 +87,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - **Writes to `/api/secrets/*` are for administrators**; status for
   operators (Disaster Recovery card), the banner for everyone.
 - **Secret store actions are shown to administrators only** (dock, action
-  details, stream, Activity and its filters): they name secrets and paths.
+  details, stream, Activity and its filters), and so are the agent logs
+  (`secrets-agent-*.log`): they name secrets and paths.
 - **`sudo harvester-secrets`**: as root the tool only does the agent call;
   everything else runs in a child dropped to `harvester-ops` before the
   state is read. Files typed by the administrator are opened by root only

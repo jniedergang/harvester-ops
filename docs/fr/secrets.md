@@ -309,7 +309,8 @@ volume.
 - Le bandeau : tout le monde.
 - Les actions du magasin de secrets (`secrets:*`) nomment des secrets et
   des chemins : elles ne sont montrées dans le dock, le détail des actions,
-  le flux et l'Activité qu'aux administrateurs.
+  le flux et l'Activité qu'aux administrateurs. De même pour les journaux de
+  l'agent (`secrets-agent-*.log`) dans l'Activité et `/api/logs/`.
 
 ## Désactiver, changer de mode, revenir à une console plus ancienne
 

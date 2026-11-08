@@ -92,3 +92,21 @@ def test_admin_sees_secrets_actions(world):
     rid = runs["secrets:sweep-orphans"].id
     st, body = get(wapp, "patronne", f"/api/stream/{rid}")
     assert st == 200 and SECRET_PATH in body
+
+
+@pytest.mark.parametrize("user,seen", [("curieux", False), ("operatrice", False), ("patronne", True)])
+def test_secrets_agent_logs_are_for_admins(world, tmp_path, monkeypatch, user, seen):
+    """Relecture des corrections finales m10 : les journaux de l'agent des
+    secrets (identifiants de clé, instantanés, déclarations, politiques)
+    suivent la règle des actions `secrets:*`."""
+    wapp, _runs = world
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "secrets-agent-20261108-101010.log").write_text(f"key hops-20261108-1 {SECRET_PATH}\n")
+    (logs / "20261108-101010-harv1-status.log").write_text("ordinary\n")
+    monkeypatch.setattr(wapp, "LOG_DIR", logs)
+    st, body = get(wapp, user, "/api/activity")
+    assert st == 200 and ("secrets-agent-" in body) is seen and "harv1-status" in body
+    st, body = get(wapp, user, "/api/logs/secrets-agent-20261108-101010.log")
+    assert (st == 200) is seen and (SECRET_PATH in body) is seen
+    assert get(wapp, user, "/api/logs/20261108-101010-harv1-status.log")[0] == 200

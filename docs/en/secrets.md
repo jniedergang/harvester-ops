@@ -293,7 +293,8 @@ below 1 GiB free or 10 % of the volume.
 - The banner: everyone.
 - Secret store actions (`secrets:*`) name secrets and paths: they are shown
   in the dock, the action details, the stream and Activity to administrators
-  only.
+  only. The same goes for the agent logs (`secrets-agent-*.log`) in Activity
+  and `/api/logs/`.
 
 ## Disabling, switching mode, going back to an older console
 
