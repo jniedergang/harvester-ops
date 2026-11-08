@@ -1088,6 +1088,17 @@ ROLES_PATH = Path(os.environ.get(
 
 ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
 
+
+# 2.9.0 (relecture finale I9) : les actions du magasin de secrets portent des
+# noms et chemins de secrets (libellé, étapes, résultat) ; réservées à
+# l'administrateur dans la liste, le détail, le flux et l'Activité
+SECRETS_ACTION_PREFIX = "secrets:"
+
+
+def _action_hidden(label):
+    return (str(label or "").startswith(SECRETS_ACTION_PREFIX)
+            and ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"])
+
 # Chemins réservés à `admin`. Comparés au chemin de la requête, préfixe.
 # Ce sont les gestes qui coupent un service, changent la configuration de
 # l'outil, ou touchent au matériel.
@@ -13928,7 +13939,7 @@ def api_status_helper(cluster, namespace):
 @requires_auth
 def api_actions_list():
     with ACTIONS_LOCK:
-        return jsonify({"actions": [a.to_dict() for a in ACTIONS.values()]})
+        return jsonify({"actions": [a.to_dict() for a in ACTIONS.values() if not _action_hidden(a.action)]})
 
 
 @app.route("/api/action", methods=["POST"])
@@ -13974,8 +13985,10 @@ def api_action_get(run_id):
         # v1.6.5: fall back to SQLite — the run may have been GC'd from
         # memory or predate the current Flask process.
         d, _events = _actions_db_get(run_id)
-        if d:
+        if d and not _action_hidden(d.get("action")):
             return jsonify(d)
+        abort(404)
+    if _action_hidden(run.action):
         abort(404)
     return jsonify(run.to_dict())
 
@@ -14056,7 +14069,7 @@ def api_stream(run_id):
         # v1.6.5: replay persisted events for runs no longer in memory so
         # the Activity "details" panel works across restarts and the 1h GC.
         d, events = _actions_db_get(run_id)
-        if not d:
+        if not d or _action_hidden(d.get("action")):
             abort(404)
 
         def gen_db():
@@ -14066,6 +14079,8 @@ def api_stream(run_id):
 
         return Response(stream_with_context(gen_db()), mimetype="text/event-stream",
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    if _action_hidden(run.action):
+        abort(404)
 
     def gen():
         # Replay any events we already have. v1.46.0 : par numéro absolu
@@ -14160,7 +14175,7 @@ def api_activity():
     nested = not filtering
 
     def keep(e):
-        return _activity_matches(e, f_cluster, f_status, f_action, f_q)
+        return not _action_hidden(e.get("action")) and _activity_matches(e, f_cluster, f_status, f_action, f_q)
 
     with ACTIONS_LOCK:
         runs = list(ACTIONS.values())
@@ -14237,6 +14252,8 @@ def api_activity():
     # présentes, y compris pour un cluster retiré de la configuration dont
     # l'historique existe encore.
     facets = _activity_facets()
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        facets = dict(facets, actions=[a for a in facets.get("actions") or [] if not _action_hidden(a)])
     return jsonify({
         "in_progress": in_progress,
         "actions_done": done[:limit],
