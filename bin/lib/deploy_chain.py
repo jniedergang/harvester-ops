@@ -329,8 +329,14 @@ def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=Non
         # Secrets du déroulé effacés quelle qu'en soit l'issue (décision 129),
         # sauf un déroulé reprenable qui les garde dans OpenBao (décision 141)
         store = secrets if secrets is not None else secret_store.store()
-        if not (keep_secrets is not None and result.get("status") in RESUMABLE
-                and keep_secrets(result["status"])):
+        kept = (keep_secrets is not None and result.get("status") in RESUMABLE
+                and keep_secrets(result["status"]))
+        if kept and hasattr(store, "forget_memory"):
+            # gardés pour la reprise : dans OpenBao seulement ; une copie en
+            # mémoire (OpenBao coupé à la saisie) ne serait jamais relue
+            # (revue m6 des tâches 9-10)
+            store.forget_memory(SECRET_CLASS, ctx.run_id)
+        if not kept:
             # revue I3 des tâches 9-10 : un effacement refusé (secret_id
             # tourné, droit retiré) ne change pas l'issue du déroulé ; il est
             # dit en étape (le code seul) et le balayage des déroulés finis

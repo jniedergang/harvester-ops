@@ -1738,6 +1738,12 @@ class MultiStore(LocalStore):
                     raise
         return n
 
+    def forget_memory(self, cls, path):
+        """Copies EN MÉMOIRE seulement (`plan-run` gardé pendant une panne
+        d'OpenBao) : la reprise ne lit que celles d'OpenBao, une copie en
+        mémoire ne servirait plus (revue m6 des tâches 9-10)."""
+        return LocalStore.delete_tree(self, cls, path)
+
     def refs(self, cls, path, backend="local"):
         if backend == "openbao":
             return self._need_bao(cls, path).refs(cls, path)

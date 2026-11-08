@@ -1117,6 +1117,8 @@ ADMIN_ONLY_PREFIXES = (
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
                        # 2.9.0 : remettre l'état chiffré d'une déclaration en clair
                        "/decrypt-state",
+                       # 2.9.0 : oublier les secrets gardés d'un déroulé arrêté
+                       "/forget-secrets",
                        # v1.43.0 : une maintenance déplace ou arrête des VMs.
                        "/maintenance")
 
@@ -37043,6 +37045,7 @@ def _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, in
 # les efface (`metadata delete`, versions comprises). Balayage au démarrage
 # (console arrêtée au mauvais moment) et à la tâche de fond. OpenBao inactif :
 # la mémoire de la 2.4.0, secrets redemandés.
+PLAN_SECRETS_FORGET_LABEL = "secrets:plan-run-forget:"
 PLAN_SECRETS_SWEEP_LABEL = "secrets:plan-run-sweep"
 PLAN_SECRETS_SWEEP_S = 3600
 PLAN_SECRETS_ORPHAN_S = 3600          # secrets sans action connue (lancement en cours)
@@ -37154,21 +37157,31 @@ def _plan_secrets_due(store=None, now=None):
     return out
 
 
-def _plan_secrets_sweep(store=None, now=None, wait=False):
+def _plan_secrets_sweep(store=None, now=None, wait=False, forget=None, user=None):
     """Une action suivie qui efface les secrets des déroulés finis ou
     expirés ; None s'il n'y a rien à effacer (ou OpenBao inactif). La liste
     est relue dans l'action (un déroulé repris entre-temps garde les
-    siens)."""
+    siens). `forget` (revue m7 des tâches 9-10) : l'identifiant d'UN
+    déroulé arrêté dont l'administrateur oublie les secrets avant le délai
+    (mémoire et OpenBao) ; refusé s'il tourne."""
     store = store or _sst.store()
-    due = _plan_secrets_due(store, now)
+    if forget is not None:
+        prev, err = _deploy_previous(forget)
+        if err or prev["status"] in ("starting", "running"):
+            return None
+        due_of = lambda: [(forget, "forgotten")]          # noqa: E731
+        label = f"{PLAN_SECRETS_FORGET_LABEL}{forget}"
+    else:
+        due_of = lambda: _plan_secrets_due(store, now)     # noqa: E731
+        label = PLAN_SECRETS_SWEEP_LABEL
+    due = due_of()
     if not due:
         return None
     with ACTIONS_LOCK:
-        if any(r.action == PLAN_SECRETS_SWEEP_LABEL and r.status in ("starting", "running")
-               for r in ACTIONS.values()):
+        if any(r.action == label and r.status in ("starting", "running") for r in ACTIONS.values()):
             return None
-    run = ActionRun(uuid.uuid4().hex[:12], PLAN_SECRETS_SWEEP_LABEL, "", [], dry_run=False)
-    run.result = {"by": "service"}
+    run = ActionRun(uuid.uuid4().hex[:12], label, "", [], dry_run=False)
+    run.result = {"by": user or "service"}
     with ACTIONS_LOCK:
         ACTIONS[run.id] = run
     READ_SHARE.invalidate("_activity")
@@ -37177,9 +37190,11 @@ def _plan_secrets_sweep(store=None, now=None, wait=False):
         run.status = "running"
         run.emit({"type": "status", "status": "running", "ts": time.time()})
         removed, failed = [], []
-        for rid, why in _plan_secrets_due(store, now):
+        for rid, why in due_of():
             try:
-                n = store.delete_tree(_dch.SECRET_CLASS, rid, backend="openbao", actor="service", action=run.id)
+                store.forget_memory(_dch.SECRET_CLASS, rid)
+                n = (store.delete_tree(_dch.SECRET_CLASS, rid, backend="openbao", actor=user or "service",
+                                       action=run.id) if _sst.is_active(store) else 0)
                 removed.append(rid)
                 run.emit({"type": "step", "step_id": f"run-{rid}", "status": "done",
                           "message": f"{n} secret(s) of run {rid} removed ({why})", "ts": time.time()})
@@ -37198,6 +37213,27 @@ def _plan_secrets_sweep(store=None, now=None, wait=False):
     else:
         threading.Thread(target=body, daemon=True, name="plan-secrets-sweep").start()
     return run
+
+
+@app.route("/api/deploy/<cluster>/forget-secrets", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_deploy_forget_secrets(cluster):
+    """Revue m7 des tâches 9-10 : les secrets d'un déroulé arrêté (gardés
+    pour sa reprise jusqu'au délai) oubliés tout de suite, par un
+    administrateur ; action suivie. La reprise les redemandera."""
+    rid = str((request.get_json(force=True, silent=True) or {}).get("action_id") or "")
+    if not _dch.RUN_ID_RE.match(rid):
+        return jsonify({"error": "action_id expected", "code": "bad-input"}), 400
+    prev, err = _deploy_previous(rid)
+    if err or prev.get("cluster") != cluster:
+        return jsonify({"error": "no plan run with this id on this cluster", "code": "not-found"}), 404
+    if prev["status"] in ("starting", "running"):
+        return jsonify({"error": "the run is still running", "code": "deploy-running"}), 409
+    run = _plan_secrets_sweep(forget=rid, user=current_user() or "console")
+    if run is None:
+        return jsonify({"error": "nothing to forget", "code": "not-found"}), 404
+    return jsonify({"action_id": run.id}), 202
 
 
 def _plan_secrets_loop():
@@ -37773,6 +37809,7 @@ def _deploy_resume_forget(prev_id):
     """Reprise lancée : les secrets du déroulé repris (copiés sous le nouveau)
     sont effacés ; OpenBao coupé, le balayage s'en chargera."""
     st = _sst.store()
+    st.forget_memory(_dch.SECRET_CLASS, prev_id)          # revue m6 des tâches 9-10
     if not _sst.is_active(st):
         return
     try:

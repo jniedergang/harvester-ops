@@ -445,3 +445,76 @@ def test_a_failed_secret_cleanup_keeps_a_done_run_done(bao, code):
     cleanup = [s for s in ctx.steps if s[0] == "secrets-cleanup"]
     assert cleanup and cleanup[-1][1] == "error" and code in cleanup[-1][2]
     assert "refused" not in cleanup[-1][2] or code in cleanup[-1][2]
+
+
+# Revue m6 des tâches 9-10 : gardés pendant une panne, en mémoire seulement ;
+# une copie en mémoire n'est jamais relue par la reprise, elle est purgée
+def test_memory_copies_of_a_kept_run_are_purged(bao):
+    st, srv = bao["store"], bao["srv"]
+    srv.sealed = True
+    keep(st)                                     # OpenBao coupé à la saisie : mémoire
+    assert st.refs(dch.SECRET_CLASS, PREV)
+    run = wapp.ActionRun(PREV, "deploy:harvlab", "harvlab", [])
+    dch.run(Ctx(PREV), one_phase("error"), secrets=st, sleep=lambda s: None,
+            keep_secrets=lambda status: wapp._deploy_keep_secrets(st, run, status))
+    assert st.refs(dch.SECRET_CLASS, PREV) == []
+
+
+def test_resume_forget_purges_memory_copies(bao):
+    st, srv = bao["store"], bao["srv"]
+    srv.sealed = True
+    keep(st)
+    wapp._deploy_resume_forget(PREV)
+    assert st.refs(dch.SECRET_CLASS, PREV) == []
+
+
+# Revue m7 : oublier tout de suite les secrets d'un déroulé arrêté (admin)
+def test_forget_the_secrets_of_a_stopped_run(env, bao):
+    keep(bao["store"])
+    prev_run(status="cancelled")
+    r = env["client"].post("/api/deploy/rack-a/forget-secrets", json={"action_id": PREV})
+    assert r.status_code == 202, r.get_json()
+    aid = r.get_json()["action_id"]
+    for _ in range(100):
+        with wapp.ACTIONS_LOCK:
+            run = wapp.ACTIONS.get(aid)
+        if run and run.status in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert run.status == "done" and run.action == f"secrets:plan-run-forget:{PREV}"
+    assert kv_paths(bao["srv"], PREV) == []
+    for v in (TOKEN, PASSWORD, BMC1, BMC2, GITPW):
+        assert v not in json.dumps(list(run.events))
+
+
+@pytest.mark.parametrize("prep,body,code", [
+    ("running", {"action_id": PREV}, 409),
+    ("none", {"action_id": PREV}, 404),
+    ("other-cluster", {"action_id": PREV}, 404),
+    ("none", {"action_id": "../x"}, 400),
+])
+def test_forget_refusals(env, bao, prep, body, code, monkeypatch):
+    keep(bao["store"])
+    with wapp.ACTIONS_LOCK:
+        wapp.ACTIONS.pop(PREV, None)
+    if prep == "running":
+        prev_run(status="running")
+        monkeypatch.setattr(wapp, "_deploy_lock_holder", lambda c: {"run": PREV})
+    elif prep == "other-cluster":
+        run = prev_run()
+        run.cluster = "rack-b"
+    r = env["client"].post("/api/deploy/rack-a/forget-secrets", json=body)
+    assert r.status_code == code, r.get_json()
+    assert kv_paths(bao["srv"], PREV)
+
+
+def test_forget_is_admin_only():
+    assert wapp.required_role_for("/api/deploy/rack-a/forget-secrets", "POST") == "admin"
+
+
+def test_cli_forget_secrets(bao, plans_cli, capsys):
+    keep(bao["store"])
+    prev_run(status="cancelled")
+    rc = plans_cli.main(["forget-secrets", PREV])
+    d = json.loads(capsys.readouterr().out)
+    assert rc == 0 and d["removed"] == [PREV] and kv_paths(bao["srv"], PREV) == []

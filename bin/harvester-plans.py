@@ -11,6 +11,7 @@
   harvester-plans [--state-dir D] [--json] resume ACTION_ID [--secrets-file s.yaml | --secrets-stdin]
                   [--confirm-system HOST=NAME]...   (2.9.0 : OpenBao actif, secrets gardés relus)
   harvester-plans [--state-dir D] [--json] sweep-secrets [--dry-run]
+  harvester-plans [--state-dir D] [--json] forget-secrets ACTION_ID
   harvester-plans [--state-dir D] [--json] undo ACTION_ID [--dry-run] [--include registry,unproven,modified]
                   [--confirm CLUSTER] [--delete-registry-data NAME]...
   harvester-plans [--state-dir D] [--json] install PLAN --profile P --nodes nodes.csv --cluster-name C --vip V
@@ -341,6 +342,26 @@ def cmd_resume(args, state):
     return _launched(app, body, status)
 
 
+def cmd_forget_secrets(args, state):
+    """Secrets gardés d'un déroulé arrêté oubliés avant le délai (revue m7 des
+    tâches 9-10) : la même action suivie que la console ; la reprise les
+    redemandera."""
+    app = _console(state)
+    prev, err = app._deploy_previous(args.action_id)
+    if err:
+        print(json.dumps({"ok": False, **err[0]}, indent=2))
+        return 2
+    if prev["status"] in ("starting", "running"):
+        print(json.dumps({"ok": False, "code": "deploy-running", "error": "the run is still running"}, indent=2))
+        return 2
+    run = app._plan_secrets_sweep(forget=args.action_id, wait=True, user=os.environ.get("USER") or "cli")
+    if run is None:
+        print(json.dumps({"ok": True, "removed": []}, indent=2))
+        return 0
+    print(json.dumps({"ok": run.status == "done", "action_id": run.id, **(run.result or {})}, indent=2))
+    return 0 if run.status == "done" else 1
+
+
 def cmd_sweep_secrets(args, state):
     """Secrets des déroulés finis ou gardés plus longtemps que le délai
     (2.9.0) : la même action suivie que la tâche de fond de la console."""
@@ -487,6 +508,9 @@ def build_parser():
     sp = sub.add_parser("sweep-secrets", allow_abbrev=False,
                         help="remove the OpenBao secrets of ended or expired runs")
     sp.add_argument("--dry-run", action="store_true")
+    sp = sub.add_parser("forget-secrets", allow_abbrev=False,
+                        help="forget now the secrets kept for the resume of a stopped run")
+    sp.add_argument("action_id")
     sp = sub.add_parser("undo", allow_abbrev=False)
     sp.add_argument("action_id")
     sp.add_argument("--dry-run", action="store_true", help="show the destruction plan, write nothing")
@@ -512,7 +536,7 @@ def build_parser():
 COMMANDS = {"plan": cmd_store, "template": cmd_store, "capi-template": cmd_store,
             "check": cmd_check, "apply": cmd_apply,
             "resume": cmd_resume, "install": cmd_install, "undo": cmd_undo,
-            "sweep-secrets": cmd_sweep_secrets}
+            "sweep-secrets": cmd_sweep_secrets, "forget-secrets": cmd_forget_secrets}
 
 
 def main(argv=None):
