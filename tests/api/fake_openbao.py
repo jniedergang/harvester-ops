@@ -290,7 +290,7 @@ class FakeOpenBao:
         if op == "keys" and key.endswith("/config"):
             k = key[: -len("/config")]
             if k not in self.transit:
-                return h._err(400, "key not found")
+                return h._err(400, f"no existing key named {k} could be found")     # OpenBao 2.7.2
             if body.get("deletion_allowed"):
                 self.transit_deletable.add(k)
             return h._send(204)

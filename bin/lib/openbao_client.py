@@ -615,7 +615,10 @@ class Client:
         try:
             self._call("POST", f"{mount}/keys/{key}/config", {"deletion_allowed": True})
         except OpenBaoError as e:
-            if e.http_status in (400, 404) and "not found" in str(e.detail or "").lower():
+            # OpenBao 2.7.2 (relevé le 08/11/2026) : 400 « no existing key
+            # named <clé> could be found »
+            low = str(e.detail or "").lower()
+            if e.http_status in (400, 404) and ("no existing key" in low or "not found" in low):
                 return False
             raise
         self._call("DELETE", f"{mount}/keys/{key}")
