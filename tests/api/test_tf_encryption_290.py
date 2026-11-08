@@ -574,3 +574,39 @@ def test_routes_are_admin_and_rate_limited(wapp):
         assert "@requires_auth" in src and "@_rate_limit(" in src
         lim = src.split('@_rate_limit("', 1)[1].split('"', 1)[0]
         assert limits.parse_many(lim)
+
+
+# ---------------------------------------------------------------------------
+# Revue des tâches 9-10 (I1) : après la migration, aucune copie en clair de
+# l'état ne reste dans l'espace (plan gardé, copies d'un déplacement, backup)
+# ---------------------------------------------------------------------------
+def _marker_files(ws):
+    return sorted(f.name for f in Path(ws).rglob("*")
+                  if f.is_file() and f.name != ".fake-tofu.jsonl" and "MARKER" in f.read_text(errors="ignore"))
+
+
+def test_migration_leaves_no_clear_copy_of_the_state(wapp, tfx):
+    d = decl(tfx)
+    tfx.ws.mkdir(parents=True)
+    clear = json.dumps({"version": 4, "serial": 3, "lineage": "l1", "resources": [
+        {"mode": "managed", "type": "harvester_ssh_key", "name": "ops",
+         "instances": [{"attributes": {"name": "MARKER-ops"}}]}]})
+    for name in ("terraform.tfstate", "terraform.tfstate.backup", "terraform.tfstate.pre-move-20261101-120000"):
+        (tfx.ws / name).write_text(clear)
+    (tfx.ws / "tfplan").write_text("MARKER plan with the previous state")
+    (tfx.ws / "tfplan.meta").write_text(json.dumps({"hash": "x", "note": "MARKER"}))
+    (tfx.ws / ".terraform").mkdir()
+    run = run_decl(wapp, tfx, d, "plan")
+    assert run.status == "done", run.error_summary
+    assert _marker_files(tfx.ws) == []
+    assert tfe.is_encrypted((tfx.ws / "terraform.tfstate").read_text())
+    assert "clear" in steps(run)["encrypt-state"][1]
+
+
+def test_an_encrypted_backup_is_kept(wapp, tfx):
+    d = decl(tfx)
+    assert run_decl(wapp, tfx, d, "apply").status == "done"
+    enc = (tfx.ws / "terraform.tfstate").read_text()
+    (tfx.ws / "terraform.tfstate.backup").write_text(enc)
+    assert wapp._tf_purge_clear_copies(tfx.ws) == []
+    assert (tfx.ws / "terraform.tfstate.backup").exists()

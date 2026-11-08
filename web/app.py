@@ -30355,6 +30355,29 @@ def api_tf_declaration_delete(decl_id):
     return jsonify({"error": "declaration not found"}), 404
 
 
+def _tf_purge_clear_copies(ws):
+    """Revue des tâches 9-10 (I1) : une fois l'état chiffré, aucune copie en
+    clair ne reste dans l'espace : le plan gardé (`tfplan`, qui porte l'état
+    d'avant et les valeurs prévues, périmé de toute façon) et tout
+    `terraform.tfstate.*` en clair (copies `.pre-move-*` d'un déplacement,
+    `.backup`). Une copie chiffrée est gardée. Rend les noms retirés."""
+    removed = []
+    for name in ("tfplan", "tfplan.meta"):
+        f = ws / name
+        if f.is_file() or f.is_symlink():
+            f.unlink(missing_ok=True)
+            removed.append(name)
+    for f in sorted(ws.glob("terraform.tfstate.*")):
+        try:
+            clear = f.is_symlink() or not _tfe.is_encrypted(f.read_text())
+        except (OSError, UnicodeDecodeError):
+            clear = True
+        if clear:
+            f.unlink(missing_ok=True)
+            removed.append(f.name)
+    return removed
+
+
 def _tf_decl_remove(decl_id):
     """Supprime une déclaration et son espace, refusé tant que son état
     porte des ressources (route et Défaire, 2.7.0). (True, None) ou (False,
@@ -31052,12 +31075,14 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
             (ws / TF_ADDRESSES_CACHE).unlink(missing_ok=True)
             step(sid, "done", "state written in clear text, encryption block removed")
             return done({"encryption": "plain", "deployed": _tf_addresses(ws)})
-        step(sid, "done", "state encrypted")
+        purged = _tf_purge_clear_copies(ws)
+        step(sid, "done", "state encrypted" + (f"; clear copies removed: {', '.join(purged)}" if purged else ""))
     if enc["encrypt"]:
         try:
             adopt()
         except (TfStateUnreadable, ValueError) as e:
             return _close_err(run, "adopt", str(e)[:300])
+        _tf_purge_clear_copies(ws)
 
     if destroying:
         args = (["plan", "-destroy", "-input=false", "-no-color"] if mode == "destroy-plan"
