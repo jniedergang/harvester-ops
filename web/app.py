@@ -2455,7 +2455,8 @@ def run_action_thread(run: ActionRun):
         with _late_reads(run):
             secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
                                                        getattr(run, "secret_refs", ()),
-                                                       getattr(run, "secret_files", None), identity=_sst.SERVICE)
+                                                       getattr(run, "secret_files", None), identity=_sst.SERVICE,
+                                                       skip=getattr(run, "secret_skip", ()))
         run.proc = subprocess.Popen(
             run.cmd,
             stdout=subprocess.PIPE,
@@ -2589,7 +2590,7 @@ def start_action(action, cluster, dry_run=False, interactive=False,
     run.cluster_user = (_ident or {}).get("user")
     try:
         _freeze_person_secrets(run)            # 2.10.0 : secrets personnels lus ICI, avec la personne
-    except _sst.SecretError:
+    except BaseException:                      # refus d'OpenBao, ou toute autre erreur : compteur rendu
         run.status = "cancelled"               # jamais lancée : rien à persister
         run._closed = True
         metric_actions_in_flight.dec()
@@ -9521,7 +9522,16 @@ def _freeze_person_secrets(run):
             used.add("service")
             continue
         if ref not in files:
-            files[ref] = str(_sst.store().shared_file(ref, "tool", identity=idt))
+            try:
+                files[ref] = str(_sst.store().shared_file(ref, "tool", identity=idt))
+            except _sst.SecretMissing:
+                # revue I2 des tâches 2 à 5 : valeur absente du magasin, comme
+                # `_spawn_secret_env` de la 2.9.1 (avertissement sans valeur,
+                # copie non remise, aucune lecture par le service)
+                log.warning("secret %s not handed to the tool: missing", ref.split("#")[0])
+                run.secret_skip = tuple(getattr(run, "secret_skip", ())) + (ref,)
+                used.add("person")
+                continue
             run.hold_secrets(files[ref])
         used.add("person")
     run.secret_files = files
@@ -9547,7 +9557,7 @@ def _late_reads(run):
         yield
 
 
-def _spawn_secret_env(clusters, refs=(), files=None, identity=None):
+def _spawn_secret_env(clusters, refs=(), files=None, identity=None, skip=()):
     """Revue I6 : un outil lancé par la console ne se connecte pas à OpenBao.
     Pour les clusters de l'action dont le kubeconfig ou la clé SSH porte une
     référence, la console remet des copies de travail tmpfs (tenues par le
@@ -9567,7 +9577,9 @@ def _spawn_secret_env(clusters, refs=(), files=None, identity=None):
     wanted = _action_secret_refs(clusters, refs)
     refs = dict(files or {})
     for v in wanted:
-        if v not in refs:
+        # `skip` : secret personnel absent au déclenchement (revue I2 des
+        # tâches 2 à 5), jamais relu par le service dans le fil
+        if v not in refs and v not in skip:
             try:
                 refs[v] = str(_sst.store().shared_file(v, "tool", identity=idt))
             except (_sst.SecretError, _sst.SecretMissing) as e:
@@ -18361,7 +18373,7 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     run.secret_files = dict(secret_files or {})
     try:
         _freeze_person_secrets(run)            # 2.10.0 : secrets personnels lus ICI, avec la personne
-    except _sst.SecretError:
+    except BaseException:                      # refus d'OpenBao, ou toute autre erreur : rien ne reste
         run.status = "cancelled"               # jamais lancée : rien à persister
         run._closed = True
         metric_actions_in_flight.dec()
@@ -24240,7 +24252,8 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
         with _late_reads(run):
             secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
                                                        getattr(run, "secret_refs", ()),
-                                                       getattr(run, "secret_files", None), identity=_sst.SERVICE)
+                                                       getattr(run, "secret_files", None), identity=_sst.SERVICE,
+                                                       skip=getattr(run, "secret_skip", ()))
         proc = subprocess.Popen(cmd, stdout=out_file or (subprocess.PIPE if sink is not None else subprocess.DEVNULL),
                                 stderr=subprocess.PIPE, text=True,
                                 **({"env": {**os.environ, **secret_env}} if secret_env else {}))

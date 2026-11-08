@@ -99,3 +99,66 @@ def test_warm_surveys_never_read_as_a_person(kvm_world, monkeypatch):
     monkeypatch.setattr(wapp._ko.SURVEYS, "warm", lambda vh, slot=None: warmed.append(vh.key_path))
     as_who(sess, lambda: wapp._kvm_warm_surveys(["k1"]))
     assert warmed == [None] and not bao.jwt_logins
+
+
+# ---------------------------------------------------------------------------
+# I2 : valeur absente au déclenchement, compteur et fichier de spécification
+# ---------------------------------------------------------------------------
+REF_KEY = "openbao:ssh-cluster/h1#private_key"
+
+
+@pytest.fixture
+def action_world(console, monkeypatch):
+    cfg = {"clusters": [{"name": "h1", "kubeconfig": "/nonexistent/kc", "ssh": {"key": REF_KEY, "user": "rancher"}}]}
+    monkeypatch.setattr(wapp, "load_config_ro", lambda: cfg)
+    monkeypatch.setattr(wapp, "load_config", lambda: cfg)
+    return console
+
+
+def _in_flight():
+    return wapp.metric_actions_in_flight._value.get()
+
+
+def _wait(run):
+    for _ in range(200):
+        if run.status in ("done", "error"):
+            return
+        time.sleep(0.05)
+
+
+def test_missing_personal_secret_is_a_warning_not_a_500(action_world, caplog):
+    import logging
+    caplog.set_level(logging.WARNING)
+    bao, sess = action_world["bao"], open_session()
+    bao.kv.pop((KV, f"{PREFIX}/ssh-cluster/h1"))               # la valeur a disparu
+    run, err = as_who(sess, lambda: wapp._cli_action("h1", "test-2100:missing", ["/usr/bin/env", "true"], "true",
+                                                    check_busy=False))
+    assert err is None and run is not None
+    _wait(run)
+    assert run.status == "done" and REF_KEY not in run.secret_files
+    assert "ssh-cluster/h1" in caplog.text and "missing" in caplog.text
+    # lue une fois, au déclenchement, avec le jeton de la personne ; jamais
+    # relue par le service dans le fil
+    reads = [r["headers"].get("x-vault-token") for r in bao.log
+             if r["path"] == f"{KV}/data/{PREFIX}/ssh-cluster/h1"]
+    assert reads == [action_world["pt"].get(sess.sid)._tok.value]
+    assert run.secret_identity == "person"
+
+
+@pytest.mark.parametrize("launcher", ["cli_action", "start_action"])
+def test_any_freeze_error_leaves_no_counter_nor_spec_file(action_world, monkeypatch, tmp_path, launcher):
+    sess = open_session()
+    monkeypatch.setattr(wapp, "_capi_work_dir", lambda: tmp_path)
+
+    def boom(run):
+        raise RuntimeError("unexpected")
+    monkeypatch.setattr(wapp, "_freeze_person_secrets", boom)
+    before = _in_flight()
+    with pytest.raises(RuntimeError):
+        if launcher == "cli_action":
+            as_who(sess, lambda: wapp._cli_action("h1", "test-2100:boom", ["/usr/bin/env", "true"], "true",
+                                                  check_busy=False, spec={"x": 1}))
+        else:
+            as_who(sess, lambda: wapp.start_action("ns-stop", "h1", namespace="default"))
+    assert _in_flight() == before
+    assert not list(tmp_path.glob("*-spec-*.json"))
