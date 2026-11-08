@@ -782,7 +782,24 @@ registry: option `offline: true` (creation window, Registries menu,
 
    The image must therefore already carry `iptables` and
    `qemu-guest-agent`: they are not installed. Without `iptables`, pods
-   that publish a host port (ingress-nginx) do not start.
+   that publish a host port (ingress-nginx) do not start. Without
+   `qemu-guest-agent`, the machines report no address. Every offline
+   creation and plan check shows the warning `offline-node-packages`
+   (not blocking); `image-sles-repos` is not shown in this mode.
+
+   `cloud-init status` reports an error on these nodes, by design: the
+   package module fails at once without repositories, and the boot goes
+   on. `repos_back` writes one line per directory in
+   `/var/log/cloud-init-output.log` (`harvester-ops: zypper repositories
+   restored in ...`).
+6. `offline_packages: keep` (creation window, Registries menu,
+   **Repositories of the image**; or a cluster template; default `skip`):
+   for an image whose repositories point at a mirror of the local network
+   (RMT, MLM). The repositories stay in place and cloud-init installs
+   `iptables` and `qemu-guest-agent` from the mirror. `package_update` and
+   `package_upgrade` stay false in both modes. With `keep`, a repository
+   that the machines cannot reach brings back the wait of several minutes
+   per repository.
 
 Limits: the fetch uses Basic authentication. A registry that only accepts
 token authentication on its blobs (Harbor, ghcr style) is not checked.

@@ -21,10 +21,33 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   instance`). The package list of CAPHV is a merged list the console
   cannot remove, and installing it would refresh the repositories; without
   repositories it fails at once. The first command without Internet puts
-  the repositories back, before the RKE2 fetch. Online clusters are
-  unchanged.
+  the repositories back, before the RKE2 fetch, and writes one line per
+  directory in `cloud-init-output.log` (restored, nothing set aside, or
+  left aside because the directory was used meanwhile). Online clusters
+  are unchanged. `cloud-init status` reports an error on these nodes, by
+  design (the package module fails without repositories).
+- `additionalUserData` of the RKE2 templates is merged, not replaced: an
+  existing `strict` or `data` is kept, and another `config` already there
+  is refused instead of being overwritten.
 
 ### Added
+- **Option `offline_packages`** (`skip`, the default, or `keep`) for a
+  cluster created with `offline: true`: `keep` leaves the repositories of
+  the image in place and lets cloud-init install `iptables` and
+  `qemu-guest-agent`, for an image whose repositories point at a mirror of
+  the local network (RMT, MLM). `package_update` and `package_upgrade` stay
+  false in both modes. In the creation window (Registries menu,
+  **Repositories of the image**, with a tooltip), cluster templates of the
+  plans and the `--spec` file of `harvester-capi`; any other value is
+  refused (`skip or keep`).
+- **Warning for the packages of the image without Internet**
+  (`offline-node-packages`, not blocking) on every offline creation and
+  plan check with `offline_packages: skip`: the image must already carry
+  `iptables` and `qemu-guest-agent` (without iptables, host-port pods stay
+  in ContainerCreating; without the guest agent, the machines report no
+  address). `image-sles-repos` is no longer shown in that mode, since its
+  advice (an openSUSE Leap image) does not help without repositories. In
+  the creation window (Nodes menu) and in the plans, five languages.
 - **Warning for a small disk without Internet** (`offline-disk-small`,
   not blocking): a cluster created with `offline: true` and a disk under
   20 GiB. At 10 GiB the 2.8.0 bench reached 78 % with the agent and Flux,
@@ -44,7 +67,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - A child cluster created without Internet by 2.8.0 keeps its templates:
   delete it and create it again with 2.8.1.
 - The node image of a cluster without Internet must already carry
-  `iptables` and `qemu-guest-agent`: they are not installed.
+  `iptables` and `qemu-guest-agent` with `offline_packages: skip`: they
+  are not installed. Use `keep` when the image repositories reach a mirror
+  of the local network.
 
 **Back to 2.8.0**: nothing to undo. Templates made by 2.8.1 keep their
 `additionalUserData` until the cluster is deleted.
@@ -56,6 +81,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   version may merge differently.
 - Only zypper repositories are moved aside. An image with another package
   manager still tries to install the CAPHV package list.
+- A test pins the bundled CAPHV (v0.10.1) and CAPRKE2 (v0.25.2) versions:
+  bumping either fails it until the merge is checked again.
 - The self-hosted check compares IP addresses only: a registry endpoint
   given as a host name is not resolved.
 
@@ -71,6 +98,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   another address, a host name, another cluster or a removal, writes the
   setting in every case and still merges when Services cannot be read.
   Eleven named mutations are killed.
+- Review fixes: the packages warning in `skip` only and `image-sles-repos`
+  hidden there (table), `offline_packages` default, refusal of other values
+  in the request, the template and the `--spec` file, `keep` without
+  `bootcmd` nor restore in both templates and both modes, merge of
+  `additionalUserData`, the stderr lines of the restore played by a real
+  shell, the pinned provider versions;
+  e2e of the new selector in the creation window and the template editor.
+  Twelve more named mutations are killed.
 
 ### Not verified for real
 - Unit-tested only, no bench pass for this release: the offline

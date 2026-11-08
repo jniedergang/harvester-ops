@@ -68,6 +68,10 @@ personnes, sans identifiant. Les gestes `gitops-*` posent une entrée
 GitOps (bin/lib/child_gitops.py) : Fleet si le cluster est importé, Flux
 sinon.
 
+2.8.1 : une demande `offline: true` prend `offline_packages` (`skip` par
+défaut : dépôts zypper de l'image mis de côté au premier démarrage, rien
+installé ; `keep` : dépôts gardés, pour un miroir du réseau local).
+
 Progression sur stderr au format STEP_EVENT|<étape>|<statut>|<message>, lue
 par la console. Codes de sortie : 0 succès, 1 échec, 2 refus du contrôle
 préalable, 3 annulation.

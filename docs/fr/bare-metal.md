@@ -1085,7 +1085,9 @@ accepte les options d'accès de la fenêtre de création (voir
   préfixes, `ca_pem`, `admin_group`), contrôlé quand ses valeurs sont
   fixées.
 - `offline: true` et `offline_artifacts` (`fetch` ou `image`) : un cluster
-  enfant amorcé sans Internet.
+  enfant amorcé sans Internet `offline_packages` (`skip`, par
+  défaut, ou `keep`, 2.8.1) : dépôts de l'image mis de côté au premier
+  démarrage, ou gardés pour un miroir du réseau local.
 
 ### Défaire un déploiement (2.7.0)
 

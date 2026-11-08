@@ -830,7 +830,25 @@ Internet** ; ou un modèle de cluster).
 
    L'image doit donc déjà porter `iptables` et `qemu-guest-agent` : ils ne
    sont pas installés. Sans `iptables`, les pods qui publient un port
-   d'hôte (ingress-nginx) ne démarrent pas.
+   d'hôte (ingress-nginx) ne démarrent pas. Sans `qemu-guest-agent`, les
+   machines ne remontent aucune adresse. Chaque création et chaque
+   contrôle de plan sans Internet affiche l'avertissement
+   `offline-node-packages` (non bloquant) ; `image-sles-repos` n'est pas
+   affiché dans ce mode.
+
+   `cloud-init status` signale une erreur sur ces nœuds, c'est voulu : le
+   module des paquets échoue tout de suite faute de dépôt, et le démarrage
+   continue. `repos_back` écrit une ligne par répertoire dans
+   `/var/log/cloud-init-output.log` (`harvester-ops: zypper repositories
+   restored in ...`).
+6. `offline_packages: keep` (fenêtre de création, menu Registres, **Dépôts
+   de l'image** ; ou un modèle de cluster ; `skip` par défaut) : pour une
+   image dont les dépôts visent un miroir du réseau local (RMT, MLM). Les
+   dépôts restent en place et cloud-init installe `iptables` et
+   `qemu-guest-agent` depuis le miroir. `package_update` et
+   `package_upgrade` restent à false dans les deux modes. Avec `keep`, un
+   dépôt que les machines ne joignent pas ramène l'attente de plusieurs
+   minutes par dépôt.
 
 Limites : la récupération emploie l'authentification Basic. Un registre
 qui n'accepte que l'authentification par jeton sur ses blobs (Harbor,

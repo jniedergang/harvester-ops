@@ -59,6 +59,7 @@ const CapiCreate = (() => {
     'offline-rke2-missing': (v) => tr('capi.new.fd.offline-rke2-missing', v),
     'offline-rke2-version-mismatch': (v) => tr('capi.new.fd.offline-rke2-version-mismatch', v),
     'offline-disk-small': (v) => tr('capi.new.fd.offline-disk-small', v),          // 2.8.1
+    'offline-node-packages': (v) => tr('capi.new.fd.offline-node-packages', v),    // 2.8.1 (relecture I-1)
     'keypair-missing': (v) => tr('capi.new.fd.keypair-missing', v),
     'network-missing': (v) => tr('capi.new.fd.network-missing', v),
     'storage-class-missing': (v) => tr('capi.new.fd.storage-class-missing', v),
@@ -138,6 +139,7 @@ const CapiCreate = (() => {
   // Le menu où se règle ce que dit chaque constat (compteur sur le menu).
   const FINDING_SEC = {
     'small-nodes': 'nodes', 'cpu-short': 'nodes', 'memory-short': 'nodes', 'offline-disk-small': 'nodes',
+    'offline-node-packages': 'nodes',
     'gateway-differs': 'network', 'mask-differs': 'network', 'endpoint-dhcp': 'network',
     'storage-class-missing': 'storage', 'cidr-overlap': 'kubernetes', 'cni-tuning-ignored': 'integrations',
     'cluster-registry-unknown': 'registries', 'cluster-registry-not-attached': 'registries',
@@ -358,6 +360,11 @@ const CapiCreate = (() => {
                 <option value="fetch">${esc(tr('capi.new.offline.fetch'))}</option>
                 <option value="image">${esc(tr('capi.new.offline.image'))}</option>
               </select></label>
+            <label class="tf-field" data-x-wrap="offline_packages" hidden><span class="tf-label">${esc(tr('capi.new.f.offlinePackages'))}</span>
+              <select data-x="offline_packages" class="tip" data-tip="${esc(tr('capi.new.t.offlinePackages'))}">
+                <option value="skip">${esc(tr('capi.new.offline.pkgSkip'))}</option>
+                <option value="keep">${esc(tr('capi.new.offline.pkgKeep'))}</option>
+              </select></label>
           </div>
           <p class="tf-desc" data-x-wrap="offline-note" hidden>${esc(tr('capi.new.offlineNote'))}</p>
         </section>
@@ -557,6 +564,7 @@ const CapiCreate = (() => {
     if (off) {
       const sync = () => {
         root.querySelector('[data-x-wrap="offline_artifacts"]').hidden = !off.checked;
+        root.querySelector('[data-x-wrap="offline_packages"]').hidden = !off.checked;
         root.querySelector('[data-x-wrap="offline-note"]').hidden = !off.checked;
       };
       off.addEventListener('change', sync);
@@ -861,7 +869,7 @@ const CapiCreate = (() => {
     }
     const oidc = readOidc(root);
     if (oidc) b.oidc = oidc;
-    if (!b.offline) delete b.offline_artifacts;
+    if (!b.offline) { delete b.offline_artifacts; delete b.offline_packages; }
     return b;
   }
 

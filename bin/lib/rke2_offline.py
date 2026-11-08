@@ -62,6 +62,11 @@ DOWNLOAD = "https://github.com/rancher/rke2/releases/download"
 # 2.8.1 : dépôts et services zypper mis de côté pendant le premier démarrage
 ZYPP_DIRS = ("/etc/zypp/repos.d", "/etc/zypp/services.d")
 ASIDE = ".harvester-ops-offline"
+# Relecture I-2 : `skip` met les dépôts de côté (défaut), `keep` les laisse
+OFFLINE_PACKAGES = ("skip", "keep")
+# Ce que CAPHV v0.10.1 demande à cloud-init (cloudInitBase), que l'image
+# doit porter en mode `skip` (constat offline-node-packages)
+NODE_PACKAGES = ("iptables", "qemu-guest-agent")
 
 
 def finding(code, level="block", **facts):
@@ -245,16 +250,28 @@ def repos_aside(dirs=ZYPP_DIRS):
 
 def repos_back(dirs=ZYPP_DIRS):
     """Ligne de shell : l'inverse de `repos_aside`, seulement si le
-    répertoire mis à la place est resté vide (rien posé entre-temps)."""
-    return (f"for d in {' '.join(dirs)}; do if [ -d \"$d{ASIDE}\" ] && {{ [ ! -e \"$d\" ] || rmdir \"$d\"; }}; "
-            f"then mv \"$d{ASIDE}\" \"$d\"; fi; done")
+    répertoire mis à la place est resté vide (rien posé entre-temps).
+    Relecture M-2 : une ligne sur stderr pour chaque répertoire (remis,
+    rien de côté, copie laissée de côté), lue dans cloud-init-output.log."""
+    return (f"for d in {' '.join(dirs)}; do if [ -d \"$d{ASIDE}\" ]; then "
+            f"if [ ! -e \"$d\" ] || rmdir \"$d\" 2>/dev/null; then mv \"$d{ASIDE}\" \"$d\" && "
+            f"echo \"harvester-ops: zypper repositories restored in $d\" >&2; "
+            f"else echo \"harvester-ops: $d is not empty, repositories left in $d{ASIDE}\" >&2; fi; "
+            f"else echo \"harvester-ops: nothing set aside for $d\" >&2; fi; done")
 
 
-def user_data():
+def user_data(packages="skip"):
     """`agentConfig.additionalUserData.config` d'un cluster sans Internet :
-    aucune mise à jour de paquets, dépôts zypper de côté au premier
-    démarrage (`cloud-init-per instance` : bootcmd tourne à chaque
-    démarrage, la remise en place une seule fois)."""
+    aucune mise à jour de paquets (les deux modes). `skip` : dépôts zypper
+    de côté au premier démarrage (`cloud-init-per instance` : bootcmd tourne
+    à chaque démarrage, la remise en place une seule fois), l'installation
+    de la liste de CAPHV échoue tout de suite. `keep` (relecture I-2) : dépôts
+    laissés en place, pour une image dont les dépôts visent un miroir du
+    réseau local (RMT, MLM) ; cloud-init installe alors la liste de CAPHV."""
+    if packages not in OFFLINE_PACKAGES:
+        raise ValueError(f"offline_packages: {packages!r}, expected skip or keep")
+    text = "package_update: false\npackage_upgrade: false\npackage_reboot_if_required: false\n"
+    if packages == "keep":
+        return text
     entry = ["cloud-init-per", "instance", "harvester-ops-repos-aside", "sh", "-c", repos_aside()]
-    return ("package_update: false\npackage_upgrade: false\npackage_reboot_if_required: false\n"
-            f"bootcmd:\n- {json.dumps(entry)}\n")
+    return text + f"bootcmd:\n- {json.dumps(entry)}\n"

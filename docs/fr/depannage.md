@@ -724,10 +724,37 @@ guest-console-log`) :
   `harvester-ops-repos-aside`. Si `package_update` vaut encore true, la
   version de CAPHV fusionne cloud-init autrement : employez une image dont
   les dépôts visent un miroir que les machines joignent, ou qui n'en a
-  aucun.
+  aucun ;
+- le cluster emploie `offline_packages: keep` et un dépôt de l'image n'est
+  pas joignable : employez `skip`, ou corrigez les dépôts de l'image.
+
+`cloud-init status` signale une erreur sur ces nœuds avec
+`offline_packages: skip` : le module des paquets échoue faute de dépôt,
+c'est voulu. Ce n'est pas la cause d'un cluster bloqué.
 
 La création sans Internet de bout en bout n'est pas encore vérifiée en
 réel (2.8.1 reste à passer au banc).
+
+### Un nœud d'un cluster sans Internet n'a aucun dépôt zypper
+
+Avec `offline_packages: skip`, les dépôts sont mis de côté pendant le
+premier démarrage et remis par la première commande sans Internet. Ils
+restent de côté quand cloud-init s'arrête avant cette commande, ou quand
+quelque chose a écrit dans `/etc/zypp/repos.d` entre-temps. Lisez
+`/var/log/cloud-init-output.log` : `harvester-ops: ... is not empty,
+repositories left in ...`, ou aucune ligne `harvester-ops:`. Remise en
+place à la main, en root :
+
+```
+for d in /etc/zypp/repos.d /etc/zypp/services.d; do
+  [ -d "$d.harvester-ops-offline" ] || continue
+  mkdir -p "$d" && mv "$d.harvester-ops-offline"/* "$d"/ && rmdir "$d.harvester-ops-offline"
+done
+```
+
+Vérifiez d'abord qu'aucun fichier du même nom n'existe dans les deux
+répertoires. Pour une image dont les dépôts joignent un miroir du réseau
+local, employez `offline_packages: keep`.
 
 ### Nœuds Harvester posé, mais les images viennent encore de l'origine
 

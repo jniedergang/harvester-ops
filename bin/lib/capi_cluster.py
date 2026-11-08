@@ -74,11 +74,13 @@ LIST_FLAGS = {"dns": "--dns", "ip_pool_refs": "--ip-pool-refs"}
 # 2.8.0 : `rancher_external` (import dans le Rancher de la session,
 # bin/lib/rancher_import.py) et `oidc` (API du cluster enfant,
 # bin/lib/child_oidc.py). `offline` et `offline_artifacts` : cluster amorcé
-# sans Internet (bin/lib/rke2_offline.py).
+# sans Internet (bin/lib/rke2_offline.py). 2.8.1 (relecture I-2) :
+# `offline_packages` (skip ou keep, rke2_offline.user_data).
 CONSOLE_OPTIONS = {"extra_disk_size", "extra_disk_class", "target_namespace",
                    "rancher_import", "extra_networks", "service_cidr", "registries",
-                   "rancher_external", "oidc", "offline", "offline_artifacts"}
+                   "rancher_external", "oidc", "offline", "offline_artifacts", "offline_packages"}
 OFFLINE_ARTIFACTS = ("fetch", "image")
+OFFLINE_PACKAGES = ("skip", "keep")         # même liste que rke2_offline.OFFLINE_PACKAGES
 KNOWN = set(FLAGS) | set(LIST_FLAGS) | CONSOLE_OPTIONS
 # Options entières : `normalize` les convertit, le rendu d'un modèle de
 # cluster (deploy_plans) donne ce type à une chaîne qui n'est qu'une variable.
@@ -163,8 +165,10 @@ def normalize(raw):
     spec["offline"] = spec.get("offline") in (True, "true", "1", 1, "on")
     if spec["offline"]:
         spec.setdefault("offline_artifacts", "fetch")
+        spec.setdefault("offline_packages", "skip")
     else:
         spec.pop("offline_artifacts", None)
+        spec.pop("offline_packages", None)
     if "oidc" in spec and not isinstance(spec["oidc"], dict):
         raise ValueError("oidc: an object (issuer_url, audience, ...)")
     regs = normalize_registry_entries(spec.pop("registries", None))
@@ -237,6 +241,7 @@ def validate(spec):
              "a storage class")
     if spec.get("offline"):
         need("offline_artifacts", spec.get("offline_artifacts") in OFFLINE_ARTIFACTS, "fetch or image")
+        need("offline_packages", spec.get("offline_packages") in OFFLINE_PACKAGES, "skip or keep")
     seen = set()
     for e in spec.get("registries") or []:
         n = e.get("registry") or ""
@@ -427,7 +432,7 @@ def renew_templates(docs, spec, whats, registries=None):
     return out
 
 
-def _apply_offline(docs, offline):
+def _apply_offline(docs, offline, packages="skip"):
     """2.8.0 (point 237) : cluster amorcé sans Internet, dans les DEUX
     gabarits RKE2 : fichiers (netrc et CA, depuis un Secret), commandes de
     récupération ajoutées à la fin de `preRKE2Commands`, et
@@ -435,7 +440,10 @@ def _apply_offline(docs, offline):
     /opt/rke2-artifacts). 2.8.1 : `agentConfig.additionalUserData.config` =
     cloud-init sans mise à jour de paquets ni dépôt zypper au premier
     démarrage, dépôts remis en tête des commandes (rke2_offline.user_data,
-    les deux modes). `offline` = {files, preRKE2Commands, secrets}
+    les deux modes). `packages` (relecture I-2) : `skip` met les dépôts
+    de côté puis les remet, `keep` les laisse (ni bootcmd ni remise en
+    place). `additionalUserData` est fusionné (M-3) : une autre `config`
+    déjà posée est refusée plutôt qu'écrasée. `offline` = {files, preRKE2Commands, secrets}
     rendu par l'appelant (rke2_offline.template_patch), vide en mode
     `image` (l'image de VM porte déjà les fichiers)."""
     if offline is None:
@@ -451,11 +459,18 @@ def _apply_offline(docs, offline):
                 + copy.deepcopy(offline["files"])
         # 2.8.1 (décision 241) : dépôts zypper remis en place avant la
         # récupération (rke2_offline.user_data les met de côté au démarrage)
-        inner["preRKE2Commands"] = list(inner.get("preRKE2Commands") or []) + [rke2_offline.repos_back()] \
-            + list(offline.get("preRKE2Commands") or [])
+        back = [rke2_offline.repos_back()] if packages == "skip" else []
+        cmds = list(inner.get("preRKE2Commands") or []) + back + list(offline.get("preRKE2Commands") or [])
+        if cmds:
+            inner["preRKE2Commands"] = cmds
         agent = inner.setdefault("agentConfig", {})
         agent["airGapped"] = True
-        agent["additionalUserData"] = {"config": rke2_offline.user_data()}
+        config = rke2_offline.user_data(packages)
+        aud = agent.setdefault("additionalUserData", {})
+        if aud.get("config") not in (None, "", config):
+            raise ValueError("additionalUserData.config is already set in a RKE2 template: "
+                             "the offline cloud-init would replace it")
+        aud["config"] = config
     return docs + [copy.deepcopy(s) for s in offline.get("secrets") or []]
 
 
@@ -532,7 +547,7 @@ def postprocess(docs, spec, origin=None, registries=None, offline=None):
     if cluster and ("ClusterResourceSet", KUBE_VIP_CRS) not in have:
         out.extend(kube_vip_docs(cluster["metadata"].get("namespace") or "default"))
     if spec.get("offline"):
-        out = _apply_offline(out, offline if offline is not None else {})
+        out = _apply_offline(out, offline if offline is not None else {}, spec.get("offline_packages") or "skip")
     return _apply_registries(out, registries)
 
 
@@ -787,11 +802,22 @@ def check(spec, facts):
         # l'agent et Flux, ramasse-miettes d'images en échec (rien ne se
         # télécharge à nouveau sans Internet)
         out.append(finding("offline-disk-small", "warn", disk=spec.get("disk_size"), advised=OFFLINE_DISK_MIN))
-    if img and img.get("ready") and not img.get("iso") and img.get("os") == "sles":
+    offline_skip = spec.get("offline") and (spec.get("offline_packages") or "skip") == "skip"
+    if offline_skip:
+        # 2.8.1 (relecture I-1) : sans Internet en `skip`, les dépôts sont
+        # mis de côté et la liste de CAPHV n'est pas installée ; l'image doit
+        # déjà porter ces paquets (sans iptables, pods à port d'hôte en
+        # ContainerCreating ; sans agent invité, aucune adresse de VM)
+        import rke2_offline
+        out.append(finding("offline-node-packages", "warn", packages=", ".join(rke2_offline.NODE_PACKAGES),
+                           image=spec.get("image")))
+    if img and img.get("ready") and not img.get("iso") and img.get("os") == "sles" and not offline_skip:
         # 2.7.0 (m-17) : rendu aussi avec disk-smaller-than-image (un `elif`
         # le cachait). Vu sur harv1 : une image SLES non enregistrée n'a aucun dépôt,
         # cloud-init n'installe ni iptables ni qemu-guest-agent, et les pods
         # à port d'hôte (ingress-nginx) restent en ContainerCreating.
+        # 2.8.1 : pas en `skip` sans Internet, offline-node-packages le dit
+        # déjà (et le conseil d'une image Leap n'y vaudrait rien).
         out.append(finding("image-sles-repos", "warn", image=spec.get("image")))
     if spec.get("ssh_keypair") and spec["ssh_keypair"] not in set(facts.get("keypairs") or []):
         out.append(finding("keypair-missing", "block", keypair=spec["ssh_keypair"]))

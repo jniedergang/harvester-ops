@@ -694,10 +694,37 @@ guest-console-log`):
   hold `package_update: false` and the `bootcmd` line
   `harvester-ops-repos-aside`. If `package_update` is still true, the
   CAPHV version merges cloud-init differently: use an image whose
-  repositories point at a mirror the machines reach, or that has none.
+  repositories point at a mirror the machines reach, or that has none;
+- the cluster uses `offline_packages: keep` and a repository of the image
+  is not reachable: use `skip`, or fix the repositories of the image.
+
+`cloud-init status` reports an error on these nodes with
+`offline_packages: skip`: the package module fails without repositories,
+by design. It is not the cause of a stuck cluster.
 
 The end-to-end offline creation is not verified for real yet (2.8.1
 still has to be run on the bench).
+
+### A node of an offline cluster has no zypper repository
+
+With `offline_packages: skip`, the repositories are set aside during the
+first boot and put back by the first command without Internet. They stay
+aside when cloud-init stops before that command, or when something wrote
+into `/etc/zypp/repos.d` in the meantime. Read
+`/var/log/cloud-init-output.log`: `harvester-ops: ... is not empty,
+repositories left in ...` or no `harvester-ops:` line at all. Restore by
+hand, as root:
+
+```
+for d in /etc/zypp/repos.d /etc/zypp/services.d; do
+  [ -d "$d.harvester-ops-offline" ] || continue
+  mkdir -p "$d" && mv "$d.harvester-ops-offline"/* "$d"/ && rmdir "$d.harvester-ops-offline"
+done
+```
+
+Check first that no file of the same name exists in both directories.
+For an image whose repositories reach a mirror of the local network, use
+`offline_packages: keep`.
 
 ### Harvester nodes merged, but images still come from the origin
 

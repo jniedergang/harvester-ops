@@ -118,6 +118,13 @@ LITERALS = [
      "capi.new.fd.offline-rke2-version-mismatch"),
     # 2.8.1 : disque d'un cluster sans Internet sous 20 Gio
     (CREATE, r"'offline-disk-small': \(v\) => tr\('capi\.new\.fd\.offline-disk-small'", "capi.new.fd.offline-disk-small"),
+    # 2.8.1 (relecture I-1, I-2) : paquets de l'image, dépôts gardés ou non
+    (CREATE, r"'offline-node-packages': \(v\) => tr\('capi\.new\.fd\.offline-node-packages'",
+     "capi.new.fd.offline-node-packages"),
+    (CREATE, r"data-tip=\"\$\{esc\(tr\('capi\.new\.t\.offlinePackages'\)\)\}\"", "capi.new.t.offlinePackages"),
+    (CREATE, r"tr\('capi\.new\.f\.offlinePackages'\)", "capi.new.f.offlinePackages"),
+    (CREATE, r"tr\('capi\.new\.offline\.pkgSkip'\)", "capi.new.offline.pkgSkip"),
+    (CREATE, r"tr\('capi\.new\.offline\.pkgKeep'\)", "capi.new.offline.pkgKeep"),
 ]
 
 
@@ -137,3 +144,10 @@ def test_new_history_verbs_are_labelled():
     kinds = block(CAPI, "function kindLabel(action)", "const capiHistory")
     for verb in ("capi-rancher-import", "capi-rancher-unimport", "capi-gitops", "capi-gitops-remove", "capi-renew"):
         assert f"case '{verb}':" in kinds, verb
+
+
+def test_offline_packages_count_on_the_nodes_menu_and_leave_with_offline():
+    """2.8.1 (relecture I-1, I-2)."""
+    assert "'offline-node-packages': 'nodes'" in CREATE
+    assert "if (!b.offline) { delete b.offline_artifacts; delete b.offline_packages; }" in CREATE
+    assert """root.querySelector('[data-x-wrap="offline_packages"]').hidden = !off.checked;""" in CREATE

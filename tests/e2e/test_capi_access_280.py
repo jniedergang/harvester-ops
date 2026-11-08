@@ -145,6 +145,16 @@ def test_offline_shows_its_mode_and_reaches_the_request(create):
     page.wait_for_timeout(900)
     body = calls["check"][-1]
     assert body["offline"] is True and body["offline_artifacts"] == "image"
+    # 2.8.1 (relecture I-2) : dépôts de l'image gardés ou mis de côté
+    expect(host.locator('[data-x-wrap="offline_packages"]')).to_be_visible()
+    assert body["offline_packages"] == "skip"
+    tcv.x(host, "offline_packages").select_option("keep")
+    page.wait_for_timeout(900)
+    assert calls["check"][-1]["offline_packages"] == "keep"
+    tcv.x(host, "offline").uncheck()
+    expect(host.locator('[data-x-wrap="offline_packages"]')).to_be_hidden()
+    page.wait_for_timeout(900)
+    assert "offline_packages" not in calls["check"][-1] and "offline_artifacts" not in calls["check"][-1]
 
 
 def test_the_template_editor_reads_and_gives_back_the_access_options(context, flask_server):
@@ -154,6 +164,7 @@ def test_the_template_editor_reads_and_gives_back_the_access_options(context, fl
     out = page.evaluate("""() => {
       const box = document.createElement('div'); document.body.appendChild(box);
       const spec = { k8s_version: 'v1.34.11', rancher_external: true, offline: true, offline_artifacts: 'fetch',
+                     offline_packages: 'keep',
                      oidc: { issuer_url: 'https://{{idp}}/realms/main', audience: 'k8s', username_prefix: 'oidc:',
                              groups_prefix: 'corp:', admin_group: 'ops' } };
       const f = CapiCreate.templateForm(box, {}, '', spec);
@@ -165,6 +176,7 @@ def test_the_template_editor_reads_and_gives_back_the_access_options(context, fl
     assert out["modeVisible"]
     r = out["read"]
     assert r["rancher_external"] is True and r["rancher_import"] is False and r["offline"] is True
+    assert r["offline_packages"] == "keep"
     assert r["oidc"]["issuer_url"] == "https://{{idp}}/realms/main" and r["oidc"]["groups_prefix"] == "corp:"
     assert r["oidc"]["admin_group"] == "ops"
 
