@@ -24,6 +24,21 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   Clusters phase replays the check before any creation and blocks if the
   reference is still missing. Install chains are unchanged (no check
   there). Five languages.
+- **Rancher agent bundle left after removing an import** (decision 247,
+  concern 4 of the 2.8.1 bench). Rancher 2.14 keeps the Bundle
+  `fleet-agent-<cluster>` of the imported child in `fleet-default` after
+  the cluster is removed (seen: `fleet-agent-harv4-r12a`, 45 minutes
+  later). Removing the import (`rancher-unimport`), and deleting or
+  undoing an imported child cluster, now delete it once the cluster is
+  gone from Rancher. Only when its name is exactly `fleet-agent-<name in
+  Rancher>`, each target names that cluster alone, it carries a mark of
+  Rancher or Fleet (`cattle.io` domain) and no label of the console.
+  Otherwise it is kept and named in the steps (`kept-not-rancher`, or
+  `kept-not-matched` for a name over 63 characters, which Fleet shortens).
+  A refusal or an unreadable Bundle is said in the steps and does not
+  undo the removal. The dry run reports it (`agent_bundle`). Without a
+  Rancher session the existing rules apply. Verified by tests only; to be
+  checked on the next bench.
 
 ### Tests
 - `test_deploy_tf_refs_later_282.py`: one case per resource kind and per
@@ -31,6 +46,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   literal name, `count` or a template, phase disabled, declaration kept or
   updated, replay at the phase start (blocks, or creates once Terraform
   made the image), and `tf_guard.resource_literals`.
+- `test_rancher_unimport_bundle_282.py`: the Bundle goes after the cluster
+  on both paths (unimport, delete), each kept case (other or second
+  target, no target, no mark, label of the console, other namespace, long
+  name), each error path (absent, unreadable, read or delete refused,
+  Rancher unreachable), dry runs, no session, cluster left in Rancher.
 
 ## [2.8.1] - 2026-11-08 - Offline child clusters skip the package update, self-hosted registry warning
 

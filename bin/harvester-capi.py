@@ -2703,6 +2703,55 @@ def _rancher_delete(api, name, cid, timeout, sleep=None, now=None):
     return EXIT_OK
 
 
+def _agent_bundle(api, name, dry=False):
+    """2.8.2 (décision 247) : Bundle `fleet-agent-<nom>` que Rancher 2.14
+    laisse dans `fleet-default` après le retrait du cluster. Supprimé
+    seulement s'il est l'agent de CE cluster et porte une marque de Rancher
+    ou de Fleet (ri.agent_bundle_ours) ; tout le reste est dit et gardé.
+    Le retrait de l'import est déjà fait : un échec ici ne le défait pas.
+    Rend {"name", "present", "delete"} (essai)."""
+    bname = ri.agent_bundle_name(name)
+    if not bname:
+        step("unimport", "running", f"kept-not-matched: the agent bundle of {name} is not looked for "
+                                    "(Fleet shortens names over 63 characters)")
+        return {"name": "", "present": None, "delete": False}
+    path = f"{ri.BUNDLE_API}/{ri.NAMESPACE}/{bname}"
+    out = {"name": f"{ri.NAMESPACE}/{bname}", "present": None, "delete": False}
+    try:
+        st, b = api.call("GET", path)
+    except RuntimeError as e:
+        step("unimport", "running", f"agent bundle {bname} unreadable, left in place: {str(e)[:120]}")
+        return out
+    if st == 404:
+        out["present"] = False
+        step("unimport", "running", f"no agent bundle {bname} left in {ri.NAMESPACE}")
+        return out
+    if st != 200:
+        step("unimport", "running", f"agent bundle {bname} unreadable (Rancher answered {st}), left in place")
+        return out
+    out["present"] = True
+    if not ri.agent_bundle_ours(b, name):
+        step("unimport", "running", f"kept-not-rancher: Bundle {ri.NAMESPACE}/{bname} kept, it is not the "
+                                    f"Rancher agent of {name} alone")
+        return out
+    out["delete"] = True
+    if dry:
+        return out
+    try:
+        st2, _ = api.call("DELETE", path)
+    except RuntimeError as e:
+        step("unimport", "running", f"agent bundle {bname} not deleted, left in place: {str(e)[:120]}")
+        return out
+    if st2 in (200, 202, 204, 404):
+        step("unimport", "running", f"Rancher agent bundle {ri.NAMESPACE}/{bname} deleted in {api.server}")
+    elif st2 == 403:
+        step("unimport", "running", f"rancher-forbidden: Rancher refused to delete the agent bundle {bname}, "
+                                    "left in place")
+    else:
+        step("unimport", "running", f"agent bundle {bname} not deleted (Rancher answered {st2}), left in place")
+    return out
+
+
 def rancher_unimport(kube, ns, cluster, harvester, expect_run="", timeout=ri.UNIMPORT_WAIT, dry=False,
                      sleep=None, now=None, cleanup=True):
     """Retrait de l'import (point 232) : cluster supprimé dans Rancher,
@@ -2710,7 +2759,9 @@ def rancher_unimport(kube, ns, cluster, harvester, expect_run="", timeout=ri.UNI
     enfant après jugement du serveur ; marque retirée. Marque relue juste
     avant d'écrire (`expect_run`). `cleanup=False` (suppression du cluster,
     revue 1-4 I-2) : rien n'est lu ni retiré dans le cluster enfant, qui
-    part ; un cluster enfant cassé reste supprimable."""
+    part ; un cluster enfant cassé reste supprimable. 2.8.2 (décision 247) :
+    dans les deux cas, le Bundle d'agent laissé par Rancher dans
+    `fleet-default` part après le cluster (_agent_bundle)."""
     if not harvester:
         raise ValueError("--harvester-name: the name of the Harvester cluster in the console")
     cl = kube.get(cs.K_CLUSTER, ns, cluster)
@@ -2736,12 +2787,14 @@ def rancher_unimport(kube, ns, cluster, harvester, expect_run="", timeout=ri.UNI
         raise RuntimeError(f"Rancher answered {st} for {name}")
     if not cleanup:
         if dry:
-            print(json.dumps({"rancher": api.server, "name": name, "present": st == 200}))
+            print(json.dumps({"rancher": api.server, "name": name, "present": st == 200,
+                              "agent_bundle": _agent_bundle(api, name, dry=True)}))
             return EXIT_OK
         if st == 200:
             code = _rancher_delete(api, name, cid, timeout, sleep, now)
             if code != EXIT_OK:
                 return code
+        _agent_bundle(api, name)
         kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"annotations": {ri.A_MARK: None}}})
         step("unimport", "done", f"{ns}/{cluster} no longer imported in {api.server} (the cluster goes: "
                                  "nothing removed inside it)")
@@ -2751,12 +2804,14 @@ def rancher_unimport(kube, ns, cluster, harvester, expect_run="", timeout=ri.UNI
         if dry:
             todo, refused, kept = _leftover_judge(child, _leftovers_of(child), "unimport")
             print(json.dumps({"rancher": api.server, "name": name, "present": st == 200,
-                              "delete": [w for _k, _n, w in todo], "kept": kept, "refused": refused}))
+                              "delete": [w for _k, _n, w in todo], "kept": kept, "refused": refused,
+                              "agent_bundle": _agent_bundle(api, name, dry=True)}))
             return EXIT_OK
         if st == 200:
             code = _rancher_delete(api, name, cid, timeout, sleep, now)
             if code != EXIT_OK:
                 return code
+        _agent_bundle(api, name)
         # le Job de nettoyage de Rancher (cattle-cleanup-*) tient ses propres
         # rôles : on attend sa fin avant de juger les restes
         try:

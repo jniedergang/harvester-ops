@@ -327,6 +327,39 @@ def mark_of(capi_cluster):
 # ---------------------------------------------------------------------------
 # Retrait
 # ---------------------------------------------------------------------------
+# 2.8.2 (décision 247, point 4 du banc 2.8.1) : Rancher 2.14 laisse dans
+# `fleet-default` le Bundle de l'agent Fleet du cluster importé après son
+# retrait (vu : `fleet-agent-harv4-r12a`, propriétaire le Namespace,
+# empreinte d'objectset, encore là 45 min après). Nom et cible posés par
+# Fleet (agentmanagement, manageagent : `fleet-agent-<cluster>`, une cible
+# `clusterName: <cluster>`) ; au-delà de 63 caractères Fleet raccourcit le
+# nom, qui n'est alors plus reconnu exactement.
+BUNDLE_API = "/v1/fleet.cattle.io.bundles"
+AGENT_BUNDLE_PREFIX = "fleet-agent-"
+
+
+def agent_bundle_name(name):
+    """`fleet-agent-<nom dans Rancher>`, ou "" s'il dépasse 63 caractères."""
+    full = AGENT_BUNDLE_PREFIX + str(name or "")
+    return full if name and len(full) <= NAME_MAX else ""
+
+
+def agent_bundle_ours(bundle, name):
+    """Vrai si le Bundle est l'agent de CE cluster seul : nom exact dans
+    `fleet-default`, au moins une cible et chacune nomme ce cluster, une
+    marque de Rancher ou de Fleet (domaine `cattle.io`), aucune étiquette
+    de la console."""
+    md = (bundle or {}).get("metadata") or {}
+    if md.get("name") != agent_bundle_name(name) or md.get("namespace") != NAMESPACE or not md.get("name"):
+        return False
+    targets = ((bundle.get("spec") or {}).get("targets")) or []
+    if not targets or any(not isinstance(t, dict) or t.get("clusterName") != name for t in targets):
+        return False
+    if any(k.startswith("harvester-ops.io/") for k in (md.get("labels") or {})):
+        return False
+    return rancher_marked(bundle)
+
+
 def _crd_group(name):
     return name.split(".", 1)[1] if "." in name else ""
 

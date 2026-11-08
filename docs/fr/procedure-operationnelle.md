@@ -689,6 +689,15 @@ visé par ce chemin.
    retirés, chacun jugé d'abord par le serveur. Seul part un objet qui
    porte une marque de Rancher (étiquette, annotation ou propriétaire
    `cattle.io`). Tout autre est gardé et nommé (`kept-not-rancher`).
+   Depuis 2.8.2, le Bundle d'agent `fleet-agent-<nom dans Rancher>` que
+   Rancher 2.14 laisse dans `fleet-default` est supprimé aussi, ici et à
+   la suppression ou au Défaire d'un cluster enfant importé. Seulement si
+   son nom est exact, que chacune de ses cibles ne nomme que ce cluster,
+   qu'il porte une marque de Rancher ou de Fleet et aucune étiquette de la
+   console. Sinon il est gardé et nommé dans les étapes
+   (`kept-not-rancher` ; `kept-not-matched` au-delà de 63 caractères, que
+   Fleet raccourcit). Un refus de Rancher sur le Bundle est dit et ne
+   défait pas le retrait. Vérifié par les tests seulement pour l'instant.
 7. **Supprimer un cluster enfant importé.** Le cluster est d'abord retiré
    de Rancher, sans rien lire dans le cluster enfant (un enfant mort reste
    supprimable). Si Rancher est injoignable ou que vous n'avez pas de
