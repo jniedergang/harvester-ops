@@ -625,12 +625,31 @@ class Client:
         environnement, jamais en argument ni dans un fichier."""
         body = {"policies": list(policies), "ttl": str(ttl)}
         if entity_alias:
+            # le rôle accepte `tf-*` : jamais de `/`, `..` ni `*` dans l'alias
+            # (revue M6 des tâches 5-7 ; nom construit par openbao_policy.tf_alias)
+            if not re.match(r"^tf-[a-z0-9][a-z0-9_-]{0,62}$", str(entity_alias)):
+                raise OpenBaoError("openbao-bad-request", None, "invalid entity_alias (tf-<declaration> expected)")
             body["entity_alias"] = entity_alias
         _, resp = self._call("POST", f"auth/token/create/{self._seg(role)}", body, retry=False)
         tok = ((resp or {}).get("auth") or {}).get("client_token")
         if not tok:
             raise OpenBaoError("openbao-bad-request", None, "no token in response")
         return tok
+
+    def entity_delete_by_alias(self, alias_name, mount_accessor):
+        """Retire l'entité qui porte l'alias `alias_name` du montage
+        `mount_accessor` (jetons enfants d'OpenTofu, alias `tf-<décl>`) :
+        recherche par alias, puis suppression par identifiant (les entités
+        créées par `entity_alias` s'appellent `entity_<id>`). Rend False si
+        aucune entité ne porte cet alias."""
+        _, found = self._call("POST", "identity/lookup/entity",
+                              {"alias_name": str(alias_name), "alias_mount_accessor": str(mount_accessor)},
+                              retry=False)
+        eid = ((found or {}).get("data") or {}).get("id")
+        if not eid:
+            return False
+        self._call("DELETE", f"identity/entity/id/{self._seg(eid)}", retry=False)
+        return True
 
     # -- instantanés raft ------------------------------------------------------
     def raft_snapshot(self, dst_path):

@@ -1,5 +1,10 @@
 path "sys/rotate/root" { capabilities = ["update", "sudo"] }
-path "identity/entity/name/tf-*" { capabilities = ["read", "delete"] }
+path "sys/auth" { capabilities = ["read"] }
+path "identity/lookup/entity" { capabilities = ["update"] }
+path "identity/entity/id/*" { capabilities = ["read", "delete"] }
+path "sys/policies/acl/hops-agent-abc123def456" { capabilities = ["read", "create", "update"] }
+path "sys/policies/acl/hops-tf-abc123def456" { capabilities = ["read", "create", "update"] }
 path "harvester-ops/config" { capabilities = ["read", "update"] }
 path "sys/storage/raft/snapshot" { capabilities = ["read"] }
 path "auth/approle/role/harvester-ops-abc123def456/custom-secret-id" { capabilities = ["update"] }
+path "auth/approle/role/harvester-ops-abc123def456/secret-id/lookup" { capabilities = ["update"] }

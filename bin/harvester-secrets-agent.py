@@ -57,7 +57,7 @@ import openbao_policy as pol  # noqa: E402
 
 VERSION_FILE = Path(os.environ.get("HARVESTER_OPS_OPT", "/opt/harvester-ops")) / "VERSION"
 OPS = ("store-secret-id", "b1-install", "b1-upgrade", "b1-remove", "rotate-secret-id", "rotate-unseal-key",
-       "restore-snapshot", "status")
+       "restore-snapshot", "b1-policies", "status")
 KEYS = {
     "store-secret-id": {"console_id", "addr", "role_id", "wrap_token", "ca_pem"},
     "b1-install": {"console_id", "bundle", "ack_offline_copy"},
@@ -66,6 +66,7 @@ KEYS = {
     "rotate-secret-id": set(),
     "rotate-unseal-key": {"ack_offline_copy"},
     "restore-snapshot": {"file", "witness"},
+    "b1-policies": set(),
     "status": set(),
 }
 COMMON = {"op", "id", "requested_by"}
@@ -785,6 +786,41 @@ class Agent:
         self.step("restart", "done")
         return f"OpenBao {info['version']} running"
 
+    def op_b1_policies(self, req=None):
+        """Décision 276 : remet les politiques `hops-*` de cette console au
+        texte de la version installée (mise à niveau après la pose, plus de
+        jeton racine en B1) : celle de l'agent et celle des jetons enfants
+        d'OpenTofu. La politique de la console n'est jamais touchée."""
+        st = self.agent_state()
+        if not st:
+            raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
+        cid = st["console_id"]
+        self.step("policies", "running")
+        a = self.agent_client()
+        try:
+            _, auths = a._call("GET", "sys/auth")
+            auths = (auths or {}).get("data") or auths or {}
+            acc = (auths.get("token/") or {}).get("accessor")
+            a._call("POST", f"sys/policies/acl/{pol.tf_role(cid)}", {"policy": pol.tf_child_policy(cid, acc)})
+            a._call("POST", f"sys/policies/acl/{pol.agent_role(cid)}",
+                    {"policy": pol.agent_policy(cid, st.get("mount") or pol.DEFAULT_MOUNT)})
+        finally:
+            a.revoke_self()
+        self.step("policies", "done", f"{pol.agent_role(cid)}, {pol.tf_role(cid)}")
+        return "policies of the agent and of the OpenTofu tokens updated"
+
+    def remove_tf_entity(self, decl):
+        """Retire l'entité du jeton enfant d'une déclaration (alias
+        `tf-<décl>` du montage `token/`) ; False si elle n'existe pas."""
+        a = self.agent_client()
+        try:
+            _, auths = a._call("GET", "sys/auth")
+            auths = (auths or {}).get("data") or auths or {}
+            acc = (auths.get("token/") or {}).get("accessor")
+            return a.entity_delete_by_alias(pol.tf_alias(decl), acc)
+        finally:
+            a.revoke_self()
+
     def op_b1_remove(self, req):
         st = self.agent_state()
         if not st:
@@ -984,11 +1020,7 @@ class Agent:
             self.render(st, tpl)
             self.host.chown(self.p.b1_etc / "openbao.hcl", uid, 0)
         self.step("witness", "running", "console identity and a witness secret")
-        a = self.agent_client()
-        a._call("POST", f"auth/approle/role/{pol.console_role(st['console_id'])}/custom-secret-id",
-                {"secret_id": _read(self.p.etc / "secret-id")})
-        a.revoke_self()
-        c = self.console_client(addr=self.b1_addr)
+        c = self._console_identity_back(st)
         if witness:
             c.kv_metadata(st["mount"], f"consoles/{st['console_id']}/{witness}")
         else:
@@ -999,6 +1031,38 @@ class Agent:
         self.rollback()                              # relance la console
         shutil.rmtree(self.p.work, ignore_errors=True)
         return f"snapshot {req['file']} restored; previous volume kept {OLD_VOLUME_DAYS} days"
+
+    def _console_identity_back(self, st):
+        """Après une restauration, la console doit se connecter avec son
+        `secret_id` courant. Un instantané pris depuis la dernière rotation
+        le contient déjà (le cas courant) : `custom-secret-id` le refuserait
+        en 500 « SecretID is already registered » (OpenBao 2.7.2, revue I3
+        des tâches 5-7). Connexion d'abord ; le `secret_id` n'est reposé que
+        si elle échoue ; l'accesseur est relu dans les deux cas. Rend le
+        client connecté de la console."""
+        role = pol.console_role(st["console_id"])
+        sid = _read(self.p.etc / "secret-id")
+        try:
+            c = self.console_client(addr=self.b1_addr)
+        except oc.OpenBaoError:
+            a = self.agent_client()
+            try:
+                a._call("POST", f"auth/approle/role/{role}/custom-secret-id", {"secret_id": sid})
+            except oc.OpenBaoError as e:
+                if "already registered" not in str(e.detail or "").lower():
+                    raise
+            finally:
+                a.revoke_self()
+            c = self.console_client(addr=self.b1_addr)
+        a = self.agent_client()
+        try:
+            _, lk = a._call("POST", f"auth/approle/role/{role}/secret-id/lookup", {"secret_id": sid})
+        finally:
+            a.revoke_self()
+        acc = ((lk or {}).get("data") or {}).get("secret_id_accessor")
+        if acc:
+            _w(self.p.etc / "secret-id-accessor", acc + "\n", 0o600)
+        return c
 
     # -- ménage (minuterie, sans demande) -----------------------------------------
     def housekeeping(self):

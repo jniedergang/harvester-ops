@@ -449,8 +449,59 @@ def test_restore_snapshot_with_the_current_key(env):
     assert not srv.requests("snapshot-force")
     assert host.ran("systemctl", "stop", hsa.CONSOLE_UNIT) and host.ran("systemctl", "start", hsa.CONSOLE_UNIT)
     assert list(p.b1_data.parent.glob(p.b1_data.name + ".old-*"))
-    assert ("custom-secret-id", pol.console_role(CID)) in srv.events
     assert not [e for e in srv.events if e[0] == "rotate-root"]
+
+
+class _RestoreDropsTheSecretId(list):
+    """Restauration d'un instantané pris AVANT la dernière rotation du
+    secret_id : le secret_id courant n'y est pas."""
+
+    def __init__(self, srv, rid, sid):
+        super().__init__()
+        self.srv, self.rid, self.sid = srv, rid, sid
+
+    def append(self, raw):
+        super().append(raw)
+        self.srv.roles[self.rid]["secret_ids"].discard(self.sid)
+        for a, (r, s) in list(self.srv.accessors.items()):
+            if (r, s) == (self.rid, self.sid):
+                del self.srv.accessors[a]
+
+
+@pytest.mark.parametrize("snapshot,custom", [
+    ("taken-after-the-rotation", False),      # le cas courant : secret_id déjà dans l'instantané
+    ("taken-before-the-rotation", True),
+])
+def test_restore_puts_the_console_secret_id_back_only_when_missing(env, snapshot, custom):
+    """Revue I3 des tâches 5-7 : OpenBao 2.7.2 refuse en 500 un
+    `custom-secret-id` déjà enregistré ; la connexion est essayée d'abord,
+    l'accesseur relu ensuite."""
+    install(env)
+    p, srv = env["p"], env["srv"]
+    rid = srv.role_ids[pol.console_role(CID)]
+    sid = (p.etc / "secret-id").read_text().strip()
+    if custom:
+        srv.restored = _RestoreDropsTheSecretId(srv, rid, sid)
+    (p.etc / "secret-id-accessor").write_text("acc-stale\n")
+    snap = p.b1_data / "snapshots" / "openbao-20261108T020000Z.snap"
+    snap.write_bytes(b"SNAP")
+    rc, st = request(env, op="restore-snapshot", file=snap.name)
+    assert rc == 0, st
+    assert (("custom-secret-id", pol.console_role(CID)) in srv.events) is custom
+    acc = (p.etc / "secret-id-accessor").read_text().strip()
+    assert srv.accessors[acc] == (rid, sid)                  # accesseur du secret_id en service
+    no_secret_in(env, st)
+
+
+def test_fake_refuses_a_duplicate_custom_secret_id(env):
+    """Le faux serveur reproduit OpenBao 2.7.2 (essai P4 de la revue)."""
+    install(env)
+    srv, p = env["srv"], env["p"]
+    a = env["agent"]().agent_client()
+    with pytest.raises(oc.OpenBaoError) as e:
+        a._call("POST", f"auth/approle/role/{pol.console_role(CID)}/custom-secret-id",
+                {"secret_id": (p.etc / "secret-id").read_text().strip()})
+    assert "already registered" in str(e.value.detail)
 
 
 def test_restore_snapshot_of_a_retired_key(env):
@@ -520,3 +571,47 @@ def test_b1_ops_need_an_installed_b1(env):
             {"file": "openbao-x.snap"} if op == "restore-snapshot" else {})
         rc, st = request(env, op=op, **extra)
         assert rc == 1 and st["code"] == "b1-not-installed", op
+
+
+# ---------------------------------------------------------------------------
+# Décision 276 (revue I5) : politiques hops-* corrigées après la pose, entités
+# tf retirées par leur alias
+# ---------------------------------------------------------------------------
+def test_tf_entity_removed_by_its_alias(env):
+    install(env)
+    srv, p = env["srv"], env["p"]
+    c = env["agent"]().console_client(addr=srv.addr)
+    c.token_create_child(pol.tf_role(CID), [pol.tf_role(CID)], "60s", entity_alias=pol.tf_alias("d1"))
+    assert [e["name"] for e in srv.entities.values()] and all(
+        e["name"].startswith("entity_") for e in srv.entities.values())
+    a = env["agent"]()
+    # l'ancienne règle `identity/entity/name/tf-*` ne désignait rien
+    t = a.agent_client()
+    with pytest.raises(oc.OpenBaoError):
+        t._call("GET", "identity/entity/name/tf-d1")
+    assert a.remove_tf_entity("d1") is True and not srv.entities
+    assert a.remove_tf_entity("d1") is False
+    with pytest.raises(ValueError):
+        a.remove_tf_entity("../d1")
+
+
+def test_console_refuses_a_bad_entity_alias(env):
+    install(env)
+    c = env["agent"]().console_client(addr=env["srv"].addr)
+    for bad in ("tf-a/../b", "tf-*", "x-d1"):
+        with pytest.raises(oc.OpenBaoError):
+            c.token_create_child(pol.tf_role(CID), [pol.tf_role(CID)], "60s", entity_alias=bad)
+
+
+def test_b1_policies_updates_only_hops_policies(env):
+    install(env)
+    srv = env["srv"]
+    srv.policies.pop(pol.agent_role(CID), None)
+    srv.events.clear()
+    rc, st = request(env, op="b1-policies")
+    assert rc == 0, st
+    written = [e[1] for e in srv.events if e[0] == "policy-post"]
+    assert sorted(written) == sorted([pol.agent_role(CID), pol.tf_role(CID)])
+    assert srv.policies[pol.agent_role(CID)] == pol.agent_policy(CID)
+    assert "auth_token_" in srv.policies[pol.tf_role(CID)]
+    no_secret_in(env, st)

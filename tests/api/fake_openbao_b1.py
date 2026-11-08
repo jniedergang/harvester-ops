@@ -30,6 +30,7 @@ class FakeB1(FakeOpenBao):
         self.initialized = True
         self.fail_paths = {}                 # chemin -> (code, message) une fois
         self.unseals = 0
+        self.entities = {}                   # id -> {"name": "entity_<id>", "aliases": {(accesseur, nom)}}
 
     # -- amorce, comme `initialize` -------------------------------------------
     def initialize(self, boot_dir):
@@ -70,6 +71,10 @@ class FakeB1(FakeOpenBao):
                 return h._send(200, {"data": {"secret_id_accessor": acc}}) if acc else h._err(404)
             if rest == "custom-secret-id":
                 sid = body.get("secret_id")
+                # comme OpenBao 2.7.2 (revue I3 des tâches 5-7, essai P4) : un
+                # secret_id déjà enregistré est refusé en 500
+                if sid in (self.roles.get(rid) or {}).get("secret_ids", ()):
+                    return h._err(500, "SecretID is already registered")
                 self.add_role(rid, sid)
                 self.accessors.setdefault("acc-" + secrets.token_hex(4), (rid, sid))
                 self.events.append(("custom-secret-id", role))
@@ -107,6 +112,33 @@ class FakeB1(FakeOpenBao):
                 self.policies[name] = body.get("policy")
             self.events.append(("policy-" + m.lower(), name))
             return h._send(204)
+        # entités : comme OpenBao 2.7.2 (essai P4), une entité créée par
+        # `entity_alias` s'appelle `entity_<id>` ; recherche par alias
+        if path.startswith("auth/token/create/") and tok and body.get("entity_alias"):
+            key = (TOKEN_ACCESSOR, body["entity_alias"])
+            if not any(key in e["aliases"] for e in self.entities.values()):
+                eid = secrets.token_hex(8)
+                self.entities[eid] = {"name": f"entity_{eid}", "aliases": {key}}
+        if path == "identity/lookup/entity" and tok:
+            key = (body.get("alias_mount_accessor"), body.get("alias_name"))
+            eid = next((i for i, e in self.entities.items() if key in e["aliases"]), None)
+            return h._send(200, {"data": {"id": eid, "name": self.entities[eid]["name"]}}) if eid else h._send(204)
+        if path.startswith("identity/entity/name/") and tok:
+            name = path.split("/", 3)[3]
+            eid = next((i for i, e in self.entities.items() if e["name"] == name), None)
+            if eid is None:
+                return h._err(404)
+            if m == "DELETE":
+                del self.entities[eid]
+                return h._send(204)
+            return h._send(200, {"data": {"id": eid, "name": name}})
+        if path.startswith("identity/entity/id/") and tok:
+            eid = path.split("/", 3)[3]
+            if m == "DELETE":
+                self.entities.pop(eid, None)
+                self.events.append(("entity-delete", eid))
+                return h._send(204)
+            return h._send(200, {"data": {"id": eid}}) if eid in self.entities else h._err(404)
         if path == "sys/rotate/root" and tok:
             self.events.append(("rotate-root", None))
             return h._send(204)

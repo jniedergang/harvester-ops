@@ -96,6 +96,13 @@ def tf_key(cid, decl):
     return f"hops-{_check(ID_RE, cid, 'console id')}-tf-{_check(DECL_RE, decl, 'declaration name')}"
 
 
+def tf_alias(decl):
+    """Alias d'entité du jeton enfant d'une déclaration : `tf-<décl>`, nom
+    validé (DECL_RE) ; le rôle de jeton accepte `tf-*`, qui laisserait
+    passer `/`, `..` ou `*` (revue M6 des tâches 5-7)."""
+    return f"tf-{_check(DECL_RE, decl, 'declaration name')}"
+
+
 def secret_id_path(cid):
     """`creation_path` attendu d'une enveloppe de `secret_id` (essai 4)."""
     return f"auth/approle/role/{console_role(cid)}/secret-id"
@@ -162,14 +169,30 @@ def agent_rules(cid, mount=DEFAULT_MOUNT):
     racine après un changement de clé de descellement (essai 7), retrait des
     entités `tf-<décl>`, réglage du montage KV, lecture des instantanés, et
     le `secret_id` de la console reposé après une restauration (les
-    `secret_id` d'un instantané sont ceux de sa date)."""
+    `secret_id` d'un instantané sont ceux de sa date).
+
+    Décision 276 (revue I5 des tâches 5-7) : l'agent garde le droit de
+    corriger les politiques `hops-*` de cette console (la sienne et celle
+    des jetons d'OpenTofu ; jamais celle de la console), seul moyen de
+    mettre une politique à niveau après la pose (plus de jeton racine). Les
+    entités créées par `entity_alias` s'appellent `entity_<id>` (essai P4) :
+    `identity/entity/name/tf-*` ne désignait rien ; elles se retrouvent par
+    leur alias (`identity/lookup/entity`, accesseur de `token/` lu dans
+    `sys/auth`) et se retirent par identifiant. Une instance B1 ne sert
+    qu'une console : `identity/entity/id/*` ne touche que les siennes."""
     m = _check(MOUNT_RE, mount, "mount")
     return [
         ("sys/rotate/root", ["update", "sudo"]),
-        ("identity/entity/name/tf-*", ["read", "delete"]),
+        ("sys/auth", ["read"]),
+        ("identity/lookup/entity", ["update"]),
+        ("identity/entity/id/*", ["read", "delete"]),
+        (f"sys/policies/acl/{agent_role(cid)}", ["read", "create", "update"]),
+        (f"sys/policies/acl/{tf_role(cid)}", ["read", "create", "update"]),
         (f"{m}/config", ["read", "update"]),
         ("sys/storage/raft/snapshot", ["read"]),
         (f"auth/approle/role/{console_role(cid)}/custom-secret-id", ["update"]),
+        # accesseur du secret_id de la console relu après une restauration
+        (f"auth/approle/role/{console_role(cid)}/secret-id/lookup", ["update"]),
     ]
 
 

@@ -64,7 +64,28 @@ def test_console_and_child_policies_never_administer(text):
 def test_agent_sudo_only_on_root_rotation():
     sudo = [p for p, caps in rules_of(pol.agent_policy(CID)) if "sudo" in caps]
     assert sudo == ["sys/rotate/root"]
-    assert "sys/polic" not in pol.agent_policy(CID)
+
+
+def test_agent_amends_only_its_hops_policies():
+    """Décision 276 : l'agent ne corrige que les politiques `hops-*` de sa
+    console (la sienne, celle des jetons d'OpenTofu), jamais celle de la
+    console ni par motif ; les entités tf se retirent par alias."""
+    rules = dict(pol.agent_rules(CID))
+    acl = sorted(p for p in rules if p.startswith("sys/policies/"))
+    assert acl == [f"sys/policies/acl/hops-agent-{CID}", f"sys/policies/acl/hops-tf-{CID}"]
+    assert all("delete" not in rules[p] and "*" not in p for p in acl)
+    assert not any(p.startswith("identity/entity/name/") for p in rules)    # ne désignait rien (essai P4)
+    assert rules["identity/lookup/entity"] == ["update"] and rules["sys/auth"] == ["read"]
+
+
+@pytest.mark.parametrize("decl,ok", [("d1", True), ("web_2", True), ("../x", False), ("a/b", False),
+                                     ("*", False), ("", False), ("A", False)])
+def test_tf_alias_is_validated(decl, ok):
+    if ok:
+        assert pol.tf_alias(decl) == f"tf-{decl}"
+    else:
+        with pytest.raises(ValueError):
+            pol.tf_alias(decl)
 
 
 @pytest.mark.parametrize("mount,prefix", [("harvester-ops", PREFIX), ("kv", "teams/x/consoles/" + CID)])
