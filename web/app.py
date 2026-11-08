@@ -33312,6 +33312,7 @@ DEPLOY_FINDING_LEVELS = {
     "registry-exists": "info", "registry-later": "info", "publish-later": "info",
     "cluster-registry-later": "info",
     "offline-later": "info",
+    "terraform-ref-later": "info",          # 2.8.2 (décision 246)
     # 2.7.0 : phase Artefacts
     "artefact-invalid": "blocking", "artefact-not-published": "blocking", "artefact-taken": "blocking",
     "artefact-check-failed": "blocking", "artefact-var-missing": "blocking", "caaph-missing": "blocking",
@@ -33333,6 +33334,51 @@ DEPLOY_CHECK_LEVELS = {"block": "blocking", "warn": "warning", "ok": "info"}
 DEPLOY_REF_KEYS = {"image-missing": ("image",), "keypair-missing": ("ssh_keypair",),
                    "network-missing": ("network", "extra_networks"),
                    "storage-class-missing": ("extra_disk_class",), "pool-missing": ("ip_pool", "ip_pool_refs")}
+
+
+# 2.8.2 (décision 246) : constat d'une référence absente -> clé de ses faits
+# (`harvester-capi check`, capi_cluster.check) ; satisfaite par une
+# ressource que la phase Terraform de ce plan déclare (`terraform-ref-later`)
+DEPLOY_TF_REFS = {"image-missing": "image", "keypair-missing": "keypair", "pool-missing": "pool"}
+# genre de ressource des modèles -> type Terraform et clé des faits
+_DEPLOY_TF_REF_TYPES = {"harvester_image": "image", "harvester_ssh_key": "keypair", "harvester_ippool": "pool"}
+
+
+def _deploy_tf_declared(resources_by_template):
+    """{"image", "keypair", "pool"} -> références que les déclarations de la
+    phase Terraform créeront, lues dans leurs ressources rendues (jamais
+    devinées) : `ns/nom` et `ns/nom affiché` d'une image (les deux formes
+    qu'accepte `harvester-capi`, _image_facts), `ns/nom` d'une paire de clés,
+    nom d'un pool d'adresses (de portée cluster). Code libre : blocs
+    `resource` de ces types à nom littéral (tf_guard.resource_literals).
+    Espace de noms absent : `default`, comme le rendu des formulaires et le
+    défaut du provider Harvester."""
+    out = {"image": set(), "keypair": set(), "pool": set()}
+    for resources in (resources_by_template or {}).values():
+        for res in resources or []:
+            if not isinstance(res, dict):
+                continue
+            kind, spec = res.get("kind"), res.get("spec") or {}
+            if kind == "raw":
+                found = _tfg.resource_literals(spec.get("tf") if isinstance(spec.get("tf"), str) else "",
+                                               _DEPLOY_TF_REF_TYPES)
+            elif _KIND_TO_TF_TYPE.get(kind) in _DEPLOY_TF_REF_TYPES:
+                found = [(_KIND_TO_TF_TYPE[kind], {k: v for k, v in spec.items() if isinstance(v, str)})]
+            else:
+                continue
+            for rtype, attrs in found:
+                name = attrs.get("name")
+                if not name:
+                    continue
+                key = _DEPLOY_TF_REF_TYPES[rtype]
+                if key == "pool":
+                    out[key].add(name)
+                    continue
+                ns = attrs.get("namespace") or "default"
+                out[key].add(f"{ns}/{name}")
+                if key == "image":
+                    out[key].add(f"{ns}/{attrs.get('display_name') or name}")
+    return out
 
 
 def _tf_template_field_type(kind, path):
@@ -33585,6 +33631,7 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
     if not install and kc and _cluster_reachable(kc) is False:
         findings.append(_deploy_finding("cluster-unreachable", "plan", f"{cluster}: API not reachable"))
     decls = []
+    applied = {}                    # modèle -> ressources que la phase appliquera
     for entry in _dpl.plan_templates(plan) if tf_on else []:
         tname = entry["template"]
         try:
@@ -33596,6 +33643,11 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
         origin = (d or {}).get("origin") or {}
         match = bool(d) and origin.get("plan") == plan["name"] and origin.get("template") == tname
         decls.append({"name": dname, "template": tname, "exists": bool(d), "origin_match": match})
+        if match and not update_differing and tname in rendered and \
+                _deploy_resources_differ(rendered[tname], d.get("resources")):
+            applied[tname] = d.get("resources")      # gardée telle quelle (revue B2-I6)
+        elif match or not d:
+            applied[tname] = rendered.get(tname)
         if d and not match:
             findings.append(_deploy_finding("decl-name-taken", "terraform",
                                             f"{dname} exists and was not made by this plan and template"))
@@ -33619,7 +33671,8 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
         findings.append(_deploy_finding("readiness-later", "readiness",
                                         "readiness is checked again when the phase starts"))
     reg = _deploy_registry_prepare(kc, plan, values, install, findings, role=role)
-    capi = _deploy_capi_prepare(kc, plan, values, install, findings, role=role, later=reg["created_here"])
+    capi = _deploy_capi_prepare(kc, plan, values, install, findings, role=role, later=reg["created_here"],
+                                tf_declared=_deploy_tf_declared(applied))
     later = {s["name"] for s in capi["summary"] if not s.get("exists")}
     arts = _deploy_artefacts_prepare(kc, plan, values, install, findings, capi["entries"], cluster, later)
     gops = _deploy_gitops_prepare(kc, plan, values, install, findings, capi["entries"], arts["rows"], cluster,
@@ -33921,7 +33974,7 @@ def _deploy_offline_later(code, spec, later, plan, values):
     return False
 
 
-def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=()):
+def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=(), tf_declared=None):
     """Constats et contexte des phases capi et clusters (2.5.0), lecture
     seule : paquet actif, version de Harvester et pile (décisions 117,
     171), modèles et rendu de chaque entrée, clusters déjà présents (repris
@@ -34049,6 +34102,12 @@ def _deploy_capi_prepare(kc, plan, values, install, findings, role=None, later=(
         elif e and _deploy_offline_later(code, e["spec"], later, plan, values):
             f = dict(f, facts=dict(f.get("facts") or {}, check=code))
             code, level = "offline-later", "info"
+        if e and code in DEPLOY_TF_REFS and \
+                (f.get("facts") or {}).get(DEPLOY_TF_REFS[code]) in (tf_declared or {}).get(DEPLOY_TF_REFS[code], ()):
+            # 2.8.2 (décision 246) : créée par une déclaration de ce plan ;
+            # `before()` de la phase Clusters rejoue `check --many`
+            f = dict(f, facts=dict(f.get("facts") or {}, check=code))
+            code, level = "terraform-ref-later", "info"
         if tf_on and e and code in DEPLOY_REF_KEYS and any(
                 _bmp.variables_in(e["raw"].get(k)) for k in DEPLOY_REF_KEYS[code]):
             code, level = "refs-later", "info"

@@ -4,6 +4,34 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.8.2] - 2026-11-08 - Plan references made by its Terraform phase, Rancher agent bundle removed with the import
+
+### Fixed
+- **Plan refused when its Terraform phase creates what a cluster template
+  names** (decision 246, concern 2 of the 2.8.1 bench, `planbm281-small`
+  on harvlab2). On an existing Harvester cluster, the launch check blocked
+  on `image-missing`, `keypair-missing` or `pool-missing` when the image,
+  key pair or IP pool comes from a declaration of the same plan; only
+  references written with variables became `refs-later`. They are now
+  `terraform-ref-later` (information) when a declaration of the
+  Terraform phase creates them. The console reads its rendered resources
+  (`image`, `ssh_key`, `ippool`, or free code whose `resource` block of
+  type `harvester_image`, `harvester_ssh_key` or `harvester_ippool` has a
+  literal name, without `count` or `for_each`). An image matches by
+  `namespace/name` or `namespace/display name`, `default` when the
+  namespace is not written. A declaration kept with other values counts
+  with its own resources, an updated one with the rendered resources. The
+  Clusters phase replays the check before any creation and blocks if the
+  reference is still missing. Install chains are unchanged (no check
+  there). Five languages.
+
+### Tests
+- `test_deploy_tf_refs_later_282.py`: one case per resource kind and per
+  mismatch (namespace, name, display name, other kind), free code with a
+  literal name, `count` or a template, phase disabled, declaration kept or
+  updated, replay at the phase start (blocks, or creates once Terraform
+  made the image), and `tf_guard.resource_literals`.
+
 ## [2.8.1] - 2026-11-08 - Offline child clusters skip the package update, self-hosted registry warning
 
 ### Fixed

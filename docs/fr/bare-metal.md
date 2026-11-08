@@ -780,7 +780,18 @@ pour chaque cluster.
   avertissements de la fenêtre de création (un seul nœud de plan de
   contrôle, version non éprouvée...).
 - Information : `cluster-exists`, `capi-later`, `refs-later`,
-  `fleet-dhcp-leases`, `fleet-sizes`.
+  `terraform-ref-later`, `fleet-dhcp-leases`, `fleet-sizes`.
+
+`terraform-ref-later` (2.8.2) : l'image, la paire de clés ou le pool
+d'adresses qu'un modèle de cluster désigne manque, mais une déclaration de
+la phase Terraform de ce plan le crée. La console le lit dans les
+ressources rendues des modèles du plan (`image`, `ssh_key`, `ippool`, ou
+code libre dont le bloc `resource` a un nom littéral, sans `count` ni
+`for_each`). Une image se reconnaît à `namespace/nom` ou
+`namespace/nom affiché` ; sans espace de noms, c'est `default`. Une
+déclaration gardée avec d'autres valeurs compte avec ses propres
+ressources. La phase Clusters revérifie avant toute création et bloque si
+la référence manque encore.
 
 Un manque que la fenêtre de création signale seulement en avertissement
 bloque un plan : la chaîne tourne sans surveillance.

@@ -207,6 +207,7 @@ const BMPlans = (() => {
     'offline-disk-small': () => tr('dpw.f.offlineDiskSmall'),                       // 2.8.1
     'offline-node-packages': () => tr('dpw.f.offlineNodePackages'),                 // 2.8.1 (relecture I-1)
     'offline-later': () => tr('dpw.f.offlineLater'),                                // 2.8.1 (banc R12)
+    'terraform-ref-later': () => tr('dpw.f.terraformRefLater'),                     // 2.8.2 (décision 246)
   };
   const LEVELS = {
     blocking: () => tr('dpw.lvl.blocking'), warning: () => tr('dpw.lvl.warning'), info: () => tr('dpw.lvl.info'),

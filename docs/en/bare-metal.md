@@ -740,7 +740,17 @@ the stack version, and the per-cluster rules of the creation window.
   (an image still importing, its root disks not counted), and the warnings of the
   creation window (one control plane node, version not tested...).
 - Information: `cluster-exists`, `capi-later`, `refs-later`,
-  `fleet-dhcp-leases`, `fleet-sizes`.
+  `terraform-ref-later`, `fleet-dhcp-leases`, `fleet-sizes`.
+
+`terraform-ref-later` (2.8.2): the image, key pair or IP pool a cluster
+template names is missing, but a declaration of the Terraform phase of
+this plan creates it. The console reads it in the rendered resources of
+the plan templates (`image`, `ssh_key`, `ippool`, or free code whose
+`resource` block has a literal name, without `count` or `for_each`).
+An image matches by `namespace/name` or `namespace/display name`; a
+missing namespace means `default`. A declaration kept with other values
+counts with its own resources. The Clusters phase checks again before
+any creation and blocks if the reference is still missing.
 
 A shortage that the creation window only reports as a warning blocks a
 plan: the chain runs unattended.

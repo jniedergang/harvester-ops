@@ -592,6 +592,30 @@ def resource_types(text):
     return sorted({b.labels[0] for b in root.blocks if b.type == "resource" and b.labels})
 
 
+def resource_literals(text, types):
+    """[(type, {attribut: valeur})] des blocs `resource` de ces types (2.8.2,
+    décision 246) : seuls les attributs de premier niveau dont la valeur est
+    une chaîne littérale (sans gabarit `${...}`) ; un bloc à `count` ou
+    `for_each` est écarté (ses noms ne se lisent pas sans OpenTofu). Vide si
+    le code est illisible (check_resources le refuse alors)."""
+    try:
+        root, _streams = _parse(text or "")
+    except _Syntax:
+        return []
+    out = []
+    for b in root.blocks:
+        if b.type != "resource" or len(b.labels) != 2 or b.labels[0] not in types:
+            continue
+        if any(name in ("count", "for_each") for name, _line, _v in b.attrs):
+            continue
+        attrs = {}
+        for name, _line, vtoks in b.attrs:
+            if len(vtoks) == 1 and vtoks[0].kind == "str" and not vtoks[0].tmpl:
+                attrs[name] = vtoks[0].val
+        out.append((b.labels[0], attrs))
+    return out
+
+
 def check_header(text, file=HEADER_FILE):
     """Violations du fichier `_providers.tf` : `terraform { required_providers }`
     avec les sources embarquées et le bloc provider attendu, rien d'autre."""
