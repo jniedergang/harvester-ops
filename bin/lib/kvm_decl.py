@@ -79,13 +79,14 @@ def key_ref(name):
     return f"openbao:ssh-kvm/{name}#private_key"
 
 
-def key_path(state, value, purpose="ssh-kvm"):
+def key_path(state, value, purpose="ssh-kvm", identity=None):
     """Chemin de la clé d'un hôte : le fichier rangé sous l'état, ou une
     copie de travail sur tmpfs quand la déclaration porte une référence du
-    magasin de secrets (2.9.0)."""
+    magasin de secrets (2.9.0). `identity` (2.10.0) : identité de la
+    lecture, service par défaut."""
     if isinstance(value, str) and value.startswith("openbao:"):
         import secret_store
-        return Path(secret_store.path_of(value, purpose))
+        return Path(secret_store.path_of(value, purpose, identity=identity))
     return resolve(state, value)
 
 

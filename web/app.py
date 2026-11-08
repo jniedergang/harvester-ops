@@ -103,6 +103,7 @@ from flask import (
     Response,
     abort,
     g,
+    has_request_context,
     jsonify,
     redirect,
     render_template,
@@ -162,6 +163,7 @@ BIN_DIR = _resolve_bin_dir()
 if str(BIN_DIR / "lib") not in sys.path:
     sys.path.append(str(BIN_DIR / "lib"))
 import secret_store as _sst  # noqa: E402  (2.9.0 : magasin de secrets)
+import openbao_jwt as _oj  # noqa: E402  (2.10.0 : jeton OpenBao par personne)
 import secret_classes as _ssc  # noqa: E402  (2.9.0 : classes de secrets)
 # 2.9.0 : seule la configuration de la console désigne OpenBao. `VAULT_*` et
 # `BAO_*` hérités de l'environnement sont retirés du processus, donc de tous
@@ -682,7 +684,46 @@ def _sso_store():
     global _SSO_SESSIONS
     if _SSO_SESSIONS is None:
         _SSO_SESSIONS = _rs.Sessions(_identity_dir)
+    # 2.10.0 : rappels du jeton OpenBao de la personne (posés une fois)
+    if _sso_person_renewed not in getattr(_SSO_SESSIONS, "on_renewed", [_sso_person_renewed]):
+        _SSO_SESSIONS.on_renewed.append(_sso_person_renewed)
+    if _sso_person_closed not in getattr(_SSO_SESSIONS, "on_closed", [_sso_person_closed]):
+        _SSO_SESSIONS.on_closed.append(_sso_person_closed)
     return _SSO_SESSIONS
+
+
+# 2.10.0 : jeton OpenBao par personne. Le magasin de secrets ne connaît pas
+# Rancher : la console lui donne le jeton d'identité courant d'une session,
+# et ne le laisse créer un jeton de personne que dans une requête (le fil
+# d'une action ne lit jamais avec un jeton de personne, décision 282).
+def _sso_person_id_token(sid):
+    """Le jeton d'identité de la session `sid` (jamais le jeton d'accès,
+    point 280 : il porte un jeton Rancher valable sur tous les clusters de
+    la personne), ou None."""
+    sess = _sso_store().get(sid) if sid else None
+    if sess is None or getattr(sess, "kind", "sso") != "sso":
+        return None
+    return getattr(sess, "id_token", None) or None
+
+
+def _sso_person_renewed(sess):
+    """Rafraîchissement Rancher : reconnexion du jeton OpenBao de la personne
+    avec le NOUVEAU jeton d'identité, révocation de l'ancien ; sans jeton
+    d'identité, le jeton de personne est révoqué."""
+    if getattr(sess, "id_token", None):
+        _sst.PERSON_TOKENS.renew(sess.sid, sess.id_token)
+    else:
+        _sst.PERSON_TOKENS.drop(sess.sid)
+
+
+def _sso_person_closed(sess):
+    """Déconnexion, session fermée, rafraîchissement refusé : revoke-self et
+    purge du cache des personnes pour cette entité."""
+    _sst.PERSON_TOKENS.drop(sess.sid)
+
+
+_sst.PERSON_TOKENS.guard = has_request_context
+_sst.PERSON_TOKENS.id_token = _sso_person_id_token
 
 
 def _sso_http(s):
@@ -1594,18 +1635,47 @@ def _secret_actor():
         return None
 
 
-def _secret_put(cls, path, field, value):
+def _secret_identity(cls):
+    """2.10.0 : identité de lecture (ou d'écriture) d'un secret de la classe
+    `cls` pour la requête en cours, table « Qui agit » du plan
+    (openbao_jwt.identity_for) : jeton de la personne pour une classe
+    personnelle d'une session Rancher par connexion unique quand le réglage
+    est allumé, service sinon. Hors requête (fil d'une action, tâche de
+    fond) : service, toujours."""
+    if not has_request_context():
+        return _sst.SERVICE
+    actor = _secret_actor()
+    try:
+        st = _sst.store()
+        settings = st.settings if st.active() else {}
+    except Exception:                          # noqa: BLE001 : réglages illisibles = service
+        return _sst.Identity("service", actor)
+    return _oj.identity_for(cls, _sso_session(), settings, actor=actor)
+
+
+def _person_token_enabled():
+    try:
+        st = _sst.store()
+        return st.active() and _oj.settings_of(st.settings)["enabled"]
+    except Exception:                          # noqa: BLE001
+        return False
+
+
+def _secret_put(cls, path, field, value, identity=None):
     """2.9.0 tâche 8 : écrit un secret nouveau dans OpenBao quand sa classe
     est migrée et rend sa référence ; None quand la classe est locale (ou
     pour une valeur de plus de 1 Mio, qui reste locale pour ce nom) :
     l'appelant écrit alors en local comme avant. SecretError si OpenBao
-    refuse (gestionnaire 503)."""
+    refuse (gestionnaire 503). 2.10.0 : `identity` (défaut : celle de la
+    requête pour cette classe)."""
     if not _secret_migrated(cls):
         return None
     if isinstance(value, bytes):
         value = value.decode()
+    if identity is None:
+        identity = _secret_identity(cls)
     try:
-        return _sst.store().put(cls, path, field, value, actor=_secret_actor())
+        return _sst.store().put(cls, path, field, value, identity=identity)
     except _sst.SecretError as e:
         if e.code == "secret-too-big":
             return None
@@ -1739,6 +1809,11 @@ class ActionRun:
         # à-dire exactement là où les gestes sont les plus lourds.
         self.identity_env = {}
         self.cluster_user = None
+        # 2.10.0 : identité des lectures de secrets de l'action, figée au
+        # déclenchement : « person » (jeton de la personne), « service »,
+        # « late-service » (lecture tardive inévitable faite par le
+        # service) ; None : aucun secret personnel lu, ou réglage éteint
+        self.secret_identity = None
         self.status = "starting"      # starting | running | done | error | cancelled
         self.exit_code = None
         # v1.6.5: last meaningful error line (kubectl stderr / script stderr)
@@ -1888,6 +1963,8 @@ class ActionRun:
             # Sous quelle identité le cluster a vu cette action. None quand la
             # délégation est éteinte : l'action a employé le kubeconfig partagé.
             "cluster_user": self.cluster_user,
+            # 2.10.0 : « person », « service » ou « late-service » (sans valeur)
+            "secret_identity": self.secret_identity,
             # v1.46.0 : progression d'un transfert (dernier point par phase)
             "progress": dict(self.progress),
             "progress_current": self.progress_last,
@@ -2017,6 +2094,12 @@ def _actions_init_db():
         conn.execute("ALTER TABLE actions ADD COLUMN parent TEXT")
     except sqlite3.OperationalError:
         pass
+    # 2.10.0 : identité des lectures de secrets (person, service,
+    # late-service) ; même migration additive, à chaud
+    try:
+        conn.execute("ALTER TABLE actions ADD COLUMN secret_identity TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("CREATE INDEX IF NOT EXISTS actions_parent ON actions(parent)")
     conn.execute("CREATE INDEX IF NOT EXISTS actions_started ON actions(started_at DESC)")
     # v1.6.0: compound index for "recent actions per cluster" lookup
@@ -2046,8 +2129,8 @@ def _actions_persist(run):
     conn.execute("""
         INSERT INTO actions(id, action, cluster, status, exit_code,
                             started_at, ended_at, dry_run, cmd, events,
-                            error_summary, result, undo, parent)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            error_summary, result, undo, parent, secret_identity)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
             exit_code=excluded.exit_code,
@@ -2055,11 +2138,12 @@ def _actions_persist(run):
             events=excluded.events,
             error_summary=excluded.error_summary,
             result=excluded.result,
-            undo=excluded.undo
+            undo=excluded.undo,
+            secret_identity=excluded.secret_identity
     """, (run.id, run.action, run.cluster, run.status, run.exit_code,
           run.started_at, run.ended_at, int(bool(run.dry_run)),
           cmd_str, events_json, run.error_summary, result_json, undo_json,
-          getattr(run, "parent", None)))
+          getattr(run, "parent", None), getattr(run, "secret_identity", None)))
     conn.commit()
     _actions_purge(conn)
     conn.close()
@@ -2141,6 +2225,8 @@ def _actions_load_history():
             run.ended_at = row["ended_at"]
             if "error_summary" in row.keys():
                 run.error_summary = row["error_summary"]
+            if "secret_identity" in row.keys():
+                run.secret_identity = row["secret_identity"]
             # An action still flagged running at startup was killed by the restart.
             if run.status in ("starting", "running") and not run.ended_at:
                 run.status = "interrupted"
@@ -2198,7 +2284,7 @@ _actions_load_history()
 # /api/action/<id> and /api/stream/<id> for runs no longer in memory.
 _ACTIONS_LIST_COLUMNS = ("id", "action", "cluster", "status", "exit_code",
                          "started_at", "ended_at", "dry_run", "error_summary",
-                         "result", "undo", "parent")
+                         "result", "undo", "parent", "secret_identity")
 
 
 _FOLDER_RESUMABLE = ("error", "interrupted")
@@ -2360,8 +2446,10 @@ def run_action_thread(run: ActionRun):
 
     secret_env, secret_map = {}, None
     try:
-        secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
-                                                   getattr(run, "secret_refs", ()), getattr(run, "secret_files", None))
+        with _late_reads(run):
+            secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
+                                                       getattr(run, "secret_refs", ()),
+                                                       getattr(run, "secret_files", None), identity=_sst.SERVICE)
         run.proc = subprocess.Popen(
             run.cmd,
             stdout=subprocess.PIPE,
@@ -2493,6 +2581,13 @@ def start_action(action, cluster, dry_run=False, interactive=False,
     _ident = current_cluster_identity()
     run.identity_env = identity_env(cluster=cluster)
     run.cluster_user = (_ident or {}).get("user")
+    try:
+        _freeze_person_secrets(run)            # 2.10.0 : secrets personnels lus ICI, avec la personne
+    except _sst.SecretError:
+        run.status = "cancelled"               # jamais lancée : rien à persister
+        run._closed = True
+        metric_actions_in_flight.dec()
+        raise
     with ACTIONS_LOCK:
         # Contrôle et inscription sous le même verrou : deux requêtes
         # simultanées ne peuvent pas passer toutes les deux.
@@ -3268,7 +3363,9 @@ def logout_local():
 def _sso_start(st, server_id):
     state, nonce, challenge, browser = _SSO_PENDING.start(_safe_next(request.args.get("next")),
                                                           server=server_id)
-    resp = redirect(_rs.authorize_url(st, _sso_redirect_uri(st), state, nonce, challenge))
+    # 2.10.0 : `groups` demandé seulement si la découverte l'annonce
+    resp = redirect(_rs.authorize_url(st, _sso_redirect_uri(st), state, nonce, challenge,
+                                      supported=_rs.scopes_supported(_sso_http(st), st)))
     resp.set_cookie(_rs.PENDING_COOKIE, browser, max_age=_rs.PENDING_TTL, httponly=True,
                     secure=_sso_cookie_secure(st), samesite="Lax", path="/auth/rancher")
     return resp
@@ -3328,7 +3425,8 @@ def sso_callback():
         app.logger.warning("Rancher sign-in refused: %s %s", e.code, e.detail)
         return redirect("/login?error=" + e.code)
     sess = _sso_store().open(ident, _rs.console_role(st, ident), tok["access_token"],
-                             tok["refresh_token"], st["session_seconds"], server_id=server_id)
+                             tok["refresh_token"], st["session_seconds"], server_id=server_id,
+                             id_token=tok["id_token"])
     _sso_start_renewer()
     app.logger.info("Rancher sign-in: %s (%s)", sess.login, sess.role)
     resp = redirect(pending.get("next") or "/")
@@ -3637,16 +3735,25 @@ def api_rancher_sso_register(server_id):
     x, st, admin, _ = got
     from urllib.parse import urlparse as _up
     name = (x.get("sso") or {}).get("oidc_client") or _radm.oidc_client_name(_up(redirect_uri).hostname)
+    # 2.10.0 : la portée `groups` ajoutée au client seulement si la
+    # découverte de ce Rancher l'annonce (Rancher 2.14.1 ne l'a pas)
+    groups = False
+    try:
+        groups = "groups" in _rs.scopes_supported(_sso_http(st), st)
+    except Exception:  # noqa: BLE001 : la découverte ne bloque pas l'enregistrement
+        groups = False
     try:
         with admin:
-            client_id, secret = _radm.register_oidc(admin, name, redirect_uri,
-                                                    refresh_seconds=int(x["session_hours"]) * 3600)
+            client_id, secret = _radm.register_oidc(
+                admin, name, redirect_uri, refresh_seconds=int(x["session_hours"]) * 3600,
+                scopes=["openid", "profile", "offline_access", "groups"] if groups else None)
     except _radm.AdminError as e:
         app.logger.warning("Rancher SSO registration on %s refused: %s", server_id, e)
         return jsonify({"error": str(e)}), e.status
     _RANCHER_STORE.set_sso(load_config(), server_id, client_id, secret, redirect_uri, name)
     app.logger.info("Rancher SSO registered by %s on %s: client %s", current_user(), server_id, client_id)
-    return jsonify({"client_id": client_id, "redirect_uri": redirect_uri, "oidc_client": name})
+    return jsonify({"client_id": client_id, "redirect_uri": redirect_uri, "oidc_client": name,
+                    "groups_scope": groups})
 
 
 @app.route("/api/rancher/servers/<server_id>/sso/unregister", methods=["POST"])
@@ -9345,15 +9452,96 @@ def _cluster_kubeconfig_path(cluster, purpose="kubectl", missing_ok=False):
         return None
 
 
-def _cluster_ssh_key_path(ssh, purpose="ssh-cluster"):
+def _cluster_ssh_key_path(ssh, purpose="ssh-cluster", identity=None):
     """Chemin de la clé SSH d'un cluster (bloc `ssh` de son entrée), seul
     lecteur du champ `ssh.key` (2.9.0) : le fichier rangé, ou une copie
-    tmpfs quand le champ porte une référence du magasin de secrets."""
+    tmpfs quand le champ porte une référence du magasin de secrets.
+    2.10.0 : `identity` (défaut : celle de la requête pour `ssh-cluster`,
+    service hors requête)."""
     key = (ssh or {}).get("key")
-    return _sst.path_of(key, purpose) if key else key
+    if not key:
+        return key
+    return _sst.path_of(key, purpose, identity=identity if identity is not None else _secret_identity("ssh-cluster"))
 
 
-def _spawn_secret_env(clusters, refs=(), files=None):
+def _action_secret_refs(clusters, refs=()):
+    """Références des secrets qu'une action remet à son outil : clés des
+    hôtes KVM (`kvm:<hôte>`), `refs` (réplication), kubeconfig et clé SSH
+    des clusters nommés. Sans lecture de valeur."""
+    names = {c for c in clusters or () if c}
+    out = list(refs or ())
+    for n in sorted(names):
+        if n.startswith("kvm:") and _kvm_check_host(n[4:]):
+            try:
+                v = _kd.load(_state_dir(), n[4:]).get("ssh_key")
+            except (OSError, ValueError):
+                v = None
+            if isinstance(v, str) and _sst.is_ref(v):
+                out.append(v)
+    for entry in load_config_ro().get("clusters", []):
+        if entry.get("name") not in names:
+            continue
+        for v in (entry.get("kubeconfig"), (entry.get("ssh") or {}).get("key")
+                  if isinstance(entry.get("ssh"), dict) else None):
+            if isinstance(v, str) and _sst.is_ref(v):
+                out.append(v)
+    return list(dict.fromkeys(out))
+
+
+def _freeze_person_secrets(run):
+    """2.10.0 (tâche 5) : les secrets PERSONNELS que l'action remettra à son
+    outil sont lus ICI, dans la requête qui la déclenche, avec l'identité de
+    la personne (son jeton OpenBao juge la lecture), puis tenus par le bail
+    de l'action ; le fil de travail les trouve dans `secret_files` et ne lit
+    plus rien avec un jeton de personne. Un refus d'OpenBao remonte
+    (SecretError) : l'action n'est pas lancée, aucune relecture par le
+    service. Pose `run.secret_identity` quand le jeton par personne est
+    allumé (rien sinon : comportement 2.9.x)."""
+    if not has_request_context() or not _sst.is_active() or not _person_token_enabled():
+        return
+    import secret_classes as _scl
+    files = run.secret_files if isinstance(getattr(run, "secret_files", None), dict) else {}
+    used = set()
+    for ref in _action_secret_refs([run.cluster, *getattr(run, "secret_clusters", ())],
+                                   getattr(run, "secret_refs", ())):
+        try:
+            cls = _sst.parse_ref_full(ref)[1]
+        except ValueError:
+            continue
+        if not _scl.is_person(cls):
+            continue
+        idt = _secret_identity(cls)
+        if idt.kind != "person":
+            used.add("service")
+            continue
+        if ref not in files:
+            files[ref] = str(_sst.store().shared_file(ref, "tool", identity=idt))
+            run.hold_secrets(files[ref])
+        used.add("person")
+    run.secret_files = files
+    if used:
+        run.secret_identity = "person" if "person" in used else "service"
+
+
+@contextlib.contextmanager
+def _late_reads(run):
+    """2.10.0 : dans le fil d'une action dont les secrets personnels ont été
+    lus avec le jeton de la personne, une lecture inévitable faite ensuite
+    par le service (copie absente, cache échu) est marquée `late-service`
+    dans l'action et dans une étape (sans valeur)."""
+    if getattr(run, "secret_identity", None) not in ("person", "late-service"):
+        yield
+        return
+
+    def mark(cls, path):
+        run.secret_identity = "late-service"
+        run.emit({"type": "step", "step_id": "secrets", "status": "warn",
+                  "message": f"secret {cls}/{path} read late by the service identity", "ts": time.time()})
+    with _sst.action_reads(mark):
+        yield
+
+
+def _spawn_secret_env(clusters, refs=(), files=None, identity=None):
     """Revue I6 : un outil lancé par la console ne se connecte pas à OpenBao.
     Pour les clusters de l'action dont le kubeconfig ou la clé SSH porte une
     référence, la console remet des copies de travail tmpfs (tenues par le
@@ -9366,34 +9554,18 @@ def _spawn_secret_env(clusters, refs=(), files=None):
         return {}, None
     # 2.9.0 tâche 8 : `kvm:<hôte>` remet la clé de l'hôte KVM ; `refs` des
     # références de plus (secrets de la réplication) ; `files` des copies
-    # déjà écrites par l'appelant ({référence: chemin}, clé d'un hôte ajouté)
-    names = {c for c in clusters or () if c}
-    wanted = list(refs or ())
-    for n in sorted(names):
-        if n.startswith("kvm:") and _kvm_check_host(n[4:]):
-            try:
-                v = _kd.load(_state_dir(), n[4:]).get("ssh_key")
-            except (OSError, ValueError):
-                v = None
-            if isinstance(v, str) and _sst.is_ref(v):
-                wanted.append(v)
+    # déjà écrites par l'appelant ({référence: chemin}, clé d'un hôte ajouté,
+    # 2.10.0 : secrets personnels lus au déclenchement). Appelé dans le fil
+    # de l'action : `identity` est celle du service (jamais une personne).
+    idt = identity if identity is not None else _sst.SERVICE
+    wanted = _action_secret_refs(clusters, refs)
     refs = dict(files or {})
     for v in wanted:
         if v not in refs:
             try:
-                refs[v] = str(_sst.store().shared_file(v, "tool"))
+                refs[v] = str(_sst.store().shared_file(v, "tool", identity=idt))
             except (_sst.SecretError, _sst.SecretMissing) as e:
                 log.warning("secret %s not handed to the tool: %s", v.split("#")[0], getattr(e, "code", e))
-    for entry in load_config_ro().get("clusters", []):
-        if entry.get("name") not in names:
-            continue
-        for v in (entry.get("kubeconfig"), (entry.get("ssh") or {}).get("key")
-                  if isinstance(entry.get("ssh"), dict) else None):
-            if isinstance(v, str) and _sst.is_ref(v) and v not in refs:
-                try:
-                    refs[v] = str(_sst.store().shared_file(v, "tool"))
-                except (_sst.SecretError, _sst.SecretMissing) as e:
-                    log.warning("secret of %s not handed to the tool: %s", entry.get("name"), e)
     if not refs:
         return {}, None
     mp = _sst.write_private_copy(_sst.secret_files_dir(_sst.store().settings), "secret-files",
@@ -10411,7 +10583,7 @@ def _vms_all_kvm():
         return [], []
     state = _state_dir()
     decls = _kd.load_all(state)
-    hosts = [_kh.VirshHost(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
+    hosts = [_kvm_virsh(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
     entries = _kvm_cli.read_all(hosts, deadline=KVM_READ_DEADLINE, folders=True) if hosts else []
     sources, rows = [], []
     for inv in entries:
@@ -11506,7 +11678,7 @@ def _check_kvm_objects(objs):
     state = _state_dir()
     for host, items in sorted(by_host.items()):
         try:
-            vh = _kh.VirshHost(_kd.load(state, host), state, timeout=KVM_READ_TIMEOUT)
+            vh = _kvm_virsh(_kd.load(state, host), state, timeout=KVM_READ_TIMEOUT)
             res = vh.batch({f"d{i}": ("dominfo", "--domain", o["domain"]) for i, o in enumerate(items)},
                            idempotent=True)
         except Exception as e:  # noqa: BLE001 : hôte injoignable, clé refusée...
@@ -12528,6 +12700,21 @@ def _kvm_public(decl):
     return {k: d.get(k) for k in ("name", "address", "port", "user", "uri", "labels")}
 
 
+def _kvm_virsh(decl, state, identity=None, **kw):
+    """VirshHost d'une déclaration. 2.10.0 : quand la lecture de la clé de
+    l'hôte (`ssh-kvm`) se fait avec le jeton de la personne, la clé est lue
+    ICI, dans la requête, et remise à l'objet : les fils d'une lecture
+    parallèle ne relisent pas le magasin (ils n'ont pas de contexte de
+    requête). Service : lecture paresseuse de la 2.9.x."""
+    idt = identity if identity is not None else _secret_identity("ssh-kvm")
+    key = None
+    if idt.kind == "person" and isinstance(decl, dict) and _sst.is_ref(decl.get("ssh_key")):
+        key = _kd.key_path(state, decl["ssh_key"], identity=idt)
+    if key is not None:
+        kw["key_path"] = key
+    return _kh.VirshHost(decl, state, **kw)
+
+
 def _kvm_host(state, name):
     """(VirshHost, None) d'un hôte déclaré, ou (None, réponse d'erreur)."""
     if not _kvm_check_host(name):
@@ -12538,7 +12725,7 @@ def _kvm_host(state, name):
         return None, _kvm_err(f"host {name} is not declared", 404)
     except _kd.DeclError as e:
         return None, _kvm_err(str(e), 500)
-    return _kh.VirshHost(decl, state, timeout=KVM_READ_TIMEOUT), None
+    return _kvm_virsh(decl, state, timeout=KVM_READ_TIMEOUT), None
 
 
 def _kvm_read_all(details=False):
@@ -12547,7 +12734,7 @@ def _kvm_read_all(details=False):
     state = _state_dir()
     warnings = []
     decls = _kd.load_all(state, warn=warnings.append)
-    hosts = [_kh.VirshHost(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
+    hosts = [_kvm_virsh(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
     entries = _kvm_cli.read_all(hosts, details=details, deadline=KVM_READ_DEADLINE) if hosts else []
     public = {d["name"]: _kvm_public(d) for d in decls}
     return [dict(public.get(e["name"], {}), **e) for e in entries], warnings
@@ -18161,6 +18348,15 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     run.secret_clusters = tuple(c for c in (*(busy_clusters or ()), *(secret_clusters or ())) if c)
     run.secret_refs = tuple(secret_refs or ())
     run.secret_files = dict(secret_files or {})
+    try:
+        _freeze_person_secrets(run)            # 2.10.0 : secrets personnels lus ICI, avec la personne
+    except _sst.SecretError:
+        run.status = "cancelled"               # jamais lancée : rien à persister
+        run._closed = True
+        metric_actions_in_flight.dec()
+        if spec_file:
+            Path(spec_file).unlink(missing_ok=True)
+        raise
     if setup is not None:
         setup(run)
     with ACTIONS_LOCK:
@@ -24030,8 +24226,10 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
         # dans le try : une erreur ici (disque plein) laissait l'action
         # « running » pour toujours
         out_file = tempfile.TemporaryFile() if capture and sink is None else None
-        secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
-                                                   getattr(run, "secret_refs", ()), getattr(run, "secret_files", None))
+        with _late_reads(run):
+            secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
+                                                       getattr(run, "secret_refs", ()),
+                                                       getattr(run, "secret_files", None), identity=_sst.SERVICE)
         proc = subprocess.Popen(cmd, stdout=out_file or (subprocess.PIPE if sink is not None else subprocess.DEVNULL),
                                 stderr=subprocess.PIPE, text=True,
                                 **({"env": {**os.environ, **secret_env}} if secret_env else {}))
@@ -28848,16 +29046,20 @@ def _tf_private_write(path, data):
         f.write(data)
 
 
-def _tf_kvm_stage(ws, host_decl):
+def _tf_kvm_stage(ws, host_decl, identity=None):
     """Clé de l'hôte et empreinte épinglée, copiées en 0600 dans l'espace le
     temps d'une exécution, et le script ssh strict qui les utilise (le
-    provider le lance par l'URI ; ni clé ni chemin dans argv de tofu)."""
+    provider le lance par l'URI ; ni clé ni chemin dans argv de tofu).
+    2.10.0 : `identity` de la lecture de la clé (service dans le fil de
+    l'action : la copie lue au déclenchement par la personne est servie)."""
     state = _state_dir()
+    idt = identity if identity is not None else _secret_identity("ssh-kvm")
     for rel, name in ((host_decl["ssh_key"], _tfk.KEY_FILE),
                       (host_decl["known_hosts"], _tfk.KNOWN_FILE)):
         # 2.9.0 : la clé de l'hôte par le magasin de secrets (référence) ou
         # son fichier rangé sous l'état
-        src = _kd.key_path(state, rel, "tf-kvm-ssh") if name == _tfk.KEY_FILE else _kd.resolve(state, rel)
+        src = (_kd.key_path(state, rel, "tf-kvm-ssh", identity=idt) if name == _tfk.KEY_FILE
+               else _kd.resolve(state, rel))
         if name == _tfk.KEY_FILE and _sst.is_active():
             # revue I4 : OpenBao actif, la clé reste sur tmpfs ; l'espace
             # (disque) n'en porte qu'un lien, retiré avec elle au déstockage
@@ -28931,7 +29133,7 @@ def _tf_kvm_check_bases(host_decl, rendered):
     if not wanted:
         return None
     try:
-        vh = _kh.VirshHost(host_decl, _state_dir(), timeout=KVM_READ_TIMEOUT)
+        vh = _kvm_virsh(host_decl, _state_dir(), identity=_sst.SERVICE, timeout=KVM_READ_TIMEOUT)
         cat = _ks.list_images(vh, vh.decl, {}, fresh=True)
     except (_ko.OpError, _kh.KvmError) as e:
         return f"host {host_decl['name']}: the image catalogue cannot be read ({getattr(e, 'kind', 'failed')})"
@@ -28981,9 +29183,11 @@ except Exception as _e:          # noqa: BLE001 : le démarrage passe
     log_tf.warning("Terraform workspace repair failed: %s", _e)
 
 
-def _tf_kvm_secret(ws, var):
+def _tf_kvm_secret(ws, var, identity=None):
     """Le jeton d'une variable sensible, tiré une fois et gardé dans
-    `<espace>/.secrets/<variable>` (0600) ; jamais rendu par l'API."""
+    `<espace>/.secrets/<variable>` (0600) ; jamais rendu par l'API.
+    2.10.0 : `identity` de la lecture et de l'écriture (`tf-kvm`)."""
+    idt = identity if identity is not None else _secret_identity("tf-kvm")
     d = ws / _tfk.SECRETS_DIR
     d.mkdir(mode=0o700, exist_ok=True)
     os.chmod(d, 0o700)
@@ -28994,13 +29198,39 @@ def _tf_kvm_secret(ws, var):
         # 2.9.0 tâche 8 : classe tf-kvm migrée -> le jeton va dans OpenBao, le
         # fichier porte sa référence (`<hôte>/<décl>/<variable>`)
         if ws.parent.name == "decls" and ws.parent.parent.parent.name == ".kvm":
-            ref = _secret_put("tf-kvm", f"{ws.parent.parent.name}/{ws.name}/{var}", "value", value)
+            ref = _secret_put("tf-kvm", f"{ws.parent.parent.name}/{ws.name}/{var}", "value", value, identity=idt)
         _tf_private_write(f, ((ref + "\n") if ref else value).encode())
     # 2.9.0 : le fichier peut porter la référence du secret migré dans OpenBao
-    return _sst.resolve_value(f.read_text().strip())
+    return _sst.resolve_value(f.read_text().strip(), identity=idt)
 
 
-def _tf_kvm_env(ws, rendered):
+def _tf_kvm_prefetch(decl, rendered, identities):
+    """2.10.0 (tâche 5) : d'une déclaration KVM lancée par une personne, la
+    clé de l'hôte (`ssh-kvm`) et les jetons des variables (`tf-kvm`) sont
+    lus au déclenchement avec SON jeton ; le fil de l'action reçoit ensuite
+    la copie partagée et le cache commun. Rend « person », « service » ou
+    None (réglage éteint). SecretError si OpenBao refuse la personne."""
+    if not identities or not _sst.is_active() or not _person_token_enabled():
+        return None
+    host_decl, herr = _tf_kvm_host(decl["cluster"])
+    if herr:
+        return None                            # le fil le dira (preflight)
+    marks = set()
+    idt_key, idt_tf = identities.get("ssh-kvm"), identities.get("tf-kvm")
+    if idt_key is not None and _sst.is_ref(host_decl.get("ssh_key")):
+        if idt_key.kind == "person":
+            _kd.key_path(_state_dir(), host_decl["ssh_key"], "tf-kvm-ssh", identity=idt_key)
+        marks.add(idt_key.kind)
+    if idt_tf is not None and _tfk.token_vars(rendered):
+        if idt_tf.kind == "person":
+            ws = _tf_decl_ws(decl)
+            for var in _tfk.token_vars(rendered):
+                _tf_kvm_secret(ws, var, identity=idt_tf)
+        marks.add(idt_tf.kind)
+    return "person" if "person" in marks else ("service" if marks else None)
+
+
+def _tf_kvm_env(ws, rendered, identity=None):
     """Variables d'environnement d'une exécution KVM : TMPDIR privé (le
     provider y écrit les ISO cloud-init, en 0644, jeton compris) et le jeton
     de chaque modèle RKE2 en TF_VAR_<variable>."""
@@ -29009,7 +29239,7 @@ def _tf_kvm_env(ws, rendered):
     os.chmod(tmp, 0o700)
     env = {"TMPDIR": str(tmp)}
     for var in _tfk.token_vars(rendered):
-        env[f"TF_VAR_{var}"] = _tf_kvm_secret(ws, var)
+        env[f"TF_VAR_{var}"] = _tf_kvm_secret(ws, var, identity=identity)
     return env
 
 
@@ -30871,7 +31101,7 @@ class TfLaunchError(Exception):
 
 
 def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster_user=None,
-                    target_kind="harvester", holder=None, role=None, parent=None):
+                    target_kind="harvester", holder=None, role=None, parent=None, secret_identities=None):
     """Lance plan, apply ou destroy d'une déclaration gardée par la console,
     en action suivie ; rend (identifiant de l'action, empreinte du contenu).
     `mode` : plan | apply | destroy | destroy-plan. 2.3.0 : `target_kind`
@@ -30884,7 +31114,10 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
     plan l'appelle depuis son fil. Refus : TfLaunchError(statut, corps).
     `role` : rôle de qui a déclenché (figé comme `user`) ; les routes et la
     chaîne le passent toujours, None = appelant local (_tf_role_refusal).
-    Rôle et tf_guard sont contrôlés ICI : la chaîne d'un plan y passe aussi."""
+    Rôle et tf_guard sont contrôlés ICI : la chaîne d'un plan y passe aussi.
+    2.10.0 : `secret_identities` ({classe: Identity}, figées par la route)
+    pour lire au déclenchement les secrets personnels d'une cible KVM ; None
+    (chaîne d'un plan, appelant local) : service."""
     decl = TF_DECLS.get(decl_id)
     if decl is None:
         raise TfLaunchError(404, {"error": "declaration not found", "id": decl_id})
@@ -30923,6 +31156,13 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
     if target_kind == "kvm" and (not _tf_libvirt_binary() or not _tf_libvirt_version()):
         raise TfLaunchError(503, {"error": "the libvirt Terraform provider is not installed",
                                   "hint": "it ships with the harvester-ops package; see the Installation tab"})
+    secret_identity = None
+    if target_kind == "kvm" and secret_identities:
+        try:
+            secret_identity = _tf_kvm_prefetch(decl, rendered, secret_identities)
+        except _sst.SecretError as e:
+            raise TfLaunchError(_SECRET_ERROR_STATUS.get(e.code, 503),
+                                {"error": str(e)[:300], "code": e.code}) from None
     with TF_DECL_RUNNING_LOCK:
         if _tf_decl_busy(decl["id"], holder):
             raise TfLaunchError(409, {"error": "this declaration is already running",
@@ -30940,6 +31180,7 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
     run = ActionRun(run_id, f"{label}:{decl['name']}:{len(rendered)}", cluster, [],
                     dry_run=mode in ("plan", "destroy-plan"))
     run.cluster_user = cluster_user
+    run.secret_identity = secret_identity
     user = user or ""
     # v1.55.0 : l'historique d'une déclaration retrouve ses actions par là.
     run.result = {"declaration_id": decl["id"], "by": user, "mode": mode}
@@ -30959,7 +31200,9 @@ def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harv
         run_id, h = _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=plan_hash,
                                     user=current_user() or "",
                                     cluster_user=(current_cluster_identity() or {}).get("user"),
-                                    target_kind=target_kind, role=current_role())
+                                    target_kind=target_kind, role=current_role(),
+                                    secret_identities={c: _secret_identity(c) for c in ("ssh-kvm", "tf-kvm")}
+                                    if target_kind == "kvm" else None)
     except TfLaunchError as e:
         return jsonify(e.payload), e.status
     return jsonify({"action_id": run_id, "plan_hash": h}), 201
@@ -31035,14 +31278,16 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
             return _close_err(run, "preflight", herr[0])
         try:
             header = _tfk.header(host_decl)
-            _tf_kvm_stage(ws, host_decl)
+            with _late_reads(run):
+                _tf_kvm_stage(ws, host_decl, identity=_sst.SERVICE)
         except _tfk.SpecError as e:
             return _close_err(run, "preflight", str(e))
         except (OSError, _kd.DeclError):
             return _close_err(run, "preflight", f"host {cluster}: its SSH key or pinned host key "
                                                 "cannot be read in the console state")
         (ws / "_providers.tf").write_text(header)
-        env, drop = _tf_kvm_env(ws, rendered), ("SSH_AUTH_SOCK",)
+        with _late_reads(run):
+            env, drop = _tf_kvm_env(ws, rendered, identity=_sst.SERVICE), ("SSH_AUTH_SOCK",)
         kcp = ""
         why = _tf_kvm_preflight(ws, host_decl, env)
         if why:

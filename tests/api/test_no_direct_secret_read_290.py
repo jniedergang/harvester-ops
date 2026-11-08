@@ -36,7 +36,7 @@ _BIN_TOOLS_MATERIALIZED = {
 ALLOWED = {
     "kubeconfig": _BIN_TOOLS_MATERIALIZED | {
         ("web/app.py", "_cluster_kubeconfig_path"),          # le lecteur
-        ("web/app.py", "_spawn_secret_env"),                 # référence remise à un outil (revue I6)
+        ("web/app.py", "_action_secret_refs"),               # références remises à un outil (revue I6, 2.10.0)
         ("web/app.py", "_replication_secret_refs"),          # références remises au suiveur (2.9.0 tâche 8)
         ("web/app.py", "_cluster_of_kubeconfig"),            # comparaison, puis le lecteur
         ("web/app.py", "_registry_console_address"),         # présence, puis le lecteur
@@ -50,7 +50,7 @@ ALLOWED = {
     },
     "ssh-key": {
         ("web/app.py", "_cluster_ssh_key_path"),             # le lecteur
-        ("web/app.py", "_spawn_secret_env"),                 # référence remise à un outil (revue I6)
+        ("web/app.py", "_action_secret_refs"),               # références remises à un outil (revue I6, 2.10.0)
         ("web/app.py", "_replication_secret_refs"),          # références remises au suiveur (2.9.0 tâche 8)
         ("web/app.py", "api_network_fabric_node_detail"), ("web/app.py", "_fabric_ssh_base"),  # présence
         ("web/app.py", "_bm_join_pubkey"),                   # drapeau `generated`, puis le lecteur

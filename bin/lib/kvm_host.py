@@ -266,16 +266,18 @@ def control_path(decl, state):
     return path
 
 
-def _ssh_base(decl, state, control=True):
+def _ssh_base(decl, state, control=True, key=None):
     """ssh et ses options pour une déclaration, sans destination.
     `control=False` : connexion propre (ControlPath=none), le chemin du
-    socket maître n'est alors ni calculé ni contrôlé."""
+    socket maître n'est alors ni calculé ni contrôlé. `key` (2.10.0) : clé
+    déjà lue par l'appelant (copie de travail obtenue avec le jeton de la
+    personne au déclenchement) ; None : lue ici, identité de service."""
     name = decl.get("name") if isinstance(decl, dict) else "?"
     why = kvm_decl.check_decl(kvm_decl.normalize(decl)) if isinstance(decl, dict) else "not a mapping"
     if why:
         raise KvmError("failed", f"{name}: failed: invalid declaration: {why}", host=name)
     try:
-        key = kvm_decl.key_path(state, decl["ssh_key"])
+        key = key or kvm_decl.key_path(state, decl["ssh_key"])
         known = kvm_decl.resolve(state, decl["known_hosts"])
     except kvm_decl.DeclError as e:
         raise KvmError("failed", f"{name}: failed: invalid declaration: {e}", host=name) from None
@@ -302,7 +304,7 @@ def _ssh_base(decl, state, control=True):
     ]
 
 
-def ssh_argv(decl, state, remote_argv, fresh=False):
+def ssh_argv(decl, state, remote_argv, fresh=False, key=None):
     """Ligne de commande ssh qui lance `remote_argv` sur l'hôte. Chaque
     élément distant est cité (shlex.quote) et le tout part en UN argument :
     le shell distant le redécoupe exactement en `remote_argv`. `fresh` :
@@ -310,7 +312,7 @@ def ssh_argv(decl, state, remote_argv, fresh=False):
     (reprise d'une lecture après la mort du maître). KvmError (`failed`)
     pour une déclaration ou un chemin rangé invalide."""
     remote = " ".join(shlex.quote(str(a)) for a in remote_argv)
-    base = _ssh_base(decl, state, control=not fresh)
+    base = _ssh_base(decl, state, control=not fresh, key=key)
     return [*base, "--", decl["address"], remote]
 
 
@@ -388,7 +390,7 @@ class VirshHost:
 
     def __init__(self, decl, state, runner=subprocess.run, timeout=30, cmd_timeout=20,
                  read_retries=READ_RETRIES, retry_delay=READ_RETRY_DELAY, sleep=time.sleep,
-                 popen=subprocess.Popen, clock=time.monotonic, batch_parallel=None):
+                 popen=subprocess.Popen, clock=time.monotonic, batch_parallel=None, key_path=None):
         # `popen` et `clock` : remplaçables par les tests de run_stream
         self.popen = popen
         self.clock = clock
@@ -407,12 +409,17 @@ class VirshHost:
         self.batch_parallel = max(1, int(BATCH_PARALLEL if batch_parallel is None
                                          else batch_parallel))
         self.name = self.decl.get("name")
+        # 2.10.0 : clé lue par l'appelant dans la requête (jeton de la
+        # personne) ; les fils d'une lecture parallèle s'en servent sans
+        # relire le magasin
+        self.key_path = key_path
 
     def _secret_paths(self):
         paths = [str(Path(self.state))]
         for field in ("ssh_key", "known_hosts"):
             try:
-                paths.append(str(kvm_decl.key_path(self.state, self.decl.get(field)) if field == "ssh_key"
+                paths.append(str((self.key_path or kvm_decl.key_path(self.state, self.decl.get(field)))
+                                 if field == "ssh_key"
                                  else kvm_decl.resolve(self.state, self.decl.get(field))))
             except kvm_decl.DeclError:
                 pass
@@ -424,7 +431,7 @@ class VirshHost:
         return ["virsh", "-c", self.decl.get("uri", kvm_decl.DEFAULT_URI), *map(str, args)]
 
     def _ssh(self, remote_argv, timeout, data=None, fresh=False):
-        argv = ssh_argv(self.decl, self.state, remote_argv, fresh=fresh)
+        argv = ssh_argv(self.decl, self.state, remote_argv, fresh=fresh, key=self.key_path)
         try:
             kvm_decl.ensure_ssh_dir(self.state)
         except OSError:
@@ -505,7 +512,7 @@ class VirshHost:
         if limit_bps is not None and (isinstance(limit_bps, bool) or not isinstance(
                 limit_bps, (int, float)) or limit_bps <= 0):
             raise ValueError("limit_bps must be a positive number")
-        argv = ssh_argv(self.decl, self.state, remote_argv, fresh=True)
+        argv = ssh_argv(self.decl, self.state, remote_argv, fresh=True, key=self.key_path)
         try:
             kvm_decl.ensure_ssh_dir(self.state)
         except OSError:

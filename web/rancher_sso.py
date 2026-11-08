@@ -170,10 +170,43 @@ class PendingLogins:
             del self._d[k]
 
 
-def authorize_url(s, redirect_uri, state, nonce, challenge):
+BASE_SCOPES = "openid profile offline_access"
+DISCOVERY_TTL = 600
+_DISCOVERY = {}                # émetteur -> (instant, portées annoncées)
+_DISCOVERY_LOCK = threading.Lock()
+
+
+def scopes_supported(http, s, now=time.time):
+    """Portées annoncées par le document de découverte de ce Rancher, gardées
+    dix minutes ; une découverte illisible rend () (rien d'ajouté)."""
+    iss = s["issuer"]
+    with _DISCOVERY_LOCK:
+        hit = _DISCOVERY.get(iss)
+        if hit and now() - hit[0] < DISCOVERY_TTL:
+            return hit[1]
+    try:
+        status, doc = http.request("GET", iss + "/.well-known/openid-configuration")
+    except SSOError:
+        status, doc = 0, None
+    found = tuple(str(x) for x in ((doc or {}).get("scopes_supported") or ())) if status == 200 \
+        and isinstance(doc, dict) else ()
+    with _DISCOVERY_LOCK:
+        _DISCOVERY[iss] = (now(), found)
+    return found
+
+
+def request_scopes(supported=()):
+    """2.10.0 : la portée `groups` n'est demandée que si le document de
+    découverte la cite. Rancher 2.14.1 ne l'annonce pas et refuse une
+    portée inconnue (`invalid_scope`), ce qui fait échouer toute la
+    connexion (essai 1)."""
+    return BASE_SCOPES + (" groups" if "groups" in (supported or ()) else "")
+
+
+def authorize_url(s, redirect_uri, state, nonce, challenge, supported=()):
     return s["issuer"] + "/authorize?" + urllib.parse.urlencode({
         "client_id": s["client_id"], "redirect_uri": redirect_uri, "response_type": "code",
-        "scope": "openid profile offline_access", "state": state, "nonce": nonce,
+        "scope": request_scopes(supported), "state": state, "nonce": nonce,
         "code_challenge": challenge, "code_challenge_method": "S256"})
 
 
@@ -199,7 +232,10 @@ def claims_of(jwt):
         raise SSOError("token-malformed")
 
 
-def check_id_token(claims, s, nonce, now=None):
+def check_id_token(claims, s, nonce, now=None, subject=None):
+    """Émetteur, audience, expiration, nonce et `sub`. `nonce=None` avec
+    `subject` : jeton d'identité d'un rafraîchissement (2.10.0), sans nonce
+    (essai 1), dont le `sub` doit rester celui de la session."""
     now = time.time() if now is None else now
     if claims.get("iss") != s["issuer"]:
         raise SSOError("token-issuer", str(claims.get("iss")))
@@ -208,10 +244,13 @@ def check_id_token(claims, s, nonce, now=None):
         raise SSOError("token-audience")
     if not isinstance(claims.get("exp"), (int, float)) or claims["exp"] < now - 60:
         raise SSOError("token-expired")
-    if not nonce or not secrets.compare_digest(str(claims.get("nonce") or ""), nonce):
-        raise SSOError("token-nonce")
+    if subject is None:
+        if not nonce or not secrets.compare_digest(str(claims.get("nonce") or ""), nonce):
+            raise SSOError("token-nonce")
     if not claims.get("sub"):
         raise SSOError("token-subject")
+    if subject is not None and claims.get("sub") != subject:
+        raise SSOError("identity-mismatch")
     return claims
 
 
@@ -350,12 +389,16 @@ def kubeconfig_text(s, cid, token_file):
 
 class Session:
     def __init__(self, sid, ident, role, token, refresh_token, expires,
-                 server_id=None, kind="sso", token_name=None):
+                 server_id=None, kind="sso", token_name=None, id_token=None):
         self.sid = sid
         self.ident = ident
         self.role = role
         self.token = token                     # jeton d'accès OIDC (court), ou jeton Rancher (direct)
         self.refresh_token = refresh_token     # jamais hors du serveur
+        # 2.10.0 : jeton d'identité (vérifié), seul jeton présenté à OpenBao
+        # (méthode jwt) ; mémoire seulement, remplacé à chaque
+        # rafraîchissement, absent de public() et de repr
+        self.id_token = id_token
         # v1.79.0 : le Rancher de la session, et comment elle a été ouverte.
         # Une connexion directe porte un jeton Rancher ordinaire, valable
         # toute la session et non renouvelable : la session finit avec lui.
@@ -372,6 +415,14 @@ class Session:
     @property
     def login(self):
         return f"{self.ident['username']}@rancher"
+
+    def __repr__(self):
+        return f"<Session {self.kind} {self.login}>"
+
+    __str__ = __repr__
+
+    def __getstate__(self):
+        raise TypeError("a Rancher session does not travel")
 
     def public(self):
         return {"user": self.login, "name": self.ident.get("name"), "rancher_id": self.ident["id"],
@@ -391,13 +442,24 @@ class Sessions:
         self._lock = threading.Lock()
         self.directory_fn = directory_fn
         self.now = now
+        # 2.10.0 : rappels « renouvelée » (nouveau jeton d'identité) et
+        # « fermée », posés par la console (jeton OpenBao de la personne)
+        self.on_renewed = []
+        self.on_closed = []
+
+    def _notify(self, hooks, session):
+        for fn in list(hooks):
+            try:
+                fn(session)
+            except Exception:                    # noqa: BLE001 : un rappel ne casse jamais la session
+                pass
 
     def open(self, ident, role, token, refresh_token, ttl, server_id=None, kind="sso",
-             token_name=None):
+             token_name=None, id_token=None):
         sid = secrets.token_urlsafe(32)
         with self._lock:
             self._d[sid] = Session(sid, ident, role, token, refresh_token, self.now() + ttl,
-                                   server_id=server_id, kind=kind, token_name=token_name)
+                                   server_id=server_id, kind=kind, token_name=token_name, id_token=id_token)
         return self._d[sid]
 
     def all(self):
@@ -419,12 +481,27 @@ class Sessions:
                 tok = refresh(http, settings_, session.refresh_token)
             except SSOError:
                 return False
+            # 2.10.0 : Rancher rend un nouveau jeton d'identité à chaque
+            # rafraîchissement (essai 1), vérifié comme à la connexion, sans
+            # nonce, avec le même `sub` ; refusé : la session est close
+            id_token = tok.get("id_token")
+            if id_token:
+                try:
+                    check_id_token(claims_of(id_token), settings_, None, now=self.now(),
+                                   subject=session.ident.get("id"))
+                except SSOError:
+                    return False
             session.token = tok["access_token"]
+            # l'ancien jeton de rafraîchissement reste accepté par Rancher
+            # (aucune rotation, essai 1) : il est oublié dès réception du
+            # nouveau, jamais gardé à côté
             session.refresh_token = tok.get("refresh_token") or session.refresh_token
+            session.id_token = id_token or None
             session.token_expires = expiry_of(session.token)
             if session.token_file:
                 _write_private(session.token_file, session.token)
-            return True
+        self._notify(self.on_renewed, session)
+        return True
 
     def get(self, sid):
         if not sid:
@@ -448,6 +525,9 @@ class Sessions:
                         os.unlink(p)
                 except OSError:
                     pass
+            s.id_token = None
+            s.refresh_token = None
+            self._notify(self.on_closed, s)
         return s
 
     def expired(self):

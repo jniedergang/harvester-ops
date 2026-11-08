@@ -201,7 +201,8 @@ def test_the_access_token_is_renewed_before_it_expires(tmp_path):
     d.mkdir()
     sessions = rs.Sessions(lambda: d, now=lambda: t[0])
     first = jwt({"exp": t[0] + 600, "token": "token-oidc"})
-    sess = sessions.open({"id": "u", "username": "a"}, "operator", first, "refresh-0", 43200)
+    # 2.10.0 : le `sub` du jeton d'identité rafraîchi doit être celui de la session
+    sess = sessions.open({"id": "user-kk67j", "username": "a"}, "operator", first, "refresh-0", 43200)
     path = sessions.kubeconfig(sess, s, "c-sg2q6")
     assert sessions.renew(sess, fake, s) and sess.token == first          # encore valable
     t[0] += 500                                                           # 100 s avant la fin
@@ -274,7 +275,7 @@ def test_a_long_action_follows_the_renewed_token(tmp_path):
     d = tmp_path / "ids"
     d.mkdir()
     sessions = rs.Sessions(lambda: d, now=lambda: t[0])
-    sess = sessions.open({"id": "u", "username": "a"}, "operator",
+    sess = sessions.open({"id": "user-kk67j", "username": "a"}, "operator",
                          jwt({"exp": t[0] + 600, "token": "token-oidc"}), "refresh-0", 43200)
     path = sessions.kubeconfig(sess, s, "c-sg2q6")
     copy = tmp_path / "workspace-kubeconfig"
