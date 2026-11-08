@@ -54,6 +54,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("HARVESTER_OPS_OPENBAO_DIR", str(etc / "openbao"))
     monkeypatch.delenv(ss.SPAWNED_ENV, raising=False)
     monkeypatch.delenv(ss.FILES_ENV, raising=False)
+    # magasin du processus neuf : un test précédent du même processus a pu
+    # le lier à son propre état (store(état) le fixe une fois pour toutes)
+    monkeypatch.setattr(ss, "_STORE", None)
     srv = FakeB1(CID).start()
     paths = hsa.Paths({"HARVESTER_OPS_STATE_DIR": str(state), "HARVESTER_OPS_ETC": str(etc),
                        "HARVESTER_OPS_LOG_DIR": str(tmp_path / "logs"),
@@ -677,3 +680,21 @@ def test_in_process_agent_writes_nothing_through_a_planted_link(env, capsys, tmp
     rc, doc, _ = cli(["rotate", "secret-id"], capsys=capsys)
     assert rc != 0 and list(outside.iterdir()) == []
     assert not d.is_symlink()
+
+
+def test_action_id_accepted_after_the_subcommand(env, capsys):
+    """`_cli_action(id_arg=True)` ajoute `--id=<action>` en fin de ligne :
+    l'outil le prend comme l'option globale (X-Hops-Action)."""
+    settings(env, mode="local")
+    rc, doc, _ = cli(["--actor", "alice", "status", "--id=abc123abc123"], capsys=capsys)
+    assert rc == 0 and hsc.ARGS.id == "abc123abc123" and hsc.ARGS.actor == "alice"
+
+
+def test_metadata_never_carries_an_empty_action(env, capsys):
+    """Sans action, `hops_action` est absente (OpenBao refuse une valeur
+    vide), et celle de la version précédente n'est pas reprise."""
+    prev = ss.version_metadata({}, 1, "ssh-kvm", "alice", "act000000001")
+    md = ss.version_metadata(prev, 2, "ssh-kvm", None, None)
+    assert all(v for v in md.values())
+    assert "hops_action" not in md and "hops_v2_action" not in md and md["hops_v1_action"] == "act000000001"
+    assert md["hops_actor"] == "service"

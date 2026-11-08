@@ -468,3 +468,25 @@ def test_cache_emptied_after_actions_that_change_secret_values(wapp, sx, monkeyp
     status, doc = post(wapp, path, body)
     assert status == 202, doc
     assert bool(cleared) is clears
+
+
+# Tâche 13, essai réel R5/R8 : les actions lancées par la console passent
+# leur identifiant à l'outil (X-Hops-Action du journal d'audit, métadonnées
+# `hops_action` des versions) ; avant, l'audit disait « bg-console ».
+@pytest.mark.parametrize("path,body", [
+    ("/api/secrets/migrate", {"class": "ssh-kvm", "to": "openbao"}),
+    ("/api/secrets/rotate", {"what": "ssh-kvm", "target": "node2"}),
+    ("/api/secrets/snapshot", {}),
+])
+def test_tool_actions_carry_their_action_id(wapp, sx, path, body):
+    status, doc = post(wapp, path, body)
+    assert status == 202, doc
+    assert sx.launched[-1]["kw"].get("id_arg") is True
+
+
+def test_originals_sweep_and_entity_removal_carry_their_action_id():
+    src = (Path(__file__).resolve().parents[2] / "web" / "app.py").read_text()
+    for fn in ("def _secret_originals_sweep", "def _tf_entity_remove_start"):
+        body = src[src.index(fn):]
+        body = body[:body.index("\ndef ", 1)]
+        assert "id_arg=True" in body, fn

@@ -1999,6 +1999,12 @@ def _load_spec(path):
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # `_cli_action(id_arg=True)` de la console ajoute `--id=<action>` en fin
+    # de ligne, après la sous-commande : remis devant (option globale)
+    ids = [a for a in argv if a.startswith("--id=")]
+    if ids:
+        argv = ids[-1:] + [a for a in argv if not a.startswith("--id=")]
     args = parser().parse_args(argv)
     ARGS.id, ARGS.actor = args.id, args.actor
     try:

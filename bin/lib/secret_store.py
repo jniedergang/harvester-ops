@@ -127,8 +127,13 @@ def version_metadata(custom, version, cls, actor, action, kept=VERSIONS_KEPT):
     out = {k: str(v) for k, v in (custom or {}).items()
            if not re.match(r"^hops_v(\d+)_(actor|action)$", str(k))
            or int(re.match(r"^hops_v(\d+)_", str(k)).group(1)) > version - kept}
-    out.update({"hops_action": action or "", "hops_actor": actor or "service", "hops_class": cls,
-                f"hops_v{version}_actor": actor or "service", f"hops_v{version}_action": action or ""})
+    out.update({"hops_actor": actor or "service", "hops_class": cls, f"hops_v{version}_actor": actor or "service"})
+    # OpenBao refuse une valeur vide (« must be 0 < len(value) <= 512 ») :
+    # sans action, la clé est absente, jamais celle d'une version précédente
+    out.pop("hops_action", None)
+    out.pop(f"hops_v{version}_action", None)
+    if action:
+        out.update({"hops_action": str(action)[:512], f"hops_v{version}_action": str(action)[:512]})
     return out
 
 

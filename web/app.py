@@ -34226,7 +34226,8 @@ def _secret_originals_sweep(now=None):
         with app.app_context():
             run, err = _cli_action("", label, [sys.executable, str(script), "--actor", "service", "confirm",
                                                "--class", cls, "--older-than-days", str(days)],
-                                   "harvester-secrets", check_busy=False, capture=True, cluster_user=None)
+                                   "harvester-secrets", check_busy=False, capture=True, cluster_user=None,
+                                   id_arg=True)
         if run is not None:
             started.append(run)
     return started
@@ -34293,7 +34294,7 @@ def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=
     who = actor or (current_user() if _has_request() else None) or "console"
     run, err = _cli_action("", label, [sys.executable, str(script), "--actor", who, *args, *cmd_tail],
                            "harvester-secrets", check_busy=False, capture=True, cluster_user=None, after=after,
-                           secret_clusters=secret_clusters)
+                           secret_clusters=secret_clusters, id_arg=True)
     if run is None and after:
         after()
     return run, err
@@ -34412,7 +34413,8 @@ def _tf_entity_remove_start(decl_id, trial=False):
         run, _err = _cli_action("", f"secrets:tf-entity-remove:{decl_id}",
                                 [sys.executable, str(script), "--actor", user, "tf-entity-remove", decl_id,
                                  *(["--trial"] if trial else [])],
-                                "harvester-secrets", check_busy=False, capture=True, cluster_user=None)
+                                "harvester-secrets", check_busy=False, capture=True, cluster_user=None,
+                                id_arg=True)
     return run
 
 

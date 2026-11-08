@@ -94,7 +94,7 @@ def test_memory_secret_file_on_tmpfs(tmp_path):
     run.mkdir()
     st = ss.MultiStore(tmp_path / "state", mountinfo=mi(str(run)))
     st.settings = dict(ss.DEFAULTS, secret_files_dir=str(run / "hops-secrets"))
-    st._sig = ("pinned",)
+    st._sig = (str(st.state_dir / ss.SETTINGS_FILE), "pinned")   # même état : pas de relecture
     st._checked = 1e18
     st._files = ss.FileStore(tmp_path / "state")
     ref = st.put("plan-run", "a1", "token", "VAL")

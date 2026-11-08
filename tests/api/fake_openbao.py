@@ -397,6 +397,12 @@ class FakeOpenBao:
                 if not e:
                     e = self.kv.setdefault((mount, path), {"versions": {}, "current": 0, "custom": None, "max": 10})
                 if "custom_metadata" in body:
+                    # message réel d'OpenBao 2.7.2 (relevé en tâche 13) : une
+                    # valeur vide est refusée, 512 caractères au plus
+                    for k, v in (body["custom_metadata"] or {}).items():
+                        if not 0 < len(str(v)) <= 512:
+                            return h._err(400, f'custom_metadata validation failed: length of value for key '
+                                               f'"{k}" is {len(str(v))} but must be 0 < len(value) <= 512')
                     e["custom"] = body["custom_metadata"]
                 if "max_versions" in body:
                     e["max"] = int(body["max_versions"])
