@@ -710,8 +710,11 @@ def _sso_person_renewed(sess):
     """Rafraîchissement Rancher : reconnexion du jeton OpenBao de la personne
     avec le NOUVEAU jeton d'identité, révocation de l'ancien ; sans jeton
     d'identité, le jeton de personne est révoqué."""
-    if getattr(sess, "id_token", None):
-        _sst.PERSON_TOKENS.renew(sess.sid, sess.id_token)
+    # revue M2 : réglage éteint, plus aucune reconnexion (jeton révoqué) ;
+    # revue I5 : la reconnexion part dans un fil à part, jamais dans celui
+    # qui renouvelle les sessions Rancher
+    if getattr(sess, "id_token", None) and _person_token_enabled():
+        _sst.PERSON_TOKENS.renew_async(sess.sid, sess.id_token)
     else:
         _sst.PERSON_TOKENS.drop(sess.sid)
 

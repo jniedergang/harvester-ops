@@ -206,9 +206,19 @@ class PersonTokens:
     * `base()` : un client OpenBao sans jeton (posé par le support OpenBao).
     """
 
+    # revue I5 des tâches 2 à 5 : la reconnexion d'un rafraîchissement Rancher
+    # se fait hors du fil de renouvellement, une à la fois par session, au
+    # plus RENEW_PARALLEL ensemble, sans nouvel essai, en RENEW_TIMEOUT s
+    RENEW_TIMEOUT = 5.0
+    RENEW_PARALLEL = 4
+
     def __init__(self, guard=None, id_token=None):
         self._lock = threading.RLock()
         self._d = {}              # session -> {"client", "entity", "mount"}
+        self._slocks = {}         # session -> verrou (connexion, reconnexion : revue M1)
+        self._pending = {}        # session -> jeton d'identité à présenter (le plus récent)
+        self._threads = []
+        self._sem = threading.BoundedSemaphore(self.RENEW_PARALLEL)
         self.guard = guard or (lambda: True)
         self.id_token = id_token or (lambda _sid: None)
         self.base = None
@@ -232,7 +242,7 @@ class PersonTokens:
         """Le client de la personne, ou None (absent ou jeton échu)."""
         with self._lock:
             e = self._d.get(session_id)
-        if e is None:
+        if e is None or e["client"] is None:
             return None
         left = e["client"].remaining()
         if left is not None and left <= 0:
@@ -248,68 +258,164 @@ class PersonTokens:
         with self._lock:
             self._d[session_id] = {"client": client, "entity": entity, "mount": mount}
 
-    def _login(self, session_id, mount, role, jwt):
+    def _slock(self, session_id):
+        with self._lock:
+            return self._slocks.setdefault(session_id, threading.Lock())
+
+    @staticmethod
+    def _jwt_claims(jwt):
+        import base64
+        try:
+            body = str(jwt).split(".")[1]
+            return json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        except (IndexError, ValueError, TypeError):
+            return None
+
+    def _connect(self, mount, role, jwt, timeout=None, retry=True):
+        """(client, entité) d'une connexion jwt, sans rien ranger. Revue M4
+        (point 280) : un jeton d'accès de Rancher (il porte `token`, un jeton
+        Rancher, et la même audience) n'est jamais envoyé à OpenBao."""
         import openbao_client as oc
+        import openbao_jwt
         if self.base is None:
             raise SecretError("openbao-inactive", detail="OpenBao is not configured")
         if not jwt:
             raise SecretError("openbao-person-no-token", detail="no Rancher identity token in this session: "
                                                                 "sign in again through Rancher")
+        claims = self._jwt_claims(jwt)
+        if not isinstance(claims, dict) or openbao_jwt.is_access_token(claims):
+            raise SecretError("openbao-person-login-failed", detail="not a Rancher identity token")
         c = self.base().for_token(None)
+        keep = c.timeout
+        if timeout is not None:
+            c.timeout = min(c.timeout, float(timeout))
         try:
-            info = c.login_jwt(mount, role, jwt)
+            info = c.login_jwt(mount, role, jwt, retry=retry)
         except oc.OpenBaoError as e:
             if e.code == "openbao-person-login-failed":
                 raise SecretError("openbao-person-login-failed", detail=e.detail) from None
             raise
-        self.set(session_id, c, info["entity_id"], mount)
+        finally:
+            c.timeout = keep
+        return c, info["entity_id"]
+
+    def _login(self, session_id, mount, role, jwt):
+        c, entity = self._connect(mount, role, jwt)
+        self.set(session_id, c, entity, mount)
         return c
 
     def login(self, identity):
         """Connexion de la personne avec le jeton d'identité de sa session
         (première lecture d'un secret personnel, ou jeton échu). Refusée hors
-        du contexte d'une requête."""
+        du contexte d'une requête. Une connexion à la fois par session
+        (revue M1) : une seconde lecture simultanée reprend le jeton obtenu
+        par la première au lieu d'en créer un autre jamais révoqué."""
         if not self.guard():
             raise SecretError("openbao-person-no-token",
                               detail="a person token is only used in the request that triggered the action")
-        return self._login(identity.session_id, identity.mount, identity.role or "person",
-                           self.id_token(identity.session_id))
+        with self._slock(identity.session_id):
+            c = self.get(identity.session_id)
+            if c is not None:
+                return c
+            return self._login(identity.session_id, identity.mount, identity.role or "person",
+                               self.id_token(identity.session_id))
+
+    def renew_async(self, session_id, jwt):
+        """Rafraîchissement Rancher : reconnexion confiée à un fil à part
+        (revue I5), le fil de renouvellement des sessions n'attend jamais
+        OpenBao. Un seul fil par session ; un jeton d'identité plus récent
+        remplace celui qui attend. Rend le fil lancé, ou None."""
+        with self._lock:
+            if session_id not in self._d:
+                return None
+            self._pending[session_id] = jwt
+            if any(t.name == f"person-renew-{session_id}" and t.is_alive() for t in self._threads):
+                return None
+            t = threading.Thread(target=self._renew_loop, args=(session_id,), daemon=True,
+                                 name=f"person-renew-{session_id}")
+            self._threads = [x for x in self._threads if x.is_alive()] + [t]
+        t.start()
+        return t
+
+    def _renew_loop(self, session_id):
+        while True:
+            with self._lock:
+                jwt = self._pending.pop(session_id, None)
+            if jwt is None:
+                return
+            with self._sem:
+                try:
+                    self.renew(session_id, jwt)
+                except Exception:                # noqa: BLE001 : le fil ne tombe jamais
+                    pass
+
+    def join(self, timeout=5.0):
+        """Attend les reconnexions en cours (tests, arrêt)."""
+        end = time.monotonic() + timeout
+        for t in list(self._threads):
+            t.join(max(0.0, end - time.monotonic()))
 
     def renew(self, session_id, jwt):
-        """Rafraîchissement Rancher (fil de renouvellement) : reconnexion
-        avec le NOUVEAU jeton d'identité, puis révocation de l'ancien jeton
-        OpenBao. Rien si la personne n'a pas de jeton OpenBao. Un refus
-        retire l'entrée (la lecture suivante dira pourquoi)."""
-        with self._lock:
-            old = self._d.get(session_id)
-        if old is None:
-            return False
-        try:
-            self._login(session_id, old["mount"], "person", jwt)
-        except Exception:                        # noqa: BLE001 : refus, panne : entrée retirée
-            self.drop(session_id)
-            return False
-        _revoke_quietly(old["client"])
-        return True
+        """Reconnexion avec le NOUVEAU jeton d'identité, puis révocation de
+        l'ancien jeton OpenBao, sans nouvel essai et en RENEW_TIMEOUT s. Rien
+        si la personne n'a pas de jeton OpenBao, ni si la session a été
+        fermée pendant la connexion (le nouveau jeton est alors révoqué).
+        Panne d'OpenBao : l'entrée et son entité restent (cache de panne de
+        15 min, point 288) ; refus : entrée retirée."""
+        import openbao_client as oc
+        with self._slock(session_id):
+            with self._lock:
+                old = self._d.get(session_id)
+            if old is None:
+                return False
+            try:
+                c, entity = self._connect(old["mount"], "person", jwt, timeout=self.RENEW_TIMEOUT, retry=False)
+            except (SecretError, oc.OpenBaoError) as e:
+                if getattr(e, "code", None) in DOWN_CODES:
+                    return False
+                self.drop(session_id)
+                return False
+            with self._lock:
+                cur = self._d.get(session_id)
+                if cur is not None:
+                    self._d[session_id] = {"client": c, "entity": entity, "mount": old["mount"]}
+            if cur is None:
+                _revoke_quietly(c)               # session close pendant la connexion
+                return False
+            if cur["client"] is not None:
+                _revoke_quietly(cur["client"])
+            return True
 
-    def forget(self, session_id):
-        """Entrée retirée sans révocation (jeton déjà échu ou refusé)."""
+    def forget(self, session_id, client=None):
+        """Jeton oublié sans révocation (déjà échu ou refusé). L'entité reste
+        connue (cache de panne). `client` : seulement si l'entrée porte
+        encore ce client (revue M1 : une reconnexion l'a peut-être remplacé)."""
         with self._lock:
-            self._d.pop(session_id, None)
+            e = self._d.get(session_id)
+            # une copie par `with_headers` partage le jeton (`_tok`) du client rangé
+            if e is not None and e["client"] is not None and (
+                    client is None or getattr(e["client"], "_tok", None) is getattr(client, "_tok", object())):
+                e["client"] = None
 
     def drop(self, session_id):
         """Déconnexion, session fermée, rafraîchissement refusé :
         `revoke-self` du jeton de la personne et purge des entrées de cache
-        de son entité."""
+        de son entité, sauf si une autre session de la même personne est
+        ouverte (revue M3)."""
         with self._lock:
             e = self._d.pop(session_id, None)
+            self._pending.pop(session_id, None)
+            self._slocks.pop(session_id, None)
             purgers = [w() for w in self._purgers]
+            shared = e is not None and any(x["entity"] == e["entity"] for x in self._d.values())
         if e is None:
             return False
-        _revoke_quietly(e["client"])
-        for fn in purgers:
-            if fn is not None and e["entity"]:
-                fn(e["entity"])
+        if e["client"] is not None:
+            _revoke_quietly(e["client"])
+        if not shared:
+            for fn in purgers:
+                if fn is not None and e["entity"]:
+                    fn(e["entity"])
         return True
 
     def drop_all(self):
@@ -1391,7 +1497,7 @@ class OpenBaoStore:
             except oc.OpenBaoError as e:
                 if attempt == 0 and (e.code == "openbao-person-expired"
                                      or (e.code == "openbao-denied" and not self._still_valid(c))):
-                    self._persons.forget(idt.session_id)
+                    self._persons.forget(idt.session_id, c)
                     continue
                 raise
         raise AssertionError("unreachable")

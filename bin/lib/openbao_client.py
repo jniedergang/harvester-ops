@@ -511,7 +511,7 @@ class Client:
             self._login(role_id, secret_id)
             t.role_id, t.secret_id = role_id, secret_id
 
-    def login_jwt(self, mount, role, jwt):
+    def login_jwt(self, mount, role, jwt, retry=True):
         """2.10.0 : connexion par la méthode `jwt` (`auth/<montage>/login`)
         avec le jeton d'identité d'une personne. Le jeton OpenBao obtenu
         reste dans l'objet (mémoire seule) ; le JWT n'est gardé nulle part.
@@ -531,7 +531,7 @@ class Client:
         with t.lock:
             t.clear()
             try:
-                _, resp = self._request("POST", f"auth/{mount}/login", body, token=False)
+                _, resp = self._request("POST", f"auth/{mount}/login", body, token=False, retry=retry)
             except OpenBaoError as e:
                 if e.code in ("openbao-unreachable", "openbao-tls", "openbao-sealed", "openbao-internal"):
                     raise

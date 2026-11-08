@@ -271,6 +271,7 @@ def test_only_the_id_token_is_ever_sent_to_openbao(console):
     sess.id_token = fake_jwt({"iss": ISS, "aud": [AUD], "sub": "user-kk67j", "exp": int(time.time()) + 600,
                               "iat": int(time.time())})
     wapp._sso_person_renewed(sess)
+    console["pt"].join()                         # reconnexion dans son fil (revue I5)
     read_key_as(sess)
     assert [j for _m, j in bao.jwt_logins] == [bao.jwt_logins[0][1], sess.id_token]
     for r in bao.log:
@@ -351,6 +352,7 @@ def test_renewer_thread_path_calls_hooks(console, tmp_path):
     fake.request = signed
     store = wapp._sso_store()
     assert store.renew(sess, fake, s, margin=180)
+    console["pt"].join()                         # reconnexion dans son fil (revue I5)
     assert len(bao.jwt_logins) == 2 and bao.jwt_logins[-1][1] == sess.id_token
     assert first not in bao.tokens
     fake.revoked.append(sess.refresh_token)
