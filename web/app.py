@@ -34247,12 +34247,15 @@ _OFFLINE_DOWNLOADED = set()
 _OFFLINE_LOCK = threading.Lock()
 
 
-def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=()):
+def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=(), clear_cache=False):
     """Action suivie `harvester-secrets ...`. `private` : valeurs tapées
     (jeton d'enveloppe, CA) remises à l'outil par un fichier 0600 sur tmpfs
-    (`--spec`), effacé à la fin de l'action ; jamais en argument."""
+    (`--spec`), effacé à la fin de l'action ; jamais en argument.
+    `clear_cache` : l'action change des valeurs que la console garde en
+    cache (rotation d'une clé KVM, retour de version, restauration) ; le
+    cache et les copies partagées sont vidés à la fin (relecture finale I10)."""
     script = BIN_DIR / SECRETS_TOOL
-    after, cmd_tail = None, []
+    cmd_tail, spec = [], None
     if private:
         try:
             spec = _sst.write_private_copy(_sst.secret_files_dir(_secrets_settings()), "secrets-spec",
@@ -34260,7 +34263,16 @@ def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=
         except _sst.SecretError as e:
             return None, (jsonify({"error": str(e), "code": e.code}), 503)
         cmd_tail = ["--spec", str(spec)]
-        after = lambda: Path(spec).unlink(missing_ok=True)     # noqa: E731
+
+    def _after():
+        if spec:
+            Path(spec).unlink(missing_ok=True)
+        if clear_cache:
+            try:
+                _sst.store().clear_cache()
+            except Exception as e:              # noqa: BLE001 : jamais l'issue de l'action
+                log.warning("secret cache not emptied: %s", type(e).__name__)
+    after = _after if (spec or clear_cache) else None
     who = actor or (current_user() if _has_request() else None) or "console"
     run, err = _cli_action("", label, [sys.executable, str(script), "--actor", who, *args, *cmd_tail],
                            "harvester-secrets", check_busy=False, capture=True, cluster_user=None, after=after,
@@ -35119,7 +35131,8 @@ def api_secrets_rollback():
         version = 0
     if not _SECRET_REF_RE.match(ref) or ".." in ref or version < 1:
         return jsonify({"error": "ref and version expected", "code": "bad-input"}), 400
-    return _secrets_accepted(*_secrets_tool_action("secrets:rollback", ["rollback", ref, "--version", str(version)]))
+    return _secrets_accepted(*_secrets_tool_action("secrets:rollback", ["rollback", ref, "--version", str(version)],
+                                                   clear_cache=True))
 
 
 @app.route("/api/secrets/rotate", methods=["POST"])
@@ -35139,7 +35152,7 @@ def api_secrets_rotate():
     # rotation d'une clé KVM : l'outil reçoit la copie de la clé en service
     # (il ne se connecte pas pour une lecture ordinaire, revue I6)
     return _secrets_accepted(*_secrets_tool_action(label, args, secret_clusters=(
-        (f"kvm:{target}",) if what == "ssh-kvm" else ())))
+        (f"kvm:{target}",) if what == "ssh-kvm" else ()), clear_cache=what == "ssh-kvm"))
 
 
 @app.route("/api/secrets/snapshot", methods=["POST"])
@@ -35161,7 +35174,7 @@ def api_secrets_restore():
         return jsonify({"error": "snapshot file name expected", "code": "snapshot-bad-name"}), 400
     if not _secrets_confirm_ok(data):
         return jsonify({"error": "type the console identifier to confirm", "code": "confirmation-required"}), 400
-    return _secrets_accepted(*_secrets_tool_action(f"secrets:restore:{name}", ["restore", name]))
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:restore:{name}", ["restore", name], clear_cache=True))
 
 
 _SECRETS_SETTABLE = ("cache_ttl_min", "timeout", "originals_keep_days", "plan_secrets_keep_days",

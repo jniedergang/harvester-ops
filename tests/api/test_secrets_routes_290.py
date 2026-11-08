@@ -451,3 +451,20 @@ def test_a_failed_snapshot_that_records_nothing_is_not_relaunched_every_tick(wap
     assert len(bg) == 1
     wapp._secrets_housekeeping_tick(now=_at(3, 36))
     assert len(bg) == 2
+
+
+# Relecture finale I10 : après une rotation ssh-kvm, un retour de version ou
+# une restauration lancés par la console, son cache (et les copies tmpfs
+# partagées) est vidé ; sinon elle servait l'ancienne clé, que l'hôte refuse.
+@pytest.mark.parametrize("path,body,clears", [
+    ("/api/secrets/rotate", {"what": "ssh-kvm", "target": "node2"}, True),
+    ("/api/secrets/rollback", {"ref": "openbao:ssh-kvm/node2#private_key", "version": 1}, True),
+    ("/api/secrets/restore", {"file": "openbao-20261108T023000Z-hops-20261108-1.snap", "confirm": CID}, True),
+    ("/api/secrets/rotate", {"what": "secret-id"}, False),
+])
+def test_cache_emptied_after_actions_that_change_secret_values(wapp, sx, monkeypatch, path, body, clears):
+    cleared = []
+    monkeypatch.setattr(sx.store, "clear_cache", lambda: cleared.append(True))
+    status, doc = post(wapp, path, body)
+    assert status == 202, doc
+    assert bool(cleared) is clears
