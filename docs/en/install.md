@@ -424,6 +424,18 @@ components still waiting for an upstream fix. To check a built image yourself:
 `python3 tools/release/check_image_trust.py localhost/harvester-ops:<version>`
 (from the sources).
 
+**Security fix (2.8.3).** The update agent and `install.sh --upgrade` run
+as root inside `/var/lib/harvester-ops` and `/var/log/harvester-ops`, which
+the console account owns. Since 2.8.3 they never follow a link there: files
+are opened by descriptor without following links, written under a new name
+then renamed, and handed over on their descriptor. `status.json` and the
+agent's `update-*.log` stay owned by root and are readable by the console
+through the `harvester-ops` group. A link found in place of a directory the
+installer needs is removed and the directory created again. The update to
+2.8.3 itself is still run by the agent already installed: to apply the fix
+at once, install 2.8.3 with `sudo ./install.sh --upgrade`. Rolling back to
+an older release reinstalls its agent and installer, without this fix.
+
 ## Moving harvops to another host
 
 The console keeps two directories apart, and copying both is all a move

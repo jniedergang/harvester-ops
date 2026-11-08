@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tarfile
@@ -28,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import self_update as su  # noqa: E402
 import container_runtime as cr  # noqa: E402
+import safe_fs as sf  # noqa: E402
 
 STATE_DIR = Path(os.environ.get("HARVESTER_OPS_STATE_DIR", "/var/lib/harvester-ops"))
 ETC_DIR = Path(os.environ.get("HARVESTER_OPS_ETC", "/etc/harvester-ops"))
@@ -51,16 +53,32 @@ class Agent:
         self.updates = STATE_DIR / "updates"
         self.status = {}
         self.log_path = None
+        self.log_fd = None
+        self.upd_dir = None          # <état>/updates, tenu par descripteur (2.8.3)
 
     # -- journal et état -------------------------------------------------
+    # 2.8.3 : <état>/updates et le répertoire des journaux appartiennent au
+    # compte de la console. Rien n'y est ouvert par un chemin : le répertoire
+    # est tenu par descripteur, le journal est un fichier neuf (O_EXCL,
+    # O_NOFOLLOW) gardé ouvert, l'état est écrit sous un nom neuf puis renommé,
+    # et chaque fichier reçoit son groupe sur son descripteur. Chaque ligne de
+    # journal est nettoyée des retours à la ligne et caractères de contrôle.
+    def _write_log(self, text):
+        if self.log_fd is None:
+            return
+        data = "".join(sf.clean_line(t) + "\n" for t in text.splitlines() or [""])
+        try:
+            os.write(self.log_fd, data.encode("utf-8", "replace"))
+        except OSError:
+            pass
+
     def log(self, msg):
-        line = time.strftime("%Y-%m-%d %H:%M:%S ", time.localtime(self.now())) + msg
+        line = time.strftime("%Y-%m-%d %H:%M:%S ", time.localtime(self.now())) + sf.clean_line(msg)
         print(line, flush=True)
-        if self.log_path:
-            with open(self.log_path, "a") as f:
-                f.write(line + "\n")
+        self._write_log(line)
 
     def step(self, sid, state, message=""):
+        message = sf.clean_line(message, 2000)
         steps = self.status.setdefault("steps", [])
         for s in steps:
             if s["id"] == sid:
@@ -73,20 +91,53 @@ class Agent:
         self.save()
 
     def finish(self, state, message):
+        message = sf.clean_line(message, 2000)
         self.status.update(state=state, message=message, ended=self.now())
         self.log(f"=> {state}: {message}")
         self.save()
 
     def save(self):
-        su.write_json_atomic(self.updates / su.STATUS, self.status, mode=0o644)
-        _give_to_service(self.updates / su.STATUS)
+        """status.json : fichier de root, lisible par le groupe de la console,
+        écrit sous un nom neuf puis renommé (un lien posé à sa place est
+        remplacé, jamais suivi)."""
+        if self.upd_dir is None:
+            return
+        data = json.dumps(self.status, indent=2).encode()
+        try:
+            self.upd_dir.write(su.STATUS, data, 0o644, _console_group())
+        except OSError as e:
+            print(f"status not written: {e}", file=sys.stderr, flush=True)
+
+    def _open_log(self):
+        """Un journal neuf dans LOG_DIR : jamais un fichier existant, jamais
+        un lien posé d'avance sous le nom attendu."""
+        try:
+            with sf.SafeDir.open_base(LOG_DIR, create_mode=0o750, owner=_service_owner()) as d:
+                stem = f"update-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.now()))}"
+                for i in range(20):
+                    name = f"{stem}.log" if i == 0 else f"{stem}-{i if i < 10 else sf.secrets.token_hex(4)}.log"
+                    try:
+                        self.log_fd = d.open_new_append(name, 0o640, _console_group())
+                    except FileExistsError:
+                        continue
+                    self.log_path = LOG_DIR / name
+                    return
+        except OSError as e:
+            print(f"update log not written: {e}", file=sys.stderr, flush=True)
+
+    def _close(self):
+        if self.log_fd is not None:
+            os.close(self.log_fd)
+            self.log_fd = None
+        if self.upd_dir is not None:
+            self.upd_dir.close()
+            self.upd_dir = None
 
     def sh(self, argv, check=True, timeout=1800, **kw):
         r = self.run_cmd(argv, capture_output=True, text=True, timeout=timeout, **kw)
         out = ((r.stdout or "") + (r.stderr or "")).strip()
-        if out and self.log_path:
-            with open(self.log_path, "a") as f:
-                f.write(out + "\n")
+        if out:
+            self._write_log(out)
         if check and r.returncode != 0:
             tail = out.splitlines()[-1] if out else f"exit {r.returncode}"
             raise su.UpdateError(f"{argv[0]} {argv[1] if len(argv) > 1 else ''}: {tail}")
@@ -121,20 +172,34 @@ class Agent:
 
     # -- traitement ------------------------------------------------------
     def process(self):
-        req_path = self.updates / su.REQUEST
-        req = su.read_json(req_path)
-        # La demande est retirée d'abord : l'unité de chemin ne se relance
-        # pas, et une demande illisible ne bloque pas les suivantes.
         try:
-            req_path.unlink()
-        except FileNotFoundError:
+            self.upd_dir = _open_updates()
+        except OSError as e:
+            print(f"harvester-ops-update: {e}; nothing done", file=sys.stderr, flush=True)
+            return 1
+        try:
+            return self._process_request()
+        finally:
+            self._close()
+
+    def _process_request(self):
+        # La demande : un fichier ordinaire de la console, jamais un lien ni
+        # un tube ; elle est retirée d'abord (l'unité de chemin ne se relance
+        # pas, une demande illisible ne bloque pas les suivantes).
+        if not self.upd_dir.lexists(su.REQUEST):
             return 0
+        try:
+            raw = self.upd_dir.read(su.REQUEST, limit=64 * 1024)
+            req = json.loads(raw) if raw is not None else None
+        except (OSError, ValueError):
+            req = None
+        self.upd_dir.set_aside(su.REQUEST)      # un répertoire posé là ne relance pas l'unité
         current = _installed_version()
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        self.log_path = LOG_DIR / f"update-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.now()))}.log"
+        self._open_log()
+        who = req.get("requested_by") if isinstance(req, dict) else None
         self.status = {"state": "running", "from": current, "to": None, "started": self.now(),
-                       "requested_by": (req or {}).get("requested_by"),
-                       "log": self.log_path.name, "steps": []}
+                       "requested_by": sf.clean_line(who, 128) if isinstance(who, str) else None,
+                       "log": self.log_path.name if self.log_path else None, "steps": []}
         try:
             if not isinstance(req, dict):
                 raise su.UpdateError("unreadable request")
@@ -149,30 +214,38 @@ class Agent:
             traceback.print_exc()
             self.finish("failed", f"Unexpected {type(e).__name__}; see journalctl -u harvester-ops-update.service")
             return 1
-        finally:
-            _give_to_service(self.log_path)
 
     def _process(self, req, current):
         # 1. copie dans un répertoire root : la console ne peut plus échanger
         #    l'archive entre la vérification et l'installation
         self.step("verify", "running", "copying and checking the release")
-        staged = (self.updates / su.STAGED).resolve()
         name = str(req.get("archive") or "")
         if not su.ARCHIVE_RE.match(name):
             raise su.UpdateError("bad archive name in the request")
-        src = (staged / name)
-        if src.is_symlink() or src.resolve().parent != staged or not src.is_file():
-            raise su.UpdateError("the archive is not in the staging directory")
-        if WORK_DIR.exists():
-            shutil.rmtree(WORK_DIR)
-        WORK_DIR.mkdir(mode=0o700, parents=True)
-        archive = WORK_DIR / name
-        shutil.copyfile(src, archive)
-        sig_src = staged / (name + ".sig")
-        sig = None
-        if sig_src.is_file() and not sig_src.is_symlink():
-            sig = WORK_DIR / (name + ".sig")
-            shutil.copyfile(sig_src, sig)
+        # 2.8.3 : le répertoire préparé et l'archive s'ouvrent sans suivre de
+        # lien, et la copie se fait depuis le descripteur ouvert.
+        try:
+            staged = self.upd_dir.subdir(su.STAGED)
+        except OSError:
+            raise su.UpdateError("the archive is not in the staging directory") from None
+        with staged:
+            src = _open_plain(staged, name)
+            if src is None:
+                raise su.UpdateError("the archive is not in the staging directory")
+            if src == "hardlinked":
+                raise su.UpdateError("the staged archive has several hard links; copy it instead")
+            if WORK_DIR.exists():
+                shutil.rmtree(WORK_DIR)
+            WORK_DIR.mkdir(mode=0o700, parents=True)
+            archive = WORK_DIR / name
+            with src:
+                _copy_bounded(src, archive)
+            sig = None
+            sig_src = _open_plain(staged, name + ".sig")
+            if sig_src not in (None, "hardlinked"):
+                sig = WORK_DIR / (name + ".sig")
+                with sig_src:
+                    _copy_bounded(sig_src, sig)
         info = su.inspect_archive(archive)
         self.status["to"] = info["version"]
         signers = su.signers_file(ETC_DIR, OPT_DIR)
@@ -220,11 +293,12 @@ class Agent:
             self.finish("rolled-back", f"{info['version']} failed ({e}); {current} restored")
             return 1
         shutil.rmtree(WORK_DIR, ignore_errors=True)
-        for p in (src, sig_src, staged / (name + ".check.json")):
-            try:
-                p.unlink(missing_ok=True)
-            except OSError:
-                pass
+        try:
+            with self.upd_dir.subdir(su.STAGED) as staged:
+                for n in (name, name + ".sig", name + ".check.json"):
+                    staged.unlink(n)
+        except OSError:
+            pass
         self.finish("done", f"{current} -> {info['version']}")
         return 0
 
@@ -311,19 +385,80 @@ def _probe(run):
     return True, (r.stdout or "").strip() if r.returncode == 0 else None
 
 
-def _give_to_service(path):
-    """Le fichier d'état et le journal se lisent depuis la console."""
+def _service_owner():
+    """(uid, gid) du compte de la console pour un répertoire que l'agent
+    recrée, ou None (compte absent, agent non root : tests)."""
+    return sf.service_ids() if os.geteuid() == 0 else None
+
+
+def _console_group():
+    """Les fichiers de l'agent restent à root et la console les lit par son
+    groupe (2.8.3 ; avant, ils lui étaient donnés par un chown qui suivait
+    les liens). None si le compte n'existe pas ou si l'agent n'est pas root."""
+    ids = _service_owner()
+    return None if ids is None else (-1, ids[1])
+
+
+def _open_updates():
+    """<état>/updates tenu par descripteur. Un lien posé à sa place est
+    retiré (sans être suivi) et refusé : rien n'est lu ni écrit au travers."""
+    base = sf.SafeDir.open_base(STATE_DIR)
     try:
-        import grp
-        import pwd
-        shutil.chown(path, pwd.getpwnam("harvester-ops").pw_uid, grp.getgrnam("harvester-ops").gr_gid)
-    except (KeyError, OSError, TypeError):
-        pass
+        try:
+            return base.subdir("updates", create_mode=0o750, owner=_service_owner())
+        except sf.UnsafePath:
+            base.unlink("updates")
+            raise
+    finally:
+        base.close()
+
+
+def _open_plain(d, name):
+    """Fichier ordinaire de `d` ouvert en lecture sans suivre de lien, ou
+    None (absent, lien, autre chose), ou "hardlinked" (plusieurs liens
+    physiques : refusé, il pourrait désigner un fichier de root)."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY,
+                     dir_fd=d.fd)
+    except OSError:
+        return None
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        return None
+    if st.st_nlink != 1:
+        os.close(fd)
+        return "hardlinked"
+    f = os.fdopen(fd, "rb")
+    f.size_at_open = st.st_size
+    return f
+
+
+def _copy_bounded(src, dest):
+    """Copie au plus la taille vue à l'ouverture : la console, propriétaire
+    du fichier, ne peut pas le faire grossir pendant la copie pour remplir le
+    disque de l'hôte. Un fichier qui change de taille est refusé."""
+    left = src.size_at_open
+    with open(dest, "wb") as out:
+        while left > 0:
+            b = src.read(min(left, 1 << 20))
+            if not b:
+                break
+            out.write(b)
+            left -= len(b)
+    if left != 0 or src.read(1):
+        raise su.UpdateError("the staged file changed while it was copied")
 
 
 def main(argv):
     if "--status" in argv:
-        print(json.dumps(su.read_json(STATE_DIR / "updates" / su.STATUS, {}), indent=2))
+        try:
+            with _open_updates() as d:
+                raw = d.read(su.STATUS)
+            st = json.loads(raw) if raw else {}
+        except (OSError, ValueError):
+            st = {}
+        print(json.dumps(st, indent=2))
         return 0
     return Agent().process()
 
