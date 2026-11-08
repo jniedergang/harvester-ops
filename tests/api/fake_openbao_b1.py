@@ -54,10 +54,28 @@ class FakeB1(FakeOpenBao):
         # tâche 11 : un instantané fabriqué (jetons aux politiques étrangères,
         # droits d'administration donnés à la console) ; faux = comme OpenBao
         self.crafted_admin = False           # la console obtient les chemins d'administration
+        # relecture finale I3 : configuration relue par la revue (liste
+        # permise), comme `initialize` la pose ; un test la modifie pour
+        # simuler un instantané fabriqué
+        self.default_policy = 'path "auth/token/lookup-self" {\n    capabilities = ["read"]\n}\n'
+        self.role_params = {}                # rôle AppRole -> paramètres posés
+        self.auth_mounts = {"token/": {"accessor": TOKEN_ACCESSOR, "type": "token"},
+                            "approle/": {"accessor": "auth_approle_x", "type": "approle"}}
+        self.secret_mounts = {"cubbyhole/": {"type": "cubbyhole"}, "identity/": {"type": "identity"},
+                              "sys/": {"type": "system"}, "transit/": {"type": "transit"},
+                              "harvester-ops/": {"type": "kv", "options": {"version": "2"}}}
+        self.audit_devices = {"hops/": {"type": "file", "path": "hops/"}}
+        self.token_roles = {}
+        self.groups = []
 
     # -- amorce, comme `initialize` -------------------------------------------
     def initialize(self, boot_dir):
         boot = {f: Path(boot_dir, f).read_text() for f in pol.BOOT_FILES}
+        if self.role_ids:
+            # instance neuve d'une restauration : ce qu'elle pose disparaît à
+            # la restauration (le stockage de l'instantané remplace tout)
+            import copy
+            self._before_fresh = copy.deepcopy((self.accessors, self.roles, self.policies))
         for role, sid in ((pol.console_role(self.cid), boot["console-secret-id"]),
                           (pol.agent_role(self.cid), boot["agent-secret-id"])):
             self.role_ids.setdefault(role, "rid-" + secrets.token_hex(6))
@@ -65,6 +83,16 @@ class FakeB1(FakeOpenBao):
             self.accessors["acc-" + secrets.token_hex(4)] = (self.role_ids[role], sid)
         self.tokens[boot["boot-token"]] = {"ttl": 900, "policies": [pol.boot_policy_name(self.cid)],
                                            "created": __import__("time").time()}
+        cid = self.cid
+        self.policies.update({pol.console_role(cid): pol.console_policy("harvester-ops", f"consoles/{cid}", cid,
+                                                                         b1=True),
+                              pol.agent_role(cid): pol.agent_policy(cid),
+                              pol.boot_policy_name(cid): pol.boot_policy(cid)})
+        self.role_params = {pol.console_role(cid): dict(token_policies=[pol.console_role(cid)],
+                                                        **pol.console_role_params(pol.B1_CIDR)),
+                            pol.agent_role(cid): dict(token_policies=[pol.agent_role(cid)],
+                                                      **pol.agent_role_params())}
+        self.token_roles = {pol.tf_role(cid): pol.tf_token_role_params(cid)}
         self.events.append(("initialized", None))
 
     def role_of(self, name):
@@ -76,6 +104,16 @@ class FakeB1(FakeOpenBao):
 
     def _route(self, h, rec, path, body, raw):
         m = rec["method"]
+        if path in ("sys/storage/raft/snapshot", "sys/storage/raft/snapshot-force") and m in ("POST", "PUT") \
+                and getattr(self, "_before_fresh", None) is not None and self._auth(rec) \
+                and (self.snapshot_key_ok or path.endswith("-force")):
+            boot = [t for t, i in self.tokens.items() if pol.boot_policy_name(self.cid) in i["policies"]]
+            self.accessors, self.roles, self.policies = self._before_fresh
+            self._before_fresh = None
+            for t in boot:                      # le jeton d'amorce de l'instance neuve disparaît
+                self.tokens.pop(t, None)
+            self.restored.append(raw)
+            return h._send(204)
         if path in self.fail_paths:
             code, msg = self.fail_paths.pop(path)
             return h._err(code, msg)
@@ -84,12 +122,42 @@ class FakeB1(FakeOpenBao):
                                  "version": self.seal_version})
         tok = self._auth(rec)
         parts = path.split("/")
+        if tok and m == "LIST" and path in ("auth/approle/role", "sys/policies/acl", "auth/token/roles",
+                                            "identity/group/id"):
+            keys = {"auth/approle/role": lambda: sorted(self.role_ids),
+                    "sys/policies/acl": lambda: sorted(set(self.policies) | {"default", "root"}),
+                    "auth/token/roles": lambda: sorted(self.token_roles),
+                    "identity/group/id": lambda: list(self.groups)}[path]()
+            return h._send(200, {"data": {"keys": keys}}) if keys else h._err(404)
+        if tok and m == "GET" and path == "sys/mounts":
+            return h._send(200, {"data": dict(self.secret_mounts)})
+        if tok and m == "GET" and path == "sys/audit":
+            return h._send(200, {"data": dict(self.audit_devices)})
+        if tok and m == "GET" and path.startswith("auth/token/roles/"):
+            r = self.token_roles.get(parts[3])
+            return h._send(200, {"data": dict(r, name=parts[3])}) if r else h._err(404)
+        if tok and path == "auth/token/lookup-self" and tok in self.tokens:
+            info = self.tokens[tok]
+            return h._send(200, {"data": {"accessor": token_accessor(tok), "ttl": info["ttl"],
+                                          "policies": info["policies"], "period": info["ttl"]}})
+        if tok and path == "auth/token/revoke-accessor":
+            t = next((t for t in self.tokens if token_accessor(t) == body.get("accessor")), None)
+            if t is None:
+                return h._err(400, "invalid accessor")
+            self.tokens.pop(t)
+            self.events.append(("revoke-accessor", body.get("accessor")))
+            return h._send(204)
         if path.startswith("auth/approle/role/") and tok:
             role = parts[3]
             rid = self.role_ids.get(role)
             rest = "/".join(parts[4:])
             if rid is None:
                 return h._err(400, "role not found")
+            if rest == "" and m == "GET":
+                return h._send(200, {"data": dict(self.role_params.get(role) or {"token_policies": [role]},
+                                                  bind_secret_id=True)})
+            if rest == "secret-id" and m == "LIST":
+                return h._send(200, {"data": {"keys": [a for a, (r, _s) in self.accessors.items() if r == rid]}})
             if rest == "role-id" and m == "GET":
                 return h._send(200, {"data": {"role_id": rid}})
             if rest == "secret-id/lookup":
@@ -143,10 +211,12 @@ class FakeB1(FakeOpenBao):
                 return h._err(400, "invalid accessor")
             return h._send(200, {"data": {"accessor": body["accessor"], "policies": self.tokens[t]["policies"]}})
         if path == "sys/auth" and tok:
-            return h._send(200, {"data": {"token/": {"accessor": TOKEN_ACCESSOR, "type": "token"},
-                                          "approle/": {"accessor": "auth_approle_x", "type": "approle"}}})
+            return h._send(200, {"data": dict(self.auth_mounts)})
         if path.startswith("sys/policies/acl/") and tok:
             name = path.split("/", 3)[3]
+            if m == "GET":
+                text = self.default_policy if name == "default" else self.policies.get(name)
+                return h._send(200, {"data": {"name": name, "policy": text}}) if text is not None else h._err(404)
             if m == "DELETE":
                 self.policies.pop(name, None)
             else:

@@ -41,6 +41,7 @@ Usage : harvester-secrets-agent            (traite la demande, sinon ménage)
 
 import calendar
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -997,6 +998,11 @@ class Agent:
         st["unsealed_once"] = True
         st["offline_copy"] = self._offline_pending(st["current_key"])
         self.save_agent_state(st)
+        a = self.agent_client()
+        try:
+            self._record_default_policy(a)
+        finally:
+            a.revoke_self()
         self.render(st, info["template"], init=False)       # initialize ne sert plus
         self.own(self.p.b1_etc / "openbao.hcl", uid)
         self.clear_boot()
@@ -1156,7 +1162,7 @@ class Agent:
         self.step("ack", "done", f"offline copy of {key_id} acknowledged")
         return f"offline copy of {key_id} acknowledged"
 
-    def op_b1_policies(self, req=None):
+    def op_b1_policies(self, req=None, review=False):
         """Décision 276 : remet les politiques `hops-*` de cette console au
         texte de la version installée (mise à niveau après la pose, plus de
         jeton racine en B1) : celle de l'agent et celle des jetons enfants
@@ -1174,10 +1180,29 @@ class Agent:
             a._call("POST", f"sys/policies/acl/{pol.tf_role(cid)}", {"policy": pol.tf_child_policy(cid, acc)})
             a._call("POST", f"sys/policies/acl/{pol.agent_role(cid)}",
                     {"policy": pol.agent_policy(cid, st.get("mount") or pol.DEFAULT_MOUNT)})
+            # relecture finale I3 : empreinte de la politique `default` relevée
+            # sur l'instance en service (jamais pendant la revue d'un
+            # instantané restauré, qui la compare)
+            if not review and not st.get("default_policy_sha256"):
+                self._record_default_policy(a)
         finally:
             a.revoke_self()
         self.step("policies", "done", f"{pol.agent_role(cid)}, {pol.tf_role(cid)}")
         return "policies of the agent and of the OpenTofu tokens updated"
+
+    def _record_default_policy(self, a):
+        """Empreinte (sha256) de la politique `default` de l'instance en
+        service, gardée dans l'état de l'agent ; la revue d'un instantané
+        restauré la compare (relecture finale I3)."""
+        try:
+            _, doc = a._call("GET", "sys/policies/acl/default")
+        except oc.OpenBaoError as e:
+            self.log(f"default policy not read ({e.code}); recorded at the next policy refresh")
+            return
+        text = str((self._data(doc) or {}).get("policy") or "")
+        if text:
+            self.save_agent_state(dict(self.agent_state(),
+                                       default_policy_sha256=hashlib.sha256(text.encode()).hexdigest()))
 
     def remove_tf_entity(self, decl):
         """Retire l'entité du jeton enfant d'une déclaration (alias
@@ -1360,46 +1385,130 @@ class Agent:
                 best = k["id"]
         return best or st["current_key"]
 
-    # -- revue d'un instantané restauré (revue M2 de la seconde passe) ----------
-    # La console reçoit la copie hors ligne de la clé de descellement
-    # (décision 275) : avec elle et un vrai instantané, elle peut en
-    # fabriquer un autre (déchiffrer la barrière, ajouter un jeton ou une
-    # politique, rechiffrer). Après une restauration, l'agent remet ses
-    # propres politiques au texte de sa version, puis refuse l'instantané
-    # (et remet l'ancien volume) si un jeton porte une politique hors de la
-    # liste de cette console, ou si le jeton de la console obtient un droit
-    # d'administration.
-    def _console_forbidden_paths(self, cid):
-        return ["sys/policies/acl/hops-probe", "sys/rotate/root", "sys/auth/hops-probe",
-                "sys/mounts/hops-probe", "sys/audit/hops-probe", "sys/raw/hops-probe",
-                "identity/entity/id/hops-probe", "auth/token/create", "auth/token/create-orphan",
-                "auth/token/accessors", f"auth/approle/role/{pol.console_role(cid)}",
-                f"auth/approle/role/{pol.agent_role(cid)}/secret-id"]
+    # -- revue d'un instantané restauré ------------------------------------------
+    # Relecture finale I3 : la console obtient la clé de descellement
+    # (copie hors ligne) et lit les instantanés ; elle peut donc en fabriquer
+    # un. La revue n'est plus une liste de refus mais une liste PERMISE de
+    # toute la configuration restaurée ; tout écart refuse l'instantané (le
+    # volume précédent est remis), puis tous les jetons de l'instantané sont
+    # révoqués (la console et l'agent se reconnectent par AppRole).
+    REVIEW_MOUNTS = {"cubbyhole/": "cubbyhole", "identity/": "identity", "sys/": "system", "transit/": "transit"}
+
+    @staticmethod
+    def _data(doc):
+        return (doc or {}).get("data") if isinstance((doc or {}).get("data"), dict) else (doc or {})
+
+    def _list(self, a, path):
+        try:
+            _, doc = a._call("LIST", path)
+        except oc.OpenBaoError as e:
+            if e.code == "openbao-missing":
+                return []
+            raise
+        keys = (self._data(doc) or {}).get("keys") or []
+        if len(keys) > 10000:
+            raise AgentError("snapshot-untrusted", f"too many entries under {path} in the restored snapshot")
+        return [str(k) for k in keys]
+
+    def _untrusted(self, what):
+        raise AgentError("snapshot-untrusted", "the restored snapshot does not match this console: "
+                         + sf.clean_line(what, 300))
 
     def review_restored(self, st, console):
-        cid = st["console_id"]
-        self.op_b1_policies()
-        allowed = {"default", pol.console_role(cid), pol.agent_role(cid), pol.tf_role(cid),
-                   pol.boot_policy_name(cid)}
+        cid, mount = st["console_id"], st.get("mount") or pol.DEFAULT_MOUNT
+        roles = {pol.console_role(cid): pol.console_role_params(pol.B1_CIDR), pol.agent_role(cid): pol.agent_role_params()}
+        self.op_b1_policies(review=True)
+        mine = set()
         a = self.agent_client()
         try:
-            _, lst = a._call("LIST", "auth/token/accessors")
-            accessors = ((lst or {}).get("data") or {}).get("keys") or []
-            if len(accessors) > 10000:
-                raise AgentError("snapshot-untrusted", "too many tokens in the restored snapshot")
+            for c in (a, console):
+                _, me = c._call("GET", "auth/token/lookup-self")
+                mine.add(str((self._data(me) or {}).get("accessor") or ""))
+            # méthodes d'authentification : token et approle seulement
+            _, auths = a._call("GET", "sys/auth")
+            auths = {k: (v or {}).get("type") for k, v in (self._data(auths) or {}).items() if isinstance(v, dict)}
+            if auths != {"token/": "token", "approle/": "approle"}:
+                self._untrusted(f"auth methods {sorted(auths)}")
+            _, auth_doc = a._call("GET", "sys/auth")
+            token_acc = ((self._data(auth_doc) or {}).get("token/") or {}).get("accessor")
+            # montages : les quatre du système, le KV de la console et transit
+            _, mounts = a._call("GET", "sys/mounts")
+            mounts = {k: (v or {}).get("type") for k, v in (self._data(mounts) or {}).items() if isinstance(v, dict)}
+            want = dict(self.REVIEW_MOUNTS, **{f"{mount}/": "kv"})
+            if mounts != want:
+                self._untrusted(f"secret mounts {sorted(mounts)}")
+            # audit : le seul journal déclaré dans la configuration
+            _, audit = a._call("GET", "sys/audit")
+            audit = {k: (v or {}).get("type") for k, v in (self._data(audit) or {}).items() if isinstance(v, dict)}
+            if set(audit) - {"hops/"} or any(t != "file" for t in audit.values()):
+                self._untrusted(f"audit devices {sorted(audit)}")
+            # politiques : noms et textes exacts
+            expected = {pol.console_role(cid): pol.console_policy(mount, f"consoles/{cid}", cid, b1=True),
+                        pol.agent_role(cid): pol.agent_policy(cid, mount),
+                        pol.tf_role(cid): pol.tf_child_policy(cid, token_acc),
+                        pol.boot_policy_name(cid): pol.boot_policy(cid, mount)}
+            for name in self._list(a, "sys/policies/acl"):
+                if name == "root":
+                    continue
+                _, doc = a._call("GET", f"sys/policies/acl/{name}")
+                text = str((self._data(doc) or {}).get("policy") or "")
+                if name == "default":
+                    seen = hashlib.sha256(text.encode()).hexdigest()
+                    if st.get("default_policy_sha256") and seen != st["default_policy_sha256"]:
+                        self._untrusted("the default policy was changed")
+                    continue
+                if name not in expected or text.strip() != expected[name].strip():
+                    self._untrusted(f"policy {name}")
+            # rôles AppRole : les deux de cette console, leurs politiques et
+            # leurs plages d'adresses, et leurs seuls secret_id attendus
+            if set(self._list(a, "auth/approle/role")) != set(roles):
+                self._untrusted("AppRole roles " + ", ".join(sorted(self._list(a, "auth/approle/role"))))
+            for role, params in roles.items():
+                _, doc = a._call("GET", f"auth/approle/role/{role}")
+                d = self._data(doc) or {}
+                if list(d.get("token_policies") or []) != [role] or set(d.get("policies") or []) - {role} \
+                        or d.get("bind_secret_id") is False:
+                    self._untrusted(f"AppRole role {role} policies")
+                for k in ("token_bound_cidrs", "secret_id_bound_cidrs"):
+                    if sorted(str(x) for x in (d.get(k) or [])) != sorted(params[k]):
+                        self._untrusted(f"AppRole role {role} {k}")
+            sid_acc = {pol.console_role(cid): _read(self.p.etc / "secret-id-accessor")}
+            _, look = a._call("POST", f"auth/approle/role/{pol.agent_role(cid)}/secret-id/lookup",
+                              {"secret_id": _read(self.p.b1_etc / "agent-secret-id")})
+            sid_acc[pol.agent_role(cid)] = str((self._data(look) or {}).get("secret_id_accessor") or "")
+            for role, acc in sid_acc.items():
+                if self._list(a, f"auth/approle/role/{role}/secret-id") != [acc]:
+                    self._untrusted(f"secret_id of the AppRole role {role}")
+            # rôles de jeton : celui des jetons d'OpenTofu, tel que posé
+            if self._list(a, "auth/token/roles") != [pol.tf_role(cid)]:
+                self._untrusted("token roles")
+            _, doc = a._call("GET", f"auth/token/roles/{pol.tf_role(cid)}")
+            d = self._data(doc) or {}
+            tp = pol.tf_token_role_params(cid)
+            if list(d.get("allowed_policies") or []) != tp["allowed_policies"] \
+                    or list(d.get("allowed_entity_aliases") or []) != tp["allowed_entity_aliases"] \
+                    or d.get("allowed_policies_glob") or d.get("orphan") or d.get("renewable"):
+                self._untrusted("token role of the OpenTofu tokens")
+            # aucun groupe d'identité (il porterait des politiques)
+            if self._list(a, "identity/group/id"):
+                self._untrusted("identity groups")
+            # jetons : politiques permises, puis tous révoqués sauf les deux
+            # de cette revue (révoqués ensuite)
+            allowed = {"default", *roles, pol.tf_role(cid), pol.boot_policy_name(cid)}
+            accessors = self._list(a, "auth/token/accessors")
             for acc in accessors:
                 _, info = a._call("POST", "auth/token/lookup-accessor", {"accessor": acc})
-                pols = set(((info or {}).get("data") or {}).get("policies") or [])
+                pols = set((self._data(info) or {}).get("policies") or [])
                 if pols - allowed:
-                    raise AgentError("snapshot-untrusted", "a token of the restored snapshot carries the "
-                                     f"policies {sf.clean_line(', '.join(sorted(pols - allowed)), 200)}")
+                    self._untrusted("a token carries the policies " + ", ".join(sorted(pols - allowed)))
+            revoked = 0
+            for acc in accessors:
+                if acc not in mine:
+                    a._call("POST", "auth/token/revoke-accessor", {"accessor": acc})
+                    revoked += 1
+            self.step("review", "running", f"{revoked} token(s) of the snapshot revoked")
         finally:
             a.revoke_self()
-        caps = console.capabilities(self._console_forbidden_paths(cid))
-        granted = sorted(p for p, c in caps.items() if set(c or []) - {"deny"})
-        if granted:
-            raise AgentError("snapshot-untrusted", "the console token of the restored snapshot is allowed on "
-                             + sf.clean_line(", ".join(granted), 300))
 
     def op_restore_snapshot(self, req):
         """Essai 6 : instance neuve, même clé statique (ou l'ancienne en
@@ -1490,7 +1599,7 @@ class Agent:
         except BaseException:
             c.revoke_self()
             raise
-        self.step("review", "done", "no foreign policy, no administration right for the console")
+        self.step("review", "done", "configuration as expected, tokens of the snapshot revoked")
         if witness:
             c.kv_metadata(st["mount"], f"consoles/{st['console_id']}/{witness}")
         else:

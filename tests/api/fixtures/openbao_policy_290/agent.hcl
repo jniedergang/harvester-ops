@@ -10,3 +10,16 @@ path "auth/approle/role/harvester-ops-abc123def456/custom-secret-id" { capabilit
 path "auth/approle/role/harvester-ops-abc123def456/secret-id/lookup" { capabilities = ["update"] }
 path "auth/token/accessors" { capabilities = ["list", "sudo"] }
 path "auth/token/lookup-accessor" { capabilities = ["update"] }
+path "sys/policies/acl" { capabilities = ["list"] }
+path "sys/policies/acl/*" { capabilities = ["read"] }
+path "auth/approle/role" { capabilities = ["list"] }
+path "auth/approle/role/*" { capabilities = ["read"] }
+path "auth/approle/role/harvester-ops-abc123def456/secret-id" { capabilities = ["list"] }
+path "auth/approle/role/hops-agent-abc123def456/secret-id" { capabilities = ["list"] }
+path "auth/approle/role/hops-agent-abc123def456/secret-id/lookup" { capabilities = ["update"] }
+path "auth/token/roles" { capabilities = ["list"] }
+path "auth/token/roles/*" { capabilities = ["read"] }
+path "identity/group/id" { capabilities = ["list"] }
+path "sys/mounts" { capabilities = ["read"] }
+path "sys/audit" { capabilities = ["read", "sudo"] }
+path "auth/token/revoke-accessor" { capabilities = ["update"] }

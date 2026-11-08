@@ -146,7 +146,58 @@ def test_a_named_key_no_longer_kept_is_refused_before_anything_stops(env, tmp_pa
 # ---------------------------------------------------------------------------
 # Instantané fabriqué avec la clé exportée (revue M2) : refusé, volume remis
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("craft", ["foreign-token", "root-token", "console-admin"])
+# Relecture finale I3 : la revue est une liste PERMISE de toute la
+# configuration restaurée ; chaque écart d'un instantané fabriqué la refuse.
+def _craft(srv, craft):
+    cid = CID
+    if craft == "foreign-token":
+        srv.add_token(policies=("default", "evil"))
+    elif craft == "root-token":
+        srv.add_token(policies=("root",))
+    elif craft == "agent-token-planted":
+        # un jeton de l'agent n'est pas refusé par sa politique (elle est
+        # permise) : il est révoqué ; ce cas vérifie seulement qu'il ne
+        # survit pas (voir test_every_token_of_the_snapshot_is_revoked)
+        return
+    elif craft == "console-policy-widened":
+        srv.policies[pol.console_role(cid)] += 'path "sys/*" { capabilities = ["sudo", "update"] }\n'
+    elif craft == "boot-policy-widened":
+        # (les politiques de l'agent et des jetons d'OpenTofu sont réécrites
+        # avant la revue : un instantané qui les élargit est réparé)
+        srv.policies[pol.boot_policy_name(cid)] = 'path "*" { capabilities = ["sudo"] }\n'
+    elif craft == "extra-policy":
+        srv.policies["evil"] = 'path "*" { capabilities = ["sudo"] }\n'
+    elif craft == "default-policy-changed":
+        srv.default_policy += 'path "sys/*" { capabilities = ["sudo"] }\n'
+    elif craft == "extra-auth-method":
+        srv.auth_mounts["userpass/"] = {"type": "userpass", "accessor": "auth_userpass_x"}
+    elif craft == "extra-approle-role":
+        srv.role_ids["evil"] = "rid-evil"
+    elif craft == "role-policies-widened":
+        srv.role_params[pol.agent_role(cid)]["token_policies"] = [pol.agent_role(cid), "root"]
+    elif craft == "role-cidr-opened":
+        srv.role_params[pol.console_role(cid)]["token_bound_cidrs"] = ["0.0.0.0/0"]
+    elif craft == "agent-secret-id-planted":
+        srv.accessors["acc-planted"] = (srv.role_ids[pol.agent_role(cid)], "sid-planted")
+    elif craft == "token-role-widened":
+        srv.token_roles[pol.tf_role(cid)] = dict(srv.token_roles[pol.tf_role(cid)], allowed_policies=["root"])
+    elif craft == "extra-token-role":
+        srv.token_roles["evil"] = {"allowed_policies": ["root"]}
+    elif craft == "identity-group":
+        srv.groups.append("grp-1")
+    elif craft == "extra-mount":
+        srv.secret_mounts["evil/"] = {"type": "kv"}
+    elif craft == "extra-audit":
+        srv.audit_devices["sock/"] = {"type": "socket"}
+
+
+CRAFTS = ["foreign-token", "root-token", "console-policy-widened", "boot-policy-widened", "extra-policy",
+          "default-policy-changed", "extra-auth-method", "extra-approle-role", "role-policies-widened",
+          "role-cidr-opened", "agent-secret-id-planted", "token-role-widened", "extra-token-role", "identity-group",
+          "extra-mount", "extra-audit"]
+
+
+@pytest.mark.parametrize("craft", CRAFTS)
 def test_a_crafted_snapshot_is_refused_and_the_volume_put_back(env, craft):
     install(env)
     p, srv = env["p"], env["srv"]
@@ -157,12 +208,7 @@ def test_a_crafted_snapshot_is_refused_and_the_volume_put_back(env, craft):
     class Crafted(list):
         def append(self, raw):
             super().append(raw)
-            if craft == "foreign-token":
-                srv.add_token(policies=("default", "evil"))
-            elif craft == "root-token":
-                srv.add_token(policies=("root",))
-            else:
-                srv.crafted_admin = True
+            _craft(srv, craft)
     srv.restored = Crafted()
     rc, st = request(env, op="restore-snapshot", file=snap.name)
     assert rc == 1 and st["code"] == "snapshot-untrusted", st
@@ -171,6 +217,26 @@ def test_a_crafted_snapshot_is_refused_and_the_volume_put_back(env, craft):
     assert env["host"].ran("systemctl", "start", hsa.CONSOLE_UNIT)
     blob = json.dumps(st)
     assert not any(t in blob for t in srv.tokens)
+
+
+def test_every_token_of_the_snapshot_is_revoked(env):
+    """Un jeton à la politique de l'agent planté dans l'instantané (sa
+    politique est permise, elle peut se réécrire) ne survit pas : tous les
+    jetons de l'instantané sont révoqués, ceux de la revue en dernier."""
+    install(env)
+    p, srv = env["p"], env["srv"]
+    planted = {}
+    snap = _snap(p.b1_data / "snapshots", "openbao-20261108T020000Z.snap")
+
+    class Crafted(list):
+        def append(self, raw):
+            super().append(raw)
+            planted["t"] = srv.add_token(policies=(pol.agent_role(CID),))
+    srv.restored = Crafted()
+    rc, st = request(env, op="restore-snapshot", file=snap.name)
+    assert rc == 0, st
+    assert planted["t"] not in srv.tokens
+    assert [e for e in srv.events if e[0] == "revoke-accessor"]
 
 
 def test_a_genuine_snapshot_passes_the_review(env):

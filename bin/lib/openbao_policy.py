@@ -204,6 +204,24 @@ def agent_rules(cid, mount=DEFAULT_MOUNT):
         # avec la clé de descellement exportée ne glisse pas un jeton racine
         ("auth/token/accessors", ["list", "sudo"]),
         ("auth/token/lookup-accessor", ["update"]),
+        # relecture finale I3 : revue par liste permise de toute la
+        # configuration restaurée (noms et textes des politiques, méthodes
+        # d'authentification, rôles AppRole et leurs secret_id, rôles de jeton,
+        # groupes d'identité, montages, audit), puis révocation de tous les
+        # jetons de l'instantané ; lectures seulement, sauf la révocation
+        ("sys/policies/acl", ["list"]),
+        ("sys/policies/acl/*", ["read"]),
+        ("auth/approle/role", ["list"]),
+        ("auth/approle/role/*", ["read"]),
+        (f"auth/approle/role/{console_role(cid)}/secret-id", ["list"]),
+        (f"auth/approle/role/{agent_role(cid)}/secret-id", ["list"]),
+        (f"auth/approle/role/{agent_role(cid)}/secret-id/lookup", ["update"]),
+        ("auth/token/roles", ["list"]),
+        ("auth/token/roles/*", ["read"]),
+        ("identity/group/id", ["list"]),
+        ("sys/mounts", ["read"]),
+        ("sys/audit", ["read", "sudo"]),
+        ("auth/token/revoke-accessor", ["update"]),
     ]
 
 
