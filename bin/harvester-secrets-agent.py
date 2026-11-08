@@ -39,6 +39,8 @@ Usage : harvester-secrets-agent            (traite la demande, sinon ménage)
         harvester-secrets-agent --status   (dernier état)
 """
 
+import calendar
+import fcntl
 import json
 import os
 import re
@@ -101,6 +103,8 @@ IMAGE = "localhost/harvester-ops-openbao"
 SECRET, SECRET_PREV = "hops-openbao-unseal", "hops-openbao-unseal-prev"
 SECRET_ID_MAX_AGE = 30 * 86400          # point 260
 OLD_VOLUME_DAYS = 7
+LOCK_WAIT_S = 1800                 # une demande attend la fin d'une autre opération
+OLD_VOLUME_RE = re.compile(r"\.old-(\d{8}-\d{6})$")
 KEY_KEEP_DAYS = 14                      # comme les instantanés (point 259)
 WAIT_S = int(os.environ.get("HARVESTER_SECRETS_AGENT_WAIT", "120"))
 # Décision 275 : copie hors ligne de la clé de descellement, remise une fois
@@ -138,6 +142,10 @@ class Paths:
         self.logrotate = g("HARVESTER_OPS_LOGROTATE_DIR", "/etc/logrotate.d") / "harvester-ops-openbao"
         self.work = g("HARVESTER_SECRETS_AGENT_WORK", "/var/lib/harvester-secrets-agent")
         self.logs = g("HARVESTER_OPS_LOG_DIR", "/var/log/harvester-ops")
+        # relecture finale I4 : un seul agent à la fois (unité systemd et
+        # `sudo harvester-secrets` en processus), verrou à côté du répertoire
+        # de travail, dans un répertoire de root
+        self.lock = self.work.with_name(self.work.name + ".lock")
 
 
 def _w(path, data, mode, binary=False, gid=None):
@@ -387,9 +395,42 @@ class Agent:
             raise AgentError("bad-request", "bad console id")
         return op
 
+    def _take_lock(self, wait):
+        """Verrou exclusif de l'agent (flock). `wait` : attendre jusqu'à
+        LOCK_WAIT_S secondes (une demande), sinon renoncer tout de suite
+        (le ménage de la minuterie). Rend le descripteur, ou None."""
+        self.p.lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.p.lock, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        waited = 0.0
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                if not wait or waited >= LOCK_WAIT_S:
+                    os.close(fd)
+                    return None
+                time.sleep(1)
+                waited += 1
+
     def process(self, request=None):
         """Traite la demande déposée (ou `request`, passée en processus par
-        `sudo harvester-secrets`), sinon le ménage de la minuterie."""
+        `sudo harvester-secrets`), sinon le ménage de la minuterie. Un seul
+        agent à la fois (relecture finale I4) : le ménage ne tourne jamais
+        pendant une restauration qui garde l'ancien volume pour son retour."""
+        pending = request is not None or (self.p.state / REQUEST).exists()
+        lock = self._take_lock(wait=pending)
+        if lock is None:
+            print("harvester-secrets-agent: another agent is running"
+                  + ("; request left for the next run" if pending else "; housekeeping skipped"),
+                  file=sys.stderr, flush=True)
+            return 1 if pending else 0
+        try:
+            return self._process_locked(request)
+        finally:
+            os.close(lock)
+
+    def _process_locked(self, request):
         try:
             self._expire_export()
         except OSError:
@@ -1580,7 +1621,15 @@ class Agent:
                 self.finish("failed", str(e), getattr(e, "code", None))
                 out = 1
         for old in self.p.b1_data.parent.glob(f"{self.p.b1_data.name}.old-*"):
-            if self.now() - old.stat().st_mtime > OLD_VOLUME_DAYS * 86400:
+            # relecture finale I4 : l'âge vient de l'horodatage du nom (posé
+            # à la restauration) ; un renommage ne change pas le mtime du
+            # répertoire, qui datait de la pose. Nom illisible : gardé.
+            m = OLD_VOLUME_RE.search(old.name)
+            try:
+                at = calendar.timegm(time.strptime(m.group(1), "%Y%m%d-%H%M%S")) if m else None
+            except ValueError:
+                at = None
+            if at is not None and self.now() - at > OLD_VOLUME_DAYS * 86400:
                 shutil.rmtree(old, ignore_errors=True)
         self.prune_agent_snapshots()
         st = self.agent_state()

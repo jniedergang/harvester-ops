@@ -676,3 +676,43 @@ def test_rotation_erases_a_copy_of_the_old_key(env):
     env["clock"]["t"] += 86400
     assert request(env, op="rotate-unseal-key")[0] == 0
     assert not (env["p"].etc / hsa.EXPORT_NAME).exists()
+
+
+# Relecture finale I4 : l'âge d'un ancien volume vient de l'horodatage de son
+# nom (un renommage garde le mtime de la pose, le volume de retour était
+# effacé au passage horaire suivant), et un seul agent tourne à la fois.
+@pytest.mark.parametrize("age_days,name_ok,kept", [
+    (1, True, True),          # restauré hier, répertoire créé il y a 60 jours : gardé
+    (8, True, False),         # restauré il y a 8 jours : effacé
+    (60, False, True),        # nom illisible : jamais effacé sur un doute
+])
+def test_old_volume_age_comes_from_its_name(env, age_days, name_ok, kept):
+    install(env)
+    p, clock = env["p"], env["clock"]
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(clock["t"] - age_days * 86400))
+    old = p.b1_data.with_name(p.b1_data.name + (f".old-{stamp}" if name_ok else ".old-unknown"))
+    old.mkdir()
+    os.utime(old, (clock["t"] - 60 * 86400,) * 2)      # mtime de la pose, bien plus ancien
+    env["agent"]().process()
+    assert old.exists() is kept
+
+
+def test_one_agent_at_a_time(env, monkeypatch):
+    import fcntl
+    install(env)
+    p, clock = env["p"], env["clock"]
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(clock["t"] - 30 * 86400))
+    old = p.b1_data.with_name(p.b1_data.name + f".old-{stamp}")
+    old.mkdir()
+    fd = os.open(p.lock, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)                       # une restauration en cours
+    try:
+        assert env["agent"]().process() == 0 and old.exists()          # ménage sauté
+        monkeypatch.setattr(hsa, "LOCK_WAIT_S", 0)
+        (p.state / hsa.REQUEST).write_text(json.dumps({"op": "status", "id": "0123abcd"}))
+        assert env["agent"]().process() == 1
+        assert (p.state / hsa.REQUEST).exists()                        # laissée au passage suivant
+    finally:
+        os.close(fd)
+    assert env["agent"]().process() == 0 and not (p.state / hsa.REQUEST).exists()
+    assert env["agent"]().process() == 0 and not old.exists()          # ménage du passage suivant
