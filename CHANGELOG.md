@@ -4,6 +4,67 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.8.3] - 2026-11-08 - Root no longer follows links in the console's directories
+
+### Security
+- **The update agent and `install.sh --upgrade` could write or hand over a
+  host file chosen by the console account** (found during an internal
+  review). Both run as root and work in `/var/lib/harvester-ops` and
+  `/var/log/harvester-ops`, which belong to the `harvester-ops` account and
+  are mounted read-write in its container. They opened, created and gave
+  files there by path, so a symbolic link left in these directories by a
+  compromised console made root append its log to, write, change the mode
+  of, or give to the console account a file anywhere on the host. That is a
+  path from the console account to root on the host. The agent also read
+  the request file and the staged archive through such links. Fixed in
+  depth:
+  - **everything root does in these directories goes through
+    `bin/lib/safe_fs.py`**: the directory is held by a descriptor and each
+    component below it is opened without following a link; a file is
+    written under a new name (`O_CREAT|O_EXCL|O_NOFOLLOW`), gets its mode
+    and owner on its descriptor, then takes its place by a rename that
+    replaces a link instead of following it; a read refuses a link, a
+    hard link and anything that is not a regular file; a change of owner
+    is made on a descriptor opened without following a link, never on a
+    file with several hard links;
+  - **update agent**: its log is a new file (never one that already exists
+    under the expected name), kept open for the whole run; `status.json`
+    and the log stay owned by root and are readable by the console through
+    its group (they were given to the console account by a `chown` that
+    followed links); the request and the staged archive and signature are
+    read only if they are regular files; a link put in place of `updates`
+    or `updates/staged` is removed or refused, and nothing is read or
+    written through it; `harvester-ops-update.py --status` reads the same
+    way;
+  - **log lines cannot be split**: line feeds, carriage returns and other
+    control characters coming from a request or from an archive not yet
+    verified are escaped (`\x0a`), ANSI colours are removed;
+  - **`install.sh`**: `updates/`, `updates/staged/`, `updates/agent.json`,
+    the Cluster API bundles and `active.json`, both embedded Terraform
+    providers and the bootstrap registry images are created, written and
+    handed to the service account through the same helper. A link found
+    where a directory is expected is removed and the directory created.
+    `uninstall.sh` only removes these directories (`rm -rf` does not follow
+    links below its arguments): unchanged.
+- **Rolling back below 2.8.3** reinstalls the agent and installer of that
+  version, with this flaw.
+
+### Tests
+- `tests/api/test_root_writes_no_follow_283.py`: a link planted in place of
+  the agent log, of `status.json` right after it is written, of `updates`,
+  `updates/staged`, the request and the staged archive; a crafted archive
+  directory name that tried to add log lines; each install step with a link
+  in place of every directory and file it writes (ten cases); a source
+  check of the install steps and the agent; every primitive of
+  `safe_fs.py` and each error path (link, FIFO, oversized file, name with a
+  slash or `..`, directory planted in place of a file, hard link read or
+  handed over, entry swapped between open and change of owner, directory
+  swapped for a link during a tree walk); a request planted as a
+  directory, a hard-linked archive, an archive that grows during the copy,
+  cleaned status messages; the helper without the agent's Python; command
+  line exit codes. Twenty-five mutations played, all detected. The install tests of the embedded
+  providers now run with the helper.
+
 ## [2.8.2] - 2026-11-08 - Plan references made by its Terraform phase, Rancher agent bundle removed with the import
 
 ### Fixed
