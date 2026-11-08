@@ -131,10 +131,58 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   e2e of the new selector in the creation window and the template editor.
   Thirteen more named mutations are killed.
 
+### Verified for real
+- **Without Internet** (R11, harvlab2, Internet of the pool addresses cut
+  by a bridge rule on node2, only the LAN accepted): a 1+1 cluster with
+  `offline: true`, `no_fallback` and 20 GiB available in 441 s. The
+  `<machine>-cloud-init` Secret held `package_update: false`, the
+  `harvester-ops-repos-aside` bootcmd and the CAPHV package list (merge
+  order confirmed). On both nodes: marker
+  `bootper.harvester_ops_repos_aside.instance`, both `restored in` lines,
+  the 11 repositories back, no `Timeout exceeded`, the package module
+  failed in 3 s; RKE2 and every system image pulled from the bootstrap
+  registry (no `server` line for docker.io); `Machine.status.addresses`
+  filled. No packet to the Internet during the creation (drop counter 0;
+  later drops were the service address 10.43.0.1 during a worker reboot).
+  A rebooted worker kept its repositories. After the addon image fix: PVC
+  of the class `harvester` bound and mounted, LoadBalancer Service
+  answered. The warnings `offline-disk-small` (10 GiB) and
+  `offline-node-packages` showed in `harvester-capi check`.
+- **Two child clusters in one plan run** (R12, harv4): registry laid on
+  harv4, RKE2 and the bench package published, one cluster imported in
+  the external Rancher 2.14 (`auto` chose Fleet: `GitRepo` and `HelmOp`
+  ready 1/1, podinfo running), one without Internet (`auto` chose Flux:
+  `OCIRepository` and `GitRepository` with the plan secret, both
+  `Kustomization` applied, cloud provider and CSI running), 1309 s in
+  total. Undo in 400 s, registry data included; harv4 and the Rancher
+  cluster list identical to before. The Rancher agent bundle
+  `fleet-agent-<cluster>` of the removed import stayed in `fleet-default`
+  and was deleted by hand (Rancher leftover).
+- **Self-hosted warning** (harv4): `harvester-nodes --dry-run` on the
+  bootstrap registry of harv4 warned with `by: bootstrap`; on an external
+  registry whose endpoint is the LoadBalancer address of that registry,
+  with `by: harvester-ops-registry/<service>`; on the registry of another
+  cluster, no warning.
+- **Plan chained to a Harvester install with a Git secret** (Redfish
+  bench on node2): install, readiness, Terraform (VM network, image, key,
+  IP pool, storage class), registry, Cluster API stack, an offline child
+  cluster, Flux and two GitOps entries, done in 3151 s. The secret was
+  accepted at launch (refused without it, `gitops-secret-missing`),
+  reached the child (`hops-gitops-gitapp-git`, same key) and was found
+  nowhere in the state directory nor in `actions.db`, before and after
+  Undo. A cluster template with `rancher_external` and a Fleet entry were
+  both refused at launch with `rancher-session-in-chain`; an explicit
+  `fleet` entry alone is refused earlier by `gitops-fleet-needs-rancher`.
+  Undo removed everything, the Terraform content last; it stopped once on
+  `registry-in-use` because other saved plans named the registry, and
+  finished after they were deleted.
+
 ### Not verified for real
-- Unit-tested only, no bench pass for this release: the offline
-  cloud-init (R11 and R12 on harv4 and a real chained plan with a Git
-  secret are to run with 2.8.1) and the self-hosted warning.
+- `offline_packages: keep`: no LAN mirror of the Leap image on the bench.
+- An image without `qemu-guest-agent` (the Leap 15.6 image carries it,
+  and `iptables`).
+- The Internet was cut on harvlab2 only; on harv4 and the chained bench
+  the offline clusters had no fallback but the hosts kept Internet.
 
 ## [2.8.0] - 2026-11-08 - Child cluster access, GitOps, machine renewal and finished registries
 

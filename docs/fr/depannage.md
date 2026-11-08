@@ -732,8 +732,21 @@ guest-console-log`) :
 `offline_packages: skip` : le module des paquets échoue faute de dépôt,
 c'est voulu. Ce n'est pas la cause d'un cluster bloqué.
 
-La création sans Internet de bout en bout n'est pas encore vérifiée en
-réel (2.8.1 reste à passer au banc).
+Vu en réel (2.8.1, harvlab2, Internet coupé par une règle de pont sur
+l'hôte) : un cluster 1+1 disponible en 441 s, le module des paquets en
+échec en 3 s, aucune requête vers Internet rejetée pendant la création.
+
+### Fournisseur de cloud et CSI en ImagePullBackOff sans Internet
+
+Le cluster enfant est disponible, mais `harvester-cloud-provider`,
+`harvester-csi-plugin` ou `csi-controller` restent en `ImagePullBackOff`
+avec `not found` : le registre n'a pas les images des modules que pose la
+console (fournisseur de cloud, pilote CSI et ses compagnons). Le paquet
+`rke2` a été construit avant la 2.8.1. Reconstruisez-le avec
+`harvester-artefacts pack --rke2`, importez-le et publiez-le dans le même
+registre : les pods tirent les images à leur essai suivant (ou
+supprimez-les). Sans ces modules, un Service LoadBalancer reste en
+attente et un PVC de la classe `harvester` n'est jamais lié.
 
 ### Un nœud d'un cluster sans Internet n'a aucun dépôt zypper
 

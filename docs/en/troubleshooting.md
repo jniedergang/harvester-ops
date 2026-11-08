@@ -702,8 +702,21 @@ guest-console-log`):
 `offline_packages: skip`: the package module fails without repositories,
 by design. It is not the cause of a stuck cluster.
 
-The end-to-end offline creation is not verified for real yet (2.8.1
-still has to be run on the bench).
+Seen for real (2.8.1, harvlab2, Internet cut by a bridge rule on the
+host): a 1+1 cluster available in 441 s, the package module failed in 3
+s, no request to the Internet dropped during the creation.
+
+### Cloud provider and CSI in ImagePullBackOff without Internet
+
+The child cluster is available, but `harvester-cloud-provider`,
+`harvester-csi-plugin` or `csi-controller` stay in `ImagePullBackOff`
+with `not found`: the registry lacks the images of the modules the
+console lays (cloud provider, CSI driver and its sidecars). The `rke2`
+package was built before 2.8.1. Build it again with `harvester-artefacts
+pack --rke2`, import it and publish it to the same registry: the pods
+pull the images at their next try (or delete them). Without these
+modules, a LoadBalancer Service stays pending and a PVC of the class
+`harvester` is never bound.
 
 ### A node of an offline cluster has no zypper repository
 
