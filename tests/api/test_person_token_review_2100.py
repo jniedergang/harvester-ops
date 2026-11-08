@@ -313,3 +313,93 @@ def test_an_access_token_is_never_sent(w, srv, claim):
     n = len(srv.jwt_logins)
     assert w.pt.renew("s-a", jwt_for("user-alice", **claim)) is False
     assert len(srv.jwt_logins) == n
+
+
+# ---------------------------------------------------------------------------
+# I6 : actions enfants d'une chaîne lancée par une personne
+# ---------------------------------------------------------------------------
+import ast  # noqa: E402
+
+
+def _worker(fn):
+    out = {}
+
+    def go():
+        try:
+            out["v"] = fn()
+        except Exception as e:                         # noqa: BLE001
+            out["e"] = e
+    t = threading.Thread(target=go)
+    t.start()
+    t.join()
+    if "e" in out:
+        raise out["e"]
+    return out.get("v")
+
+
+def _chain_run(person_launched):
+    import types
+    r = types.SimpleNamespace(secret_identity=None, person_launched=person_launched, events=[])
+    r.emit = r.events.append
+    return r
+
+
+@pytest.mark.parametrize("launched,want", [(True, "late-service"), (False, None)])
+def test_late_reads_of_a_person_launched_run_are_marked(console, launched, want):
+    """Déroulé (ou action enfant) lancé par une personne : une lecture
+    d'une classe personnelle par le service dans son fil est marquée
+    `late-service` (étape et `secret_identity`), sans valeur ; lancé par un
+    compte local, rien ne change."""
+    run = _chain_run(launched)
+
+    def worker():
+        with wapp._late_reads(run):
+            return ss._STORE.get("openbao:ssh-cluster/h1#private_key", identity=ss.SERVICE)
+    assert _worker(worker) == "KEY-h1"
+    assert run.secret_identity == want
+    steps = [e for e in run.events if e.get("step_id") == "secrets"]
+    assert bool(steps) is launched and "KEY-h1" not in json.dumps(run.events)
+
+
+def test_chain_runs_and_children_carry_the_launcher_mark():
+    """Les fils d'un déroulé et d'un défaire passent par `_late_reads`, et
+    chaque action Terraform qu'ils lancent reçoit `late_service`."""
+    src = (ROOT / "web" / "app.py").read_text()
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    for fn in ("_deploy_runner", "_undo_runner"):
+        assert "_late_reads(run)" in ast.get_source_segment(src, funcs[fn]), fn
+    launch = ast.get_source_segment(src, funcs["_tf_decl_launch"])
+    assert "run.person_launched = bool(late_service)" in launch
+    for fn in ("_deploy_start", "_undo_start"):
+        assert "_person_launched()" in ast.get_source_segment(src, funcs[fn]), fn
+
+
+def test_person_launched_only_for_a_person_with_a_token(console):
+    assert as_who(open_session(), wapp._person_launched) is True
+    assert as_who(None, wapp._person_launched) is False
+    assert as_who(open_session(kind="direct"), wapp._person_launched) is False
+    assert wapp._person_launched() is False                       # hors requête
+
+
+def _chain_launches():
+    tree = ast.parse((ROOT / "web" / "app.py").read_text())
+    funcs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    out = []
+    for fn in ("_deploy_terraform_phase", "_undo_phases"):
+        for c in ast.walk(funcs[fn]):
+            if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "_tf_decl_launch":
+                out.append((fn, c.lineno, any(k.arg == "late_service" for k in c.keywords)))
+    return out
+
+
+def test_every_chain_launch_carries_the_launcher_mark():
+    launches = _chain_launches()
+    assert len(launches) >= 3
+    assert [x for x in launches if not x[2]] == []
+
+
+def test_decrypt_state_freezes_the_person_identity():
+    src = (ROOT / "web" / "app.py").read_text()
+    i = src.index('"decrypt-state", user=current_user()')
+    assert "secret_identities=" in src[i:i + 500]

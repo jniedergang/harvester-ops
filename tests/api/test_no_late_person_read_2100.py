@@ -20,7 +20,7 @@ APP = ROOT / "web" / "app.py"
 
 # fonctions de fil (actions, déroulés) qui remettent ou lisent des secrets
 WORKER_FUNCS = ("run_action_thread", "_vm_transfer_runner", "_tf_decl_runner_body", "_tf_kvm_check_bases",
-                "_tf_decl_runner")
+                "_tf_decl_runner", "_deploy_runner", "_deploy_terraform_phase", "_undo_runner", "_undo_phases")
 # lecteurs d'une classe personnelle (ou qui en remettent une copie)
 READERS = ("_spawn_secret_env", "_cluster_ssh_key_path", "_tf_kvm_stage", "_tf_kvm_env", "_tf_kvm_secret",
            "_kvm_virsh", "key_path", "path_of", "resolve_value", "shared_file", "materialize", "ssh_options")

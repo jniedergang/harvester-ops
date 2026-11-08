@@ -1849,6 +1849,9 @@ class ActionRun:
         # demande autant (un opérateur n'annule pas l'ajout d'hôte d'un admin)
         self.required_role = None
         self.launch_role = None            # 2.4.0 : rôle figé de qui a lancé un plan
+        # 2.10.0 (revue I6 des tâches 2 à 5) : déroulé lancé par une personne
+        # qui a un jeton OpenBao ; ses enfants lisent par le service, marqués
+        self.person_launched = False
         # v1.96.0 : message d'une annulation pour un outil qui ne défait pas
         # tout (None : celui des transferts, « transfer undone »)
         self.cancel_summary = None
@@ -9533,13 +9536,26 @@ def _freeze_person_secrets(run):
         run.secret_identity = "person" if "person" in used else "service"
 
 
+def _person_launched():
+    """Vrai dans la requête d'une personne connectée par Rancher dont les
+    lectures personnelles passent par son jeton OpenBao. Une chaîne de plan
+    ou un défaire qu'elle lance lit ensuite dans son fil, par le service :
+    ses actions enfants sont marquées « service tardif » (revue I6)."""
+    if not has_request_context() or not _sst.is_active() or not _person_token_enabled():
+        return False
+    return _secret_identity("ssh-kvm").kind == "person"
+
+
 @contextlib.contextmanager
 def _late_reads(run):
     """2.10.0 : dans le fil d'une action dont les secrets personnels ont été
     lus avec le jeton de la personne, une lecture inévitable faite ensuite
     par le service (copie absente, cache échu) est marquée `late-service`
-    dans l'action et dans une étape (sans valeur)."""
-    if getattr(run, "secret_identity", None) not in ("person", "late-service"):
+    dans l'action et dans une étape (sans valeur). Revue I6 : de même dans
+    un déroulé (plan, défaire) lancé par une personne qui a un jeton
+    OpenBao, et dans les actions qu'il lance (`person_launched`)."""
+    if getattr(run, "secret_identity", None) not in ("person", "late-service") \
+            and not getattr(run, "person_launched", False):
         yield
         return
 
@@ -31119,7 +31135,8 @@ class TfLaunchError(Exception):
 
 
 def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster_user=None,
-                    target_kind="harvester", holder=None, role=None, parent=None, secret_identities=None):
+                    target_kind="harvester", holder=None, role=None, parent=None, secret_identities=None,
+                    late_service=False):
     """Lance plan, apply ou destroy d'une déclaration gardée par la console,
     en action suivie ; rend (identifiant de l'action, empreinte du contenu).
     `mode` : plan | apply | destroy | destroy-plan. 2.3.0 : `target_kind`
@@ -31135,7 +31152,10 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
     Rôle et tf_guard sont contrôlés ICI : la chaîne d'un plan y passe aussi.
     2.10.0 : `secret_identities` ({classe: Identity}, figées par la route)
     pour lire au déclenchement les secrets personnels d'une cible KVM ; None
-    (chaîne d'un plan, appelant local) : service."""
+    (chaîne d'un plan, appelant local) : service. `late_service` (revue I6) :
+    chaîne lancée par une personne qui a un jeton OpenBao ; toute lecture
+    d'une classe personnelle par le service dans le fil de l'action est
+    marquée « service tardif » (étape et `secret_identity`)."""
     decl = TF_DECLS.get(decl_id)
     if decl is None:
         raise TfLaunchError(404, {"error": "declaration not found", "id": decl_id})
@@ -31181,6 +31201,7 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
         except _sst.SecretError as e:
             raise TfLaunchError(_SECRET_ERROR_STATUS.get(e.code, 503),
                                 {"error": str(e)[:300], "code": e.code}) from None
+
     with TF_DECL_RUNNING_LOCK:
         if _tf_decl_busy(decl["id"], holder):
             raise TfLaunchError(409, {"error": "this declaration is already running",
@@ -31199,6 +31220,7 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
                     dry_run=mode in ("plan", "destroy-plan"))
     run.cluster_user = cluster_user
     run.secret_identity = secret_identity
+    run.person_launched = bool(late_service)
     user = user or ""
     # v1.55.0 : l'historique d'une déclaration retrouve ses actions par là.
     run.result = {"declaration_id": decl["id"], "by": user, "mode": mode}
@@ -35630,7 +35652,9 @@ def api_tf_declaration_decrypt_state(decl_id):
     try:
         run_id, _h = _tf_decl_launch(d["cluster"], kc, decl_id, "decrypt-state", user=current_user() or "",
                                      cluster_user=(current_cluster_identity() or {}).get("user"),
-                                     target_kind=kind, role=current_role())
+                                     target_kind=kind, role=current_role(),
+                                     secret_identities={c: _secret_identity(c) for c in ("ssh-kvm", "tf-kvm")}
+                                     if kind == "kvm" else None)
     except TfLaunchError as e:
         return jsonify(e.payload), e.status
     return jsonify({"action_id": run_id}), 202
@@ -37066,7 +37090,7 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
             kc = kc_ref()
             pid, h = _tf_decl_launch(cluster, kc, decl["id"], "plan", user=user,
                                      cluster_user=cluster_user, holder=run.id, role=run.launch_role,
-                                     parent=run.id)
+                                     parent=run.id, late_service=run.person_launched)
             actions.append(pid)
             status, child = _deploy_wait_child(pid)
             if not _tf_decl_wait_idle(decl["id"]):
@@ -37095,7 +37119,7 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
                                         else "nothing to change", data=data)
             aid, _h = _tf_decl_launch(cluster, kc, decl["id"], "apply", plan_hash=h, user=user,
                                       cluster_user=cluster_user, holder=run.id, role=run.launch_role,
-                                      parent=run.id)
+                                      parent=run.id, late_service=run.person_launched)
             actions.append(aid)
             status, _child = _deploy_wait_child(aid)
             if not _tf_decl_wait_idle(decl["id"]):
@@ -38267,7 +38291,8 @@ def _deploy_cleanup_dry(created):
 
 def _deploy_runner(run, cluster, kc, dctx, user, cluster_user, previous, install, store, lock_fd=None):
     try:
-        _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, install, store)
+        with _late_reads(run):                 # revue I6 : lectures tardives d'un déroulé marquées
+            _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, install, store)
     finally:
         # rendu APRÈS l'écriture du statut final : une ligne `running` dans
         # actions.db a toujours son verrou tenu (revue B2-I1)
@@ -38548,6 +38573,7 @@ def _deploy_start(cluster, kc, dctx, dry_run=False, user="", cluster_user=None, 
     run.cluster_user = cluster_user
     run.required_role = required_role
     run.launch_role = role                 # figé : chaque déclaration lancée par la chaîne le reprend
+    run.person_launched = _person_launched()
     plan = dctx["plan"]
     run.result = {"plan": plan["name"], "plan_revision": plan["revision"], "cluster": cluster,
                   "resumes": resumes, "dry_run": bool(dry_run), "by": user or "",
@@ -39503,7 +39529,7 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
         try:
             aid, _h = _tf_decl_launch(cluster, kc, decl_id, "destroy", user=(run.result or {}).get("by") or "",
                                       cluster_user=run.cluster_user, holder=run.id, role=run.launch_role,
-                                      parent=run.id)
+                                      parent=run.id, late_service=run.person_launched)
             data["actions"].append(aid)
             status, _c = _deploy_wait_child(aid)
             if not _tf_decl_wait_idle(decl_id):
@@ -39533,8 +39559,9 @@ def _undo_runner(run, cluster, kc, steps, delete_data, previous, orig_id, lock_f
         ctx = _DeployCtx(run, base)
         res = None
         try:
-            res = _dch.run(ctx, _undo_phases(run, cluster, kc, steps, delete_data, runs), previous=previous,
-                           order=_du.ORDER, secrets=_sst.store())
+            with _late_reads(run):             # revue I6 : lectures tardives d'un défaire marquées
+                res = _dch.run(ctx, _undo_phases(run, cluster, kc, steps, delete_data, runs), previous=previous,
+                               order=_du.ORDER, secrets=_sst.store())
         except BaseException as e:
             log.exception("undo %s", run.id)
             res = dict(run.result or {}, status="error", error_summary=type(e).__name__)
@@ -39632,6 +39659,7 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
             run.cluster_user = cluster_user
             run.required_role = "admin"
             run.launch_role = role
+            run.person_launched = _person_launched()
             run.result = {"undoes": action_id, "plan": res.get("plan"), "cluster": cluster, "by": user or "",
                           "selected": [s["id"] for s in steps], "delete_data": sorted(delete_data), "phases": []}
             with ACTIONS_LOCK:
