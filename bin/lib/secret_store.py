@@ -61,6 +61,8 @@ CLASSES = {
     "replication-notify": {"persist": True},
     "replication-hook": {"persist": True},
     "tf-kvm": {"persist": True},
+    # 2.10.0 : valeurs d'External Secrets Operator, dans OpenBao seulement
+    "eso": {"persist": True, "bao_only": True},
 }
 
 SETTINGS_FILE = "secrets-settings.json"
@@ -94,6 +96,9 @@ DEFAULTS = {
     "snapshot_keep": 14,
     "snapshots": None,            # {"last_ok_at", "last_file", "bytes", "last_error", "last_error_at"}
     "tf_keys_retired": {},        # décision 278 : décl -> {"at", "trial"[, "error"]}
+    # 2.10.0 : jeton OpenBao par personne (éteint tant que l'administrateur
+    # ne l'a pas activé : point 290)
+    "person_token": {"enabled": False, "servers": {}, "groups_only": False},
 }
 SNAPSHOT_KEEP_RANGE = (1, 365)
 SNAPSHOT_TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
@@ -119,11 +124,13 @@ DOWN_CODES = ("openbao-unreachable", "openbao-tls", "openbao-sealed", "openbao-i
 VERSIONS_KEPT = 10                # max_versions du montage (B1), recommandé en A
 
 
-def version_metadata(custom, version, cls, actor, action, kept=VERSIONS_KEPT):
+def version_metadata(custom, version, cls, actor, action, kept=VERSIONS_KEPT, identity=None):
     """`custom_metadata` d'une écriture : auteur et action de la version
     courante (`hops_actor`, `hops_action`, `hops_class`) et de chaque version
     gardée (`hops_v<N>_actor`, `hops_v<N>_action`), les plus anciennes
-    retirées au-delà de `kept`. Jamais d'empreinte de la valeur."""
+    retirées au-delà de `kept`. Jamais d'empreinte de la valeur. 2.10.0 :
+    `identity` (`person` ou `service`) écrit en `hops_identity` quand le
+    jeton par personne est en jeu ; None la retire (comportement 2.9.x)."""
     out = {k: str(v) for k, v in (custom or {}).items()
            if not re.match(r"^hops_v(\d+)_(actor|action)$", str(k))
            or int(re.match(r"^hops_v(\d+)_", str(k)).group(1)) > version - kept}
@@ -132,9 +139,220 @@ def version_metadata(custom, version, cls, actor, action, kept=VERSIONS_KEPT):
     # sans action, la clé est absente, jamais celle d'une version précédente
     out.pop("hops_action", None)
     out.pop(f"hops_v{version}_action", None)
+    out.pop("hops_identity", None)
+    if identity:
+        out["hops_identity"] = str(identity)
     if action:
         out.update({"hops_action": str(action)[:512], f"hops_v{version}_action": str(action)[:512]})
     return out
+
+
+class Identity:
+    """2.10.0 : identité présentée à OpenBao pour une lecture ou une
+    écriture. `service` : le jeton AppRole du processus (la personne n'est
+    que dans `X-Hops-Actor`) ; `person` : le jeton OpenBao de la personne
+    connectée par Rancher (session `session_id`, méthode `jwt` du montage
+    `mount`). Ne porte aucun jeton : rien de secret à afficher."""
+
+    __slots__ = ("kind", "actor", "session_id", "entity", "mount", "role")
+    KINDS = ("service", "person")
+
+    def __init__(self, kind, actor=None, session_id=None, entity=None, mount=None, role="person"):
+        if kind not in self.KINDS:
+            raise ValueError("unknown identity kind")
+        if kind == "person" and not (session_id and mount):
+            raise ValueError("a person identity needs its session and its jwt mount")
+        self.kind, self.actor, self.session_id = kind, actor, session_id
+        self.entity, self.mount, self.role = entity, mount, role
+
+    @property
+    def header(self):
+        """Valeur de `X-Hops-Actor`."""
+        return self.actor or None
+
+    def __eq__(self, other):
+        return isinstance(other, Identity) and all(getattr(self, a) == getattr(other, a) for a in self.__slots__)
+
+    def __hash__(self):
+        return hash((self.kind, self.actor, self.session_id))
+
+    def __repr__(self):
+        return f"<Identity {self.kind} {self.actor or 'service'}>"
+
+    __str__ = __repr__
+
+
+SERVICE = Identity("service", None)
+
+
+def as_identity(value):
+    """`actor` de la 2.9.0 (chaîne ou None) ou Identity : une chaîne vaut
+    l'identité de service avec cette personne dans l'en-tête."""
+    if isinstance(value, Identity):
+        return value
+    return Identity("service", value if isinstance(value, str) and value else None)
+
+
+class PersonTokens:
+    """2.10.0 : jetons OpenBao des personnes d'un processus, en mémoire
+    seulement, indexés par identifiant de session Rancher. Jamais remis à un
+    outil, jamais écrits.
+
+    * `guard()` : vrai dans le contexte d'une requête (posé par la console) ;
+      hors requête (fil d'une action, tâche de fond) aucun jeton de personne
+      n'est créé ni employé (décision 282, tâche 5) ;
+    * `id_token(session_id)` : le jeton d'identité courant de la session
+      (posé par la console ; le magasin ne connaît pas Rancher) ;
+    * `base()` : un client OpenBao sans jeton (posé par le support OpenBao).
+    """
+
+    def __init__(self, guard=None, id_token=None):
+        self._lock = threading.RLock()
+        self._d = {}              # session -> {"client", "entity", "mount"}
+        self.guard = guard or (lambda: True)
+        self.id_token = id_token or (lambda _sid: None)
+        self.base = None
+        self._purgers = []        # weakref.WeakMethod : purge du cache d'une entité
+
+    def __repr__(self):
+        with self._lock:
+            return f"<PersonTokens {len(self._d)} session(s)>"
+
+    __str__ = __repr__
+
+    def __getstate__(self):
+        raise TypeError("person tokens do not travel")
+
+    def add_purger(self, method):
+        with self._lock:
+            self._purgers = [w for w in self._purgers if w() is not None]
+            self._purgers.append(weakref.WeakMethod(method))
+
+    def get(self, session_id):
+        """Le client de la personne, ou None (absent ou jeton échu)."""
+        with self._lock:
+            e = self._d.get(session_id)
+        if e is None:
+            return None
+        left = e["client"].remaining()
+        if left is not None and left <= 0:
+            return None
+        return e["client"]
+
+    def entity(self, session_id):
+        with self._lock:
+            e = self._d.get(session_id)
+            return e["entity"] if e else None
+
+    def set(self, session_id, client, entity, mount=None):
+        with self._lock:
+            self._d[session_id] = {"client": client, "entity": entity, "mount": mount}
+
+    def _login(self, session_id, mount, role, jwt):
+        import openbao_client as oc
+        if self.base is None:
+            raise SecretError("openbao-inactive", detail="OpenBao is not configured")
+        if not jwt:
+            raise SecretError("openbao-person-no-token", detail="no Rancher identity token in this session: "
+                                                                "sign in again through Rancher")
+        c = self.base().for_token(None)
+        try:
+            info = c.login_jwt(mount, role, jwt)
+        except oc.OpenBaoError as e:
+            if e.code == "openbao-person-login-failed":
+                raise SecretError("openbao-person-login-failed", detail=e.detail) from None
+            raise
+        self.set(session_id, c, info["entity_id"], mount)
+        return c
+
+    def login(self, identity):
+        """Connexion de la personne avec le jeton d'identité de sa session
+        (première lecture d'un secret personnel, ou jeton échu). Refusée hors
+        du contexte d'une requête."""
+        if not self.guard():
+            raise SecretError("openbao-person-no-token",
+                              detail="a person token is only used in the request that triggered the action")
+        return self._login(identity.session_id, identity.mount, identity.role or "person",
+                           self.id_token(identity.session_id))
+
+    def renew(self, session_id, jwt):
+        """Rafraîchissement Rancher (fil de renouvellement) : reconnexion
+        avec le NOUVEAU jeton d'identité, puis révocation de l'ancien jeton
+        OpenBao. Rien si la personne n'a pas de jeton OpenBao. Un refus
+        retire l'entrée (la lecture suivante dira pourquoi)."""
+        with self._lock:
+            old = self._d.get(session_id)
+        if old is None:
+            return False
+        try:
+            self._login(session_id, old["mount"], "person", jwt)
+        except Exception:                        # noqa: BLE001 : refus, panne : entrée retirée
+            self.drop(session_id)
+            return False
+        _revoke_quietly(old["client"])
+        return True
+
+    def forget(self, session_id):
+        """Entrée retirée sans révocation (jeton déjà échu ou refusé)."""
+        with self._lock:
+            self._d.pop(session_id, None)
+
+    def drop(self, session_id):
+        """Déconnexion, session fermée, rafraîchissement refusé :
+        `revoke-self` du jeton de la personne et purge des entrées de cache
+        de son entité."""
+        with self._lock:
+            e = self._d.pop(session_id, None)
+            purgers = [w() for w in self._purgers]
+        if e is None:
+            return False
+        _revoke_quietly(e["client"])
+        for fn in purgers:
+            if fn is not None and e["entity"]:
+                fn(e["entity"])
+        return True
+
+    def drop_all(self):
+        with self._lock:
+            sids = list(self._d)
+        for sid in sids:
+            self.drop(sid)
+        return len(sids)
+
+
+def _revoke_quietly(client):
+    try:
+        client.revoke_self()
+    except Exception:                            # noqa: BLE001 : jeton oublié de toute façon
+        pass
+
+
+PERSON_TOKENS = PersonTokens()
+
+# 2.10.0 (tâche 5) : marque des lectures tardives. Le fil d'une action dont
+# les secrets personnels ont été lus au déclenchement avec le jeton de la
+# personne pose un rappel ; une lecture de service d'une classe personnelle
+# qui part réellement vers OpenBao (pas le cache) dans ce fil l'appelle.
+_READ_CTX = threading.local()
+
+
+@contextlib.contextmanager
+def action_reads(on_late):
+    prev = getattr(_READ_CTX, "on_late", None)
+    _READ_CTX.on_late = on_late
+    try:
+        yield
+    finally:
+        _READ_CTX.on_late = prev
+
+
+def _late_read(cls, path):
+    fn = getattr(_READ_CTX, "on_late", None)
+    if fn is not None and secret_classes.is_person(cls):
+        try:
+            fn(cls, path)
+        except Exception:                        # noqa: BLE001 : la marque ne bloque jamais la lecture
+            pass
 
 
 class SecretMissing(KeyError):
@@ -365,6 +583,9 @@ def load_settings(state_dir=None):
         out["snapshot_time"] = DEFAULTS["snapshot_time"]
     if not isinstance(out["tf_keys_retired"], dict):
         out["tf_keys_retired"] = {}
+    pt = out["person_token"]
+    out["person_token"] = (dict(pt) if isinstance(pt, dict)
+                           else dict(DEFAULTS["person_token"], servers={}))
     if not out["prefix"] and out["console_id"]:
         out["prefix"] = f"consoles/{out['console_id']}"
     return out
@@ -1093,7 +1314,8 @@ class OpenBaoStore:
     Aucun repli sur une copie locale : passé le cache, une lecture refusée
     remonte l'erreur avec la classe et le nom (point 258)."""
 
-    def __init__(self, settings, client_factory, cache_ttl=None, files_dir=None, clock=time.monotonic):
+    def __init__(self, settings, client_factory, cache_ttl=None, files_dir=None, clock=time.monotonic,
+                 person_tokens=None):
         self.settings = settings
         self.mount = settings.get("mount") or DEFAULTS["mount"]
         self.prefix = str(settings.get("prefix") or "").strip("/")
@@ -1108,6 +1330,13 @@ class OpenBaoStore:
         self._shared = {}         # référence -> (chemin, échéance) : copie en service
         self._copies = {}         # chemin -> {ref, holders (fils), retired} (revue I1)
         self._derived = {}        # groupe -> chemin d'une copie dérivée en service (revue I2)
+        # 2.10.0 : cache des personnes, (entité, référence) -> (valeur,
+        # instant), servi à la MÊME personne seulement, et seulement quand
+        # OpenBao ne répond plus (point 288)
+        self._pcache = {}
+        self._persons = person_tokens if person_tokens is not None else PERSON_TOKENS
+        self._persons.base = self._bare_client
+        self._persons.add_purger(self.purge_entity)
         self.down_since = None
         self.last_error = None
 
@@ -1127,7 +1356,59 @@ class OpenBaoStore:
         return f"{self.prefix}/{cls}/{path}"
 
     def _client(self, actor=None, action=None):
+        if isinstance(actor, Identity):
+            actor = actor.header
         return self._factory(actor, action)
+
+    def _bare_client(self):
+        """Client sans jeton (base d'un client de personne) : celui de la
+        fabrique (`bare`) quand elle le sait, sinon une copie sans jeton du
+        client de service."""
+        bare = getattr(self._factory, "bare", None)
+        if bare is not None:
+            return bare()
+        return self._factory(None, None).for_token(None)
+
+    def _person_client(self, idt, action=None):
+        c = self._persons.get(idt.session_id)
+        if c is None:
+            c = self._persons.login(idt)
+        return c.with_headers(action, idt.header)
+
+    def _run(self, idt, action, fn):
+        """`fn(client)` avec le client de l'identité. Personne : son jeton,
+        jamais celui du service ; jeton échu ou révoqué côté OpenBao : une
+        seule reconnexion avec le jeton d'identité courant de la session,
+        puis la requête rejouée une fois. Un refus d'OpenBao remonte tel
+        quel (aucune relecture par le service : point 282)."""
+        import openbao_client as oc
+        if idt.kind != "person":
+            return fn(self._client(idt.header, action))
+        for attempt in (0, 1):
+            c = self._person_client(idt, action)
+            try:
+                return fn(c)
+            except oc.OpenBaoError as e:
+                if attempt == 0 and (e.code == "openbao-person-expired"
+                                     or (e.code == "openbao-denied" and not self._still_valid(c))):
+                    self._persons.forget(idt.session_id)
+                    continue
+                raise
+        raise AssertionError("unreachable")
+
+    @staticmethod
+    def _still_valid(c):
+        import openbao_client as oc
+        try:
+            return c.token_valid()
+        except oc.OpenBaoError:
+            return True                      # panne : le refus d'origine remonte
+
+    def purge_entity(self, entity):
+        """Entrées du cache des personnes d'une entité (déconnexion)."""
+        with self._lock:
+            for k in [k for k in self._pcache if k[0] == entity]:
+                del self._pcache[k]
 
     def _failed(self, e, cls, name):
         import openbao_client as oc
@@ -1177,6 +1458,7 @@ class OpenBaoStore:
         effacées dès qu'aucune action qui les a reçues ne tourne encore."""
         with self._lock:
             self._cache.clear()
+            self._pcache.clear()
             for r in list(self._shared):
                 self._retire(r)
             for g in list(self._derived):
@@ -1187,6 +1469,7 @@ class OpenBaoStore:
         """Arrêt du processus : toutes les copies partagées sont effacées."""
         with self._lock:
             self._cache.clear()
+            self._pcache.clear()
             self._shared.clear()
             self._derived.clear()
             for p in list(self._copies):
@@ -1202,85 +1485,146 @@ class OpenBaoStore:
             self._cache.pop(ref, None)
         return None
 
-    def _read(self, cls, path, actor=None, action=None):
+    def _read(self, cls, path, actor=None, action=None, with_entity=False):
         import openbao_client as oc
+        idt = as_identity(actor)
         try:
-            data, meta = self._client(actor, action).kv_get(self.mount, self._kv(cls, path))
+            data, meta, ent = self._run(idt, action, lambda c: (*c.kv_get(self.mount, self._kv(cls, path)),
+                                                                getattr(c, "entity_id", None)))
         except oc.OpenBaoError as e:
             err = self._failed(e, cls, path)
             if err is None:
-                return None, None
+                return (None, None, None) if with_entity else (None, None)
             raise err from None
         self._ok()
-        return data, meta
+        if idt.kind == "service":
+            _late_read(cls, path)
+        return (data, meta, ent) if with_entity else (data, meta)
 
-    def get(self, ref, actor=None):
-        _b, cls, path, field = parse_ref_full(ref)
-        v = self._cached(ref)
-        if v is not None:
-            return v
-        data, _meta = self._read(cls, path, actor)
-        if not data or field not in data:
-            raise SecretMissing(ref)
+    def _keep(self, cls, path, data, entity=None):
+        now = self._clock()
         with self._lock:
             for f, val in data.items():
                 if isinstance(val, str):
-                    self._cache[make_ref(cls, path, f, "openbao")] = (val, self._clock())
+                    r = make_ref(cls, path, f, "openbao")
+                    self._cache[r] = (val, now)
+                    if entity:
+                        self._pcache[(entity, r)] = (val, now)
+
+    def get(self, ref, actor=None, identity=None):
+        """Valeur d'un secret. `identity` (2.10.0, ou `actor` de la 2.9.0) :
+        une personne passe TOUJOURS par OpenBao avec son jeton (il juge et
+        journalise) ; la valeur alimente le cache commun ; quand OpenBao ne
+        répond plus, seule la même personne est servie depuis son cache."""
+        idt = as_identity(identity if identity is not None else actor)
+        _b, cls, path, field = parse_ref_full(ref)
+        if idt.kind == "person":
+            return self._get_person(ref, cls, path, field, idt)
+        v = self._cached(ref)
+        if v is not None:
+            return v
+        data, _meta = self._read(cls, path, idt)
+        if not data or field not in data:
+            raise SecretMissing(ref)
+        self._keep(cls, path, data)
         return data[field]
 
-    def put(self, cls, path, field, value, actor=None, action=None):
-        import openbao_client as oc
+    def _get_person(self, ref, cls, path, field, idt):
         try:
-            secret_classes.require_migratable(cls)
-        except secret_classes.NotMigratable:
-            raise SecretError("class-not-migratable", cls, path) from None
+            data, _meta, ent = self._read(cls, path, idt, with_entity=True)
+        except SecretError as e:
+            if e.code in DOWN_CODES:
+                ent = self._persons.entity(idt.session_id)
+                v = self._pcached(ent, ref) if ent else None
+                if v is not None:
+                    return v
+            raise
+        if not data or field not in data:
+            raise SecretMissing(ref)
+        self._keep(cls, path, data, ent or self._persons.entity(idt.session_id))
+        return data[field]
+
+    def _pcached(self, entity, ref):
+        with self._lock:
+            hit = self._pcache.get((entity, ref))
+            if hit and self._clock() - hit[1] < self.cache_ttl:
+                return hit[0]
+            self._pcache.pop((entity, ref), None)
+        return None
+
+    def put(self, cls, path, field, value, actor=None, action=None, identity=None):
+        import openbao_client as oc
+        idt = as_identity(identity if identity is not None else actor)
+        if cls not in secret_classes.BAO_ONLY:
+            try:
+                secret_classes.require_migratable(cls)
+            except secret_classes.NotMigratable:
+                raise SecretError("class-not-migratable", cls, path) from None
         ref = make_ref(cls, path, field, "openbao")
         if not isinstance(value, str):
             raise TypeError("a secret value is a string")
         if len(value.encode()) > VALUE_MAX:
             raise SecretError("secret-too-big", cls, path, f"over {VALUE_MAX} bytes")
-        c = self._client(actor, action)
         kv = self._kv(cls, path)
         try:
-            try:
-                data, meta = c.kv_get(self.mount, kv)
-                cas = int(meta.get("version") or 0)
-                custom = meta.get("custom_metadata") or {}
-            except oc.OpenBaoError as e:
-                if e.code != "openbao-missing":
-                    raise
-                # Dernière version supprimée (douce) ou détruite : 404 à la
-                # lecture, mais la clé garde sa version courante (revue I5).
-                md = self._metadata(c, kv)
-                data, cas, custom = {}, int(md.get("current_version") or 0), md.get("custom_metadata") or {}
-            new = dict(data or {}, **{field: value})
-            cm = version_metadata(custom, cas + 1, cls, actor, action)
-            try:
-                written = c.kv_put(self.mount, kv, new, cas=cas, custom_metadata=cm)
-            except oc.OpenBaoError as e:
-                # Revue M1 : écriture appliquée dont la réponse s'est perdue
-                # (délai, 5xx), puis réessai refusé par `cas` : relire et
-                # comparer (essai 5) avant de conclure au conflit.
-                if e.code != "openbao-cas-conflict":
-                    raise
-                try:
-                    again, _m = c.kv_get(self.mount, kv)
-                except oc.OpenBaoError:
-                    raise e from None
-                if again != new:
-                    raise
-                written = oc.Written(cas + 1)
-                try:
-                    c.kv_set_metadata(self.mount, kv, cm)
-                except oc.OpenBaoError as me:
-                    written.metadata_error = me.code
+            written = self._run(idt, action, lambda c: self._put_with(c, cls, kv, field, value, idt, action))
         except oc.OpenBaoError as e:
             raise (self._failed(e, cls, path) or SecretError(e.code, cls, path, e.detail)) from None
         self._ok()
         with self._lock:
             self._cache[ref] = (value, self._clock())
+            if idt.kind == "person":
+                ent = self._persons.entity(idt.session_id)
+                if ent:
+                    self._pcache[(ent, ref)] = (value, self._clock())
         self.last_metadata_error = getattr(written, "metadata_error", None)
         return ref
+
+    def _identity_mark(self, idt):
+        """`hops_identity` des métadonnées : posé quand le jeton par personne
+        est allumé (ou pour une écriture de personne), absent sinon
+        (métadonnées de la 2.9.x inchangées)."""
+        if idt.kind == "person":
+            return "person"
+        pt = (self.settings or {}).get("person_token") or {}
+        return "service" if isinstance(pt, dict) and pt.get("enabled") is True else None
+
+    def _put_with(self, c, cls, kv, field, value, idt, action):
+        import openbao_client as oc
+        actor = idt.header
+        try:
+            data, meta = c.kv_get(self.mount, kv)
+            cas = int(meta.get("version") or 0)
+            custom = meta.get("custom_metadata") or {}
+        except oc.OpenBaoError as e:
+            if e.code != "openbao-missing":
+                raise
+            # Dernière version supprimée (douce) ou détruite : 404 à la
+            # lecture, mais la clé garde sa version courante (revue I5).
+            md = self._metadata(c, kv)
+            data, cas, custom = {}, int(md.get("current_version") or 0), md.get("custom_metadata") or {}
+        new = dict(data or {}, **{field: value})
+        cm = version_metadata(custom, cas + 1, cls, actor, action, identity=self._identity_mark(idt))
+        try:
+            written = c.kv_put(self.mount, kv, new, cas=cas, custom_metadata=cm)
+        except oc.OpenBaoError as e:
+            # Revue M1 : écriture appliquée dont la réponse s'est perdue
+            # (délai, 5xx), puis réessai refusé par `cas` : relire et
+            # comparer (essai 5) avant de conclure au conflit.
+            if e.code != "openbao-cas-conflict":
+                raise
+            try:
+                again, _m = c.kv_get(self.mount, kv)
+            except oc.OpenBaoError:
+                raise e from None
+            if again != new:
+                raise
+            written = oc.Written(cas + 1)
+            try:
+                c.kv_set_metadata(self.mount, kv, cm)
+            except oc.OpenBaoError as me:
+                written.metadata_error = me.code
+        return written
 
     def copy_new(self, ref, new_path, actor=None, action=None):
         """Copie le secret `ref` vers `new_path` (même classe, même champ),
@@ -1440,21 +1784,25 @@ class OpenBaoStore:
 
     # -- copies de travail ---------------------------------------------------
     @contextlib.contextmanager
-    def file(self, ref, purpose, actor=None):
-        value = self.get(ref, actor)
+    def file(self, ref, purpose, actor=None, identity=None):
+        value = self.get(ref, actor, identity)
         p = write_private_copy(self._files_dir(), purpose, value)
         try:
             yield p
         finally:
             _unlink(p)
 
-    def shared_file(self, ref, purpose, actor=None):
+    def shared_file(self, ref, purpose, actor=None, identity=None):
         """Copie partagée entre requêtes de lecture (kubeconfig), servie au
         plus la durée du cache. Revue I1 : le fil qui la reçoit (une action,
         une requête) la tient ; une copie retirée (expirée, cache vidé) n'est
         effacée qu'une fois tous ses fils terminés, ou au plus tard
         SHARED_HOLD_MAX_S après son retrait, et à l'arrêt. Un fil qui
-        reprend le même secret rend sa copie précédente."""
+        reprend le même secret rend sa copie précédente. 2.10.0 : une
+        personne fait d'abord juger sa lecture par OpenBao avec son jeton,
+        puis reçoit la même copie que tout lecteur (point 288)."""
+        idt = as_identity(identity if identity is not None else actor)
+        value = self.get(ref, idt) if idt.kind == "person" else None
         now = self._clock()
         with self._lock:
             hit = self._shared.get(ref)
@@ -1465,7 +1813,8 @@ class OpenBaoStore:
                 self._hold(hit[0], ref)
                 self._sweep()
                 return hit[0]
-        value = self.get(ref, actor)
+        if value is None:
+            value = self.get(ref, idt)
         p = write_private_copy(self._files_dir(), purpose, value)
         with self._lock:
             hit = self._shared.get(ref)
@@ -1658,6 +2007,20 @@ def default_client_factory(settings):
                 c.login_approle(role_id, secret_id)
                 base["c"] = c
         return c.with_headers(action, actor)
+
+    def bare():
+        """2.10.0 : client sans jeton (base d'un client de personne), sans
+        connexion AppRole."""
+        if spawned():
+            raise oc.OpenBaoError("openbao-login-failed", None, "a tool launched by the console does not log in")
+        ca = settings.get("ca_file") or openbao_dir() / "ca.pem"
+        try:
+            ca_pem = Path(ca).read_text() if Path(ca).is_file() else None
+        except OSError:
+            raise oc.OpenBaoError("openbao-tls", None, "OpenBao CA file unreadable") from None
+        return oc.Client(settings["addr"], ca_pem=ca_pem, timeout=oc.clamp_timeout(settings.get("timeout"))
+                         ).for_token(None)
+    factory.bare = bare
     return factory
 
 
@@ -1723,6 +2086,8 @@ class MultiStore(LocalStore):
             self._files = FileStore(self.state_dir)
             server = lambda s: (s.get("mode"), s.get("addr"), s.get("mount"), s.get("prefix"))  # noqa: E731
             if self._bao is not None and (server(old) != server(new) or not openbao_active(new)):
+                # 2.10.0 : les jetons de personne visent l'ancien serveur
+                threading.Thread(target=PERSON_TOKENS.drop_all, daemon=True, name="person-tokens-drop").start()
                 self._bao.clear_cache()
                 self._old_bao.append(self._bao)     # copies encore tenues : balayées plus tard
                 self._bao = None
@@ -1759,9 +2124,15 @@ class MultiStore(LocalStore):
         return cls in (self.settings.get("migrated") or {}) and self._bao is not None
 
     # -- interface -------------------------------------------------------------
-    def put(self, cls, path, field, value, actor=None, action=None):
+    def put(self, cls, path, field, value, actor=None, action=None, identity=None):
+        if identity is not None:
+            actor = identity
         if cls not in CLASSES:
             make_ref(cls, path, field)              # ValueError
+        if CLASSES[cls].get("bao_only"):
+            # 2.10.0 : classe sans emplacement local (valeurs d'ESO)
+            make_ref(cls, path, field)
+            return self._need_bao(cls, path).put(cls, path, field, value, actor=actor, action=action)
         if not CLASSES[cls]["persist"]:
             # 2.9.0 (décision 141, tâche 10) : OpenBao actif, les secrets d'un
             # déroulé y sont gardés jusqu'à sa fin (reprise sans les
@@ -1784,7 +2155,9 @@ class MultiStore(LocalStore):
             return bao.put(cls, path, field, value, actor=actor, action=action)
         return self.files.put(cls, path, field, value)
 
-    def get(self, ref, actor=None):
+    def get(self, ref, actor=None, identity=None):
+        if identity is not None:
+            actor = identity
         try:
             backend, cls, path, _field = parse_ref_full(ref)
         except ValueError:
@@ -1895,11 +2268,13 @@ class MultiStore(LocalStore):
         return []
 
     @contextlib.contextmanager
-    def file(self, ref, purpose, actor=None):
+    def file(self, ref, purpose, actor=None, identity=None):
         """Chemin d'un fichier qui porte la valeur, le temps du bloc. Support
         fichier : le fichier d'aujourd'hui lui-même (rien n'est copié ni
         effacé). OpenBao et mémoire : copie 0600 sur tmpfs, effacée à la
         sortie du bloc, exception comprise."""
+        if identity is not None:
+            actor = identity
         backend, cls, path, field = parse_ref_full(ref)
         if spawned() and CLASSES[cls]["persist"]:
             p = spawned_file(ref, required=backend == "openbao")
@@ -1929,9 +2304,11 @@ class MultiStore(LocalStore):
         finally:
             _unlink(p)
 
-    def shared_file(self, ref, purpose, actor=None):
+    def shared_file(self, ref, purpose, actor=None, identity=None):
         """Chemin gardé au-delà d'une requête : le fichier local lui-même, ou
         une copie tmpfs d'un secret OpenBao gardée la durée du cache."""
+        if identity is not None:
+            actor = identity
         backend, cls, path, field = parse_ref_full(ref)
         if spawned() and CLASSES[cls]["persist"]:
             p = spawned_file(ref, required=backend == "openbao")
@@ -2029,9 +2406,12 @@ def _cleanup():
 # ---------------------------------------------------------------------------
 # Aides des lecteurs (tâche 4)
 # ---------------------------------------------------------------------------
-def resolve_value(value, actor=None, st=None):
+def resolve_value(value, actor=None, st=None, identity=None):
     """La valeur d'un champ qui peut porter une référence : la référence est
-    lue par le magasin ; toute autre valeur est rendue telle quelle."""
+    lue par le magasin ; toute autre valeur est rendue telle quelle.
+    `identity` (2.10.0) : identité de la lecture (service par défaut)."""
+    if identity is not None:
+        actor = identity
     if isinstance(value, str) and is_ref(value):
         return (st or store()).get(value, actor)
     return value
@@ -2059,10 +2439,13 @@ def read_value_file(path, actor=None, st=None):
     return s or None
 
 
-def path_of(value, purpose, actor=None, st=None):
+def path_of(value, purpose, actor=None, st=None, identity=None):
     """Chemin à remettre à un outil pour un champ qui peut porter une
     référence (kubeconfig, clé SSH) : la référence donne une copie tmpfs
-    partagée (ou le fichier local) ; un chemin est rendu tel quel."""
+    partagée (ou le fichier local) ; un chemin est rendu tel quel.
+    `identity` (2.10.0) : identité de la lecture (service par défaut)."""
+    if identity is not None:
+        actor = identity
     if isinstance(value, str) and is_ref(value):
         return str((st or store()).shared_file(value, purpose, actor))
     return value

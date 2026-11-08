@@ -19,7 +19,10 @@ import secret_store as ss     # noqa: E402
 
 
 def test_table_matches_store_classes():
-    assert set(sc.MIGRATABLE) == set(ss.CLASSES)
+    # 2.10.0 : `eso` vit dans OpenBao seulement (aucun emplacement local)
+    assert set(sc.MIGRATABLE) | set(sc.BAO_ONLY) == set(ss.CLASSES)
+    assert not set(sc.MIGRATABLE) & set(sc.BAO_ONLY)
+    assert all(ss.CLASSES[c].get("bao_only") for c in sc.BAO_ONLY)
     assert set(sc.MIGRATION_ORDER) == set(sc.MIGRATABLE) - {"plan-run"}
     assert sc.MIGRATION_ORDER[0] == "replication-notify" and sc.MIGRATION_ORDER[-1] == "kubeconfig"
 
@@ -133,3 +136,31 @@ def test_notify_field_round_trip(tmp_path, cid, secret):
     kind, _db, (got_cid, got_secret) = sc.local_location("replication-notify", "global", field, tmp_path)
     assert kind == "notify" and got_cid == cid
     assert got_secret == (secret if isinstance(secret, str) else sc.header_field(secret[1]))
+
+
+# ---------------------------------------------------------------------------
+# 2.10.0 tâche 3 : colonne `person` (classe lue avec le jeton de la personne)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("cls,person", [
+    ("ssh-cluster", True), ("ssh-kvm", True), ("tf-kvm", True), ("eso", True),
+    ("kubeconfig", False), ("rancher-oidc", False), ("replication-notify", False),
+    ("replication-hook", False), ("plan-run", False),
+    ("accounts", False), ("web-auth", False), ("public-keys", False), ("openbao-credentials", False),
+    ("config-kubeconfig", False),
+])
+def test_person_column(cls, person):
+    assert sc.CLASS_TABLE[cls].person is person
+    assert sc.is_person(cls) is person
+
+
+def test_person_list_and_unknown():
+    assert sc.PERSON == ("ssh-cluster", "ssh-kvm", "tf-kvm", "eso")
+    assert sc.is_person("nope") is False
+
+
+def test_eso_class():
+    s = sc.spec("eso")
+    assert s.bao_path == "eso/{key}/{namespace}/{name}" and s.migratable is False and s.readers == ()
+    assert "eso" not in sc.MIGRATION_ORDER
+    with pytest.raises(ValueError):
+        sc.local_location("eso", "k/ns/n", "v", "/tmp")
