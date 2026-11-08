@@ -407,3 +407,32 @@ def test_orphan_sweep_never_trusts_a_missing_or_empty_source(b1, capsys, monkeyp
     rc, doc, _ = cli(["sweep-orphans", "--class", "tf-kvm", "--tf-dir", arg], capsys=capsys)
     assert rc == 0 and doc["removed"] == []
     assert all(o["kept_because"] == why for o in doc["orphans"]) and doc["orphans"]
+
+
+# Relecture finale I8 : un refus avant de commencer (répertoire disparu,
+# NFS démonté) est rangé comme un échec ; sans cela le fil de fond relançait
+# une action toutes les 5 minutes et l'avertissement ne paraissait jamais.
+@pytest.mark.parametrize("how,code", [("dir-gone", "bad-input"), ("unexpected", "RuntimeError")])
+def test_a_snapshot_refused_before_starting_is_recorded(b1, capsys, monkeypatch, how, code):
+    if how == "dir-gone":
+        b1["dir"].rmdir()
+    else:
+        def boom(*a, **k):
+            raise RuntimeError("x")
+        monkeypatch.setattr(tcli.hsc, "admin_client", boom)
+    if how == "unexpected":
+        with pytest.raises(RuntimeError):
+            cli(["snapshot"], capsys=capsys)
+    else:
+        rc, doc, _ = cli(["snapshot"], capsys=capsys)
+        assert rc != 0
+    last = read_settings(b1)["snapshots"]
+    assert last["last_error"] == code and last["last_error_at"]
+
+
+@pytest.mark.parametrize("keep", ["0", "-100", "366"])
+def test_snapshot_keep_is_bounded(b1, capsys, keep):
+    (b1["dir"] / "openbao-20261010T023000Z-hops-20261001-1.snap").write_bytes(b"x")
+    rc, doc, _ = cli(["snapshot", "--keep", keep], capsys=capsys)
+    assert rc == 2 and doc["code"] == "bad-input"
+    assert (b1["dir"] / "openbao-20261010T023000Z-hops-20261001-1.snap").exists()

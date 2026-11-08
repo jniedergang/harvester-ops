@@ -1410,19 +1410,37 @@ def cmd_snapshot(args):
     s, raw = settings(), raw_settings()
     if s["mode"] != "b1" or not ss.openbao_active(s):
         return refuse("b1-only", "snapshots are taken in mode B1 (in mode A the server belongs to you)")
-    dest = _snapshot_dest(raw, args.dest)
-    key = str(agent_health().get("current_key") or "")
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    name = f"openbao-{stamp}-{key}.snap" if KEY_ID_RE.match(key) else f"openbao-{stamp}.snap"
-    keep = args.keep or s["snapshot_keep"]
-    if args.dry_run:
-        out({"ok": True, "dry_run": True, "file": name, "keep": keep})
-        return EXIT_OK
+    lo, hi = ss.SNAPSHOT_KEEP_RANGE
+    if args.keep is not None and not lo <= args.keep <= hi:
+        return refuse("bad-input", f"--keep: between {lo} and {hi}")
 
     def record(**kw):
         doc = raw_settings()
         doc["snapshots"] = dict(doc.get("snapshots") or {}, **kw)
         save_settings(doc)
+    # relecture finale I8 : tout échec est rangé, refus compris (répertoire
+    # disparu, erreur imprévue) ; sinon le fil de fond relance sans fin
+    try:
+        return _snapshot_take(args, s, raw, record)
+    except CliError as e:
+        if not args.dry_run:
+            record(last_error=e.code, last_error_at=int(time.time()))
+        raise
+    except Exception as e:                       # noqa: BLE001 : rangé puis relevé
+        if not args.dry_run:
+            record(last_error=type(e).__name__, last_error_at=int(time.time()))
+        raise
+
+
+def _snapshot_take(args, s, raw, record):
+    dest = _snapshot_dest(raw, args.dest)
+    key = str(agent_health().get("current_key") or "")
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    name = f"openbao-{stamp}-{key}.snap" if KEY_ID_RE.match(key) else f"openbao-{stamp}.snap"
+    keep = args.keep if args.keep is not None else s["snapshot_keep"]
+    if args.dry_run:
+        out({"ok": True, "dry_run": True, "file": name, "keep": keep})
+        return EXIT_OK
     try:
         n = admin_client(s=s).raft_snapshot(str(dest / name))
     except (oc.OpenBaoError, OSError) as e:

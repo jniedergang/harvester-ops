@@ -34398,6 +34398,7 @@ SECRETS_HOUSEKEEPING_S = 300
 SECRETS_DAILY_S = 86400
 SNAPSHOT_STALE_S = 2 * 86400            # plan, tâche 11 : objet protégé en avertissement
 SNAPSHOT_RETRY_S = 3600
+_SECRETS_SNAPSHOT_TRIED = {"at": 0.0}     # dernier lancement planifié (relecture finale I8)
 AUDIT_LOW_BYTES = 1 << 30               # plan, « Audit » : 1 Gio libre ou 10 % du volume
 AUDIT_LOW_RATIO = 0.10
 SECRET_ID_ROTATE_S = 30 * 86400         # point 260 : la minuterie de l'agent tourne le secret_id à 30 jours
@@ -34777,8 +34778,13 @@ def _secrets_housekeeping_tick(now=None):
         slot = _snapshot_slot(s.get("snapshot_time"), now)
         last_ok = float(snaps.get("last_ok_at") or 0)
         last_err = float(snaps.get("last_error_at") or 0)
+        # relecture finale I8 : le dernier lancement compte aussi, pour un
+        # outil qui échouerait sans rien ranger (jamais une action par passage)
+        tried = float(_SECRETS_SNAPSHOT_TRIED["at"] or 0)
         if last_ok < slot and (last_err < slot or now - last_err >= SNAPSHOT_RETRY_S) \
+                and (tried < slot or now - tried >= SNAPSHOT_RETRY_S) \
                 and not _secrets_running(SECRETS_SNAPSHOT_LABEL):
+            _SECRETS_SNAPSHOT_TRIED["at"] = now
             run = _secrets_service_action(SECRETS_SNAPSHOT_LABEL, ["snapshot"])
             if run is not None:
                 started.append(run)

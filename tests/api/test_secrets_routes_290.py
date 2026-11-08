@@ -438,3 +438,16 @@ def test_status_tells_a_newer_vault_needs_the_acknowledgement(wapp, sx, monkeypa
     sx.srv.seal_version = "2.0.0-HEAD"
     status, doc = post(wapp, "/api/secrets/status", method="get")
     assert doc["tf_server"]["warning"] is None
+
+
+def test_a_failed_snapshot_that_records_nothing_is_not_relaunched_every_tick(wapp, sx, bg):
+    """Relecture finale I8 : un outil qui échoue sans écrire last_error_at
+    (plantage, version ancienne) n'est relancé qu'après le délai de réessai."""
+    sx.set(snapshots={"last_ok_at": _at(2, 31, -1)})
+    wapp._SECRETS_SNAPSHOT_TRIED["at"] = 0.0
+    wapp._secrets_housekeeping_tick(now=_at(2, 35))
+    wapp._secrets_housekeeping_tick(now=_at(2, 40))
+    wapp._secrets_housekeeping_tick(now=_at(3, 30))
+    assert len(bg) == 1
+    wapp._secrets_housekeeping_tick(now=_at(3, 36))
+    assert len(bg) == 2
