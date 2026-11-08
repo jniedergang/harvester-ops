@@ -125,6 +125,27 @@ def test_server_verdict(mode, version, expected):
     assert tfe.server_verdict(mode, {"version": version}) == expected
 
 
+# Revue m1 des tâches 9-10 : le type du serveur se lit dans un champ propre à
+# chacun (relevé réel : OpenBao 2.7.2 `commit_date`, Vault 1.14.2 `build_date`)
+OB_272 = {"type": "static", "version": "2.0.0-HEAD", "commit_date": "", "cluster_name": "vault-cluster-e64d5855"}
+VAULT_1142 = {"type": "shamir", "version": "1.14.2", "build_date": "2023-08-24T13:19:12Z"}
+
+
+@pytest.mark.parametrize("status,kind,expected", [
+    (OB_272, "openbao", None),
+    (dict(OB_272, version="2.7.2"), "openbao", None),
+    (dict(OB_272, version="3.0.0"), "openbao", tfe.WARN_VAULT_UNVERIFIED),       # majeur inconnu
+    (VAULT_1142, "vault", None),
+    (dict(VAULT_1142, version="1.17.6"), "vault", tfe.WARN_VAULT_UNVERIFIED),
+    (dict(VAULT_1142, version="2.0.0"), "vault", tfe.WARN_VAULT_UNVERIFIED),     # un futur Vault 2.x
+    ({"version": "2.1.0"}, None, None),
+    ({"version": "4.1.0"}, None, tfe.WARN_VAULT_UNVERIFIED),
+])
+def test_server_kind_decides_before_the_version(status, kind, expected):
+    assert tfe.server_kind(status) == kind
+    assert tfe.server_verdict("a", status) == expected
+
+
 @pytest.mark.parametrize("ack,addr,version,expected", [
     ({"addr": "https://v", "version": "1.17"}, "https://v", "1.17.6", True),
     ({"addr": "https://v", "version": "1.17"}, "https://v", "1.18.0", False),
@@ -634,3 +655,39 @@ def test_an_encrypted_backup_is_kept(wapp, tfx):
     (tfx.ws / "terraform.tfstate.backup").write_text(enc)
     assert wapp._tf_purge_clear_copies(tfx.ws) == []
     assert (tfx.ws / "terraform.tfstate.backup").exists()
+
+
+# Revue m2 et m3 des tâches 9-10 : durée du jeton lue dans la réponse, session
+# partagée entre fils sans double jeton
+def test_child_token_expiry_comes_from_the_granted_lease(wapp, tfx):
+    decl(tfx)
+    tfx.srv.child_ttl = 600                      # le serveur plafonne (max_lease_ttl)
+    sess = wapp._TfBaoSession(DECL, timeout=1800)
+    t0 = time.time()
+    sess.env()
+    assert sess.expires <= t0 + 601
+    first = sess.token
+    sess.expires = time.time() + 100             # sous la marge de 120 s
+    sess.env()
+    assert sess.token != first
+    sess.revoke()
+
+
+def test_a_shared_session_creates_one_token_for_concurrent_threads(wapp, tfx):
+    import threading as th
+    decl(tfx)
+    sess = wapp._TfBaoSession(DECL)
+    go = th.Barrier(6)
+
+    def use():
+        go.wait()
+        sess.env()
+    ts = [th.Thread(target=use) for _ in range(6)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(child_tokens(tfx.srv)) == 1
+    tok = sess.token
+    sess.revoke()
+    assert sess.scrub(f"x {tok} y") == "x *** y"

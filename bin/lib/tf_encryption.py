@@ -131,19 +131,43 @@ def server_version(seal_status):
     return (int(m.group(1)), int(m.group(2))) if m else None
 
 
+def server_kind(seal_status):
+    """« openbao », « vault » ou None, lu dans un champ que les deux serveurs
+    remplissent différemment (relevé le 08/11/2026 sur OpenBao 2.7.2 de la
+    collection SUSE et Vault 1.14.2 : `sys/seal-status` porte `commit_date`
+    chez OpenBao, `build_date` chez Vault). Revue m1 des tâches 9-10 : la
+    version majeure seule prendrait un futur Vault 2.x pour OpenBao."""
+    st = seal_status if isinstance(seal_status, dict) else {}
+    if "build_date" in st:
+        return "vault"
+    if "commit_date" in st:
+        return "openbao"
+    return None
+
+
+OPENBAO_MAJORS = (2,)             # majeurs d'OpenBao connus ; au-delà, acquittement
+
+
 def server_verdict(mode, seal_status):
     """None (rien à dire) ou WARN_VAULT_UNVERIFIED. B1 est un OpenBao posé
-    par la console. En mode A : OpenBao est en 2.x et plus (fork de Vault
-    1.14) ; un Vault 1.x plus récent que 1.14, ou une version illisible,
-    demande l'acquittement de l'administrateur."""
+    par la console. En mode A : un Vault plus récent que 1.14 (le seul que
+    le fournisseur `openbao` d'OpenTofu garantit), un serveur dont le type
+    ou la version ne se lit pas, ou un majeur d'OpenBao inconnu, demandent
+    l'acquittement de l'administrateur. Type inconnu (champ absent) : la
+    version décide, OpenBao en 2.x."""
     if mode == "b1":
         return None
     v = server_version(seal_status)
     if v is None:
         return WARN_VAULT_UNVERIFIED
-    if v[0] == 1 and v > VAULT_VERIFIED:
-        return WARN_VAULT_UNVERIFIED
-    return None
+    kind = server_kind(seal_status)
+    if kind == "vault":
+        return None if v <= VAULT_VERIFIED else WARN_VAULT_UNVERIFIED
+    if kind == "openbao":
+        return None if v[0] in OPENBAO_MAJORS else WARN_VAULT_UNVERIFIED
+    if v[0] == 1:
+        return None if v <= VAULT_VERIFIED else WARN_VAULT_UNVERIFIED
+    return None if v[0] in OPENBAO_MAJORS else WARN_VAULT_UNVERIFIED
 
 
 def ack_matches(ack, addr, seal_status):

@@ -29640,9 +29640,17 @@ class _TfBaoSession:
     (un jeton expiré au départ donne 403, indiscernable d'une mauvaise
     clé : la console compare elle-même l'heure), révoqué à la fin."""
 
+    # revue m2 des tâches 9-10 : marge avant l'expiration lue dans la réponse
+    # (tofu peut mettre du temps à démarrer avant son premier appel transit)
+    MARGIN_S = 120
+
     def __init__(self, decl_id, timeout=TF_BAO_SESSION_TIMEOUT, action=None, actor=None):
         self.decl_id, self.timeout, self.action, self.actor = decl_id, int(timeout), action, actor
         self.token, self.expires, self.addr, self.ca_file, self._ca_pem = None, 0.0, None, None, None
+        # revue m3 : une vue (autre fil) peut emprunter la session d'une action
+        self._lock = threading.RLock()
+        self._issued = []
+        self.granted = 0
 
     def __repr__(self):
         return f"<TfBaoSession {self.decl_id} {'open' if self.token else 'closed'}>"
@@ -29657,21 +29665,28 @@ class _TfBaoSession:
             client.transit_create(key)                 # idempotent (vu sur OpenBao 2.7.2)
             ttl = _tfe.child_ttl(self.timeout)
             role = _opol.tf_role(cid)
-            token = client.token_create_child(role, [role], f"{ttl}s", entity_alias=_tfe.alias(self.decl_id))
+            token, lease = client.token_create_child(role, [role], f"{ttl}s", entity_alias=_tfe.alias(self.decl_id),
+                                                     with_lease=True)
         except _oc.OpenBaoError as e:
             raise _sst.SecretError(e.code, "tf-state", self.decl_id, e.detail) from None
         self.addr = s["addr"]
         self.ca_file, self._ca_pem = _tf_bao_ca(s)
-        self.token, self.expires = token, time.time() + ttl
+        # durée accordée par le serveur (plafonnée par max_lease_ttl ou par
+        # le parent), pas celle demandée
+        granted = lease if lease and 0 < lease <= ttl else ttl
+        self.token, self.expires, self.granted = token, time.time() + granted, granted
+        self._issued.append(token)
 
     def env(self):
-        if self.token is None or time.time() >= self.expires - 30:
-            self.revoke()
-            self._open()
-        return _tfe.env(self.addr, self.token, self.ca_file)
+        with self._lock:
+            if self.token is None or time.time() >= self.expires - min(self.MARGIN_S, self.granted / 2):
+                self.revoke()
+                self._open()
+            return _tfe.env(self.addr, self.token, self.ca_file)
 
     def revoke(self):
-        tok, self.token = self.token, None
+        with self._lock:
+            tok, self.token = self.token, None
         if not tok:
             return
         try:
@@ -29683,7 +29698,11 @@ class _TfBaoSession:
             log_tf.warning("OpenTofu child token of %s not revoked: %s", self.decl_id, type(e).__name__)
 
     def scrub(self, text):
-        return text.replace(self.token, "***") if self.token and text else text
+        if not text:
+            return text
+        for tok in list(self._issued):
+            text = text.replace(tok, "***")
+        return text
 
 
 @contextlib.contextmanager

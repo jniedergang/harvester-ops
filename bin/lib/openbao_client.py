@@ -633,10 +633,12 @@ class Client:
         return ((dec or {}).get("data") or {}).get("plaintext") == probe
 
     # -- jetons enfants --------------------------------------------------------
-    def token_create_child(self, role, policies, ttl, entity_alias=None):
+    def token_create_child(self, role, policies, ttl, entity_alias=None, with_lease=False):
         """Jeton enfant par un rôle de jeton (`auth/token/create/<rôle>`).
         Rend le jeton : l'appelant le remet à un seul processus par son
-        environnement, jamais en argument ni dans un fichier."""
+        environnement, jamais en argument ni dans un fichier. `with_lease` :
+        rend (jeton, durée accordée en secondes) ; le serveur peut plafonner
+        la durée demandée (revue m2 des tâches 9-10)."""
         body = {"policies": list(policies), "ttl": str(ttl)}
         if entity_alias:
             # le rôle accepte `tf-*` : jamais de `/`, `..` ni `*` dans l'alias
@@ -645,9 +647,16 @@ class Client:
                 raise OpenBaoError("openbao-bad-request", None, "invalid entity_alias (tf-<declaration> expected)")
             body["entity_alias"] = entity_alias
         _, resp = self._call("POST", f"auth/token/create/{self._seg(role)}", body, retry=False)
-        tok = ((resp or {}).get("auth") or {}).get("client_token")
+        auth = (resp or {}).get("auth") or {}
+        tok = auth.get("client_token")
         if not tok:
             raise OpenBaoError("openbao-bad-request", None, "no token in response")
+        if with_lease:
+            try:
+                lease = int(auth.get("lease_duration"))
+            except (TypeError, ValueError):
+                lease = None
+            return tok, lease
         return tok
 
     def entity_delete_by_alias(self, alias_name, mount_accessor):
