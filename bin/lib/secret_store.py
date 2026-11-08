@@ -79,6 +79,13 @@ CACHE_TTL_RANGE = (1, 120)
 VALUE_MAX = 1 << 20               # 1 Mio
 TMPFS_TYPES = ("tmpfs", "ramfs")
 # Erreurs du client qui disent « OpenBao ne répond pas » (bandeau, cache).
+# Revue I6 : un outil lancé par la console ne se connecte jamais à OpenBao.
+# La console pose SPAWNED_ENV (son propre pid) dans son environnement, hérité
+# par tout ce qu'elle lance ; elle remet les copies de travail dont l'outil a
+# besoin par un fichier de correspondance tmpfs (FILES_ENV : {référence:
+# chemin}). Un lecteur de la console (read_workers) reste la console.
+SPAWNED_ENV = "HARVESTER_OPS_SPAWNED"
+FILES_ENV = "HARVESTER_OPS_SECRET_FILES"
 # Une copie partagée retirée mais encore tenue par un fil vivant est effacée
 # au plus tard après ce délai (revue I1 : borne si un fil ne finit jamais).
 SHARED_HOLD_MAX_S = 12 * 3600
@@ -979,6 +986,35 @@ class OpenBaoStore:
 # ---------------------------------------------------------------------------
 # Magasin du processus : mémoire (plan-run), fichiers, OpenBao
 # ---------------------------------------------------------------------------
+def spawned(env=None):
+    """Processus lancé par la console (et pas la console elle-même ni un de
+    ses lecteurs) : il ne se connecte pas, il lit les copies remises."""
+    env = os.environ if env is None else env
+    mark = env.get(SPAWNED_ENV)
+    return bool(mark) and mark != str(os.getpid()) and env.get("HARVESTER_OPS_READ_WORKER") != "1"
+
+
+def spawned_file(ref, required=True):
+    """Chemin de la copie de travail remise par la console pour `ref` (une
+    référence `openbao:` ou `local:`, telle qu'écrite dans la configuration).
+    Absente : SecretError `openbao-spawned-no-file` (jamais de connexion), ou
+    None si `required` est faux (une référence `local:` se lit alors sur
+    place)."""
+    _b, cls, path, _f = parse_ref_full(ref)
+    mp = os.environ.get(FILES_ENV)
+    try:
+        files = json.loads(Path(mp).read_text()) if mp else {}
+    except (OSError, ValueError):
+        files = {}
+    p = files.get(ref) if isinstance(files, dict) else None
+    if p and os.path.isfile(p):
+        return Path(p)
+    if not required:
+        return None
+    raise SecretError("openbao-spawned-no-file", cls, path,
+                      "launched by the console without a working file for this secret")
+
+
 def default_client_factory(settings):
     """Fabrique des clients d'un processus : une connexion AppRole par
     processus (identifiants lus dans /etc/harvester-ops/openbao/), une copie
@@ -988,6 +1024,8 @@ def default_client_factory(settings):
     lock = threading.Lock()
 
     def factory(actor=None, action=None):
+        if spawned():
+            raise oc.OpenBaoError("openbao-login-failed", None, "a tool launched by the console does not log in")
         with lock:
             c = base.get("c")
             if c is None:
@@ -1116,6 +1154,10 @@ class MultiStore(LocalStore):
             backend, cls, path, _field = parse_ref_full(ref)
         except ValueError:
             raise SecretMissing(ref if isinstance(ref, str) else "(invalid)") from None
+        if spawned() and CLASSES[cls]["persist"]:
+            p = spawned_file(ref, required=backend == "openbao")
+            if p is not None:
+                return p.read_text()
         if backend == "openbao":
             return self._need_bao(cls, path).get(ref, actor)
         if not CLASSES[cls]["persist"]:
@@ -1156,6 +1198,11 @@ class MultiStore(LocalStore):
         effacé). OpenBao et mémoire : copie 0600 sur tmpfs, effacée à la
         sortie du bloc, exception comprise."""
         backend, cls, path, field = parse_ref_full(ref)
+        if spawned() and CLASSES[cls]["persist"]:
+            p = spawned_file(ref, required=backend == "openbao")
+            if p is not None:
+                yield p                          # copie de la console : elle l'efface
+                return
         if backend == "openbao":
             with self._need_bao(cls, path).file(ref, purpose, actor) as p:
                 yield p
@@ -1183,6 +1230,10 @@ class MultiStore(LocalStore):
         """Chemin gardé au-delà d'une requête : le fichier local lui-même, ou
         une copie tmpfs d'un secret OpenBao gardée la durée du cache."""
         backend, cls, path, field = parse_ref_full(ref)
+        if spawned() and CLASSES[cls]["persist"]:
+            p = spawned_file(ref, required=backend == "openbao")
+            if p is not None:
+                return p
         if backend == "local" and CLASSES[cls]["persist"]:
             local = self.files.read_local(cls, path, field)
             if is_openbao_ref(local):

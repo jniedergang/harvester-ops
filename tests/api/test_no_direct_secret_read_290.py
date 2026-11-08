@@ -36,6 +36,7 @@ _BIN_TOOLS_MATERIALIZED = {
 ALLOWED = {
     "kubeconfig": _BIN_TOOLS_MATERIALIZED | {
         ("web/app.py", "_cluster_kubeconfig_path"),          # le lecteur
+        ("web/app.py", "_spawn_secret_env"),                 # référence remise à un outil (revue I6)
         ("web/app.py", "_cluster_of_kubeconfig"),            # comparaison, puis le lecteur
         ("web/app.py", "_registry_console_address"),         # présence, puis le lecteur
         ("web/app.py", "_baremetal_install_steps"),          # kubeconfig neuf d'une installation (écrivain)
@@ -46,6 +47,7 @@ ALLOWED = {
     },
     "ssh-key": {
         ("web/app.py", "_cluster_ssh_key_path"),             # le lecteur
+        ("web/app.py", "_spawn_secret_env"),                 # référence remise à un outil (revue I6)
         ("web/app.py", "api_network_fabric_node_detail"), ("web/app.py", "_fabric_ssh_base"),  # présence
         ("web/app.py", "_bm_join_pubkey"),                   # drapeau `generated`, puis le lecteur
         ("web/app.py", "_validate_cluster_payload"), ("web/app.py", "api_clusters_create"),
@@ -75,6 +77,7 @@ ALLOWED = {
         ("bin/harvester-replication.py", "cmd_notify_show"),  # masqué (rn.mask)
         ("bin/harvester-replication.py", "cmd_notify_set"),   # garde les valeurs rangées
         ("web/app.py", "_repl_notify_stored"),               # masqué / normalisé, jamais envoyé
+        ("web/app.py", "_replication_follow_secret_env"),    # références du suiveur (revue I6)
     },
 }
 

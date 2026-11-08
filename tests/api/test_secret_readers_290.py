@@ -498,3 +498,113 @@ def test_app_tf_kvm_stage_migrated_key_stays_off_disk(wapp, env, tmp_path, monke
     target = Path(os.readlink(key))
     wapp._tf_kvm_unstage(ws)
     assert not key.exists() and not key.is_symlink() and not target.exists()
+
+
+# ---------------------------------------------------------------------------
+# Revue des tâches 2 à 4 : outils lancés par la console (I6)
+# ---------------------------------------------------------------------------
+def test_console_marks_what_it_launches(wapp):
+    assert os.environ[ss.SPAWNED_ENV]
+    assert not ss.spawned({ss.SPAWNED_ENV: str(os.getpid())})
+    assert ss.spawned({ss.SPAWNED_ENV: "1"})
+    assert not ss.spawned({ss.SPAWNED_ENV: "1", "HARVESTER_OPS_READ_WORKER": "1"})
+    assert not ss.spawned({})
+
+
+def test_spawned_tool_reads_handed_copies_and_never_logs_in(env, tmp_path, monkeypatch):
+    ref = env["put"]("kubeconfig", "h1", "kubeconfig")
+    other = env["put"]("ssh-cluster", "h2", "private_key")
+    copy = tmp_path / "handed"
+    copy.write_text(VALUE)
+    mp = tmp_path / "map.json"
+    mp.write_text(json.dumps({ref: str(copy)}))
+    monkeypatch.setenv(ss.SPAWNED_ENV, "1")
+    monkeypatch.setenv(ss.FILES_ENV, str(mp))
+    env["bao"].log.clear()
+    st = env["store"]
+    assert st.get(ref) == VALUE
+    assert st.shared_file(ref, "kubectl") == copy
+    with st.file(ref, "x") as p:
+        assert p == copy
+    assert copy.exists()                                   # la console l'efface, pas l'outil
+    with pytest.raises(ss.SecretError) as e:
+        st.get(other)
+    assert e.value.code == "openbao-spawned-no-file" and e.value.name == "h2"
+    assert env["bao"].log == []                            # aucune requête, aucune connexion
+    with pytest.raises(oc.OpenBaoError) as e2:
+        ss.default_client_factory({"addr": env["bao"].addr})()
+    assert e2.value.code == "openbao-login-failed"
+
+
+def test_console_hands_working_files_to_a_tool(wapp, env, monkeypatch):
+    kc = env["put"]("kubeconfig", "h1", "kubeconfig")
+    key = env["put"]("ssh-cluster", "h1", "private_key")
+    monkeypatch.setattr(wapp, "load_config_ro", lambda: {"clusters": [
+        {"name": "h1", "kubeconfig": kc, "ssh": {"key": key}},
+        {"name": "h2", "kubeconfig": "/local/h2.yaml"}]})
+    extra, mp = wapp._spawn_secret_env(["h1", "h2"])
+    files = json.loads(Path(extra[ss.FILES_ENV]).read_text())
+    assert set(files) == {kc, key} and all(_on_tmpfs(env, p) for p in files.values())
+    assert Path(mp).parent == env["run"]
+    assert wapp._spawn_secret_env(["h2"]) == ({}, None)
+
+
+def test_cli_action_runner_passes_the_files_and_erases_the_map(wapp, env, monkeypatch):
+    kc = env["put"]("kubeconfig", "h1", "kubeconfig")
+    monkeypatch.setattr(wapp, "load_config_ro", lambda: {"clusters": [{"name": "h1", "kubeconfig": kc}]})
+    seen = {}
+
+    class P:
+        returncode = 0
+        stderr = iter(())
+        stdout = None
+        pid = 1
+
+        def __init__(self, cmd, **kw):
+            seen.update(kw.get("env") or {})
+            mp = (kw.get("env") or {}).get(ss.FILES_ENV)
+            seen["map_existed"] = bool(mp) and Path(mp).exists()
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+    monkeypatch.setattr(wapp.subprocess, "Popen", P)
+    run = wapp.ActionRun("r-i6", "t", "h1", ["t"])
+    wapp._vm_transfer_runner(run, ["true"])
+    assert seen["map_existed"] and not Path(seen[ss.FILES_ENV]).exists()
+
+
+def test_replication_follower_secret_files_rewritten_on_rotation(wapp, env, monkeypatch, tmp_path):
+    import replication_db as rdb
+    ref = env["put"]("replication-notify", "global", "mx_1__token", "tok-1")
+    conn = rdb.connect(tmp_path / "replication.db")
+    rdb.set_setting(conn, "notify", {"channels": [{"id": "mx-1", "token": ref}]}, by="t")
+    conn.close()
+    monkeypatch.setattr(wapp, "_replication_conn", lambda: rdb.connect(tmp_path / "replication.db"))
+    extra = wapp._replication_follow_secret_env()
+    files = json.loads(Path(extra[ss.FILES_ENV]).read_text())
+    f = Path(files[ref])
+    assert f.read_text() == "tok-1" and f.parent.parent == env["run"]
+    env["put"]("replication-notify", "global", "mx_1__token", "tok-2")
+    env["store"].clear_cache()
+    assert wapp._replication_follow_secret_env() == extra
+    assert f.read_text() == "tok-2"
+
+
+def test_follower_supervisor_spawns_with_secret_env(wapp):
+    got = {}
+
+    class P:
+        pid = 7
+
+        def __init__(self, cmd, **kw):
+            got.update(kw)
+
+        def poll(self):
+            return None
+    sup = wapp.ReplicationFollowerSupervisor(lambda: ["follow"], lambda: "/dev/null", lambda: True, lambda: 1,
+                                             popen=P, secret_env=lambda: {ss.FILES_ENV: "/run/x/files.json"})
+    sup._spawn()
+    assert got["env"][ss.FILES_ENV] == "/run/x/files.json"

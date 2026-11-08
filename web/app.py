@@ -167,6 +167,11 @@ import secret_store as _sst  # noqa: E402  (2.9.0 : magasin de secrets)
 # atteindre un sous-processus).
 for _k in [k for k in os.environ if k.startswith(("VAULT_", "BAO_"))]:
     os.environ.pop(_k, None)
+# Revue I6 : tout ce que la console lance hérite de cette marque et ne se
+# connecte pas à OpenBao ; il reçoit ses copies de travail (_spawn_secret_env).
+# Jamais écrasée : un outil lancé par la console qui charge ce module (la CLI
+# bare-metal) reste un outil lancé.
+os.environ.setdefault(_sst.SPAWNED_ENV, str(os.getpid()))
 import longhorn_room  # noqa: E402
 # garde anti-SSRF des téléchargements (1.99.0), dans bin/lib depuis la prochaine
 # version KVM : la console (ISO, images KVM) et la CLI KVM partagent la même.
@@ -2229,7 +2234,9 @@ def run_action_thread(run: ActionRun):
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
 
+    secret_env, secret_map = {}, None
     try:
+        secret_env, secret_map = _spawn_secret_env([run.cluster])
         run.proc = subprocess.Popen(
             run.cmd,
             stdout=subprocess.PIPE,
@@ -2238,9 +2245,11 @@ def run_action_thread(run: ActionRun):
             bufsize=1,
             env={**os.environ, "NO_COLOR": "1",
                  "HARVESTER_OPS_CONFIG": str(CONFIG_PATH),
-                 **getattr(run, "identity_env", {})},
+                 **getattr(run, "identity_env", {}), **secret_env},
         )
-    except FileNotFoundError as e:
+    except (FileNotFoundError, _sst.SecretError) as e:
+        if secret_map:
+            secret_map.unlink(missing_ok=True)
         run.status = "error"
         run.exit_code = 127
         run.emit({"type": "log", "level": "error", "message": str(e), "ts": time.time()})
@@ -2278,6 +2287,8 @@ def run_action_thread(run: ActionRun):
     rc = run.proc.wait()
     t_err.join(timeout=5)
     t_out.join(timeout=5)
+    if secret_map:
+        secret_map.unlink(missing_ok=True)
 
     run.exit_code = rc
     run.status = "done" if rc == 0 else "error"
@@ -9160,6 +9171,36 @@ def _cluster_ssh_key_path(ssh, purpose="ssh-cluster"):
     tmpfs quand le champ porte une référence du magasin de secrets."""
     key = (ssh or {}).get("key")
     return _sst.path_of(key, purpose) if key else key
+
+
+def _spawn_secret_env(clusters):
+    """Revue I6 : un outil lancé par la console ne se connecte pas à OpenBao.
+    Pour les clusters de l'action dont le kubeconfig ou la clé SSH porte une
+    référence, la console remet des copies de travail tmpfs (tenues par le
+    fil courant, celui qui attend l'outil) et un fichier de correspondance
+    {référence: chemin}, nommé par HARVESTER_OPS_SECRET_FILES. Rend (env,
+    fichier de correspondance à effacer quand l'outil a fini) ; ({}, None)
+    sans OpenBao ou sans référence. Un secret illisible n'est pas remis :
+    l'outil le dit (`openbao-spawned-no-file`) pour ce cluster seulement."""
+    if not _sst.is_active():
+        return {}, None
+    names = {c for c in clusters or () if c}
+    refs = {}
+    for entry in load_config_ro().get("clusters", []):
+        if entry.get("name") not in names:
+            continue
+        for v in (entry.get("kubeconfig"), (entry.get("ssh") or {}).get("key")
+                  if isinstance(entry.get("ssh"), dict) else None):
+            if isinstance(v, str) and _sst.is_ref(v) and v not in refs:
+                try:
+                    refs[v] = str(_sst.store().shared_file(v, "tool"))
+                except (_sst.SecretError, _sst.SecretMissing) as e:
+                    log.warning("secret of %s not handed to the tool: %s", entry.get("name"), e)
+    if not refs:
+        return {}, None
+    mp = _sst.write_private_copy(_sst.secret_files_dir(_sst.store().settings), "secret-files",
+                                 json.dumps(refs))
+    return {_sst.FILES_ENV: str(mp)}, mp
 
 
 _KUBE_SYSTEM_MISS = {}         # cluster -> horodatage du dernier échec
@@ -23614,6 +23655,7 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     last_error = None
     out_file = None
+    secret_map = None
     if run.cancel_requested:
         # v1.99.0 : annulée avant le départ de la commande : rien n'est lancé
         run.status, run.error_summary = "cancelled", "cancelled before the command started: nothing done"
@@ -23625,8 +23667,10 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
         # dans le try : une erreur ici (disque plein) laissait l'action
         # « running » pour toujours
         out_file = tempfile.TemporaryFile() if capture and sink is None else None
+        secret_env, secret_map = _spawn_secret_env([run.cluster])
         proc = subprocess.Popen(cmd, stdout=out_file or (subprocess.PIPE if sink is not None else subprocess.DEVNULL),
-                                stderr=subprocess.PIPE, text=True)
+                                stderr=subprocess.PIPE, text=True,
+                                **({"env": {**os.environ, **secret_env}} if secret_env else {}))
         run.proc = proc          # annulable depuis le dock : le script défait tout
         got = []
         reader = None
@@ -23708,6 +23752,8 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
     finally:
         if out_file is not None:
             out_file.close()
+        if secret_map:
+            secret_map.unlink(missing_ok=True)
     run.ended_at = time.time()
     run.emit({"type": "status", "status": run.status,
               "exit_code": run.exit_code, "ts": time.time()})
@@ -33003,9 +33049,15 @@ class ReplicationFollowerSupervisor:
     POLL_S = 2
     LOG_MAX = 10 * 1024 * 1024
 
+    SECRETS_REFRESH_S = 60
+
     def __init__(self, cmd, log_path, enabled, grace, popen=subprocess.Popen, clock=time.monotonic,
-                 wall=time.time, ready=None, reopen_signal=signal.SIGUSR1):
+                 wall=time.time, ready=None, reopen_signal=signal.SIGUSR1, secret_env=None):
         self._cmd, self._log_path, self._enabled, self._grace = cmd, log_path, enabled, grace
+        # revue I6 : le suiveur ne se connecte pas à OpenBao ; ses secrets de
+        # notification lui viennent de copies tmpfs tenues à jour par la console
+        self._secret_env = secret_env
+        self._secrets_at = None
         self._popen, self._clock, self._wall, self._ready = popen, clock, wall, ready
         self._reopen_signal = reopen_signal
         self.rotations = 0
@@ -33055,6 +33107,9 @@ class ReplicationFollowerSupervisor:
                     self._exited(rc)
                 else:
                     self._rotate_if_needed()
+                    if (self._secret_env is not None and self._secrets_at is not None
+                            and self._clock() - self._secrets_at >= self.SECRETS_REFRESH_S):
+                        self._refresh_secrets()
             metric_repl_follower_up.set(1 if self.running() else 0)
 
     def _rotate_if_needed(self):
@@ -33084,11 +33139,25 @@ class ReplicationFollowerSupervisor:
             pass
         return open(path, "a", buffering=1)
 
+    def _refresh_secrets(self):
+        """Copies de travail du suiveur réécrites (rotation, nouvelle valeur) ;
+        rend l'environnement qui les nomme."""
+        if self._secret_env is None:
+            return {}
+        self._secrets_at = self._clock()
+        try:
+            return self._secret_env() or {}
+        except Exception as e:                    # noqa: BLE001 : le suiveur part quand même
+            log_watch.warning("replication follower: secrets not refreshed: %s", e)
+            return {}
+
     def _spawn(self):
         try:
+            extra = self._refresh_secrets()
             with self._open_log() as log_f:
                 self.proc = self._popen(self._cmd(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                        stderr=log_f, start_new_session=True)
+                                        stderr=log_f, start_new_session=True,
+                                        **({"env": {**os.environ, **extra}} if extra else {}))
         except OSError as e:
             self.proc = None
             self._backoff(f"cannot start the follower: {type(e).__name__}")
@@ -33185,6 +33254,70 @@ def _replication_follower_health():
     return sup.health()
 
 
+def _secret_refs_in(obj, out):
+    """Références du magasin de secrets trouvées dans un document JSON."""
+    if isinstance(obj, str):
+        if _sst.is_ref(obj):
+            out.add(obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _secret_refs_in(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _secret_refs_in(v, out)
+    return out
+
+
+def _replication_follow_secret_env():
+    """Revue I6 : copies de travail des secrets de notification et des
+    en-têtes des actions annexes, pour le suiveur de réplication qui ne se
+    connecte pas à OpenBao. Fichiers stables sous
+    `<tmpfs>/replication-follow/` (nom tiré de la référence, jamais de la
+    valeur), réécrits quand la valeur change, retirés quand la référence
+    disparaît ; une valeur illisible (OpenBao coupé) garde la copie d'avant.
+    Rend {HARVESTER_OPS_SECRET_FILES: correspondance} ou {}."""
+    if not _sst.is_active():
+        return {}
+    refs = set()
+    conn = _replication_conn()
+    try:
+        _secret_refs_in(_rdb.get_setting(conn, "notify") or {}, refs)
+        for (opts,) in conn.execute("SELECT options FROM plans"):
+            try:
+                _secret_refs_in(json.loads(opts or "{}"), refs)
+            except ValueError:
+                continue
+    finally:
+        conn.close()
+    d = _sst.secret_files_dir(_sst.store().settings) / "replication-follow"
+    d.mkdir(mode=0o700, exist_ok=True)
+    files = {}
+    for ref in sorted(refs):
+        f = d / hashlib.sha256(ref.encode()).hexdigest()[:16]
+        try:
+            value = _sst.store().get(ref)
+        except (_sst.SecretError, _sst.SecretMissing) as e:
+            log_watch.warning("replication follower: %s not refreshed: %s", ref.split("#")[0], e)
+            if f.exists():
+                files[ref] = str(f)
+            continue
+        try:
+            same = f.read_text() == value
+        except OSError:
+            same = False
+        if not same:
+            tmp = _sst.write_private_copy(d, "next", value)
+            os.replace(tmp, f)
+        files[ref] = str(f)
+    tmp = _sst.write_private_copy(d, "next", json.dumps(files))
+    os.replace(tmp, d / "files.json")
+    keep = {Path(p).name for p in files.values()} | {"files.json"}
+    for p in d.iterdir():
+        if p.name not in keep:
+            p.unlink(missing_ok=True)
+    return {_sst.FILES_ENV: str(d / "files.json")}
+
+
 def _replication_follow_lock(path):
     """Verrou exclusif (flock) du répertoire d'état, tenu toute la vie de la
     console : (descripteur, None) s'il est pris, (None, pid du détenteur)
@@ -33223,7 +33356,8 @@ def _start_replication_follower():
         REPLICATION_FOLLOWER_ELSEWHERE = None
         REPLICATION_FOLLOWER = ReplicationFollowerSupervisor(
             _replication_follow_cmd, _replication_follow_log,
-            _replication_follow_enabled, _replication_follow_grace, ready=_MODULE_READY)
+            _replication_follow_enabled, _replication_follow_grace, ready=_MODULE_READY,
+            secret_env=_replication_follow_secret_env)
         REPLICATION_FOLLOWER.start()
         # protection automatique : la console qui tient le verrou du suivi seulement
         if REPLICATION_AUTO_PROTECT is None:
