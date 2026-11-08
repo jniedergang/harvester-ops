@@ -422,3 +422,26 @@ def test_cli_sweep_secrets(bao, plans_cli, capsys):
     rc = plans_cli.main(["sweep-secrets"])
     d = json.loads(capsys.readouterr().out)
     assert rc == 0 and d["removed"] == [PREV] and kv_paths(bao["srv"], PREV) == []
+
+
+# ---------------------------------------------------------------------------
+# Revue des tâches 9-10 (I3) : un échec de l'effacement des secrets ne change
+# pas l'issue d'un déroulé ; il est écrit en étape et laissé au balayage
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("code", ["openbao-login-failed", "openbao-denied", "openbao-unreachable"])
+def test_a_failed_secret_cleanup_keeps_a_done_run_done(bao, code):
+    st, srv = bao["store"], bao["srv"]
+    keep(st)
+
+    def refuse(*a, **kw):
+        raise ss.SecretError(code, dch.SECRET_CLASS, PREV, "refused")
+    st.openbao.delete_tree = refuse
+    ctx = Ctx(PREV)
+    res = dch.run(ctx, one_phase("done"), secrets=st, sleep=lambda s: None,
+                  keep_secrets=lambda status: False)
+    assert res["status"] == "done"
+    if code == "openbao-unreachable":
+        return                                   # déjà toléré : laissé au balayage sans bruit
+    cleanup = [s for s in ctx.steps if s[0] == "secrets-cleanup"]
+    assert cleanup and cleanup[-1][1] == "error" and code in cleanup[-1][2]
+    assert "refused" not in cleanup[-1][2] or code in cleanup[-1][2]

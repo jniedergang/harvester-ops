@@ -331,4 +331,13 @@ def run(ctx, phases, previous=None, sleep=time.sleep, now=time.time, secrets=Non
         store = secrets if secrets is not None else secret_store.store()
         if not (keep_secrets is not None and result.get("status") in RESUMABLE
                 and keep_secrets(result["status"])):
-            store.delete_tree(SECRET_CLASS, ctx.run_id)
+            # revue I3 des tâches 9-10 : un effacement refusé (secret_id
+            # tourné, droit retiré) ne change pas l'issue du déroulé ; il est
+            # dit en étape (le code seul) et le balayage des déroulés finis
+            # s'en charge
+            try:
+                store.delete_tree(SECRET_CLASS, ctx.run_id)
+            except Exception as e:                        # noqa: BLE001
+                code = getattr(e, "code", None) or type(e).__name__
+                ctx.emit_step("secrets-cleanup", "error",
+                              f"secrets of the run not erased ({code}); the background sweep will retry")
