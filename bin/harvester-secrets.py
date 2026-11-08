@@ -199,6 +199,26 @@ def run_agent(req, timeout=None):
         raise CliError("secrets-agent-missing", "no secret store agent on this host: run "
                        "`sudo harvester-secrets ...` on the host, or install the agent (install.sh --upgrade)",
                        EXIT_REFUSED)
+    if in_process:
+        # Root joue l'agent lui-même : la demande lui est passée en mémoire,
+        # et son état rendu de même ; rien n'est écrit ni lu par un chemin du
+        # répertoire de la console (qui pourrait y avoir posé un lien).
+        if os.path.lexists(rp):
+            raise CliError("secrets-agent-busy", "another request is waiting for the agent", EXIT_REFUSED)
+        # mêmes répertoires que l'outil (revue M11 des tâches 5-7) : hors des
+        # chemins par défaut, Paths() de l'agent lirait ailleurs
+        mod = _agent_module()
+        env = dict(os.environ, HARVESTER_OPS_STATE_DIR=str(state()))
+        if ss.openbao_dir().name == "openbao":
+            env["HARVESTER_OPS_ETC"] = str(ss.openbao_dir().parent)
+        agent = mod.Agent(paths=mod.Paths(env))
+        agent.process(request=req)
+        st = agent.status
+        for s in st.get("steps") or []:
+            step(f"agent-{s['id']}", s.get("status"), s.get("message") or "")
+        if st.get("state") not in ("done", "failed"):
+            raise CliError("secrets-agent-failed", "the agent did not run (see its log)", EXIT_FAIL)
+        return st
     d.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(rp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -206,14 +226,6 @@ def run_agent(req, timeout=None):
         raise CliError("secrets-agent-busy", "another request is waiting for the agent", EXIT_REFUSED) from None
     with os.fdopen(fd, "w") as f:
         json.dump(req, f)
-    if in_process:
-        # mêmes répertoires que l'outil (revue M11 des tâches 5-7) : hors des
-        # chemins par défaut, Paths() de l'agent lirait ailleurs
-        mod = _agent_module()
-        env = dict(os.environ, HARVESTER_OPS_STATE_DIR=str(state()))
-        if ss.openbao_dir().name == "openbao":
-            env["HARVESTER_OPS_ETC"] = str(ss.openbao_dir().parent)
-        mod.Agent(paths=mod.Paths(env)).process()
     deadline = time.monotonic() + timeout
     shown = {}
     while True:

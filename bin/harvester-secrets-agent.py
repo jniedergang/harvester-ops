@@ -44,6 +44,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -54,6 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import openbao_bundle as ob  # noqa: E402
 import openbao_client as oc  # noqa: E402
 import openbao_policy as pol  # noqa: E402
+import safe_fs as sf  # noqa: E402
 
 VERSION_FILE = Path(os.environ.get("HARVESTER_OPS_OPT", "/opt/harvester-ops")) / "VERSION"
 OPS = ("store-secret-id", "b1-install", "b1-upgrade", "b1-remove", "rotate-secret-id", "rotate-unseal-key",
@@ -77,6 +79,9 @@ COMMON = {"op", "id", "requested_by"}
 REQUEST, STATUS, AGENT = "request.json", "status.json", "agent.json"
 REQUEST_MAX = 64 << 10
 ROLE_ID_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
+SECRET_VALUE_RE = re.compile(r"^[\x21-\x7e]{1,256}$")
+ADDR_MAX = 512
+LOOPBACK = ("127.0.0.1", "::1", "localhost")
 REQ_ID_RE = re.compile(r"^[a-f0-9]{8,32}$")
 SNAP_RE = re.compile(r"^openbao-[0-9A-Za-z_.-]{1,80}\.snap$")
 WITNESS_RE = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+){0,6}$")
@@ -123,15 +128,19 @@ class Paths:
         self.logs = g("HARVESTER_OPS_LOG_DIR", "/var/log/harvester-ops")
 
 
-def _w(path, data, mode, binary=False):
-    """Écriture atomique, droits posés avant le renommage."""
+def _w(path, data, mode, binary=False, gid=None):
+    """Écriture atomique dans un répertoire de root, droits et groupe posés
+    sur le descripteur avant le renommage (revue M3 : jamais d'intervalle où
+    le fichier en place n'a pas encore son groupe)."""
     path = Path(path)
     tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), mode)
     try:
         with os.fdopen(fd, "wb" if binary else "w") as f:
+            os.fchmod(f.fileno(), mode)
+            if gid is not None:
+                os.fchown(f.fileno(), 0 if os.geteuid() == 0 else -1, gid)
             f.write(data)
-        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -140,6 +149,33 @@ def _w(path, data, mode, binary=False):
 
 def _read(path):
     return Path(path).read_text().strip()
+
+
+def check_addr(addr):
+    """Adresse d'un OpenBao du mode A (revue M10) : https, ou http sur la
+    boucle locale seulement ; hôte présent, longueur bornée, sans caractère
+    de contrôle."""
+    from urllib.parse import urlsplit
+    if not isinstance(addr, str) or not addr or len(addr) > ADDR_MAX or sf.clean_line(addr) != addr:
+        return False
+    try:
+        u = urlsplit(addr)
+        host = u.hostname
+        u.port                                         # noqa: B018 : port invalide -> ValueError
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return u.scheme == "https" or (u.scheme == "http" and host in LOOPBACK)
+
+
+def check_secret_value(value, what):
+    """Valeur déballée (secret_id, accesseur) : une chaîne courte, sans
+    espace ni caractère de contrôle (elle est écrite telle quelle dans un
+    fichier d'une ligne)."""
+    if not isinstance(value, str) or not SECRET_VALUE_RE.match(value):
+        raise AgentError("openbao-unwrap-bad", f"the wrapping token held an unexpected {what}")
+    return value
 
 
 class Host:
@@ -189,17 +225,36 @@ class Agent:
         self.sleep, self.now = sleep, now
         self.status = {}
         self.log_path = None
+        self.log_fd = None
+        self.state_dir = None        # <état>/secrets-agent, tenu par descripteur
         self.undo = []
 
     # -- journal et état ----------------------------------------------------
+    # Revue C1 des tâches 5-7 (même famille que la 2.8.3) : <état>/secrets-agent
+    # et le répertoire des journaux appartiennent au compte de la console.
+    # Rien n'y est ouvert par un chemin : le répertoire est tenu par
+    # descripteur pour toute l'opération (un échange en cours de route ne
+    # change pas où l'agent écrit), le journal est un fichier neuf (O_EXCL,
+    # O_NOFOLLOW) gardé ouvert, l'état est écrit sous un nom neuf puis
+    # renommé, groupe posé sur le descripteur. Tout texte venu d'une demande
+    # est nettoyé (une seule ligne, sans caractère de contrôle).
     def log(self, msg):
-        line = time.strftime("%Y-%m-%d %H:%M:%S ", time.localtime(self.now())) + msg
+        line = time.strftime("%Y-%m-%d %H:%M:%S ", time.localtime(self.now())) + sf.clean_line(msg)
         print(line, flush=True)
-        if self.log_path:
-            with open(self.log_path, "a") as f:
-                f.write(line + "\n")
+        if self.log_fd is not None:
+            try:
+                os.write(self.log_fd, (line + "\n").encode("utf-8", "replace"))
+            except OSError:
+                pass
+
+    def log_block(self, title, text):
+        """Plusieurs lignes (journal d'OpenBao) : chacune nettoyée."""
+        self.log(title)
+        for line in (text or "").splitlines():
+            self.log("  " + line)
 
     def step(self, sid, state, message=""):
+        message = sf.clean_line(message, 2000)
         steps = self.status.setdefault("steps", [])
         for s in steps:
             if s["id"] == sid:
@@ -211,42 +266,93 @@ class Agent:
         self.save()
 
     def finish(self, state, message, code=None):
+        message = sf.clean_line(message, 2000)
         self.status.update(state=state, message=message, ended=self.now(), **({"code": code} if code else {}))
         self.log(f"=> {state}: {message}")
         self.save()
 
     def save(self):
-        self.p.state.mkdir(parents=True, exist_ok=True)
-        _w(self.p.state / STATUS, json.dumps(self.status, indent=2), 0o644)
-        self._give(self.p.state / STATUS)
+        """status.json : fichier de root lisible par tous (aucune valeur),
+        groupe de la console, écrit sous un nom neuf puis renommé : un lien
+        posé à sa place est remplacé, jamais suivi."""
+        if self.state_dir is None:
+            return
+        try:
+            self.state_dir.write(STATUS, json.dumps(self.status, indent=2).encode(), 0o644, self._console_group())
+        except OSError as e:
+            print(f"status not written: {e}", file=sys.stderr, flush=True)
 
-    def _give(self, path):
-        own = self.host.service_owner()
-        if own:
+    def _service_owner(self):
+        """(uid, gid) du compte de la console quand l'agent est root, sinon
+        None (tests sans privilège : rien n'est donné)."""
+        return self.host.service_owner() if os.geteuid() == 0 else None
+
+    def _console_group(self):
+        own = self._service_owner()
+        return None if own is None else (-1, own[1])
+
+    def open_state(self):
+        """<état>/secrets-agent tenu par descripteur. Un lien (ou un fichier)
+        posé à sa place est retiré sans être suivi, et refusé."""
+        base = sf.SafeDir.open_base(self.p.console_state)
+        try:
             try:
-                self.host.chown(path, *own)
-            except OSError:
-                pass
+                self.state_dir = base.subdir(self.p.state.name, create_mode=0o750, owner=self._service_owner())
+            except sf.UnsafePath:
+                base.unlink(self.p.state.name)
+                raise
+        finally:
+            base.close()
+
+    def open_log(self):
+        """Un journal neuf : jamais un fichier existant, jamais un lien posé
+        d'avance sous le nom attendu. Fichier de root, 0640, groupe de la
+        console (elle le lit, ne peut pas le réécrire)."""
+        try:
+            with sf.SafeDir.open_base(self.p.logs, create_mode=0o750, owner=self._service_owner()) as d:
+                stem = f"secrets-agent-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.now()))}"
+                for i in range(20):
+                    name = f"{stem}.log" if i == 0 else f"{stem}-{i if i < 10 else secrets.token_hex(4)}.log"
+                    try:
+                        self.log_fd = d.open_new_append(name, 0o640, self._console_group())
+                    except FileExistsError:
+                        continue
+                    self.log_path = self.p.logs / name
+                    return
+        except OSError as e:
+            print(f"secrets agent log not written: {e}", file=sys.stderr, flush=True)
+
+    def close(self):
+        if self.log_fd is not None:
+            os.close(self.log_fd)
+            self.log_fd = None
+        if self.state_dir is not None:
+            self.state_dir.close()
+            self.state_dir = None
 
     # -- demande --------------------------------------------------------------
     def read_request(self):
         """La demande, retirée AVANT tout traitement (usage unique, l'unité de
-        chemin ne se relance pas) ; None s'il n'y en a pas."""
-        rp = self.p.state / REQUEST
-        try:
-            st = os.lstat(rp)
-        except FileNotFoundError:
+        chemin ne se relance pas) ; None s'il n'y en a pas. Lue par le
+        descripteur du répertoire : fichier ordinaire, un seul lien physique,
+        jamais un lien ni un tube ; un répertoire posé à sa place est écarté."""
+        d = self.state_dir
+        if not d.lexists(REQUEST):
             return None
+        raw, bad = None, "unreadable request"
         try:
-            if not (rp.is_file() and not rp.is_symlink()) or st.st_size > REQUEST_MAX:
-                return {"_bad": "the request is not a small regular file"}
-            fd = os.open(rp, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(fd) as f:
-                raw = f.read(REQUEST_MAX + 1)
+            raw = d.read(REQUEST, limit=REQUEST_MAX)
+        except sf.UnsafePath:
+            bad = "the request is not a small regular file"
         except OSError:
-            return {"_bad": "unreadable request"}
+            pass
         finally:
-            rp.unlink(missing_ok=True)
+            try:
+                d.set_aside(REQUEST)
+            except OSError:
+                pass
+        if raw is None:
+            return {"_bad": bad}
         try:
             req = json.loads(raw)
         except ValueError:
@@ -261,27 +367,42 @@ class Agent:
             raise AgentError("unknown-operation", "operation not in the closed list")
         extra = set(req) - COMMON - KEYS[op]
         if extra:
-            raise AgentError("bad-request", f"unexpected keys for {op}: {', '.join(sorted(extra))[:100]}")
+            raise AgentError("bad-request", f"unexpected keys for {op}: "
+                                            f"{sf.clean_line(', '.join(sorted(extra)), 100)}")
         if req.get("id") is not None and not REQ_ID_RE.match(str(req["id"])):
             raise AgentError("bad-request", "bad request id")
         if "console_id" in KEYS[op] and not pol.ID_RE.match(str(req.get("console_id") or "")):
             raise AgentError("bad-request", "bad console id")
         return op
 
-    def process(self):
+    def process(self, request=None):
+        """Traite la demande déposée (ou `request`, passée en processus par
+        `sudo harvester-secrets`), sinon le ménage de la minuterie."""
         try:
             self._expire_export()
         except OSError:
             pass
-        req = self.read_request()
+        try:
+            self.open_state()
+        except OSError as e:
+            print(f"harvester-secrets-agent: {e}; nothing done", file=sys.stderr, flush=True)
+            return 1
+        try:
+            return self._process(request)
+        finally:
+            self.close()
+            shutil.rmtree(self.p.work, ignore_errors=True)    # copie du paquet, PKI, instantané
+
+    def _process(self, request):
+        req = request if request is not None else self.read_request()
         if req is None:
             return self.housekeeping()
-        self.p.logs.mkdir(parents=True, exist_ok=True)
-        self.log_path = self.p.logs / f"secrets-agent-{time.strftime('%Y%m%d-%H%M%S', time.localtime(self.now()))}.log"
+        self.open_log()
+        who = req.get("requested_by")
         self.status = {"state": "running", "op": req.get("op") if req.get("op") in OPS else None,
                        "request_id": req.get("id") if REQ_ID_RE.match(str(req.get("id") or "")) else None,
-                       "requested_by": str(req.get("requested_by") or "")[:64] or None,
-                       "started": self.now(), "log": self.log_path.name, "steps": []}
+                       "requested_by": sf.clean_line(who, 64) or None if isinstance(who, str) else None,
+                       "started": self.now(), "log": self.log_path.name if self.log_path else None, "steps": []}
         self.undo = []
         try:
             op = self.check_request(req)
@@ -301,9 +422,6 @@ class Agent:
             self.rollback()
             self.finish("failed", f"Unexpected {type(e).__name__}; see journalctl -u harvester-secrets-agent")
             return 1
-        finally:
-            if self.log_path and self.log_path.exists():
-                self._give(self.log_path)
 
     def rollback(self):
         """Défait les étapes faites, de la dernière à la première."""
@@ -313,38 +431,60 @@ class Agent:
                 fn()
                 self.log(f"[undo] {name}")
             except Exception as e:                      # noqa: BLE001 : au mieux, journalisé
-                self.log(f"[undo] {name} failed: {type(e).__name__}: {str(e)[:200]}")
+                self.log(f"[undo] {name} failed: {type(e).__name__}: {sf.clean_line(e, 200)}")
 
     # -- aides ----------------------------------------------------------------
     def ca_pem(self):
+        """CA de l'OpenBao du mode A, déposée avec ses identifiants
+        (store-secret-id) : jamais utilisée pour parler à B1."""
         try:
             return (self.p.etc / "ca.pem").read_text()
         except OSError:
             return None
 
-    def console_settings(self):
+    def b1_ca(self):
+        """CA de B1, écrite par make_tls dans /etc/harvester-ops-openbao
+        (root, 0700) : la seule à laquelle l'agent se fie sur 127.0.0.1:8210
+        (revue I6 : la console peut faire réécrire la CA du mode A)."""
         try:
-            return json.loads((self.p.console_state / "secrets-settings.json").read_text())
+            return (self.p.b1_etc / "ca.pem").read_text()
+        except OSError:
+            return None
+
+    def console_settings(self):
+        """Réglages de la console, lus sans suivre de lien (fichier de la
+        console : un lien vers un JSON de root ne doit rien décider)."""
+        try:
+            with sf.SafeDir.open_base(self.p.console_state) as d:
+                raw = d.read("secrets-settings.json")
+            doc = json.loads(raw) if raw else {}
         except (OSError, ValueError):
             return {}
+        return doc if isinstance(doc, dict) else {}
 
     def console_client(self, addr=None, secret_id=None):
         """Client connecté avec l'identité de la console (role-id et
-        secret-id de /etc/harvester-ops/openbao)."""
-        addr = addr or self.console_settings().get("addr") or self.b1_addr
-        c = self.client(addr, self.ca_pem())
+        secret-id de /etc/harvester-ops/openbao). B1 (installé, ou
+        `addr` = B1) : adresse et CA de B1 ; mode A : celles de la console."""
+        settings = self.console_settings() if addr is None else {}
+        if addr == self.b1_addr or (addr is None and settings.get("mode") != "a"):
+            addr, ca = self.b1_addr, self.b1_ca()
+        else:
+            addr, ca = addr or settings.get("addr"), self.ca_pem()
+        c = self.client(addr, ca)
         c.login_approle(_read(self.p.etc / "role-id"), secret_id or _read(self.p.etc / "secret-id"))
         return c
 
     def agent_client(self):
-        c = self.client(self.b1_addr, self.ca_pem())
+        c = self.client(self.b1_addr, self.b1_ca())
         c.login_approle(_read(self.p.b1_etc / "agent-role-id"), _read(self.p.b1_etc / "agent-secret-id"))
         return c
 
     def write_credentials(self, role_id, secret_id, accessor, ca_pem=None):
         """Identifiants de la console : role-id et secret-id
         root:harvester-ops 0640 (le conteneur les lit par son groupe), CA
-        publique 0644, accesseur 0600 (rotation)."""
+        publique 0644, accesseur 0600 (rotation). Groupe posé avant le
+        renommage (revue M3)."""
         self.p.etc.mkdir(parents=True, exist_ok=True)
         os.chmod(self.p.etc, 0o750)
         gid = self.host.group_gid("harvester-ops")
@@ -352,9 +492,7 @@ class Agent:
             self.host.chown(self.p.etc, 0, gid)
         for name, value, mode in (("role-id", role_id, 0o640), ("secret-id", secret_id, 0o640),
                                   ("secret-id-accessor", accessor or "", 0o600)):
-            _w(self.p.etc / name, value + "\n", mode)
-            if gid is not None and mode == 0o640:
-                self.host.chown(self.p.etc / name, 0, gid)
+            _w(self.p.etc / name, value + "\n", mode, gid=gid if mode == 0o640 else None)
         if ca_pem:
             _w(self.p.etc / "ca.pem", ca_pem, 0o644)
 
@@ -386,9 +524,20 @@ class Agent:
             self.sleep(2)
         raise AgentError("b1-start-timeout", f"{what} not ready after {WAIT_S} s ({last})")
 
+    def account_gid(self):
+        """Groupe du compte du conteneur (créé par `useradd --user-group`) ;
+        0 seulement si l'hôte ne le connaît pas (revue M7 : le conteneur
+        n'a pas besoin du groupe 0, tout ce qu'il écrit est monté)."""
+        gid = self.host.group_gid(ACCOUNT)
+        return 0 if gid is None else gid
+
+    def own(self, path, uid):
+        self.host.chown(path, uid, self.account_gid())
+
     def unit_env(self, uid, image_ref, prev=False):
         _w(self.p.b1_etc / "unit.env",
-           f"OPENBAO_IMAGE={image_ref}\nOPENBAO_UID={uid}\nOPENBAO_PREV_KEY={1 if prev else 0}\n", 0o644)
+           f"OPENBAO_IMAGE={image_ref}\nOPENBAO_UID={uid}\nOPENBAO_GID={self.account_gid()}\n"
+           f"OPENBAO_PREV_KEY={1 if prev else 0}\n", 0o644)
 
     def podman_secret(self, name, src=None):
         self.host.run(["podman", "secret", "rm", name], check=False)
@@ -411,19 +560,44 @@ class Agent:
         _w(self.p.b1_etc / "openbao.hcl", cfg, 0o444)
 
     def staged_bundle(self, name):
-        staged = (self.p.state / "staged").resolve()
+        """Le paquet de staged/, copié dans le répertoire de travail de root
+        depuis un descripteur (revue M1) : staged/ ouvert sans suivre de
+        lien, paquet fichier ordinaire à un seul lien physique, copie bornée
+        à la taille vue à l'ouverture. Vérifié ensuite, signature comprise
+        (clé de la collection posée par install.sh). Le répertoire de travail
+        est retiré à la fin de l'opération, réussie ou non (process)."""
         if not ob.NAME_RE.match(str(name or "")):
             raise AgentError("bundle-bad-name", "bad bundle name in the request")
-        src = staged / name
-        if src.is_symlink() or not src.is_file() or src.resolve().parent != staged:
-            raise AgentError("bundle-missing", "the bundle is not in the staging directory")
-        if self.p.work.exists():
-            shutil.rmtree(self.p.work)
-        self.p.work.mkdir(mode=0o700, parents=True)
-        dst = self.p.work / name
-        shutil.copyfile(src, dst)                 # la console ne peut plus l'échanger
-        info = ob.verify(dst, self.p.work)
-        return info
+        missing = AgentError("bundle-missing", "the bundle is not in the staging directory")
+        try:
+            staged = self.state_dir.subdir("staged")
+        except OSError:
+            raise missing from None
+        with staged:
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY,
+                             dir_fd=staged.fd)
+            except OSError:
+                raise missing from None
+        with os.fdopen(fd, "rb") as src:
+            st = os.fstat(src.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > ob.MAX_BUNDLE:
+                raise missing
+            if self.p.work.exists():
+                shutil.rmtree(self.p.work)
+            self.p.work.mkdir(mode=0o700, parents=True)
+            dst = self.p.work / name
+            left = st.st_size
+            with open(dst, "wb") as out:
+                while left > 0:
+                    b = src.read(min(left, 1 << 20))
+                    if not b:
+                        break
+                    out.write(b)
+                    left -= len(b)
+            if left != 0 or src.read(1):
+                raise AgentError("bundle-changed", "the staged bundle changed while it was copied")
+        return ob.verify(dst, self.p.work)
 
     def load_image(self, info):
         r = self.host.run(["podman", "load", "-i", str(info["image_tar"])])
@@ -464,8 +638,8 @@ class Agent:
         _w(self.p.b1_etc / "ca.pem", ca, 0o644)
         for f, mode in (("server.key", 0o400), ("server.pem", 0o444)):
             os.chmod(tls / f, mode)
-            self.host.chown(tls / f, uid, 0)
-        self.host.chown(tls, uid, 0)
+            self.own(tls / f, uid)
+        self.own(tls, uid)
         shutil.rmtree(work, ignore_errors=True)           # la clé de la CA ne sert plus
         return ca
 
@@ -473,11 +647,11 @@ class Agent:
         """Fichiers d'amorce sur tmpfs (/run), 0400 au compte du conteneur,
         lus une fois par `initialize` (essai 3) ; valeurs gardées en mémoire."""
         self.p.boot.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.host.chown(self.p.boot, uid, 0)
+        self.own(self.p.boot, uid)
         vals = {f: secrets.token_hex(16) for f in pol.BOOT_FILES}
         for f, v in vals.items():
             _w(self.p.boot / f, v, 0o400)
-            self.host.chown(self.p.boot / f, uid, 0)
+            self.own(self.p.boot / f, uid)
         return vals
 
     def clear_boot(self):
@@ -504,6 +678,11 @@ class Agent:
         `sys/wrapping/lookup` (creation_path exact) puis déballée ; déjà
         déballée, expirée ou d'un autre chemin : rien n'est écrit."""
         cid = req["console_id"]
+        if self.agent_state():
+            # revue I6 : en B1, les identifiants viennent de b1-install et de
+            # rotate-secret-id ; un dépôt remplacerait la CA et l'adresse
+            raise AgentError("b1-installed", "OpenBao B1 is installed on this host: its credentials are managed by "
+                                             "the agent (b1-remove first to use another OpenBao)")
         role_id = str(req.get("role_id") or "")
         if not ROLE_ID_RE.match(role_id):
             raise AgentError("bad-request", "bad role id")
@@ -513,7 +692,9 @@ class Agent:
         ca = req.get("ca_pem")
         if ca is not None and (not isinstance(ca, str) or "BEGIN CERTIFICATE" not in ca or len(ca) > 16384):
             raise AgentError("bad-request", "bad CA")
-        addr = str(req.get("addr") or "")
+        addr = req.get("addr")
+        if not check_addr(addr):
+            raise AgentError("bad-request", "bad address (https, or http on the loopback only)")
         self.step("unwrap", "running", "checking the wrapping token (creation path) then unwrapping")
         c = self.client(addr, ca)
         try:
@@ -527,6 +708,9 @@ class Agent:
         secret_id, accessor = data.get("secret_id"), data.get("secret_id_accessor")
         if not secret_id:
             raise AgentError("openbao-unwrap-used", "the wrapping token held no secret_id")
+        check_secret_value(secret_id, "secret_id")
+        if accessor is not None:
+            check_secret_value(accessor, "accessor")
         self.step("unwrap", "done")
         self.step("login", "running", "test login with the new secret_id")
         t = self.client(addr, ca)
@@ -553,8 +737,12 @@ class Agent:
         wrap = ((body or {}).get("wrap_info") or {}).get("token")
         if not wrap:
             raise AgentError("rotate-no-wrap", "OpenBao did not wrap the new secret_id")
-        data = self.client(c.addr, self.ca_pem()).unwrap(wrap, pol.secret_id_path(cid))
+        data = self.client(c.addr, self.b1_ca() if c.addr == self.b1_addr else self.ca_pem()).unwrap(
+            wrap, pol.secret_id_path(cid))
         new, new_acc = data.get("secret_id"), data.get("secret_id_accessor")
+        check_secret_value(new, "secret_id")
+        if new_acc is not None:
+            check_secret_value(new_acc, "accessor")
         self.step("issue", "done")
         self.step("login", "running", "test login with the new secret_id")
         t = self.console_client(secret_id=new)
@@ -626,7 +814,7 @@ class Agent:
         for d in (self.p.b1_data, data, self.p.b1_data / "audit"):
             d.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.chmod(d, 0o700)
-            self.host.chown(d, uid, 0)
+            self.own(d, uid)
         snaps = self.p.b1_data / "snapshots"
         snaps.mkdir(mode=0o700, exist_ok=True)
         self.host.chown(snaps, 0, 0)
@@ -666,7 +854,7 @@ class Agent:
 
         self.step("config", "running")
         self.render(st, info["template"], init=True)
-        self.host.chown(self.p.b1_etc / "openbao.hcl", uid, 0)
+        self.own(self.p.b1_etc / "openbao.hcl", uid)
         _w(self.p.b1_etc / "openbao.hcl.tpl", info["template"], 0o644)
         self.unit_env(uid, f"{IMAGE}:current")
         self.p.logrotate.parent.mkdir(parents=True, exist_ok=True)
@@ -692,7 +880,7 @@ class Agent:
             # Initialisation en échec : le serveur refuse ensuite tout
             # démarrage ; seul geste, effacer ce volume NEUF (jamais descellé).
             tail = self.host.run(["journalctl", "-u", UNIT, "-n", "30", "--no-pager", "-o", "cat"], check=False)
-            self.log("OpenBao log:\n" + (tail.stdout or "")[-4000:])
+            self.log_block("OpenBao log:", (tail.stdout or "")[-4000:])
             raise AgentError(e.code, f"{e}; the new volume is wiped, see the agent log") from None
         self.step("start", "done")
 
@@ -738,7 +926,7 @@ class Agent:
         st["offline_copy"] = self._offline_pending(st["current_key"])
         self.save_agent_state(st)
         self.render(st, info["template"], init=False)       # initialize ne sert plus
-        self.host.chown(self.p.b1_etc / "openbao.hcl", uid, 0)
+        self.own(self.p.b1_etc / "openbao.hcl", uid)
         self.clear_boot()
         self.undo = []
         self.step("credentials", "done")
@@ -788,14 +976,14 @@ class Agent:
         self.step("restart", "running")
         self.restart()
         try:
-            self.wait_unsealed(self.ca_pem())
+            self.wait_unsealed(self.b1_ca())
             t = self.console_client(addr=self.b1_addr)
             t.revoke_self()
         except (AgentError, oc.OpenBaoError) as e:
             self.step("rollback", "running", str(getattr(e, "code", e)))
             self.host.run(["podman", "tag", f"{IMAGE}:previous", f"{IMAGE}:current"])
             self.restart()
-            self.wait_unsealed(self.ca_pem())
+            self.wait_unsealed(self.b1_ca())
             self.step("rollback", "done", f"{st.get('version')} restored")
             raise AgentError("b1-upgrade-failed", f"OpenBao {info['version']} did not come up; "
                                                   f"{st.get('version')} restored") from None
@@ -959,14 +1147,14 @@ class Agent:
         self.podman_secret(SECRET, keys / f"{new}.key")
         st2 = dict(st, current_key=new)
         self.render(st2, tpl, prev=old)
-        self.host.chown(self.p.b1_etc / "openbao.hcl", uid, 0)
+        self.own(self.p.b1_etc / "openbao.hcl", uid)
         self.unit_env(uid, f"{IMAGE}:current", prev=True)
 
         def back():
             self.podman_secret(SECRET, keys / f"{old}.key")
             self.podman_secret(SECRET_PREV)
             self.render(st, tpl)
-            self.host.chown(self.p.b1_etc / "openbao.hcl", uid, 0)
+            self.own(self.p.b1_etc / "openbao.hcl", uid)
             self.unit_env(uid, f"{IMAGE}:current")
             (keys / f"{new}.key").unlink(missing_ok=True)
             self.restart()
@@ -974,7 +1162,7 @@ class Agent:
         self.step("new-key", "done", f"{new} (previous {old})")
         self.step("restart", "running", "both keys")
         self.restart()
-        self.wait_unsealed(self.ca_pem())
+        self.wait_unsealed(self.b1_ca())
         self.step("restart", "done")
         self.step("rotate-root", "running", "sys/rotate/root with the agent identity")
         a = self.agent_client()
@@ -990,7 +1178,7 @@ class Agent:
         self.undo = []                               # la clé racine est rechiffrée : plus de retour
         self.step("retire-old", "running")
         self.render(st2, tpl)
-        self.host.chown(self.p.b1_etc / "openbao.hcl", uid, 0)
+        self.own(self.p.b1_etc / "openbao.hcl", uid)
         self.unit_env(uid, f"{IMAGE}:current")
         self.podman_secret(SECRET_PREV)
         shutil.copyfile(keys / f"{new}.key", self.p.b1_etc / "unseal.key.next")
@@ -1004,7 +1192,7 @@ class Agent:
         (self.p.etc / EXPORT_NAME).unlink(missing_ok=True)      # une copie de l'ancienne ne sert plus
         self.save_agent_state(st2)
         self.restart()
-        self.wait_unsealed(self.ca_pem(), "OpenBao with the new key only")
+        self.wait_unsealed(self.b1_ca(), "OpenBao with the new key only")
         self.step("retire-old", "done", f"{old} kept {KEY_KEEP_DAYS} days for older snapshots")
         return f"unseal key rotated to {new}"
 
@@ -1074,14 +1262,14 @@ class Agent:
             old_vol.rename(self.p.b1_data)
             self.podman_secret(SECRET_PREV)
             self.render(st, tpl)
-            self.host.chown(self.p.b1_etc / "openbao.hcl", uid, 0)
+            self.own(self.p.b1_etc / "openbao.hcl", uid)
             self.unit_env(uid, f"{IMAGE}:current")
             self.clear_boot()
             self.host.run(["systemctl", "start", UNIT], check=False)
         self.undo.append(("previous volume back", back))
         for d in (self.p.b1_data, self.p.b1_data / "data", self.p.b1_data / "audit"):
             d.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self.host.chown(d, uid, 0)
+            self.own(d, uid)
         (self.p.b1_data / "snapshots").mkdir(mode=0o700, exist_ok=True)
         for s in (old_vol / "snapshots").glob("*.snap"):
             shutil.copy2(s, self.p.b1_data / "snapshots" / s.name)
@@ -1091,17 +1279,17 @@ class Agent:
         if prev:
             self.podman_secret(SECRET_PREV, keys / f"{prev}.key")
         self.render(st, tpl, prev=prev, init=True)
-        self.host.chown(self.p.b1_etc / "openbao.hcl", uid, 0)
+        self.own(self.p.b1_etc / "openbao.hcl", uid)
         self.unit_env(uid, f"{IMAGE}:current", prev=bool(prev))
         self.host.run(["systemctl", "start", UNIT])
-        self.wait_unsealed(self.ca_pem(), "fresh OpenBao")
+        self.wait_unsealed(self.b1_ca(), "fresh OpenBao")
         self.step("fresh", "done")
         self.step("restore", "running")
-        b = self.client(self.b1_addr, self.ca_pem())
+        b = self.client(self.b1_addr, self.b1_ca())
         b.set_token(boot["boot-token"])
         b.raft_restore(str(snap), force=False)       # jamais snapshot-force (essai 6)
         self.clear_boot()
-        self.wait_unsealed(self.ca_pem(), "restored OpenBao")
+        self.wait_unsealed(self.b1_ca(), "restored OpenBao")
         self.step("restore", "done")
         if prev:
             self.step("rotate-root", "running", "the snapshot key is not the current one")
@@ -1109,15 +1297,15 @@ class Agent:
             a._call("POST", "sys/rotate/root", {})
             a.revoke_self()
             self.render(st, tpl)
-            self.host.chown(self.p.b1_etc / "openbao.hcl", uid, 0)
+            self.own(self.p.b1_etc / "openbao.hcl", uid)
             self.unit_env(uid, f"{IMAGE}:current")
             self.podman_secret(SECRET_PREV)
             self.restart()
-            self.wait_unsealed(self.ca_pem(), "OpenBao with the current key only")
+            self.wait_unsealed(self.b1_ca(), "OpenBao with the current key only")
             self.step("rotate-root", "done")
         else:
             self.render(st, tpl)
-            self.host.chown(self.p.b1_etc / "openbao.hcl", uid, 0)
+            self.own(self.p.b1_etc / "openbao.hcl", uid)
         self.step("witness", "running", "console identity and a witness secret")
         c = self._console_identity_back(st)
         if witness:
@@ -1203,10 +1391,15 @@ def _version():
 
 def main(argv):
     if "--status" in argv:
+        # lu par descripteur, sans suivre de lien (fichier de l'état de la console)
+        p = Paths()
         try:
-            print((Paths().state / STATUS).read_text())
-        except OSError:
-            print("{}")
+            with sf.SafeDir.open_base(p.console_state) as base, base.subdir(p.state.name) as d:
+                raw = d.read(STATUS)
+            st = json.loads(raw) if raw else {}
+        except (OSError, ValueError):
+            st = {}
+        print(json.dumps(st if isinstance(st, dict) else {}, indent=2))
         return 0
     os.umask(0o077)
     return Agent().process()

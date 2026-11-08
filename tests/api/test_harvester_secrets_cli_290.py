@@ -593,3 +593,19 @@ def test_file_launched_by_the_console_without_a_copy(env, capsys, monkeypatch):
         ss._STORE = None
     assert rc == 1 and "openbao-spawned-no-file" in err and not str(out).strip()
     assert not env["srv"].requests("auth/approle/login")
+
+
+def test_in_process_agent_writes_nothing_through_a_planted_link(env, capsys, tmp_path):
+    """2.9.0 second pass: `sudo harvester-secrets` hands the request to the
+    agent in memory; a link planted as secrets-agent/ receives nothing."""
+    creds(env)
+    settings(env)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    d = env["state"] / "secrets-agent"
+    if d.exists():
+        os.rename(d, tmp_path / "old")
+    d.symlink_to(outside)
+    rc, doc, _ = cli(["rotate", "secret-id"], capsys=capsys)
+    assert rc != 0 and list(outside.iterdir()) == []
+    assert not d.is_symlink()

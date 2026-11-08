@@ -131,3 +131,266 @@ def test_secrets_steps_touch_the_state_only_through_the_helper(name):
                  and line.strip() != 'install -d -m 0750 "$STATE_DIR"'
                  and any(tok in line for tok in (">", "install ", "chown", "chgrp", "chmod", "cp ", "mv "))]
     assert offenders == [], offenders
+
+
+# ---------------------------------------------------------------------------
+# Agent des secrets (root) : journal, état, demande, réglages, paquet
+# ---------------------------------------------------------------------------
+import time  # noqa: E402
+
+from test_secrets_agent_290 import env, bundle, request, install, hsa, CID  # noqa: E402,F401
+import openbao_client as oc  # noqa: E402
+
+
+def agent_log_name(env):
+    return f"secrets-agent-{time.strftime('%Y%m%d-%H%M%S', time.localtime(env['clock']['t']))}.log"
+
+
+def last_status(env):
+    return json.loads((env["p"].state / hsa.STATUS).read_text())
+
+
+def test_agent_log_link_is_never_written(env, chowns, tmp_path):
+    """C1 (P1 of the review): a link planted under the predictable log name
+    plus a request key holding a newline must not append a line to the
+    victim (authorized_keys primitive)."""
+    p = env["p"]
+    p.logs.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "authorized_keys"
+    victim.write_text("root key\n")
+    (p.logs / agent_log_name(env)).symlink_to(victim)
+    rc, st = request(env, op="status", **{"\nssh-ed25519 AAAAinjected console": 1})
+    assert rc == 1 and st["code"] == "bad-request"
+    assert victim.read_text() == "root key\n"
+    assert ino(victim) not in chowns
+    log = p.logs / st["log"]
+    assert st["log"] != agent_log_name(env) and log.is_file() and not log.is_symlink()
+    lines = log.read_text().splitlines()
+    assert not any(line.startswith("ssh-ed25519") for line in lines), lines
+    assert any("\\x0assh-ed25519 AAAAinjected" in line for line in lines), lines
+
+
+def test_agent_messages_and_requester_are_one_line(env):
+    rc, st = request(env, op="status", requested_by="ju\nssh-ed25519 AAAA\x1b[31m‮")
+    assert rc == 0
+    assert "\n" not in st["requested_by"] and "\x1b" not in st["requested_by"] and "‮" not in st["requested_by"]
+    rc, st = request(env, op="status", **{"x\ny": 1})
+    assert "\n" not in st["message"]
+
+
+def test_agent_refuses_a_state_directory_that_is_a_link(env, chowns, tmp_path):
+    """C1 second path: secrets-agent replaced by a link to another
+    directory; nothing is read or created there, the link is removed."""
+    p = env["p"]
+    outside = tmp_path / "etc-somewhere"
+    outside.mkdir()
+    (outside / hsa.REQUEST).write_text(json.dumps({"op": "status", "id": "0123abcd"}))
+    os.rename(p.state, tmp_path / "old-state")
+    p.state.symlink_to(outside)
+    assert env["agent"]().process() == 1
+    assert sorted(x.name for x in outside.iterdir()) == [hsa.REQUEST]
+    assert ino(outside) not in chowns
+    assert not p.state.is_symlink()
+
+
+def test_agent_state_directory_swapped_mid_operation(env, tmp_path):
+    """The console swaps secrets-agent for a link while the agent works:
+    the following status writes stay in the directory the agent opened."""
+    p = env["p"]
+    install(env)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    host = env["host"]
+    real_run = host.run
+
+    def run(argv, **kw):
+        if argv[:2] == ["systemctl", "is-active"] and not p.state.is_symlink():
+            os.rename(p.state, tmp_path / "moved-state")
+            p.state.symlink_to(outside)
+        return real_run(argv, **kw)
+    host.run = run
+    (p.state / hsa.REQUEST).write_text(json.dumps({"op": "status", "id": "0123abcd"}))
+    env["agent"]().process()
+    assert list(outside.iterdir()) == []
+    st = json.loads((tmp_path / "moved-state" / hsa.STATUS).read_text())
+    assert st["state"] == "done" and st["op"] == "status"
+
+
+def test_agent_request_planted_as_a_directory_is_set_aside(env):
+    p = env["p"]
+    (p.state / hsa.REQUEST).mkdir()
+    assert env["agent"]().process() == 1
+    assert last_status(env)["code"] == "bad-request"
+    assert not (p.state / hsa.REQUEST).exists()          # l'unité de chemin ne boucle pas
+
+
+def test_agent_status_link_is_replaced_not_followed(env, chowns, tmp_path):
+    p = env["p"]
+    victim = tmp_path / "agent-script.py"
+    victim.write_text("root code\n")
+    (p.state / hsa.STATUS).symlink_to(victim)
+    rc, st = request(env, op="status")
+    assert rc == 0 and victim.read_text() == "root code\n" and ino(victim) not in chowns
+    m = os.stat(p.state / hsa.STATUS, follow_symlinks=False)
+    assert stat.S_ISREG(m.st_mode) and stat.S_IMODE(m.st_mode) == 0o644
+    log = p.logs / st["log"]
+    assert stat.S_IMODE(log.stat().st_mode) == 0o640
+
+
+def test_agent_does_not_read_console_settings_through_a_link(env, tmp_path):
+    p = env["p"]
+    secret = tmp_path / "root-only.json"
+    secret.write_text(json.dumps({"mode": "a", "addr": "https://attacker.example", "console_id": CID}))
+    (p.console_state / "secrets-settings.json").symlink_to(secret)
+    assert env["agent"]().console_settings() == {}
+
+
+def test_agent_status_cli_does_not_read_through_a_link(env, tmp_path, capsys, monkeypatch):
+    p = env["p"]
+    secret = tmp_path / "root-only.json"
+    secret.write_text('{"root": "only"}')
+    (p.state / hsa.STATUS).symlink_to(secret)
+    monkeypatch.setenv("HARVESTER_OPS_STATE_DIR", str(p.console_state))
+    assert hsa.main(["--status"]) == 0
+    assert "root" not in capsys.readouterr().out
+
+
+def test_agent_refuses_a_staging_directory_that_is_a_link(env, tmp_path):
+    """M1: staged/ replaced by a link to a directory holding a valid bundle."""
+    p = env["p"]
+    outside = tmp_path / "outside"
+    os.rename(p.state / "staged", outside)
+    (p.state / "staged").symlink_to(outside)
+    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name)
+    assert rc == 1 and st["code"] == "bundle-missing", st
+    assert not env["host"].ran("podman", "load")
+    assert (outside / env["bundle"].name).exists()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_agent_refuses_a_bundle_that_is_a_link(env, tmp_path, kind):
+    p = env["p"]
+    name = env["bundle"].name
+    keep = tmp_path / "keep.tar.gz"
+    os.rename(p.state / "staged" / name, keep)
+    if kind == "symlink":
+        (p.state / "staged" / name).symlink_to(keep)
+    else:
+        os.link(keep, p.state / "staged" / name)
+    rc, st = request(env, op="b1-install", console_id=CID, bundle=name)
+    assert rc == 1 and st["code"] == "bundle-missing", st
+    assert not env["host"].ran("podman", "load")
+
+
+def test_agent_work_directory_removed_after_a_failure(env):
+    env["host"].digest = "sha256:" + "0" * 64            # échec après la copie et l'extraction
+    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name)
+    assert rc == 1 and st["code"] == "bundle-digest-mismatch"
+    assert not env["p"].work.exists()
+
+
+# -- I6 / M10 : CA de l'agent, dépôt refusé en B1, demande validée -------------
+def recording_agent(env, seen):
+    srv = env["srv"]
+
+    def client(addr, ca_pem=None):
+        seen.append((addr, ca_pem))
+        return oc.Client(srv.addr, timeout=2, retry_delays=(0.01,))
+    a = env["agent"]()
+    a.client = client
+    return a
+
+
+def test_agent_talks_to_b1_with_its_own_ca_only(env):
+    """I6: the console can rewrite /etc/harvester-ops/openbao/ca.pem
+    (store-secret-id); every call to B1 uses /etc/harvester-ops-openbao/ca.pem."""
+    install(env)
+    p = env["p"]
+    b1_ca = (p.b1_etc / "ca.pem").read_text()
+    (p.etc / "ca.pem").write_text("-----BEGIN CERTIFICATE-----\nconsole\n-----END CERTIFICATE-----\n")
+    for op in ("b1-policies", "rotate-unseal-key"):
+        seen = []
+        (p.state / hsa.REQUEST).write_text(json.dumps({"op": op, "id": "0123abcd"}))
+        env["clock"]["t"] += 86400
+        assert recording_agent(env, seen).process() == 0, last_status(env)
+        assert seen and all(ca == b1_ca for _, ca in seen), (op, seen)
+
+
+def test_store_secret_id_refused_once_b1_is_installed(env):
+    install(env)
+    before = (env["p"].etc / "ca.pem").read_text()
+    rc, st = request(env, op="store-secret-id", console_id=CID, addr=env["srv"].addr, role_id="rid-console-1",
+                     wrap_token="s.x", ca_pem="-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n")
+    assert rc == 1 and st["code"] == "b1-installed"
+    assert (env["p"].etc / "ca.pem").read_text() == before
+
+
+@pytest.mark.parametrize("addr,ok", [
+    ("http://openbao.example:8200", False), ("ftp://127.0.0.1:8200", False), ("https://", False),
+    ("https://openbao.example:8200", True), ("http://127.0.0.1:8200", True), ("http://[::1]:8200", True),
+    ("http://localhost:8200", True), ("https://ok.example/" + "a" * 600, False),
+])
+def test_store_secret_id_address_checked(env, addr, ok):
+    assert hsa.check_addr(addr) == ok
+
+
+@pytest.mark.parametrize("value", [None, 12, "", "a\nb", "x" * 300, "ok\x00"])
+def test_unwrapped_secret_id_checked(env, value):
+    with pytest.raises(hsa.AgentError):
+        hsa.check_secret_value(value, "secret_id")
+
+
+def test_unwrapped_secret_id_plain_value_accepted():
+    assert hsa.check_secret_value("2a3b-4c5d-6e7f", "secret_id") == "2a3b-4c5d-6e7f"
+
+
+# -- M3 : identifiants à leur groupe avant le renommage --------------------------
+def test_credentials_get_their_group_before_the_rename(env, monkeypatch):
+    events = []
+    p = env["p"]
+    env["host"].group_gid = lambda name: os.getgid()
+    real_fchown, real_rename, real_replace = os.fchown, os.rename, os.replace
+    monkeypatch.setattr(os, "fchown", lambda fd, u, g: events.append(("fchown", os.fstat(fd).st_ino)))
+    monkeypatch.setattr(env["host"], "chown", lambda path, u, g: events.append(("chown", Path(path).name)))
+
+    def ren(fn):
+        def w(src, dst, *a, **k):
+            fn(src, dst, *a, **k)
+            if str(dst).endswith("secret-id"):
+                events.append(("rename", os.stat(dst).st_ino))
+        return w
+    monkeypatch.setattr(os, "rename", ren(real_rename))
+    monkeypatch.setattr(os, "replace", ren(real_replace))
+    env["agent"]().write_credentials("rid-1", "sid-1", "acc-1")
+    rn = [e for e in events if e[0] == "rename"]
+    assert rn, events
+    i = events.index(rn[0])
+    assert ("fchown", rn[0][1]) in events[:i], events
+    assert ("chown", "secret-id") not in events
+
+
+# -- M7 : groupe du compte du conteneur, plus le groupe 0 -------------------------
+def test_b1_uses_the_account_group(env):
+    env["host"].gids = {}
+    real = env["host"].run
+
+    def run(argv, **kw):
+        r = real(argv, **kw)
+        if argv[:1] == ["useradd"]:
+            env["host"].gids[argv[-1]] = 991
+        return r
+    env["host"].run = run
+    env["host"].group_gid = lambda name: env["host"].gids.get(name)
+    install(env)
+    p = env["p"]
+    assert "OPENBAO_GID=991" in (p.b1_etc / "unit.env").read_text()
+    owned = {path: (u, g) for path, u, g in env["host"].chowns}
+    for d in (p.b1_data / "data", p.b1_data / "audit", p.b1_etc / "tls", p.b1_etc / "openbao.hcl"):
+        assert owned[str(d)] == (990, 991), d
+    unit = (ROOT / "config" / "systemd" / hsa.UNIT).read_text()
+    assert ':0"' not in unit and "gid=0" not in unit and "OPENBAO_GID" in unit
+
+
+def test_agent_unit_hardening():
+    unit = (ROOT / "config" / "systemd" / "harvester-secrets-agent.service").read_text()
+    assert "ProtectHome=read-only" in unit and "PrivateTmp=yes" in unit
