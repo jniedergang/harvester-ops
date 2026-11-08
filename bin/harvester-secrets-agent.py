@@ -1947,12 +1947,13 @@ class Agent:
             # groupes d'identité : seulement les groupes internes `hops-<id>-*`
             # de l'état de l'agent, chacun avec sa seule politique (2.10.0) ;
             # rien d'autre (un groupe porte des politiques)
-            groups_present = self._review_groups(a, cid, groups)
+            groups_present, group_members = self._review_groups(a, cid, groups)
             # relecture des corrections finales IMP-1 : entités d'identité sans
             # politique, alias sur approle/ (role_id des deux rôles), sur
             # token/ (`tf-<déclaration>`) ou (2.10.0) sur un montage jwt des
             # personnes seulement
-            self._review_entities(a, roles, token_acc, jwt_accs - {None})
+            self._review_entities(a, roles, token_acc, jwt_accs - {None},
+                                  {e for ms in group_members.values() for e in ms})
             # m4 : aucun espace de noms (révocation faite dans la racine)
             if self._list(a, "sys/namespaces"):
                 self._untrusted("namespaces")
@@ -1971,7 +1972,7 @@ class Agent:
                     a._call("POST", "auth/token/revoke-accessor", {"accessor": acc})
                     revoked += 1
             self.step("review", "running", f"{revoked} token(s) of the snapshot revoked")
-            return {"jwt": jwt_present, "groups": groups_present}
+            return {"jwt": jwt_present, "groups": groups_present, "members": group_members}
         finally:
             a.revoke_self()
 
@@ -1996,7 +1997,13 @@ class Agent:
             self._untrusted(f"jwt auth method {m} ({', '.join(bad)})")
 
     def _review_groups(self, a, cid, groups):
-        present = set()
+        """Groupes internes `hops-<id>-*` de l'état, chacun avec sa seule
+        politique et (revue 6-7 I-2) des membres pris parmi ceux de l'état :
+        un membre ajouté hors de la console (entité AppRole de la console,
+        jeton d'OpenTofu, inconnu) recevrait les droits du groupe. Un
+        instantané plus ancien peut en avoir moins. Rend ({nom}, {nom:
+        membres restaurés})."""
+        present, members = set(), {}
         for gid in self._list(a, "identity/group/id"):
             try:
                 _, doc = a._call("GET", f"identity/group/id/{gid}")
@@ -2009,35 +2016,50 @@ class Agent:
                     or list(d.get("policies") or []) != [pol.group_policy_name(cid, mine)] \
                     or d.get("parent_group_ids") or d.get("member_group_ids"):
                 self._untrusted(f"identity group {sf.clean_line(name or gid, 80)}")
+            got = [str(e) for e in d.get("member_entity_ids") or []]
+            if set(got) - set(groups[mine].get("members") or []):
+                self._untrusted(f"members of the identity group {sf.clean_line(name, 80)}")
             present.add(mine)
-        return present
+            members[mine] = sorted(got)
+        return present, members
 
-    def _review_entities(self, a, roles, token_acc, jwt_accs=frozenset()):
+    def _review_entities(self, a, roles, token_acc, jwt_accs=frozenset(), members=frozenset()):
         """Les politiques d'une entité valent pour chaque jeton de l'entité,
         y compris ceux émis après la révocation (prochain login AppRole de la
         console, jeton enfant `auth/token/create/<rôle>` avec un alias
         `tf-*`). Les entités attendues n'en portent aucune : la console,
-        l'agent et les jetons d'OpenTofu tiennent leurs droits de leur rôle."""
+        l'agent et les jetons d'OpenTofu tiennent leurs droits de leur rôle.
+        Revue 6-7 I-2 : une entité qui a un alias jwt (une personne) n'a QUE
+        des alias jwt, et tout membre d'un groupe est une telle entité (sinon
+        un jeton d'OpenTofu ou la console recevrait les droits du groupe)."""
         _, auth_doc = a._call("GET", "sys/auth")
         approle_acc = ((self._data(auth_doc) or {}).get("approle/") or {}).get("accessor")
         role_ids = set()
         for role in roles:
             _, doc = a._call("GET", f"auth/approle/role/{role}/role-id")
             role_ids.add(str((self._data(doc) or {}).get("role_id") or ""))
+        persons = set()
         for eid in self._list(a, "identity/entity/id"):
             _, doc = a._call("GET", f"identity/entity/id/{eid}")
             d = self._data(doc) or {}
             if d.get("policies"):
                 self._untrusted(f"identity entity {eid} carries policies")
-            for al in d.get("aliases") or []:
+            aliases = d.get("aliases") or []
+            on_jwt = [al for al in aliases if (al or {}).get("mount_accessor") in jwt_accs]
+            if on_jwt and len(on_jwt) != len(aliases):
+                self._untrusted(f"identity entity {eid} mixes person and service aliases")
+            if on_jwt:
+                persons.add(eid)
+                continue                # une personne (alias = `sub`) ; ses droits viennent du rôle et des groupes
+            for al in aliases:
                 acc, name = (al or {}).get("mount_accessor"), str((al or {}).get("name") or "")
                 if acc and acc == approle_acc and name in role_ids:
                     continue
                 if acc and acc == token_acc and name.startswith("tf-") and pol.DECL_RE.match(name[3:]):
                     continue
-                if acc and acc in jwt_accs:
-                    continue                # une personne (alias = `sub`) ; ses droits viennent du rôle et des groupes
                 self._untrusted(f"identity entity {eid} alias on an unexpected mount or name")
+        if set(members) - persons:
+            self._untrusted("a group member is not a person entity")
 
     def op_restore_snapshot(self, req):
         """Essai 6 : instance neuve, même clé statique (ou l'ancienne en
@@ -2130,6 +2152,14 @@ class Agent:
             raise
         self.step("review", "done", "configuration as expected, tokens of the snapshot revoked")
         self._prune_person_state(present or {})
+        # revue 6-7 M-1 : la politique commune (« lecture seulement par
+        # groupe » compris) et celles des groupes reprennent le texte de
+        # l'état de l'agent ; la revue en acceptait deux
+        st_now = self.agent_state()
+        if st_now.get("person_jwt") or st_now.get("person_groups"):
+            done = self._with_agent(lambda a: self._person_policies_refresh(a, st_now))
+            if done:
+                self.step("person-policies", "done", ", ".join(done))
         if witness:
             c.kv_metadata(st["mount"], f"consoles/{st['console_id']}/{witness}")
         else:
@@ -2148,7 +2178,8 @@ class Agent:
         st = self.agent_state()
         pj = {k: v for k, v in (st.get("person_jwt") or {}).items()
               if isinstance(v, dict) and v.get("mount") in present.get("jwt", set())}
-        pg = {k: v for k, v in (st.get("person_groups") or {}).items() if k in present.get("groups", set())}
+        pg = {k: (dict(v, members=present["members"][k]) if k in (present.get("members") or {}) else v)
+              for k, v in (st.get("person_groups") or {}).items() if k in present.get("groups", set())}
         if pj != (st.get("person_jwt") or {}) or pg != (st.get("person_groups") or {}):
             gone = sorted(set(st.get("person_jwt") or {}) - set(pj)) + sorted(set(st.get("person_groups") or {}) - set(pg))
             self.save_agent_state(dict(st, person_jwt=pj, person_groups=pg))

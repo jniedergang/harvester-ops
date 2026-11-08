@@ -433,6 +433,14 @@ CRAFTS = {
                                       s.groups.append("grp-evil")),
     "group-external": lambda s: next(iter(s.group_docs.values())).update(type="external"),
     "entity-on-jwt-with-policy": lambda s: s.entity_policies.__setitem__(UUID_A, [pol.agent_role(CID)]),
+    # revue 6-7 I-2 : membres d'un groupe comparés à l'état ; une entité de
+    # personne n'a que des alias jwt
+    "group-member-extra": lambda s: next(iter(s.group_docs.values()))["member_entity_ids"].append(
+        "99999999-2222-3333-4444-555555555555"),
+    "group-member-console": lambda s: next(iter(s.group_docs.values()))["member_entity_ids"].extend(
+        i for i, e in s.entities.items() if any(a[0] == s.auth_mounts["approle/"]["accessor"] for a in e["aliases"])),
+    "entity-mixed-aliases": lambda s: s.entities[UUID_A]["aliases"].add((s.auth_mounts["token/"]["accessor"],
+                                                                         "tf-decl1")),
 }
 
 
@@ -444,3 +452,27 @@ def test_a_crafted_snapshot_with_jwt_objects_is_refused(b1, craft):
     rc, st = _restore_with(b1, CRAFTS[craft])
     assert rc == 1 and st["code"] == "snapshot-untrusted", st
     assert marker.read_text() == "live"
+
+
+def test_restore_puts_back_groups_only(b1):
+    """Revue 6-7 M-1 : un instantané pris avant « lecture seulement par
+    groupe » porte la politique commune complète ; après la restauration,
+    la politique suit le réglage de l'état de l'agent."""
+    srv = _configured(b1)
+    srv.enforce_agent = True
+    assert request(b1, op="b1-groups", groups_only=True)[0] == 0
+    srv.enforce_agent = False
+    full = pol.person_policy("harvester-ops", f"consoles/{CID}", CID, False)
+    rc, st = _restore_with(b1, lambda s: s.policies.__setitem__(pol.person_policy_name(CID), full))
+    assert rc == 0, st
+    assert srv.policies[pol.person_policy_name(CID)].strip() == \
+        pol.person_policy("harvester-ops", f"consoles/{CID}", CID, True).strip()
+
+
+def test_an_older_snapshot_with_fewer_members_passes_and_prunes_them(b1):
+    """Un instantané pris avant l'ajout d'un membre en a moins : accepté
+    (moins de droits), l'état de l'agent suit."""
+    _configured(b1)
+    rc, st = _restore_with(b1, lambda s: next(iter(s.group_docs.values()))["member_entity_ids"].clear())
+    assert rc == 0, st
+    assert b1["agent"]().agent_state()["person_groups"]["ops"]["members"] == []
