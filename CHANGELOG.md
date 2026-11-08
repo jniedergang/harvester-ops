@@ -109,7 +109,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   units keep running; the `.migrated` originals stay until they expire;
   reinstalling 2.9.0 serves everything again. Way out: bring every class
   back, put states back in clear, disable, then roll back. `install.sh`
-  run by hand with an older release is not guarded.
+  run by hand with an older release is not guarded. The update agent
+  refuses an archive whose version is not the one the console checked.
 - `VAULT_*` and `BAO_*` are removed from the environment of the console and
   of the tools it launches.
 - Adding a KVM host refuses a key that is not UTF-8. `_encryption.tf` is a
