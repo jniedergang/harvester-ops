@@ -216,6 +216,8 @@ class Store:
     def _abs(self, p):
         if not p:
             return None
+        if str(p).startswith(_REF_PREFIXES):       # 2.9.0 : référence du magasin, pas un chemin
+            return p
         return p if os.path.isabs(p) else str(self.state / p)
 
     def _file(self, sid):
@@ -457,9 +459,28 @@ def _hours(v):
     return min(24, max(1, h))
 
 
-def read_secret(path):
+_REF_PREFIXES = ("openbao:", "local:")
+
+
+def _secret_store():
+    """bin/lib/secret_store (2.9.0), chargé seulement quand une référence
+    est rencontrée."""
+    try:
+        import secret_store
+    except ImportError:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "bin" / "lib"))
+        import secret_store
+    return secret_store
+
+
+def _raw_secret(path):
+    """Ce qui est rangé : la référence elle-même (champ `secret_file` ou
+    contenu du fichier remplacé par sa référence), ou la valeur du fichier."""
     if not path:
         return None
+    if str(path).startswith(_REF_PREFIXES):
+        return str(path)
     try:
         s = Path(path).read_text().strip()
     except OSError:
@@ -467,9 +488,21 @@ def read_secret(path):
     return s or None
 
 
+def read_secret(path):
+    """Le secret du client OIDC. 2.9.0 : par le magasin de secrets quand il
+    est rangé par référence (OpenBao) ; une erreur d'OpenBao remonte avec
+    son code (refus de la connexion SSO, jamais de repli local)."""
+    s = _raw_secret(path)
+    if s and s.startswith(_REF_PREFIXES):
+        return _secret_store().read_value_file(s)
+    return s
+
+
 def sso_enabled(server):
+    """Le SSO est enregistré : identifiant du client et secret rangé (sans
+    lire OpenBao pour une simple liste)."""
     sso = server.get("sso") or {}
-    return bool(sso.get("client_id") and read_secret(sso.get("secret_file")))
+    return bool(sso.get("client_id") and _raw_secret(sso.get("secret_file")))
 
 
 def public(server):

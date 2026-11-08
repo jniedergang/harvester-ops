@@ -51,7 +51,8 @@ def declared_clusters():
     data = _read_yaml(cfg) if Path(cfg).is_file() else None
     state = cluster_decl.state_dir()
     decls = [(p, _read_yaml(p)) for p in cluster_decl.decl_files(state)]
-    return cluster_decl.merge((data or {}).get("clusters") or [], decls, state)
+    return [cluster_decl.materialize(c) for c in
+            cluster_decl.merge((data or {}).get("clusters") or [], decls, state)]
 
 
 UNREACHABLE_MARKERS = ("unable to connect", "timed out", "no route to host", "connection refused",

@@ -1312,7 +1312,7 @@ def cmd_notify_set(args):
 
 def cmd_notify_test(args):
     conn = open_db(args)
-    cfg = db.get_setting(conn, "notify") or {}
+    cfg = rn.resolve_secrets(db.get_setting(conn, "notify") or {})
     ch = next((c for c in cfg.get("channels") or [] if c.get("id") == args.channel), None)
     if ch is None:
         raise UsageError(f"unknown channel: {str(args.channel)[:40]}", "unknown-channel")

@@ -71,6 +71,21 @@ def key_rel(name):
     return f"{SSH_DIR}/{name}_id"
 
 
+def key_ref(name):
+    """Référence de la clé d'un hôte migrée dans OpenBao (2.9.0)."""
+    return f"openbao:ssh-kvm/{name}#private_key"
+
+
+def key_path(state, value, purpose="ssh-kvm"):
+    """Chemin de la clé d'un hôte : le fichier rangé sous l'état, ou une
+    copie de travail sur tmpfs quand la déclaration porte une référence du
+    magasin de secrets (2.9.0)."""
+    if isinstance(value, str) and value.startswith("openbao:"):
+        import secret_store
+        return Path(secret_store.path_of(value, purpose))
+    return resolve(state, value)
+
+
 def known_hosts_rel(name):
     return f"{SSH_DIR}/{name}_known"
 
@@ -120,6 +135,9 @@ def check_decl(decl):
         return "invalid or missing user"
     for field, expected in (("ssh_key", key_rel(decl["name"])),
                             ("known_hosts", known_hosts_rel(decl["name"]))):
+        # 2.9.0 : la clé migrée dans OpenBao est désignée par sa référence
+        if field == "ssh_key" and decl.get(field) == key_ref(decl["name"]):
+            continue
         if decl.get(field) != expected:
             return f"{field} must be {expected}"
     if not _valid_uri(decl.get("uri", DEFAULT_URI)):

@@ -63,6 +63,7 @@ log_notes   = logging.getLogger("harvester-ops.notes")
 log_capi    = logging.getLogger("harvester-ops.capi")
 log_tf      = logging.getLogger("harvester-ops.terraform")
 
+import atexit
 import base64
 import sqlite3
 import yaml
@@ -159,6 +160,13 @@ BIN_DIR = _resolve_bin_dir()
 # de web/ du même nom garde la priorité.
 if str(BIN_DIR / "lib") not in sys.path:
     sys.path.append(str(BIN_DIR / "lib"))
+import secret_store as _sst  # noqa: E402  (2.9.0 : magasin de secrets)
+# 2.9.0 : seule la configuration de la console désigne OpenBao. `VAULT_*` et
+# `BAO_*` hérités de l'environnement sont retirés du processus, donc de tous
+# les outils qu'il lance (un `BAO_TOKEN` d'administrateur ne doit jamais
+# atteindre un sous-processus).
+for _k in [k for k in os.environ if k.startswith(("VAULT_", "BAO_"))]:
+    os.environ.pop(_k, None)
 import longhorn_room  # noqa: E402
 # garde anti-SSRF des téléchargements (1.99.0), dans bin/lib depuis la prochaine
 # version KVM : la console (ISO, images KVM) et la CLI KVM partagent la même.
@@ -412,12 +420,34 @@ def _stage_kubeconfig(src_kc, ws):
     with shell access. Now it's strict 0600. v1.5.7."""
     import shutil as _shutil
     dst = ws / "kubeconfig"
+    if _sst.is_active():
+        # 2.9.0 (point 263) : OpenBao actif, la copie vit sur tmpfs et
+        # l'espace n'en garde qu'un lien : jamais d'identifiants sur disque.
+        tmp = _sst.write_private_copy(_sst.secret_files_dir(_sst.store().settings), "tf-kubeconfig",
+                                      Path(src_kc).read_text())
+        _TF_TMPFS_COPIES.append(tmp)
+        if dst.is_symlink() or dst.exists():
+            dst.unlink()
+        dst.symlink_to(tmp)
+        return dst
     _shutil.copyfile(src_kc, dst)
     try:
         os.chmod(dst, 0o600)
     except OSError:
         pass
     return dst
+
+
+_TF_TMPFS_COPIES = []           # copies tmpfs des kubeconfigs d'espaces Terraform (2.9.0)
+
+
+@atexit.register
+def _tf_tmpfs_cleanup():
+    for p in _TF_TMPFS_COPIES:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
 
 
 # Path-param keys we validate as RFC 1123 labels. URL paths that carry
@@ -1461,8 +1491,16 @@ def current_cluster_identity():
 def _identity_dir():
     """Répertoire privé des copies. Repli sur un temporaire quand
     /var/lib n'est pas inscriptible (déploiement en rootfs read-only)."""
-    for candidate in (IDENTITY_DIR,
-                      Path(tempfile.gettempdir()) / "harvester-ops-identities"):
+    candidates = (IDENTITY_DIR, Path(tempfile.gettempdir()) / "harvester-ops-identities")
+    if _sst.is_active():
+        # 2.9.0 (point 263) : OpenBao actif, les copies usurpées (qui portent
+        # les identifiants du cluster) vont sur tmpfs, jamais sous /var/lib
+        try:
+            candidates = (_sst.secret_files_dir(_sst.store().settings) / "identities",)
+        except _sst.SecretError as e:
+            log.warning("délégation d'identité : %s", e)
+            return None
+    for candidate in candidates:
         try:
             candidate.mkdir(parents=True, exist_ok=True)
             os.chmod(candidate, 0o700)
@@ -4618,7 +4656,8 @@ def _cluster_of_kubeconfig(kc):
         return "?"
     try:
         for c in load_config().get("clusters", []):
-            if c.get("kubeconfig") == str(kc):
+            if c.get("kubeconfig") == str(kc) or (_sst.is_ref(c.get("kubeconfig"))
+                                                   and _cluster_kubeconfig_path(c, missing_ok=True) == str(kc)):
                 return c["name"]
     except Exception:
         pass
@@ -5515,7 +5554,7 @@ def api_network_fabric_node_detail(cluster, node):
            "-o", "StrictHostKeyChecking=accept-new",
            "-p", str(ssh.get("port", 22))]
     if ssh.get("key"):
-        cmd += ["-i", str(ssh["key"])]
+        cmd += ["-i", str(_cluster_ssh_key_path(ssh))]
     cmd += [f"{ssh.get('user', 'rancher')}@{target.get('ip')}",
             _FABRIC_DETAIL_CMD]
     try:
@@ -5838,7 +5877,7 @@ def _fabric_ssh_base(cluster, node):
             "-o", "StrictHostKeyChecking=accept-new",
             "-p", str(ssh.get("port", 22))]
     if ssh.get("key"):
-        base += ["-i", str(ssh["key"])]
+        base += ["-i", str(_cluster_ssh_key_path(ssh))]
     return base + [f"{ssh.get('user', 'rancher')}@{target.get('ip')}"]
 
 
@@ -6471,8 +6510,8 @@ def _cluster_for_server(server_url):
     host = urlparse(str(server_url)).hostname
     for c in load_config().get("clusters", []):
         try:
-            kc = yaml.safe_load(Path(c["kubeconfig"]).read_text()) or {}
-        except (OSError, KeyError, yaml.YAMLError):
+            kc = yaml.safe_load(Path(_cluster_kubeconfig_path(c, missing_ok=True)).read_text()) or {}
+        except (OSError, KeyError, TypeError, yaml.YAMLError):
             continue
         for entry in kc.get("clusters") or []:
             if urlparse((entry.get("cluster") or {}).get("server") or "").hostname == host:
@@ -6492,7 +6531,7 @@ def _join_cluster(server_url, cluster=None):
     entry = next((c for c in load_config().get("clusters", []) if c.get("name") == cluster), None)
     if not entry or not host:
         return None
-    server = _kubeconfig_server(entry.get("kubeconfig") or "")
+    server = _kubeconfig_server(_cluster_kubeconfig_path(entry, missing_ok=True) or "")
     if server and urlparse(server).hostname == host:
         return cluster
     kc = _kubectl_for_cluster(cluster)
@@ -6573,7 +6612,7 @@ def _bm_join_pubkey(cluster):
     console (`ssh.generated`) : le nouveau nœud reçoit la même. None sinon."""
     entry = next((c for c in load_config().get("clusters", []) if c.get("name") == cluster), None)
     ssh = (entry or {}).get("ssh") or {}
-    key = ssh.get("key")
+    key = _cluster_ssh_key_path(ssh) if ssh.get("generated") else ssh.get("key")
     if not (ssh.get("generated") and key and Path(key).is_file()):
         return None
     try:
@@ -9062,9 +9101,37 @@ def _kubectl_for_cluster(cluster):
         if c["name"] == cluster:
             if _sso_session() is not None:
                 return _sso_kubeconfig(cluster, c)
-            return _identity_kubeconfig(c["kubeconfig"],
+            return _identity_kubeconfig(_cluster_kubeconfig_path(c),
                                         current_cluster_identity())
     return None
+
+
+def _cluster_kubeconfig_path(cluster, purpose="kubectl", missing_ok=False):
+    """Chemin du kubeconfig de la console pour un cluster (nom ou entrée de
+    la configuration), seul lecteur du champ `kubeconfig` (2.9.0) : le
+    fichier rangé, ou une copie tmpfs partagée quand le champ porte une
+    référence du magasin de secrets (OpenBao). None pour un cluster inconnu.
+    `missing_ok` : None aussi quand le secret est illisible (OpenBao coupé),
+    pour les tâches de fond qui passent au cluster suivant."""
+    entry = cluster if isinstance(cluster, dict) else next(
+        (c for c in load_config_ro().get("clusters", []) if c.get("name") == cluster), None)
+    if not entry:
+        return None
+    try:
+        return _sst.path_of(entry.get("kubeconfig"), purpose)
+    except (_sst.SecretError, _sst.SecretMissing) as e:
+        if not missing_ok:
+            raise
+        log.warning("kubeconfig of %s unavailable: %s", entry.get("name"), e)
+        return None
+
+
+def _cluster_ssh_key_path(ssh, purpose="ssh-cluster"):
+    """Chemin de la clé SSH d'un cluster (bloc `ssh` de son entrée), seul
+    lecteur du champ `ssh.key` (2.9.0) : le fichier rangé, ou une copie
+    tmpfs quand le champ porte une référence du magasin de secrets."""
+    key = (ssh or {}).get("key")
+    return _sst.path_of(key, purpose) if key else key
 
 
 _KUBE_SYSTEM_MISS = {}         # cluster -> horodatage du dernier échec
@@ -9080,11 +9147,12 @@ def _kube_system_uid(entry):
     # et la sonde TCP de deux secondes plutôt que le délai de kubectl.
     if time.time() - _KUBE_SYSTEM_MISS.get(name, 0) < 60:
         return None
-    if _cluster_reachable(entry["kubeconfig"]) is False:
+    kc = _cluster_kubeconfig_path(entry, missing_ok=True)
+    if not kc or _cluster_reachable(kc) is False:
         _KUBE_SYSTEM_MISS[name] = time.time()
         return None
     try:
-        out = _kubectl_run(["kubectl", "--kubeconfig", entry["kubeconfig"], "get", "namespace",
+        out = _kubectl_run(["kubectl", "--kubeconfig", kc, "get", "namespace",
                               "kube-system", "-o", "jsonpath={.metadata.uid}"],
                              capture_output=True, text=True, timeout=10)
     except (subprocess.TimeoutExpired, OSError):
@@ -9113,10 +9181,13 @@ def _node_uids(entry):
     seen = _NODE_UIDS.get(name)
     if seen and time.time() - seen[0] < 600:
         return seen[1]
-    if time.time() - _KUBE_SYSTEM_MISS.get(name, 0) < 60 or _cluster_reachable(entry["kubeconfig"]) is False:
+    if time.time() - _KUBE_SYSTEM_MISS.get(name, 0) < 60:
+        return frozenset()
+    kc = _cluster_kubeconfig_path(entry, missing_ok=True)
+    if not kc or _cluster_reachable(kc) is False:
         return frozenset()
     try:
-        out = _kubectl_run(["kubectl", "--kubeconfig", entry["kubeconfig"], "get", "nodes",
+        out = _kubectl_run(["kubectl", "--kubeconfig", kc, "get", "nodes",
                               "-o", "jsonpath={.items[*].metadata.uid}"],
                              capture_output=True, text=True, timeout=10)
     except (subprocess.TimeoutExpired, OSError):
@@ -11939,8 +12010,8 @@ def _usage_sample_once(collect=None, now=None):
     from datetime import timedelta
     collect = collect or _gpus_collect
     now = now or _bookings_now()
-    clusters = [(c.get("name"), c.get("kubeconfig")) for c in load_config_ro().get("clusters", [])
-                if c.get("name")]
+    clusters = [(c.get("name"), _cluster_kubeconfig_path(c, missing_ok=True))
+                for c in load_config_ro().get("clusters", []) if c.get("name")]
 
     def one(item):
         name, kc = item
@@ -13126,7 +13197,7 @@ def api_clusters_test_kubeconfig(name):
     cluster = next((c for c in cfg.get("clusters", []) if c["name"] == name), None)
     if not cluster:
         return jsonify({"error": f"cluster '{name}' not found"}), 404
-    kc = _identity_kubeconfig(cluster.get("kubeconfig", ""),
+    kc = _identity_kubeconfig(_cluster_kubeconfig_path(cluster) or "",
                               current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"ok": False, "error": f"kubeconfig file not found: {kc}"}), 404
@@ -13156,7 +13227,7 @@ def api_clusters_test_ssh(name):
     if not cluster:
         return jsonify({"error": f"cluster '{name}' not found"}), 404
     ssh_user = cluster.get("ssh", {}).get("user", "rancher")
-    ssh_key  = cluster.get("ssh", {}).get("key", "")
+    ssh_key  = _cluster_ssh_key_path(cluster.get("ssh")) or ""
     ssh_port = cluster.get("ssh", {}).get("port", 22)
 
     def _probe(node):
@@ -13215,7 +13286,7 @@ def api_connection_test(cluster):
     if not cluster_cfg:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
 
-    kc_path = _identity_kubeconfig(cluster_cfg.get("kubeconfig", ""),
+    kc_path = _identity_kubeconfig(_cluster_kubeconfig_path(cluster_cfg) or "",
                                    current_cluster_identity())
     result = {
         "cluster": cluster,
@@ -13302,7 +13373,7 @@ def api_connection_test(cluster):
 
     # 4. SSH reachability per node
     ssh_user = cluster_cfg.get("ssh", {}).get("user", "rancher")
-    ssh_key  = cluster_cfg.get("ssh", {}).get("key", "")
+    ssh_key  = _cluster_ssh_key_path(cluster_cfg.get("ssh")) or ""
     ssh_port = cluster_cfg.get("ssh", {}).get("port", 22)
 
     def _probe_node(node):
@@ -16115,7 +16186,7 @@ def _build_bundle(job: BundleJob):
         status_data = {}
         for c in cfg.get("clusters", []):
             cname = c["name"]
-            kc = _identity_kubeconfig(c.get("kubeconfig", ""),
+            kc = _identity_kubeconfig(_cluster_kubeconfig_path(c, "bundle", missing_ok=True) or "",
                                       getattr(job, "identity", None))
             if not Path(kc).exists():
                 continue
@@ -17271,7 +17342,7 @@ def api_capi_install(cluster):
     cluster_cfg = next((c for c in cfg.get("clusters", []) if c["name"] == cluster), None)
     if not cluster_cfg:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    kc = _identity_kubeconfig(cluster_cfg.get("kubeconfig", ""),
+    kc = _identity_kubeconfig(_cluster_kubeconfig_path(cluster_cfg) or "",
                               current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"error": "kubeconfig missing"}), 400
@@ -17344,7 +17415,7 @@ def api_capi_install(cluster):
         target=_capi_install_runner,
         args=(run, cluster, kc, nodes_ips,
               ssh.get("user", "rancher"),
-              ssh.get("key", ""),
+              _cluster_ssh_key_path(ssh) or "",
               ssh.get("port", 22),
               dry_run),
         daemon=True,
@@ -23111,7 +23182,7 @@ def api_capi_uninstall(cluster):
     cluster_cfg = next((c for c in cfg.get("clusters", []) if c["name"] == cluster), None)
     if not cluster_cfg:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    kc = _identity_kubeconfig(cluster_cfg.get("kubeconfig", ""),
+    kc = _identity_kubeconfig(_cluster_kubeconfig_path(cluster_cfg) or "",
                               current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"error": "kubeconfig missing"}), 400
@@ -23142,7 +23213,7 @@ def api_capi_uninstall(cluster):
         target=_capi_uninstall_runner,
         args=(run, cluster, kc, nodes_ips,
               ssh.get("user", "rancher"),
-              ssh.get("key", ""),
+              _cluster_ssh_key_path(ssh) or "",
               ssh.get("port", 22),
               keep_cm, dry_run),
         daemon=True,
@@ -24998,7 +25069,7 @@ def _vnc_classify_loss(cluster, namespace, name, uid):
     a-t-il pris la place ? KubeVirt n'en accepte qu'un, et sans cette
     distinction les deux consoles se la reprenaient en boucle."""
     cfg = load_config()
-    kc = next((c["kubeconfig"] for c in cfg.get("clusters", [])
+    kc = next((_cluster_kubeconfig_path(c, "vnc") for c in cfg.get("clusters", [])
                if c["name"] == cluster), None)
     reason = "lost"
     if kc:
@@ -25111,7 +25182,7 @@ def ws_vnc(ws, cluster, namespace, name):
         log_vnc.warning("rejected /ws/vnc for %s/%s: ticket of another user", namespace, name)
         ws.close(message="invalid or expired ticket"); return
     cfg = load_config()
-    kc = next((c["kubeconfig"] for c in cfg.get("clusters", [])
+    kc = next((_cluster_kubeconfig_path(c, "vnc") for c in cfg.get("clusters", [])
                if c["name"] == cluster), None)
     if not kc:
         ws.close(message="unknown cluster"); return
@@ -27785,7 +27856,7 @@ def ws_serial(ws, cluster, namespace, name):
     if not entry or not _vnc_ticket_user_ok(entry):
         ws.close(message="invalid or expired ticket"); return
     cfg = load_config()
-    kc = next((c["kubeconfig"] for c in cfg.get("clusters", []) if c["name"] == cluster), None)
+    kc = next((_cluster_kubeconfig_path(c, "serial") for c in cfg.get("clusters", []) if c["name"] == cluster), None)
     if not kc:
         ws.close(message="unknown cluster"); return
     try:
@@ -28344,7 +28415,10 @@ def _tf_kvm_stage(ws, host_decl):
     state = _state_dir()
     for rel, name in ((host_decl["ssh_key"], _tfk.KEY_FILE),
                       (host_decl["known_hosts"], _tfk.KNOWN_FILE)):
-        _tf_private_write(ws / name, _kd.resolve(state, rel).read_bytes())
+        # 2.9.0 : la clé de l'hôte par le magasin de secrets (référence) ou
+        # son fichier rangé sous l'état
+        src = _kd.key_path(state, rel, "tf-kvm-ssh") if name == _tfk.KEY_FILE else _kd.resolve(state, rel)
+        _tf_private_write(ws / name, src.read_bytes())
     # le script ssh strict que le provider lance (qemu+sshcmd, command=)
     _tf_private_write(ws / _tfk.WRAPPER_FILE, _tfk.ssh_wrapper(ws).encode())
     os.chmod(ws / _tfk.WRAPPER_FILE, 0o700)
@@ -28464,7 +28538,8 @@ def _tf_kvm_secret(ws, var):
     f = d / var
     if not f.is_file():
         _tf_private_write(f, _secrets.token_hex(32).encode())
-    return f.read_text().strip()
+    # 2.9.0 : le fichier peut porter la référence du secret migré dans OpenBao
+    return _sst.resolve_value(f.read_text().strip())
 
 
 def _tf_kvm_env(ws, rendered):
@@ -33274,7 +33349,6 @@ _MODULE_READY.set()
 import deploy_chain as _dch  # noqa: E402
 import deploy_plans as _dpl  # noqa: E402
 import deploy_ready as _drd  # noqa: E402
-import secret_store as _sst  # noqa: E402
 
 DEPLOY_PREFIX = "deploy:"
 DEPLOY_POLL = float(os.environ.get("HARVESTER_OPS_DEPLOY_POLL", _dch.POLL_SECONDS))
@@ -33355,7 +33429,7 @@ def _deploy_console_kc(cluster):
     """Kubeconfig de la console pour un cluster (celui créé par une
     installation enchaînée : identité de la console, comme la série)."""
     c = _deploy_cluster_entry(cluster)
-    return c.get("kubeconfig") if c else None
+    return _cluster_kubeconfig_path(c, "deploy") if c else None
 
 
 def _deploy_vip_of(kc):
@@ -37400,7 +37474,8 @@ def _registry_console_address(cluster):
     entry = _registry_cluster_entry(cluster)
     host = None
     try:
-        kc = yaml.safe_load(Path(entry["kubeconfig"]).read_text()) if entry and entry.get("kubeconfig") else None
+        kc_path = _cluster_kubeconfig_path(entry, "registry") if entry and entry.get("kubeconfig") else None
+        kc = yaml.safe_load(Path(kc_path).read_text()) if kc_path else None
         host = urlparse(((kc or {}).get("clusters") or [{}])[0].get("cluster", {}).get("server") or "").hostname
     except (OSError, ValueError, AttributeError, IndexError, yaml.YAMLError):
         host = None

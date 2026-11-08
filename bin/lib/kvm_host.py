@@ -273,7 +273,7 @@ def _ssh_base(decl, state):
     if why:
         raise KvmError("failed", f"{name}: failed: invalid declaration: {why}", host=name)
     try:
-        key = kvm_decl.resolve(state, decl["ssh_key"])
+        key = kvm_decl.key_path(state, decl["ssh_key"])
         known = kvm_decl.resolve(state, decl["known_hosts"])
     except kvm_decl.DeclError as e:
         raise KvmError("failed", f"{name}: failed: invalid declaration: {e}", host=name) from None
@@ -414,8 +414,11 @@ class VirshHost:
         paths = [str(Path(self.state))]
         for field in ("ssh_key", "known_hosts"):
             try:
-                paths.append(str(kvm_decl.resolve(self.state, self.decl.get(field))))
+                paths.append(str(kvm_decl.key_path(self.state, self.decl.get(field)) if field == "ssh_key"
+                                 else kvm_decl.resolve(self.state, self.decl.get(field))))
             except kvm_decl.DeclError:
+                pass
+            except Exception:                   # noqa: BLE001 : secret illisible, rien à masquer
                 pass
         return sorted(paths, key=len, reverse=True)
 

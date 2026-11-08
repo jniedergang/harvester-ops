@@ -268,6 +268,33 @@ def mask(cfg):
     return out
 
 
+def _has_ref(cfg):
+    for c in (cfg or {}).get("channels") or []:
+        vals = [c.get(f) for f in SECRET_FIELDS.get(c.get("kind"), ())]
+        vals += list((c.get("secret_headers") or {}).values())
+        if any(isinstance(v, str) and v.startswith(("openbao:", "local:")) for v in vals):
+            return True
+    return False
+
+
+def resolve_secrets(cfg, actor=None):
+    """2.9.0 : le réglage avec les valeurs des secrets rangés par référence
+    dans le magasin (`openbao:replication-notify/global#<canal>__<secret>`).
+    Sans référence, le réglage est rendu tel quel (même objet). Seul point
+    de lecture des secrets de notification avant un envoi."""
+    if not _has_ref(cfg):
+        return cfg
+    import secret_store
+    out = copy.deepcopy(cfg)
+    for c in out.get("channels") or []:
+        for f in SECRET_FIELDS.get(c.get("kind"), ()):
+            if c.get(f):
+                c[f] = secret_store.resolve_value(c[f], actor)
+        if c.get("secret_headers"):
+            c["secret_headers"] = {k: secret_store.resolve_value(v, actor) for k, v in c["secret_headers"].items()}
+    return out
+
+
 def secrets_of(cfg):
     """Toutes les valeurs secrètes (pour les retirer d'un message d'erreur)."""
     out = []
@@ -514,7 +541,7 @@ class Notifier:
             # premier tour (ou base remplacée) : rien d'ancien n'est envoyé
             db.set_setting(conn, self.CURSOR, top, by=self.by)
             return 0
-        cfg = db.get_setting(conn, "notify") or {}
+        cfg = resolve_secrets(db.get_setting(conn, "notify") or {})
         if not cfg.get("enabled") or not cfg.get("channels"):
             if top != cursor:
                 db.set_setting(conn, self.CURSOR, top, by=self.by)

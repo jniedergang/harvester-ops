@@ -38,12 +38,13 @@ CLASS_TABLE = {
     "kubeconfig": ClassSpec(
         ("<state>/clusters.d/<n>.yaml (kubeconfig)", "<state>/kubeconfigs/<n>.yaml"),
         "kubeconfig/{name}", True,
-        ("web/app.py:_cluster_kubeconfig_path", "bin/lib/cluster_decl.py:materialize")),
+        ("web/app.py:_cluster_kubeconfig_path", "bin/lib/cluster_decl.py:materialize",
+         "bin/lib/common.sh:_secret_field")),
     "ssh-cluster": ClassSpec(
         ("<state>/clusters.d/<n>.yaml (ssh.key)", "<state>/ssh/<n>_id"),
         "ssh-cluster/{name}", True,
         ("web/app.py:_cluster_ssh_key_path", "bin/lib/cluster_decl.py:materialize",
-         "bin/lib/node_images.py:_ssh_opts", "bin/lib/common.sh:SSH_KEY")),
+         "bin/lib/node_images.py:ssh_options", "bin/lib/common.sh:_secret_field")),
     "ssh-kvm": ClassSpec(
         ("<state>/kvm.d/<n>.yaml (ssh_key)", "<state>/ssh/<n>_id"),
         "ssh-kvm/{name}", True,

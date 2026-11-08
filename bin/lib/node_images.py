@@ -25,7 +25,9 @@ def ssh_options(ssh):
     opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
             "-o", "StrictHostKeyChecking=accept-new", "-p", str(ssh.get("port", 22))]
     if ssh.get("key"):
-        opts += ["-i", ssh["key"]]
+        # 2.9.0 : une clé migrée dans le magasin de secrets arrive en référence
+        import secret_store
+        opts += ["-i", secret_store.path_of(ssh["key"], "ssh-cluster")]
     return opts
 
 
