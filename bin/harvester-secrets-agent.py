@@ -57,16 +57,20 @@ import openbao_policy as pol  # noqa: E402
 
 VERSION_FILE = Path(os.environ.get("HARVESTER_OPS_OPT", "/opt/harvester-ops")) / "VERSION"
 OPS = ("store-secret-id", "b1-install", "b1-upgrade", "b1-remove", "rotate-secret-id", "rotate-unseal-key",
-       "restore-snapshot", "b1-policies", "status")
+       "restore-snapshot", "b1-policies", "export-unseal-key", "export-unseal-key-done", "ack-offline-copy",
+       "status")
 KEYS = {
     "store-secret-id": {"console_id", "addr", "role_id", "wrap_token", "ca_pem"},
-    "b1-install": {"console_id", "bundle", "ack_offline_copy"},
+    "b1-install": {"console_id", "bundle"},
     "b1-upgrade": {"bundle"},
     "b1-remove": set(),
     "rotate-secret-id": set(),
-    "rotate-unseal-key": {"ack_offline_copy"},
+    "rotate-unseal-key": set(),
     "restore-snapshot": {"file", "witness"},
     "b1-policies": set(),
+    "export-unseal-key": set(),
+    "export-unseal-key-done": set(),
+    "ack-offline-copy": {"key_id"},
     "status": set(),
 }
 COMMON = {"op", "id", "requested_by"}
@@ -86,6 +90,12 @@ SECRET_ID_MAX_AGE = 30 * 86400          # point 260
 OLD_VOLUME_DAYS = 7
 KEY_KEEP_DAYS = 14                      # comme les instantanés (point 259)
 WAIT_S = int(os.environ.get("HARVESTER_SECRETS_AGENT_WAIT", "120"))
+# Décision 275 : copie hors ligne de la clé de descellement, remise une fois
+# à l'administrateur (fichier root:harvester-ops 0440 dans le répertoire
+# root des identifiants de la console, monté en lecture seule dans le
+# conteneur), effacé après le téléchargement ou au bout de 10 minutes.
+EXPORT_NAME = "unseal-export.key"
+EXPORT_TTL_S = 600
 
 
 class AgentError(Exception):
@@ -259,6 +269,10 @@ class Agent:
         return op
 
     def process(self):
+        try:
+            self._expire_export()
+        except OSError:
+            pass
         req = self.read_request()
         if req is None:
             return self.housekeeping()
@@ -478,6 +492,8 @@ class Agent:
                 "current_key": st.get("current_key"), "image": st.get("image"),
                 "keys": [{k: v for k, v in e.items() if k != "file"} for e in st.get("keys", [])],
                 "secret_id_age_s": int(self.now() - sid.stat().st_mtime) if sid.exists() else None,
+                "offline_copy": {k: (st.get("offline_copy") or {}).get(k)
+                                 for k in ("key_id", "exported_at", "downloaded_at", "acked_at")} if st else None,
                 "agent_version": _version()}
         self.status["info"] = info
         self.step("status", "done")
@@ -571,9 +587,9 @@ class Agent:
 
     def op_b1_install(self, req):
         cid = req["console_id"]
-        ack = req.get("ack_offline_copy") is True
-        if not ack:
-            raise AgentError("offline-copy-ack-required", "acknowledge the offline copy of the unseal key first")
+        # décision 275 : l'acquittement de la copie hors ligne vient APRÈS la
+        # pose (la clé n'existe pas avant) : export-unseal-key puis
+        # ack-offline-copy ; `ack_offline_copy` n'est plus exigé ici
         if self.agent_state():
             raise AgentError("b1-already-installed", "OpenBao B1 is already installed on this host")
         data = self.p.b1_data / "data"
@@ -603,7 +619,9 @@ class Agent:
         new_etc = not self.p.b1_etc.exists()
         self.p.b1_etc.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.p.b1_etc, 0o700)
-        self.undo.append(("configuration", lambda: self._remove_b1_etc(keep_key=ack, whole=new_etc)))
+        # une clé tirée n'est jamais perdue par un retour arrière : gardée
+        # et reprise au prochain essai
+        self.undo.append(("configuration", lambda: self._remove_b1_etc(keep_key=True, whole=new_etc)))
         new_data = not self.p.b1_data.exists()
         for d in (self.p.b1_data, data, self.p.b1_data / "audit"):
             d.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -717,6 +735,7 @@ class Agent:
                                ((lk or {}).get("data") or {}).get("secret_id_accessor"), ca)
         self.undo.append(("credentials", self._remove_credentials))
         st["unsealed_once"] = True
+        st["offline_copy"] = self._offline_pending(st["current_key"])
         self.save_agent_state(st)
         self.render(st, info["template"], init=False)       # initialize ne sert plus
         self.host.chown(self.p.b1_etc / "openbao.hcl", uid, 0)
@@ -786,6 +805,86 @@ class Agent:
         self.step("restart", "done")
         return f"OpenBao {info['version']} running"
 
+    # -- copie hors ligne de la clé de descellement (décision 275) -------------
+    @staticmethod
+    def _offline_pending(key_id):
+        return {"key_id": key_id, "exported_at": None, "downloaded_at": None, "acked_at": None}
+
+    def _expire_export(self):
+        """Copie remise et jamais reprise : effacée après EXPORT_TTL_S."""
+        f = self.p.etc / EXPORT_NAME
+        if not f.exists() and not f.is_symlink():
+            return
+        o = (self.agent_state() or {}).get("offline_copy") or {}
+        if not o.get("exported_at") or self.now() - o["exported_at"] > EXPORT_TTL_S:
+            f.unlink(missing_ok=True)
+
+    def op_export_unseal_key(self, req=None):
+        """La clé de descellement EN SERVICE remise une fois à
+        l'administrateur : copie root:harvester-ops 0440 dans le répertoire
+        root des identifiants (lu par la console, en lecture seule), effacée
+        après le téléchargement (export-unseal-key-done) ou au bout de
+        EXPORT_TTL_S. Jamais de valeur dans le statut ni le journal."""
+        st = self.agent_state()
+        if not st:
+            raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
+        key_id = st["current_key"]
+        src = self.p.b1_etc / "keys" / f"{key_id}.key"
+        if not src.is_file():
+            raise AgentError("unseal-key-missing", f"the key {key_id} is not on this host")
+        self.step("export", "running", f"key {key_id}")
+        self.p.etc.mkdir(parents=True, exist_ok=True)
+        dst = self.p.etc / EXPORT_NAME
+        dst.unlink(missing_ok=True)
+        _w(dst, src.read_bytes(), 0o440, binary=True)
+        gid = self.host.group_gid("harvester-ops")
+        if gid is not None:
+            self.host.chown(dst, 0, gid)
+        o = st.get("offline_copy") or {}
+        if o.get("key_id") != key_id:
+            o = self._offline_pending(key_id)
+        o.update(exported_at=self.now(), downloaded_at=None)
+        st["offline_copy"] = o
+        self.save_agent_state(st)
+        self.status["info"] = {"key_id": key_id, "expires_in_s": EXPORT_TTL_S}
+        self.step("export", "done", f"key {key_id}: one download within {EXPORT_TTL_S // 60} min")
+        return f"unseal key {key_id} ready for one download"
+
+    def op_export_unseal_key_done(self, req=None):
+        st = self.agent_state()
+        if not st:
+            raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
+        (self.p.etc / EXPORT_NAME).unlink(missing_ok=True)
+        o = st.get("offline_copy") or {}
+        if o.get("exported_at"):
+            o["downloaded_at"] = self.now()
+            st["offline_copy"] = o
+            self.save_agent_state(st)
+        self.status["info"] = {"key_id": o.get("key_id")}
+        self.step("export", "done", "the copy given for download is erased")
+        return "download copy erased"
+
+    def op_ack_offline_copy(self, req):
+        """Acquittement écrit de la copie hors ligne : seulement pour la clé
+        en service, et une fois qu'elle a été remise (elle existe et
+        l'administrateur l'a eue)."""
+        st = self.agent_state()
+        if not st:
+            raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
+        key_id = str(req.get("key_id") or "")
+        o = st.get("offline_copy") or {}
+        if key_id != st["current_key"] or o.get("key_id") != key_id:
+            raise AgentError("offline-copy-wrong-key", "this is not the unseal key in service")
+        if not o.get("exported_at"):
+            raise AgentError("offline-copy-not-exported", "download the key first (export-unseal-key)")
+        (self.p.etc / EXPORT_NAME).unlink(missing_ok=True)
+        o["acked_at"] = self.now()
+        st["offline_copy"] = o
+        self.save_agent_state(st)
+        self.status["info"] = {"key_id": key_id, "acked": True}
+        self.step("ack", "done", f"offline copy of {key_id} acknowledged")
+        return f"offline copy of {key_id} acknowledged"
+
     def op_b1_policies(self, req=None):
         """Décision 276 : remet les politiques `hops-*` de cette console au
         texte de la version installée (mise à niveau après la pose, plus de
@@ -846,8 +945,6 @@ class Agent:
         """Essai 7 : current = nouvelle, previous = ancienne, redémarrage,
         `sys/rotate/root` (sans lui la clé racine reste chiffrée par
         l'ancienne), instantané, PUIS retrait de l'ancienne."""
-        if req.get("ack_offline_copy") is not True:
-            raise AgentError("offline-copy-ack-required", "acknowledge the offline copy of the new key first")
         st = self.agent_state()
         if not st:
             raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
@@ -903,6 +1000,8 @@ class Agent:
             if k["id"] == old:
                 k["retired"] = self.now()
         st2["keys"] = st2["keys"] + [{"id": new, "created": self.now(), "retired": None}]
+        st2["offline_copy"] = self._offline_pending(new)       # copie de la NOUVELLE clé attendue
+        (self.p.etc / EXPORT_NAME).unlink(missing_ok=True)      # une copie de l'ancienne ne sert plus
         self.save_agent_state(st2)
         self.restart()
         self.wait_unsealed(self.ca_pem(), "OpenBao with the new key only")

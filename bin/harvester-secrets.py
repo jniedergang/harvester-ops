@@ -7,14 +7,15 @@
                             [--wrapped-stdin] [--transit] [--dry-run]
     harvester-secrets enable --mode a --addr URL --role-id ID --wrapped-stdin [--ca FILE]
                              [--mount M] [--prefix P] [--dry-run]
-    harvester-secrets enable --mode b1 --bundle FILE --ack-offline-copy [--dry-run]
+    harvester-secrets enable --mode b1 --bundle FILE [--dry-run]
     harvester-secrets disable [--remove-b1] [--dry-run]
     harvester-secrets migrate --to openbao|local [--class C ...] [--name N] [--dry-run]
     harvester-secrets confirm --class C [--older-than-days N]
     harvester-secrets outage-test
     harvester-secrets versions REF
     harvester-secrets rollback REF --version N [--dry-run]
-    harvester-secrets rotate secret-id | unseal-key --ack-offline-copy | transit DECL | ssh-kvm HOST
+    harvester-secrets rotate secret-id | unseal-key | transit DECL | ssh-kvm HOST
+    harvester-secrets offline-copy export [--to FILE] | done | ack --key-id ID
     harvester-secrets snapshot [--dest DIR] [--dry-run]
     harvester-secrets restore FILE [--dry-run]
     harvester-secrets bundle --registry R --user U --password-stdin [--repository P] [--tag T]
@@ -450,9 +451,6 @@ def _enable_a(args, doc):
 def _enable_b1(args, doc):
     if not args.bundle:
         return refuse("bad-input", "mode b1 needs --bundle")
-    if not args.ack_offline_copy:
-        return refuse("offline-copy-ack-required", "keep an offline copy of the unseal key "
-                      "(/etc/harvester-ops-openbao/unseal.key) once installed, then pass --ack-offline-copy")
     src = Path(args.bundle)
     step("bundle", "running", "checking the OpenBao bundle")
     with tempfile.TemporaryDirectory(prefix="openbao-bundle-") as tmp:
@@ -470,7 +468,10 @@ def _enable_b1(args, doc):
     staged.mkdir(parents=True, exist_ok=True)
     if src.resolve().parent != staged.resolve():
         shutil.copyfile(src, staged / src.name)
-    agent_ok(run_agent({"op": "b1-install", "console_id": cid, "bundle": src.name, "ack_offline_copy": True}))
+    agent_ok(run_agent({"op": "b1-install", "console_id": cid, "bundle": src.name}))
+    # décision 275 : la copie hors ligne de la clé se fait maintenant qu'elle
+    # existe (offline-copy export, puis ack) ; migrer attend l'acquittement
+    doc["offline_copy"] = {"pending": True, "since": int(time.time())}
     prefix = f"consoles/{cid}"
     res = run_checks(pol.B1_ADDR, ca_of(), pol.DEFAULT_MOUNT, prefix, cid, b1=True, transit=True)
     if not all_green(res):
@@ -479,7 +480,7 @@ def _enable_b1(args, doc):
     doc.update(mode="b1", addr=pol.B1_ADDR, mount=pol.DEFAULT_MOUNT, prefix=prefix)
     save_settings(doc)
     out({"ok": True, "mode": "b1", "addr": pol.B1_ADDR, "console_id": cid, "version": info["version"],
-         "checks": res})
+         "checks": res, "offline_copy": "pending: harvester-secrets offline-copy export, then ack"})
     return EXIT_OK
 
 
@@ -731,6 +732,9 @@ def cmd_migrate(args):
         return refuse("class-not-migratable", f"{c} cannot move to OpenBao")
     if c == "plan-run":
         return refuse("class-not-migratable", "plan-run has nothing to migrate (new runs go to OpenBao)")
+    if args.to == "openbao" and not args.dry_run and (raw_settings().get("offline_copy") or {}).get("pending"):
+        return refuse("offline-copy-ack-required", "keep the offline copy of the unseal key first "
+                      "(harvester-secrets offline-copy export, then offline-copy ack --key-id ID)")
     if args.replace_existing and (args.to != "openbao" or not args.name):
         return refuse("replace-needs-name", "--replace-existing replaces one named secret: "
                       "give --to openbao and --name")
@@ -899,6 +903,48 @@ def cmd_outage_test(args):
     return EXIT_OK if ok else EXIT_FAIL
 
 
+def cmd_offline_copy(args):
+    """Décision 275 : copie hors ligne de la clé de descellement de B1.
+    `export` la remet une fois (fichier lu par la console pour un seul
+    téléchargement, ou copié par `--to` puis effacé), `done` efface la copie
+    remise, `ack` acquitte la copie gardée de la clé en service (refusé
+    tant qu'elle n'a pas été remise). Jamais la clé dans la sortie."""
+    s = settings()
+    if s.get("mode") != "b1":
+        return refuse("b1-only", "the unseal key belongs to mode B1")
+    if args.what == "export":
+        st = agent_ok(run_agent({"op": "export-unseal-key"}))
+        key_id = (st.get("info") or {}).get("key_id")
+        if args.to:
+            src = ss.openbao_dir() / "unseal-export.key"
+            dst = Path(args.to)
+            try:
+                data = src.read_bytes()
+                fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+            except OSError as e:
+                agent_ok(run_agent({"op": "export-unseal-key-done"}))
+                return fail("offline-copy-write", f"copy not written ({type(e).__name__}); nothing kept")
+            agent_ok(run_agent({"op": "export-unseal-key-done"}))
+            step("offline-copy", "done", f"key {key_id} copied; store it offline, then offline-copy ack")
+        out({"ok": True, "key_id": key_id, "copied": bool(args.to)})
+        return EXIT_OK
+    if args.what == "done":
+        agent_ok(run_agent({"op": "export-unseal-key-done"}))
+        out({"ok": True})
+        return EXIT_OK
+    if not args.key_id:
+        return refuse("bad-input", "offline-copy ack needs --key-id")
+    st = agent_ok(run_agent({"op": "ack-offline-copy", "key_id": args.key_id}))
+    doc = raw_settings()
+    doc["offline_copy"] = {"pending": False, "key_id": args.key_id, "acked_at": int(time.time()),
+                           "by": ARGS.actor or "cli"}
+    save_settings(doc)
+    out({"ok": True, "key_id": args.key_id, "acked": True})
+    return EXIT_OK
+
+
 def cmd_versions(args):
     if not ss.is_openbao_ref(args.ref):
         return refuse("bad-input", "an openbao: reference is required")
@@ -940,13 +986,15 @@ def cmd_rotate(args):
     if args.what == "unseal-key":
         if s["mode"] != "b1":
             return refuse("b1-only", "the unseal key belongs to mode B1")
-        if not args.ack_offline_copy:
-            return refuse("offline-copy-ack-required", "keep an offline copy of the new key, then --ack-offline-copy")
         if args.dry_run:
             out({"ok": True, "dry_run": True, "would": "new key, restart, sys/rotate/root, snapshot, old key retired"})
             return EXIT_OK
-        st = agent_ok(run_agent({"op": "rotate-unseal-key", "ack_offline_copy": True}))
-        out({"ok": True, "rotated": "unseal-key", "message": st.get("message")})
+        st = agent_ok(run_agent({"op": "rotate-unseal-key"}))
+        doc = raw_settings()
+        doc["offline_copy"] = {"pending": True, "since": int(time.time())}
+        save_settings(doc)
+        out({"ok": True, "rotated": "unseal-key", "message": st.get("message"),
+             "offline_copy": "pending: harvester-secrets offline-copy export, then ack"})
         return EXIT_OK
     if args.what == "transit":
         try:
@@ -1106,7 +1154,6 @@ def parser():
     for o in ("--addr", "--role-id", "--ca", "--mount", "--prefix", "--bundle"):
         s.add_argument(o)
     s.add_argument("--wrapped-stdin", action="store_true")
-    s.add_argument("--ack-offline-copy", action="store_true")
     s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("disable")
     s.add_argument("--remove-b1", action="store_true")
@@ -1131,8 +1178,11 @@ def parser():
     s = sub.add_parser("rotate")
     s.add_argument("what", choices=("secret-id", "unseal-key", "transit", "ssh-kvm"))
     s.add_argument("target", nargs="?")
-    s.add_argument("--ack-offline-copy", action="store_true")
     s.add_argument("--dry-run", action="store_true")
+    s = sub.add_parser("offline-copy", help="offline copy of the B1 unseal key (one download, then ack)")
+    s.add_argument("what", choices=("export", "done", "ack"))
+    s.add_argument("--to", help="export: write the key to this new file (0600), then erase the download copy")
+    s.add_argument("--key-id")
     s = sub.add_parser("snapshot")
     s.add_argument("--dest")
     s.add_argument("--dry-run", action="store_true")
@@ -1156,7 +1206,7 @@ def parser():
 COMMANDS = {"status": cmd_status, "assistant": cmd_assistant, "check": cmd_check, "enable": cmd_enable,
             "disable": cmd_disable, "migrate": cmd_migrate, "confirm": cmd_confirm, "versions": cmd_versions,
             "rollback": cmd_rollback, "outage-test": cmd_outage_test, "rotate": cmd_rotate, "snapshot": cmd_snapshot, "restore": cmd_restore,
-            "bundle": cmd_bundle, "file": cmd_file}
+            "bundle": cmd_bundle, "file": cmd_file, "offline-copy": cmd_offline_copy}
 
 
 def main(argv=None):

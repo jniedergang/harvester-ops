@@ -76,7 +76,7 @@ def request(env, **req):
 
 
 def install(env):
-    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name, ack_offline_copy=True)
+    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name)
     assert rc == 0, st
     return st
 
@@ -100,7 +100,8 @@ def no_secret_in(env, st, extra=()):
     ({"op": "rm-rf"}, "unknown-operation"),
     ({"op": "exec", "cmd": "id"}, "unknown-operation"),
     ({"op": "status", "extra": 1}, "bad-request"),
-    ({"op": "b1-install", "console_id": "nothex", "bundle": "x", "ack_offline_copy": True}, "bad-request"),
+    ({"op": "b1-install", "console_id": "nothex", "bundle": "x"}, "bad-request"),
+    ({"op": "b1-install", "console_id": "abc123def456", "bundle": "x", "ack_offline_copy": True}, "bad-request"),
     ({"op": "status", "id": "../x"}, "bad-request"),
 ])
 def test_request_outside_the_closed_list_refused(env, req, code):
@@ -229,29 +230,33 @@ def test_b1_install_sets_max_versions_when_initialize_could_not(env, monkeypatch
     assert calls == ["get", "set"]
 
 
-def test_b1_install_needs_the_offline_copy_ack(env):
-    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name, ack_offline_copy=False)
-    assert rc == 1 and st["code"] == "offline-copy-ack-required" and env["host"].cmds == []
+def test_b1_install_leaves_the_offline_copy_pending(env):
+    """Décision 275 : l'acquittement vient après la pose (la clé n'existe
+    pas avant) ; la copie de la clé en service est attendue."""
+    install(env)
+    a = env["agent"]().agent_state()
+    assert a["offline_copy"] == {"key_id": a["current_key"], "exported_at": None, "downloaded_at": None,
+                                 "acked_at": None}
 
 
 def test_b1_install_refuses_an_existing_volume(env):
     d = env["p"].b1_data / "data"
     d.mkdir(parents=True)
     (d / "raft.db").write_text("x")
-    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name, ack_offline_copy=True)
+    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name)
     assert rc == 1 and st["code"] == "b1-volume-exists" and (d / "raft.db").exists()
 
 
 @pytest.mark.parametrize("name,code", [("../../etc/passwd", "bundle-bad-name"),
                                        ("harvester-ops-openbao-9.9.9-nope.tar.gz", "bundle-missing")])
 def test_b1_install_bundle_outside_staging_refused(env, name, code):
-    rc, st = request(env, op="b1-install", console_id=CID, bundle=name, ack_offline_copy=True)
+    rc, st = request(env, op="b1-install", console_id=CID, bundle=name)
     assert rc == 1 and st["code"] == code
 
 
 def test_b1_install_wrong_image_digest_refused(env):
     env["host"].digest = "sha256:" + "0" * 64
-    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name, ack_offline_copy=True)
+    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name)
     assert rc == 1 and st["code"] == "bundle-digest-mismatch"
 
 
@@ -270,7 +275,7 @@ def test_b1_install_failure_rolls_everything_back(env, fail_at):
             real(boot)
             srv.roles[srv.role_ids[pol.agent_role(CID)]]["secret_ids"].clear()
         host.on_start = lambda: init(p.boot)
-    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name, ack_offline_copy=True)
+    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name)
     assert rc == 1 and st["state"] == "failed"
     assert host.ran("systemctl", "disable", "--now", hsa.UNIT)
     assert hsa.SECRET not in host.secrets
@@ -288,7 +293,7 @@ def test_b1_install_failure_rolls_everything_back(env, fail_at):
 def test_b1_install_failure_journal_kept(env):
     env["host"].on_start = lambda: setattr(env["host"], "active", "failed")
     env["srv"].initialized = False
-    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name, ack_offline_copy=True)
+    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name)
     assert st["code"] == "b1-start-failed" and "wiped" in st["message"]
     assert env["host"].ran("journalctl", "-u", hsa.UNIT)
 
@@ -299,7 +304,7 @@ def test_volume_never_wiped_once_unsealed(env):
     with pytest.raises(hsa.AgentError) as e:
         a._wipe_new_volume(whole=True)
     assert e.value.code == "b1-volume-unsealed" and (env["p"].b1_data / "data").exists()
-    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name, ack_offline_copy=True)
+    rc, st = request(env, op="b1-install", console_id=CID, bundle=env["bundle"].name)
     assert rc == 1 and st["code"] == "b1-already-installed"
 
 
@@ -387,7 +392,7 @@ def test_rotate_unseal_key_rotates_root_before_dropping_the_old_key(env):
     host.on_restart = lambda: renders.append(("restart", (p.b1_etc / "openbao.hcl").read_text().count("previous_key_id"),
                                               len([e for e in srv.events if e[0] == "rotate-root"])))
     env["clock"]["t"] += 86400
-    rc, st = request(env, op="rotate-unseal-key", ack_offline_copy=True)
+    rc, st = request(env, op="rotate-unseal-key")
     assert rc == 0, st
     assert renders == [("restart", 1, 0), ("restart", 0, 1)]   # 2 clés sans rotation, puis 1 clé après
     a = env["agent"]().agent_state()
@@ -403,7 +408,7 @@ def test_rotate_unseal_key_failed_rotate_root_keeps_the_old_key(env):
     p, srv, host = env["p"], env["srv"], env["host"]
     old = env["agent"]().agent_state()["current_key"]
     srv.fail_paths["sys/rotate/root"] = (403, "permission denied")
-    rc, st = request(env, op="rotate-unseal-key", ack_offline_copy=True)
+    rc, st = request(env, op="rotate-unseal-key")
     assert rc == 1
     assert env["agent"]().agent_state()["current_key"] == old
     assert host.secrets[hsa.SECRET] == (p.b1_etc / "keys" / f"{old}.key").read_bytes()
@@ -411,10 +416,16 @@ def test_rotate_unseal_key_failed_rotate_root_keeps_the_old_key(env):
     assert len(list((p.b1_etc / "keys").iterdir())) == 1
 
 
-def test_rotate_unseal_key_needs_ack(env):
+def test_rotate_unseal_key_leaves_the_new_key_pending(env):
     install(env)
+    first = env["agent"]().agent_state()["current_key"]
+    assert request(env, op="export-unseal-key")[0] == 0
+    assert request(env, op="ack-offline-copy", key_id=first)[0] == 0
+    env["clock"]["t"] += 86400
     rc, st = request(env, op="rotate-unseal-key")
-    assert rc == 1 and st["code"] == "offline-copy-ack-required"
+    assert rc == 0, st
+    a = env["agent"]().agent_state()
+    assert a["offline_copy"]["key_id"] == a["current_key"] != first and a["offline_copy"]["acked_at"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +519,7 @@ def test_restore_snapshot_of_a_retired_key(env):
     install(env)
     p, srv = env["p"], env["srv"]
     env["clock"]["t"] += 86400
-    request(env, op="rotate-unseal-key", ack_offline_copy=True)
+    request(env, op="rotate-unseal-key")
     a = env["agent"]().agent_state()
     old = a["keys"][0]
     snap = p.b1_data / "snapshots" / "openbao-old.snap"
@@ -567,8 +578,7 @@ def test_b1_remove_keeps_data_aside(env):
 
 def test_b1_ops_need_an_installed_b1(env):
     for op in ("b1-remove", "rotate-unseal-key", "restore-snapshot"):
-        extra = {"ack_offline_copy": True} if op == "rotate-unseal-key" else (
-            {"file": "openbao-x.snap"} if op == "restore-snapshot" else {})
+        extra = {"file": "openbao-x.snap"} if op == "restore-snapshot" else {}
         rc, st = request(env, op=op, **extra)
         assert rc == 1 and st["code"] == "b1-not-installed", op
 
@@ -615,3 +625,53 @@ def test_b1_policies_updates_only_hops_policies(env):
     assert srv.policies[pol.agent_role(CID)] == pol.agent_policy(CID)
     assert "auth_token_" in srv.policies[pol.tf_role(CID)]
     no_secret_in(env, st)
+
+
+# ---------------------------------------------------------------------------
+# Décision 275 (revue I4) : copie hors ligne remise une fois, acquittée après
+# ---------------------------------------------------------------------------
+def test_offline_copy_export_download_once_then_ack(env):
+    install(env)
+    p = env["p"]
+    a = env["agent"]().agent_state()
+    key_id = a["current_key"]
+    # acquitter une clé jamais remise : refusé
+    rc, st = request(env, op="ack-offline-copy", key_id=key_id)
+    assert rc == 1 and st["code"] == "offline-copy-not-exported"
+    rc, st = request(env, op="export-unseal-key")
+    assert rc == 0 and st["info"]["key_id"] == key_id
+    f = p.etc / hsa.EXPORT_NAME
+    assert f.read_bytes() == (p.b1_etc / "keys" / f"{key_id}.key").read_bytes() and mode(f) == 0o440
+    no_secret_in(env, st, extra=[f.read_bytes().hex()])
+    assert f.read_bytes() not in json.dumps(st).encode()
+    rc, st = request(env, op="export-unseal-key-done")
+    assert rc == 0 and not f.exists()
+    rc, st = request(env, op="ack-offline-copy", key_id="hops-20000101-1")
+    assert rc == 1 and st["code"] == "offline-copy-wrong-key"
+    rc, st = request(env, op="ack-offline-copy", key_id=key_id)
+    assert rc == 0
+    o = env["agent"]().agent_state()["offline_copy"]
+    assert o["acked_at"] and o["downloaded_at"] and o["key_id"] == key_id
+    rc, st = request(env, op="status")
+    assert st["info"]["offline_copy"]["acked_at"] == o["acked_at"]
+
+
+def test_offline_copy_expires(env):
+    install(env)
+    assert request(env, op="export-unseal-key")[0] == 0
+    f = env["p"].etc / hsa.EXPORT_NAME
+    assert f.exists()
+    env["clock"]["t"] += hsa.EXPORT_TTL_S - 5
+    env["agent"]().process()                         # minuterie : encore là
+    assert f.exists()
+    env["clock"]["t"] += 10
+    env["agent"]().process()
+    assert not f.exists()
+
+
+def test_rotation_erases_a_copy_of_the_old_key(env):
+    install(env)
+    assert request(env, op="export-unseal-key")[0] == 0
+    env["clock"]["t"] += 86400
+    assert request(env, op="rotate-unseal-key")[0] == 0
+    assert not (env["p"].etc / hsa.EXPORT_NAME).exists()

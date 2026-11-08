@@ -236,17 +236,15 @@ def test_enable_a_used_wrap_activates_nothing(env, capsys):
 
 def test_enable_refused_when_already_active(env, capsys):
     settings(env)
-    rc, doc, _ = cli(["enable", "--mode", "b1", "--bundle", "x", "--ack-offline-copy"], capsys=capsys)
+    rc, doc, _ = cli(["enable", "--mode", "b1", "--bundle", "x"], capsys=capsys)
     assert rc == 2 and doc["code"] == "openbao-already-active"
 
 
-def test_enable_b1_needs_the_ack_and_a_good_bundle(env, capsys, tmp_path):
+def test_enable_b1_needs_a_good_bundle(env, capsys, tmp_path):
     settings(env, mode="local")
-    rc, doc, _ = cli(["enable", "--mode", "b1", "--bundle", "x.tar.gz"], capsys=capsys)
-    assert rc == 2 and doc["code"] == "offline-copy-ack-required"
     bad = tmp_path / "harvester-ops-openbao-1.0-x.tar.gz"
     bad.write_bytes(b"not a tarball")
-    rc, doc, _ = cli(["enable", "--mode", "b1", "--bundle", str(bad), "--ack-offline-copy", "--dry-run"], capsys=capsys)
+    rc, doc, _ = cli(["enable", "--mode", "b1", "--bundle", str(bad), "--dry-run"], capsys=capsys)
     assert rc == 2 and doc["code"] == "bundle-unsafe"
 
 
@@ -433,7 +431,7 @@ def test_rotate(env, capsys):
     creds(env)
     settings(env)
     assert cli(["rotate", "secret-id", "--dry-run"], capsys=capsys)[0] == 0
-    assert cli(["rotate", "unseal-key", "--ack-offline-copy"], capsys=capsys)[1]["code"] == "b1-only"
+    assert cli(["rotate", "unseal-key"], capsys=capsys)[1]["code"] == "b1-only"
     assert cli(["rotate", "ssh-kvm", "k1"], capsys=capsys)[0] == 2
     rc, doc, _ = cli(["rotate", "transit", "Bad Decl"], capsys=capsys)
     assert rc == 2

@@ -1241,6 +1241,9 @@ def current_role():
 # Chemins dont la simple LECTURE est réservée aux admins : savoir qui
 # détient l'administration d'un cluster n'a pas à être public.
 ADMIN_ONLY_READ_PREFIXES = ("/api/harvester-users", "/api/users",
+                            # 2.9.0 : copie hors ligne de la clé de descellement de B1
+                            # (export, téléchargement unique, acquittement), toutes méthodes
+                            "/api/secrets/offline-copy/",
                             # v1.59.0 : la configuration d'un add-on peut porter des mots de passe
                             "/api/addons/",
                             # v1.67.0 : un paquet de support porte les journaux du cluster,
@@ -33715,6 +33718,99 @@ def _start_secret_originals_sweeper():
     t = threading.Thread(target=_secret_originals_loop, daemon=True, name="secret-originals")
     t.start()
     return t
+
+
+# 2.9.0 (décision 275, revue I4 des tâches 5-7) : copie hors ligne de la clé
+# de descellement de B1. L'administrateur tape l'identifiant de la console
+# pour confirmer ; l'agent remet la clé en service une fois (fichier root,
+# lecture seule pour la console) ; un seul téléchargement, puis la copie est
+# effacée ; l'acquittement n'est accepté qu'après la remise. Chaque geste est
+# une action suivie ; la clé ne passe jamais par un journal, actions.db ni
+# une étape.
+SECRET_OFFLINE_EXPORT = "unseal-export.key"
+SECRET_OFFLINE_EXPORT_ACTION = "secrets:offline-copy-export"
+_UNSEAL_KEY_ID_RE = re.compile(r"^hops-[0-9]{8}-[0-9]{1,4}$")
+_OFFLINE_DOWNLOADED = set()
+_OFFLINE_LOCK = threading.Lock()
+
+
+def _secrets_tool_action(label, args):
+    script = BIN_DIR / SECRETS_TOOL
+    return _cli_action("", label, [sys.executable, str(script), "--actor", current_user() or "console", *args],
+                       "harvester-secrets", check_busy=False, capture=True, cluster_user=None)
+
+
+def _secrets_b1_refusal():
+    if (_sst.load_settings(_state_dir()) or {}).get("mode") != "b1":
+        return jsonify({"error": "the unseal key belongs to mode B1", "code": "b1-only"}), 409
+    return None
+
+
+@app.route("/api/secrets/offline-copy/export", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_offline_copy_export():
+    refused = _secrets_b1_refusal()
+    if refused:
+        return refused
+    data = request.get_json(force=True, silent=True) or {}
+    cid = (_sst.load_settings(_state_dir()) or {}).get("console_id") or ""
+    if not cid or str(data.get("confirm") or "") != cid:
+        return jsonify({"error": "type the console identifier to confirm the export of the unseal key",
+                        "code": "confirmation-required"}), 400
+    run, err = _secrets_tool_action(SECRET_OFFLINE_EXPORT_ACTION, ["offline-copy", "export"])
+    if err:
+        return err
+    return jsonify({"action_id": run.id}), 202
+
+
+@app.route("/api/secrets/offline-copy/download", methods=["GET"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_offline_copy_download():
+    """Téléchargement UNIQUE de la clé remise par l'action d'export
+    `?action=<id>` ; la copie de l'agent est effacée aussitôt (action
+    suivie). Jamais en cache, jamais dans un journal."""
+    aid = str(request.args.get("action") or "")
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(aid)
+    if run is None or run.action != SECRET_OFFLINE_EXPORT_ACTION or run.status != "done":
+        return jsonify({"error": "no finished export action with this id", "code": "offline-copy-no-export"}), 404
+    key_id = str(((run.result or {}).get("output") or {}).get("key_id") or "")
+    if not _UNSEAL_KEY_ID_RE.match(key_id):
+        return jsonify({"error": "the export did not name its key", "code": "offline-copy-no-export"}), 404
+    with _OFFLINE_LOCK:
+        if aid in _OFFLINE_DOWNLOADED:
+            return jsonify({"error": "this copy was already downloaded: export again",
+                            "code": "offline-copy-downloaded"}), 410
+        try:
+            data = (_sst.openbao_dir() / SECRET_OFFLINE_EXPORT).read_bytes()
+        except OSError:
+            return jsonify({"error": "the copy expired or was erased: export again",
+                            "code": "offline-copy-expired"}), 410
+        _OFFLINE_DOWNLOADED.add(aid)
+    _secrets_tool_action("secrets:offline-copy-done", ["offline-copy", "done"])
+    resp = Response(data, mimetype="application/octet-stream")
+    resp.headers["Content-Disposition"] = f'attachment; filename="harvester-ops-{key_id}.key"'
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Hops-Key-Id"] = key_id
+    return resp
+
+
+@app.route("/api/secrets/offline-copy/ack", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_offline_copy_ack():
+    refused = _secrets_b1_refusal()
+    if refused:
+        return refused
+    key_id = str((request.get_json(force=True, silent=True) or {}).get("key_id") or "")
+    if not _UNSEAL_KEY_ID_RE.match(key_id):
+        return jsonify({"error": "key_id expected (hops-AAAAMMJJ-N)", "code": "bad-input"}), 400
+    run, err = _secrets_tool_action(f"secrets:offline-copy-ack:{key_id}", ["offline-copy", "ack", "--key-id", key_id])
+    if err:
+        return err
+    return jsonify({"action_id": run.id}), 202
 
 
 def _replication_secret_refs(clusters=False):

@@ -69,3 +69,145 @@ def test_capi_install_holds_its_kubeconfig_and_key(appenv):
     src = inspect.getsource(appenv["wapp"].api_capi_install)
     assert "run.hold_secrets(kc, key_path)" in src
     assert src.index("run.hold_secrets(kc, key_path)") < src.index("threading.Thread(")
+
+
+# ---------------------------------------------------------------------------
+# I4 (décision 275) : copie hors ligne de la clé, outil harvester-secrets
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+import os  # noqa: E402
+import stat  # noqa: E402
+
+from test_secret_migrate_290 import cli, hsc, migrate  # noqa: E402
+
+KEYBYTES = bytes(range(32))
+
+
+@pytest.fixture
+def b1(env, monkeypatch):
+    doc = json.loads((env["state"] / ss.SETTINGS_FILE).read_text())
+    doc["mode"] = "b1"
+    (env["state"] / ss.SETTINGS_FILE).write_text(json.dumps(doc))
+    calls = []
+    etc = Path(os.environ["HARVESTER_OPS_OPENBAO_DIR"])
+
+    def fake_agent(req, timeout=None):
+        calls.append(dict(req))
+        if req["op"] == "export-unseal-key":
+            (etc / "unseal-export.key").write_bytes(KEYBYTES)
+            return {"state": "done", "info": {"key_id": "hops-20261108-1"}}
+        if req["op"] == "export-unseal-key-done":
+            (etc / "unseal-export.key").unlink(missing_ok=True)
+        return {"state": "done", "info": {}}
+    monkeypatch.setattr(hsc, "run_agent", fake_agent)
+    return dict(env, calls=calls, etc=etc)
+
+
+def test_offline_copy_export_to_a_file(b1, capsys, tmp_path):
+    dst = tmp_path / "usb" / "unseal.key"
+    dst.parent.mkdir()
+    rc, doc, err = cli(["offline-copy", "export", "--to", str(dst)], capsys)
+    assert rc == 0 and doc == {"ok": True, "key_id": "hops-20261108-1", "copied": True}
+    assert dst.read_bytes() == KEYBYTES and stat.S_IMODE(dst.stat().st_mode) == 0o600
+    assert [c["op"] for c in b1["calls"]] == ["export-unseal-key", "export-unseal-key-done"]
+    assert not (b1["etc"] / "unseal-export.key").exists()
+    assert KEYBYTES.hex() not in err + json.dumps(doc)
+    # jamais par-dessus un fichier existant
+    rc, doc, _ = cli(["offline-copy", "export", "--to", str(dst)], capsys)
+    assert rc == 1 and doc["code"] == "offline-copy-write" and not (b1["etc"] / "unseal-export.key").exists()
+
+
+def test_offline_copy_ack_and_migration_gate(b1, capsys):
+    doc = json.loads((b1["state"] / ss.SETTINGS_FILE).read_text())
+    doc["offline_copy"] = {"pending": True, "since": 1}
+    (b1["state"] / ss.SETTINGS_FILE).write_text(json.dumps(doc))
+    rc, out, _ = migrate("rancher-oidc", capsys)
+    assert rc == 2 and out["code"] == "offline-copy-ack-required"
+    assert cli(["offline-copy", "ack"], capsys)[0] == 2                        # --key-id exigé
+    rc, out, _ = cli(["offline-copy", "ack", "--key-id", "hops-20261108-1"], capsys)
+    assert rc == 0 and b1["calls"][-1] == {"op": "ack-offline-copy", "key_id": "hops-20261108-1"}
+    oc_ = json.loads((b1["state"] / ss.SETTINGS_FILE).read_text())["offline_copy"]
+    assert oc_["pending"] is False and oc_["by"] == "alice"
+    assert migrate("rancher-oidc", capsys)[0] == 0
+
+
+def test_offline_copy_is_b1_only(env, capsys):
+    rc, doc, _ = cli(["offline-copy", "export"], capsys)
+    assert rc == 2 and doc["code"] == "b1-only"
+
+
+# ---------------------------------------------------------------------------
+# I4 (décision 275) : routes de la console, actions suivies, un seul téléchargement
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def b1app(appenv, monkeypatch):
+    doc = json.loads((appenv["state"] / ss.SETTINGS_FILE).read_text())
+    doc["mode"] = "b1"
+    (appenv["state"] / ss.SETTINGS_FILE).write_text(json.dumps(doc))
+    w = appenv["wapp"]
+    launched = []
+
+    def fake_cli(cluster, label, cmd, tool, **kw):
+        launched.append((label, cmd[cmd.index("offline-copy"):]))
+        return w.ActionRun(f"act{len(launched)}", label, "", []), None
+    monkeypatch.setattr(w, "_cli_action", fake_cli)
+    return dict(appenv, launched=launched, cid=doc["console_id"])
+
+
+@pytest.mark.parametrize("path,method", [("/api/secrets/offline-copy/export", "POST"),
+                                         ("/api/secrets/offline-copy/download", "GET"),
+                                         ("/api/secrets/offline-copy/ack", "POST")])
+def test_offline_copy_routes_are_admin_only(wapp, path, method):
+    assert wapp.required_role_for(path, method) == "admin"
+
+
+def test_offline_copy_export_needs_the_typed_console_id(b1app):
+    w = b1app["wapp"]
+    with w.app.test_client() as c:
+        r = c.post("/api/secrets/offline-copy/export", json={"confirm": "yes"})
+        assert r.status_code == 400 and r.get_json()["code"] == "confirmation-required" and not b1app["launched"]
+        r = c.post("/api/secrets/offline-copy/export", json={"confirm": b1app["cid"]})
+    assert r.status_code == 202 and r.get_json()["action_id"]
+    assert b1app["launched"] == [("secrets:offline-copy-export", ["offline-copy", "export"])]
+
+
+def test_offline_copy_download_once(b1app):
+    w = b1app["wapp"]
+    etc = Path(os.environ["HARVESTER_OPS_OPENBAO_DIR"])
+    (etc / "unseal-export.key").write_bytes(KEYBYTES)
+    run = w.ActionRun("exp1", "secrets:offline-copy-export", "", [])
+    run.status, run.result = "done", {"output": {"ok": True, "key_id": "hops-20261108-1"}}
+    with w.ACTIONS_LOCK:
+        w.ACTIONS["exp1"] = run
+    try:
+        with w.app.test_client() as c:
+            r = c.get("/api/secrets/offline-copy/download?action=exp1")
+            assert r.status_code == 200 and r.data == KEYBYTES
+            assert r.headers["Cache-Control"] == "no-store" and "hops-20261108-1" in r.headers["Content-Disposition"]
+            assert b1app["launched"] == [("secrets:offline-copy-done", ["offline-copy", "done"])]
+            r = c.get("/api/secrets/offline-copy/download?action=exp1")
+            assert r.status_code == 410 and r.get_json()["code"] == "offline-copy-downloaded"
+            assert c.get("/api/secrets/offline-copy/download?action=nope").status_code == 404
+    finally:
+        with w.ACTIONS_LOCK:
+            w.ACTIONS.pop("exp1", None)
+    # la clé n'est dans aucune action ni étape
+    blob = json.dumps([list(r.events) for r in w.ACTIONS.values()], default=str)
+    assert KEYBYTES.hex() not in blob
+
+
+def test_offline_copy_ack_route(b1app):
+    w = b1app["wapp"]
+    with w.app.test_client() as c:
+        assert c.post("/api/secrets/offline-copy/ack", json={"key_id": "../x"}).status_code == 400
+        r = c.post("/api/secrets/offline-copy/ack", json={"key_id": "hops-20261108-1"})
+    assert r.status_code == 202
+    assert b1app["launched"] == [("secrets:offline-copy-ack:hops-20261108-1",
+                                  ["offline-copy", "ack", "--key-id", "hops-20261108-1"])]
+
+
+def test_offline_copy_routes_refused_outside_b1(appenv):
+    w = appenv["wapp"]
+    with w.app.test_client() as c:
+        r = c.post("/api/secrets/offline-copy/export", json={"confirm": "x"})
+    assert r.status_code == 409 and r.get_json()["code"] == "b1-only"
