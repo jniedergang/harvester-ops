@@ -540,3 +540,19 @@ def test_a_chain_that_installs_the_cluster_refuses_rancher_at_launch(git, extern
         assert all(f["level"] == "blocking" for f in body.get_json()["findings"]
                    if f["code"] == "rancher-session-in-chain")
     assert found == codes
+
+
+@pytest.mark.parametrize("run_id,origin_run,expect", [
+    (None, None, {"plan": "site"}),                       # contrôle d'avant lancement
+    ("0123456789ab", None, {"plan": "site", "run": "0123456789ab"}),
+    ("0123456789ab", "ba9876543210", {"plan": "site", "run": "ba9876543210"}),
+])
+def test_the_gitops_request_origin_is_accepted_by_the_tool(run_id, origin_run, expect):
+    """Banc 2.8.0 : le contrôle d'un plan sur un cluster enfant existant
+    envoyait `run: None`, que l'outil refuse ; toutes les entrées étaient
+    bloquées (`gitops-check-failed`)."""
+    row = {"ref": "c28/c28", "entry": {"name": "apps"}}
+    spec = wapp._deploy_gitops_spec(row, {"name": "site"}, run_id, "", "admin", {}, origin_run=origin_run)
+    assert spec["origin"] == expect
+    text = ",".join(f"{k}={v}" for k, v in spec["origin"].items())
+    assert wapp._cc.parse_origin(text) == expect

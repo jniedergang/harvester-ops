@@ -35246,8 +35246,12 @@ def _deploy_gitops_ours(cur, plan_name):
 
 
 def _deploy_gitops_spec(row, plan, run_id, by, role, secrets_, origin_run=None):
+    # banc 2.8.0 : le contrôle d'avant lancement n'a pas encore d'exécution ;
+    # `run: None` était refusé par l'outil (« invalid value for 'run' ») et
+    # bloquait toute entrée sur un cluster enfant existant
+    run = origin_run or run_id
     return {"cluster": row["ref"], "entry": row["entry"], "secrets": secrets_, "role": role or "admin",
-            "origin": {"plan": plan["name"], "run": origin_run or run_id}, "by": by}
+            "origin": dict({"plan": plan["name"]}, **({"run": run} if run else {})), "by": by}
 
 
 def _deploy_gitops_checks(kc, rows, plan, later_clusters, secret_names, role, cluster_name, live=True):
