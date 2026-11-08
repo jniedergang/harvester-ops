@@ -4,6 +4,78 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.8.2] - 2026-11-08 - Plan references made by its Terraform phase, Rancher agent bundle removed with the import
+
+### Fixed
+- **Plan refused when its Terraform phase creates what a cluster template
+  names** (decision 246, concern 2 of the 2.8.1 bench, `planbm281-small`
+  on harvlab2). On an existing Harvester cluster, the launch check blocked
+  on `image-missing`, `keypair-missing` or `pool-missing` when the image,
+  key pair or IP pool comes from a declaration of the same plan; only
+  references written with variables became `refs-later`. They are now
+  `terraform-ref-later` (information) when a declaration of the
+  Terraform phase creates them. The console reads its rendered resources
+  (`image`, `ssh_key`, `ippool`, or free code whose `resource` block of
+  type `harvester_image`, `harvester_ssh_key` or `harvester_ippool` has a
+  literal name, without `count` or `for_each`). A namespace written as an
+  expression keeps the block out, it is never taken as `default`; a
+  resource that does not render counts for nothing. An image matches by
+  `namespace/name` or `namespace/display name`, `default` when the
+  namespace is not written. A declaration kept with other values counts
+  with its own resources, an updated one with the rendered resources. The
+  Clusters phase replays the check before any creation and blocks if the
+  reference is still missing. Install chains are unchanged (no check
+  there). Five languages.
+- **Dry run of such a plan ended in error** (review of 2.8.2). In a dry
+  run the Terraform and Registry phases create nothing, so the replay at
+  the start of the Clusters phase found the deferred reference still
+  missing and stopped. When every blocking finding of that replay was
+  deferred at launch (same cluster, code and facts: `terraform-ref-later`,
+  `refs-later`, `cluster-registry-later`, `offline-later`), a dry run now
+  ends the phase with "dry run: the clusters are checked once the earlier
+  phases of the plan have made what they name" and creates nothing. Any
+  other blocking finding still stops it.
+- **Rancher agent bundle left after removing an import** (decision 247,
+  concern 4 of the 2.8.1 bench). Rancher 2.14 keeps the Bundle
+  `fleet-agent-<cluster>` of the imported child in `fleet-default` after
+  the cluster is removed (seen: `fleet-agent-harv4-r12a`, 45 minutes
+  later). Removing the import (`rancher-unimport`), and deleting or
+  undoing an imported child cluster, now delete it once the cluster is
+  gone from Rancher. Only when its name is exactly `fleet-agent-<name in
+  Rancher>`, each target names that cluster alone, it carries a mark of
+  Rancher or Fleet (`cattle.io` domain) and no label of the console, and
+  once the Fleet cluster of that name is gone (waited for up to 60 s;
+  while it is there Fleet would recreate the Bundle, or it belongs to a
+  live Fleet cluster). Otherwise it is kept and named in the steps
+  (`kept-not-rancher`, `kept-fleet-cluster`, or `kept-not-matched` for a
+  name over 63 characters, which Fleet shortens).
+  A refusal or an unreadable Bundle is said in the steps and does not
+  undo the removal. The dry run reports it (`agent_bundle`). Without a
+  Rancher session the existing rules apply. The undo preview of an
+  import says what happens to the Bundle (deleted, kept, unreadable or not
+  looked for), with a tooltip, in five languages. Verified by tests only;
+  to be checked on the next bench.
+
+### Tests
+- `test_deploy_tf_refs_later_282.py`: one case per resource kind and per
+  mismatch (namespace, name, display name, other kind), free code with a
+  literal name, `count`, a template or a computed namespace, a resource
+  that does not render, phase disabled, declaration kept or
+  updated, replay at the phase start (blocks, or creates once Terraform
+  made the image), dry runs (deferred findings pass, a new one or other
+  facts block), and `tf_guard.resource_literals`.
+- `test_deploy_offline_later_281.py`: a dry run of an offline plan passes
+  the findings its Registry phase would satisfy.
+- `test_rancher_unimport_bundle_282.py`: the Bundle goes after the cluster
+  on both paths (unimport, delete), each kept case (other or second
+  target, no target, no mark, label of the console, other namespace, long
+  name), each error path (absent, unreadable, read or delete refused,
+  Rancher unreachable), dry runs, no session, cluster left in Rancher,
+  and the Fleet cluster (still there, gone during the wait, unreadable,
+  Rancher cluster already absent, dry runs).
+- `test_bm_plans_gitops_280.py` (e2e): the undo preview of an import
+  tells each outcome of the agent Bundle, escaped, with its tooltip.
+
 ## [2.8.1] - 2026-11-08 - Offline child clusters skip the package update, self-hosted registry warning
 
 ### Fixed

@@ -740,7 +740,25 @@ the stack version, and the per-cluster rules of the creation window.
   (an image still importing, its root disks not counted), and the warnings of the
   creation window (one control plane node, version not tested...).
 - Information: `cluster-exists`, `capi-later`, `refs-later`,
-  `fleet-dhcp-leases`, `fleet-sizes`.
+  `terraform-ref-later`, `fleet-dhcp-leases`, `fleet-sizes`.
+
+`terraform-ref-later` (2.8.2): the image, key pair or IP pool a cluster
+template names is missing, but a declaration of the Terraform phase of
+this plan creates it. The console reads it in the rendered resources of
+the plan templates (`image`, `ssh_key`, `ippool`, or free code whose
+`resource` block has a literal name, without `count` or `for_each`; a
+namespace written as an expression keeps the block out). A resource that
+does not render (missing field) counts for nothing.
+An image matches by `namespace/name` or `namespace/display name`; a
+namespace not written means `default`. A declaration kept with other values
+counts with its own resources. The Clusters phase checks again before
+any creation and blocks if the reference is still missing. In a dry
+run the earlier phases create nothing: when every blocking finding of
+that check was deferred at launch (`terraform-ref-later`, `refs-later`,
+`cluster-registry-later`, `offline-later`, same cluster and same facts),
+the Clusters phase ends with "dry run: the clusters are checked once the
+earlier phases of the plan have made what they name", without creating
+anything. Any other blocking finding stops the dry run as it stops a run.
 
 A shortage that the creation window only reports as a warning blocks a
 plan: the chain runs unattended.
@@ -1088,6 +1106,10 @@ clusters, registry, terraform.
 - When the cluster of an import is undone too, the import step ends
   "left to the removal of its cluster": the deletion drops the import
   without reading the child cluster.
+- Since 2.8.2 the preview of an import also says what happens to the
+  agent Bundle Rancher leaves in Fleet (`fleet-agent-<name>`): deleted
+  once its Fleet cluster is gone, kept (not exactly the agent of this
+  cluster), unreadable, or not looked for (name over 63 characters).
 - A Fleet entry needs a Rancher session. Without one, its item fails
   with `rancher-session-needed`, never "already gone".
 - Undo is refused while a machine renewal runs on the Harvester cluster

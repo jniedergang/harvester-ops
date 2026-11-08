@@ -69,6 +69,7 @@ FINDING_CODES = ["plan-invalid", "template-missing", "var-missing", "var-invalid
                  "oidc-admin-group-invalid", "oidc-version-too-old", "oidc-with-rancher", "offline-needs-no-fallback",
                  "offline-rke2-missing", "offline-rke2-version-mismatch",
                  "offline-disk-small", "offline-node-packages", "offline-later",  # 2.8.1
+                 "terraform-ref-later",  # 2.8.2
                  "rancher-session-in-chain"]  # revue finale 2.8.0 I-3
 
 
