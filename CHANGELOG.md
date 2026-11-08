@@ -4,6 +4,44 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.9.1] - 2026-11-08 - B1 cleanup commands fixed and split by console outcome
+
+### Fixed
+- **`docs/en/secrets.md` and `docs/fr/secrets.md`, "What stays after
+  `disable --remove-b1`"** (found during the 2.9.0 release report). The
+  manual cleanup command removed `localhost/harvester-ops-openbao:current`
+  and `:previous` together: `:previous` only exists after
+  `harvester-secrets upgrade-b1`, so the command failed ("image not known")
+  on a console that installed B1 but never upgraded it. It is now
+  `podman images --format ... | grep ... | xargs -r podman rmi`, which
+  removes whatever B1 tag is actually there (`current`, `previous`, the
+  version tag) and does nothing on an empty list. The block also left the
+  Application Collection image (`dp.apps.rancher.io/containers/openbao:*`
+  by default) undocumented even though the text said it stayed; the
+  command to remove it is now given too.
+- **Same section mixed two different situations**: removing the B1
+  leftovers on a console that stays on 2.9.x, and removing the 2.9.0 secret
+  store agent itself after a rollback to 2.8.x. The first case must never
+  touch `/opt/harvester-ops/openbao` or the `harvester-secrets-agent.*` /
+  `harvester-secrets-rotate.timer` units, which 2.9.0 still needs to enable
+  B1 again and to rotate the console's own `secret_id`. Split into two
+  subsections, one per situation.
+- A stray sentence in "Disabling, switching mode" said `disable --remove-b1`
+  removes "the B1 container, unit, account and volume": the account and the
+  images are deliberately left in place (`bin/harvester-secrets-agent.py`
+  `op_b1_remove` only stops the unit, removes the podman secrets and sets
+  the data aside). Reworded to match the accurate list that follows it.
+
+### Tests
+- `tests/api/test_secrets_cleanup_docs_291.py`: the units named in the
+  cleanup commands exist under `config/systemd/`, the image names match the
+  `IMAGE` constant of `harvester-secrets-agent.py` and the
+  `DEFAULT_REGISTRY`/`DEFAULT_REPOSITORY` of `openbao_bundle.py`, the
+  "stay on 2.9.x" block never names an agent unit or `/opt/harvester-ops`,
+  the rollback block names all three, and every `podman rmi` is filtered or
+  uses `--ignore`/`-i`. Three of the six fail against the pre-fix docs (the
+  mixed block, and the bare `:current`/`:previous` command).
+
 ## [2.9.0] - 2026-11-08 - OpenBao secret store
 
 ### Added
