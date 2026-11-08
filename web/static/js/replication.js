@@ -288,6 +288,7 @@ const Replication = (() => {
           <button type="button" class="btn btn-sm btn-primary tip rp-new" data-rp="new" data-tip="${esc(tr('rp.newTip'))}">${icon('add')} ${esc(tr('rp.new'))}</button>
         </div>
         <div class="rp-follower" data-rp="follower" hidden></div>
+        ${cur.mode === 'all' ? '<div class="rp-secstore" data-rp="secstore" hidden></div>' : ''}
         <div class="rp-alerts" data-rp="alerts" hidden></div>
         <div data-rp="body"><p class="form-hint">${esc(tr('common.loading'))}</p></div>
         ${cur.mode === 'cluster' ? `<div data-rp="vms"></div>` : ''}
@@ -308,6 +309,9 @@ const Replication = (() => {
     if (c !== cur) return;
     c.data = d; c.alerts = a; c.hostRows = h || null;
     render();
+    // 2.9.0 (point 259) : objet protégé « Magasin de secrets » de la vue d'ensemble
+    const ss = c.host.querySelector('[data-rp="secstore"]');
+    if (ss && window.Secrets && U.roleRank(d && d.role) >= 2) Secrets.drCard(ss);
   }
 
   function filtered() {

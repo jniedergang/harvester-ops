@@ -379,7 +379,9 @@ def test_a_cluster_hidden_by_rancher_is_explained(context, flask_server):
     notice = page.locator("#access-notice")
     expect(notice).to_be_visible()
     expect(notice).to_contain_text("secret: Rancher manages it but gives your account no access to it.")
-    assert not [c for c in calls if "/secret" in c and "/api/" in c and "clusters" not in c]
+    # 2.9.0 : /api/secrets/banner (magasin de secrets) n'est pas le cluster « secret »
+    assert not [c for c in calls if "/secret" in c and "/api/" in c and "clusters" not in c
+                and "/api/secrets/" not in c]
 
 
 def spy_veil(page):

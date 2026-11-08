@@ -1726,6 +1726,12 @@ const BMPlans = (() => {
               <p class="form-hint" style="grid-column:1/-1;">${esc(tr('dpw.gopSecretsHint'))}</p>
               <div class="dpw-gop-secrets-box" style="grid-column:1/-1;"></div>
             </fieldset>
+            ${resume ? `<div class="dpw-kept" hidden>
+              <p class="form-hint">${icon('lock', { size: 13 })} <span class="dpw-kept-text">${esc(tr('dpw.secretsKept'))}</span></p>
+              <div class="apply-bar">
+                <button type="button" class="btn btn-secondary btn-sm tip dpw-type-secrets" data-tip="${esc(tr('dpw.t.typeSecrets'))}">${esc(tr('dpw.typeSecrets'))}</button>
+                <button type="button" class="btn btn-secondary btn-sm tip dpw-forget needs-admin" data-tip="${esc(tr('dpw.t.forgetSecrets'))}">${icon('delete', { size: 12 })} ${esc(tr('dpw.forgetSecrets'))}</button>
+              </div></div>` : ''}
             <fieldset class="dpw-secrets"${s.needSecrets ? '' : ' hidden'}>
               <legend>${esc(tr('dpw.fs.secrets'))}</legend>
               <p class="form-hint" style="grid-column:1/-1;">${esc(tr('dpw.secretsAgain'))}</p>
@@ -1999,7 +2005,8 @@ const BMPlans = (() => {
         gopClear();                               // jamais réaffichés après le départ
         // constats rendus au départ (plan changé depuis le déroulé repris...)
         const notes = (r.d.findings || []).filter(f => f && f.level !== 'info');
-        msg.innerHTML = okLine(dryRun ? tr('dpw.dryStarted') : tr('dpw.started')) + (notes.length ? findingsHtml(notes) : '');
+        msg.innerHTML = okLine(dryRun ? tr('dpw.dryStarted') : tr('dpw.started')) + (notes.length ? findingsHtml(notes) : '')
+          + (r.d.secrets_source === 'openbao' ? `<p class="form-hint" data-dpw-source="openbao">${icon('lock', { size: 12 })} ${esc(tr('dpw.secretsFromOpenbao'))}</p>` : '');
         follow(r.d.action_id);
         return;
       }
@@ -2008,6 +2015,19 @@ const BMPlans = (() => {
         paintChecks();
         setTab('checks');
         msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('dpw.refusedFindings'))}</div>`;
+        return;
+      }
+      // 2.9.0 (décision 141) : OpenBao ne répond pas, la reprise redemande
+      // les secrets à taper (comportement 2.4.0)
+      if (r.status === 503 && r.d.secrets_prompt) {
+        const git = (r.d.fields || []).includes('gitops_secrets');
+        if (!git) { s.needSecrets = true; $('.dpw-secrets').hidden = false; }
+        const kept = $('.dpw-kept');
+        if (kept) kept.hidden = true;
+        setTab('params');
+        msg.innerHTML = `<div class="bm-refusal" data-dpw-prompt="${git ? 'gitops' : 'install'}">${icon('warn', { size: 14 })} ${esc(tr('dpw.openbaoDown', { code: r.d.code || '?' }))}</div>`;
+        const first = form.querySelector(git ? '.dpw-gop-secret' : '[data-dpw-secret]');
+        if (first) first.focus();
         return;
       }
       if (r.d.code === 'secrets-required') {
@@ -2042,8 +2062,41 @@ const BMPlans = (() => {
       const t = e.target.closest('[data-dpw-tab]');
       if (t) { setTab(t.dataset.dpwTab); return; }
       if (e.target.closest('.dpw-recheck')) { runCheck(); return; }
-      if (e.target.closest('.dpw-dry')) { launch(true); }
+      if (e.target.closest('.dpw-dry')) { launch(true); return; }
+      if (e.target.closest('.dpw-type-secrets')) {
+        s.needSecrets = true;
+        $('.dpw-secrets').hidden = false;
+        const first = form.querySelector('[data-dpw-secret]');
+        if (first) first.focus();
+        return;
+      }
+      if (e.target.closest('.dpw-forget')) { forgetSecrets(); }
     });
+    // 2.9.0 (décision 141, revue m7) : secrets gardés dans OpenBao jusqu'à la
+    // fin du déroulé ; un administrateur peut les oublier tout de suite
+    async function forgetSecrets() {
+      if (!confirm(tr('dpw.forgetConfirm', { id: resume.id }))) return;
+      const r = await api('POST', `/api/deploy/${enc(s.cluster)}/forget-secrets`, { action_id: resume.id });
+      const msg = $('.dpw-msg');
+      if (r.ok && r.d.action_id) {
+        msg.innerHTML = okLine(tr('dpw.forgetStarted'));
+        $('.dpw-kept').hidden = true;
+        s.needSecrets = !!res.install;
+        $('.dpw-secrets').hidden = !s.needSecrets;
+        if (window.Dock && Dock.poll) Dock.poll();
+      } else {
+        msg.innerHTML = refusal(r.d, r.status);
+      }
+    }
+    if (resume) {
+      api('GET', '/api/secrets/banner').then((b) => {
+        if (!b.ok || !b.d.active || !form.isConnected) return;
+        const kept = $('.dpw-kept');
+        if (kept) kept.hidden = false;
+        if (res.install) { s.needSecrets = false; $('.dpw-secrets').hidden = true; }
+        if (!can('admin')) { const f = $('.dpw-forget'); if (f) f.hidden = true; }
+      }).catch(() => {});
+    }
     form.addEventListener('change', (e) => {
       if (e.target.classList.contains('dpw-update')) { s.updateDiffering = e.target.checked; runCheck(); return; }
       if (gopKindChange(e.target)) { later(); return; }

@@ -322,11 +322,13 @@ const TFDeclView = (() => {
           <span class="badge tip tfd-target-badge tfd-fam-${esc(familyOf(d))}" data-tip="${esc(tr('tfd.t.target', { target: targetText(d) }))}">${esc(targetText(d))}</span>
           <span class="badge info tip" data-tip="${esc(tr('tfd.t.ownState'))}">${esc(tr('tfd.ownState'))}</span>
           ${deployed ? `<span class="badge ok tip" data-tip="${esc((d.deployed || []).join(', '))}">${esc(tr('tfd.nDeployed', { n: deployed }))}</span>` : ''}
+          ${encryptionBadge(d)}
           ${d.last_applied_at ? `<span class="tfd-meta">${esc(d.last_applied_by
             ? tr('tfd.lastApply', { status: text(STATUS, d.last_applied_status || 'done'), when: when(d.last_applied_at), by: d.last_applied_by })
             : tr('tfd.lastApplyAt', { status: text(STATUS, d.last_applied_status || 'done'), when: when(d.last_applied_at) }))}</span>` : ''}
         </div>
         ${changedSinceApply(d) && !plan ? `<p class="tfd-notice">${esc(tr('tfd.changedNotice'))}</p>` : ''}
+        ${encryptionNotice(d)}
         ${locked ? `<p class="tfd-notice tfd-raw-locked">${esc(tr('tfd.rawAdminNotice'))}</p>` : ''}
         ${blocked.length ? `<div class="sto-finding sev-critical tfd-blocked" role="alert">
           <div class="sto-finding-title">${esc(tr('tfd.blockedTitle'))}</div>
@@ -349,9 +351,44 @@ const TFDeclView = (() => {
         ${familyOf(d) === 'harvester' ? `<button type="button" class="btn btn-sm tfd-save-template tip needs-admin" data-tip="${esc(tr('tfd.t.saveTemplate'))}">${Icons.svg('copy', { size: 14 })} ${esc(tr('tfd.saveTemplate'))}</button>` : ''}
         <button type="button" class="btn btn-sm btn-danger tfd-destroy tip" ${deployed && !stop ? '' : 'disabled'}
                 data-tip="${esc(stop || tr('tfd.t.destroy'))}">${Icons.svg('destroy', { size: 14 })} ${esc(tr('tfd.destroy'))}</button>
+        ${(d.encryption || {}).state === 'encrypted' && !rawLocked() ? `<button type="button" class="btn btn-sm tfd-decrypt tip"
+                data-tip="${esc(tr('tfd.t.decrypt'))}">${Icons.svg('unlock', { size: 14 })} ${esc(tr('tfd.decrypt'))}</button>` : ''}
         <button type="button" class="btn btn-sm tfd-delete tip" ${deployed ? 'disabled' : ''}
                 data-tip="${esc(deployed ? tr('tfd.t.deleteDeployed') : tr('tfd.t.delete'))}">${Icons.svg('delete', { size: 14 })} ${esc(tr('tfd.delete'))}</button>
       </footer>`;
+  }
+
+  // 2.9.0 (tâches 9 et 12) : état OpenTofu chiffré par le moteur transit
+  // d'OpenBao, avertissement Terraform, état illisible
+  function encryptionBadge(d) {
+    const e = d.encryption || {};
+    if (e.state === 'encrypted') {
+      return `<span class="badge ok tip" data-tfd-enc="encrypted" data-tip="${esc(tr('tfd.t.encrypted'))}">${Icons.svg('lock', { size: 12 })} ${esc(tr('tfd.encrypted'))}</span>`;
+    }
+    if (e.warning === 'tf-encryption-needs-opentofu') {
+      return `<span class="badge warn tip" data-tfd-enc="needs-opentofu" data-tip="${esc(tr('tfd.t.needsOpentofu'))}">${esc(tr('tfd.notEncrypted'))}</span>`;
+    }
+    return '';
+  }
+  function encryptionNotice(d) {
+    const e = d.encryption || {};
+    const out = [];
+    if (e.block === 'migrate-in' || e.block === 'migrate-out') out.push(tr('tfd.encMigrating'));
+    if (e.block === 'unknown' || e.block === 'unreadable') out.push(tr('tfd.encBlockUnknown'));
+    if (d.state_error) out.push(tr('tfd.stateUnreadable', { code: d.state_error }));
+    return out.map(t => `<p class="tfd-notice" data-tfd-enc-notice>${esc(t)}</p>`).join('');
+  }
+  async function decryptDecl(d) {
+    if (!confirm(tr('tfd.decryptConfirm', { name: d.name }))) return;
+    try {
+      const r = await fetch(`/api/tf-declarations/${encodeURIComponent(d.id)}/decrypt-state`, { method: 'POST' });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) { alert(tr('tfd.error', { msg: body.error || `HTTP ${r.status}` })); return; }
+      if (window.Dock && Dock.poll) Dock.poll();
+      alert(tr('tfd.decryptStarted'));
+    } catch (e) {
+      alert(tr('tfd.error', { msg: e.message }));
+    }
   }
 
   function resourcesHtml(d) {
@@ -929,6 +966,7 @@ const TFDeclView = (() => {
       if (e.target.closest('.tfd-save-template')) { saveAsTemplate(d); return; }
       if (e.target.closest('.tfd-destroy')) { runDestroy(d); return; }
       if (e.target.closest('.tfd-delete')) { removeDecl(d); return; }
+      if (e.target.closest('.tfd-decrypt')) { decryptDecl(d); return; }
     });
     host.addEventListener('input', (e) => {
       if (e.target.classList.contains('tfd-filter')) {

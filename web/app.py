@@ -34532,6 +34532,16 @@ def _secrets_status(admin=False):
     }
     if admin:
         out["console_id"] = s.get("console_id")
+    if out["active"] and s.get("mode") == "a" and TF_FLAVOR == "opentofu":
+        # point 270 B : Vault plus récent que 1.14, acquittement pour OpenTofu
+        try:
+            sst = _tf_server_status(s)
+            v = _tfe.server_version(sst)
+            out["tf_server"] = {"warning": _tfe.server_verdict("a", sst), "kind": _tfe.server_kind(sst),
+                                "version": f"{v[0]}.{v[1]}" if v else None,
+                                "acknowledged": _tfe.ack_matches(s.get("tf_vault_ack"), s.get("addr"), sst)}
+        except Exception as e:              # noqa: BLE001 : serveur muet, rien à acquitter
+            out["tf_server"] = {"error": getattr(e, "code", type(e).__name__)}
     try:
         last = json.loads((_secrets_agent_dir() / "status.json").read_text())
         out["agent"]["last"] = {k: last.get(k) for k in ("op", "state", "message", "code", "requested_by")}

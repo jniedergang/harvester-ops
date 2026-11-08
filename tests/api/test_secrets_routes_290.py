@@ -426,3 +426,15 @@ def test_probe_sets_the_metric_and_the_banner_state(wapp, sx, monkeypatch):
     sx.srv.sealed = True
     assert wapp._secrets_probe_tick() is False and seen[-1] == 0
     assert wapp._secrets_banner()["error"] == "openbao-sealed"
+
+
+def test_status_tells_a_newer_vault_needs_the_acknowledgement(wapp, sx, monkeypatch):
+    monkeypatch.setattr(wapp, "TF_FLAVOR", "opentofu")
+    wapp._TF_SERVER_STATUS.clear()
+    sx.srv.seal_version = "1.17.6"
+    status, doc = post(wapp, "/api/secrets/status", method="get")
+    assert doc["tf_server"]["warning"] == "tf-encryption-vault-unverified" and doc["tf_server"]["acknowledged"] is False
+    wapp._TF_SERVER_STATUS.clear()
+    sx.srv.seal_version = "2.0.0-HEAD"
+    status, doc = post(wapp, "/api/secrets/status", method="get")
+    assert doc["tf_server"]["warning"] is None
