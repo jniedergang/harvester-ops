@@ -51,8 +51,16 @@ def declared_clusters():
     data = _read_yaml(cfg) if Path(cfg).is_file() else None
     state = cluster_decl.state_dir()
     decls = [(p, _read_yaml(p)) for p in cluster_decl.decl_files(state)]
-    return [cluster_decl.materialize(c) for c in
-            cluster_decl.merge((data or {}).get("clusters") or [], decls, state)]
+    # matérialisées une à une par targets_from (revue I8 de la 2.9.0)
+    return cluster_decl.merge((data or {}).get("clusters") or [], decls, state)
+
+
+class SecretUnavailable:
+    """Cluster dont le kubeconfig (secret) est illisible : signalé seul,
+    les autres clusters se lisent (revue I8 de la 2.9.0)."""
+
+    def __init__(self, error):
+        self.error = error
 
 
 UNREACHABLE_MARKERS = ("unable to connect", "timed out", "no route to host", "connection refused",
@@ -113,6 +121,9 @@ def collect(targets, reader=None, probe=None):
     reader, probe = reader or read_cluster, probe or reachable
     clusters, rows = [], []
     for name, kube in targets:
+        if isinstance(kube, SecretUnavailable):
+            clusters.append({"cluster": name, "state": "secret-unavailable", "error": _short(kube.error)})
+            continue
         if probe(kube) is False:
             clusters.append({"cluster": name, "state": "unreachable"})
             continue
@@ -161,8 +172,16 @@ def targets_from(args):
         if not entry.get("kubeconfig"):
             raise ValueError(f"cluster {args.cluster} has no kubeconfig in the configuration")
         return [(args.cluster, Kube(entry["kubeconfig"], timeout=30))]
-    out = [(c["name"], Kube(c["kubeconfig"], timeout=30))
-           for c in declared_clusters() if c.get("name") and c.get("kubeconfig")]
+    out = []
+    for c in declared_clusters():
+        if not (c.get("name") and c.get("kubeconfig")):
+            continue
+        try:
+            c = cluster_decl.materialize(c)
+        except Exception as e:                     # noqa: BLE001 : SecretError, SecretMissing
+            out.append((c["name"], SecretUnavailable(str(e))))
+            continue
+        out.append((c["name"], Kube(c["kubeconfig"], timeout=30)))
     if not out:
         raise ValueError("no cluster declared: give --cluster or --kubeconfig")
     return out

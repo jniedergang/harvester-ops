@@ -608,3 +608,22 @@ def test_follower_supervisor_spawns_with_secret_env(wapp):
                                              popen=P, secret_env=lambda: {ss.FILES_ENV: "/run/x/files.json"})
     sup._spawn()
     assert got["env"][ss.FILES_ENV] == "/run/x/files.json"
+
+
+def test_containers_one_unreadable_secret_does_not_block_other_clusters(env, tmp_path, monkeypatch):
+    """I8 : OpenBao coupé, un seul cluster migré : les autres se lisent."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("hc_i8", ROOT / "bin" / "harvester-containers.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    ref = env["put"]("kubeconfig", "h1", "kubeconfig")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"clusters:\n- name: h1\n  kubeconfig: \"{ref}\"\n- name: h2\n  kubeconfig: /local/h2.yaml\n")
+    monkeypatch.setenv("HARVESTER_OPS_CONFIG", str(cfg))
+    env["bao"].stop()
+    import argparse
+    targets = tool.targets_from(argparse.Namespace(kubeconfig=None, cluster=None))
+    clusters, _rows = tool.collect(targets, reader=lambda k: ([], []), probe=lambda k: True)
+    by = {c["cluster"]: c for c in clusters}
+    assert by["h2"]["state"] == "ok"
+    assert by["h1"]["state"] == "secret-unavailable" and "openbao-unreachable" in by["h1"]["error"]
