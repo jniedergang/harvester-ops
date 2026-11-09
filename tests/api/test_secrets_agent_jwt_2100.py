@@ -480,3 +480,39 @@ def test_an_older_snapshot_with_fewer_members_passes_and_prunes_them(b1):
     rc, st = _restore_with(b1, lambda s: next(iter(s.group_docs.values()))["member_entity_ids"].clear())
     assert rc == 0, st
     assert b1["agent"]().agent_state()["person_groups"]["ops"]["members"] == []
+
+
+# ---------------------------------------------------------------------------
+# Revue 6-7 M-8 : bornes de ce que la console fait poser par l'agent
+# ---------------------------------------------------------------------------
+def _seed(env, **kw):
+    a = env["agent"]()
+    st = a.agent_state()
+    st.update(kw)
+    a.save_agent_state(st)
+
+
+def test_agent_limits_mounts_groups_and_eso_clusters(b1):
+    _seed(b1, person_jwt={f"r{i}": {"mount": f"jwt-hops-{CID}-p-r{i}"} for i in range(pol.MAX_PERSON_MOUNTS)})
+    rc, st = jwt_op(b1)
+    assert rc != 0 and st["code"] == "limit-jwt-mounts"
+    assert MOUNT + "/" not in b1["srv"].auth_mounts                   # refusé avant tout geste
+    _seed(b1, person_groups={f"g{i}": {"classes": ["ssh-kvm"], "clusters": ["a"], "members": []}
+                             for i in range(pol.MAX_GROUPS)})
+    rc, st = request(b1, op="b1-groups", name="new", classes=["ssh-kvm"], clusters=["a"], members=[])
+    assert rc != 0 and st["code"] == "limit-groups"
+    rc, st = request(b1, op="b1-groups", name="new", remove=True)
+    assert rc == 0 and st.get("code") is None                          # un retrait n'est jamais borné
+    _seed(b1, eso_listener="172.16.1.11:8212",
+          eso_clusters={f"{i:08x}": {"mount": f"jwt-hops-{CID}-eso-{i:08x}"} for i in range(pol.MAX_ESO_CLUSTERS)})
+    rc, st = request(b1, op="b1-eso-cluster", key="1d905023", harvester="harvlab2", namespace="c210", cluster="c210",
+                     issuer="https://kubernetes.default.svc.cluster.local", pubkeys=[PEM_A], namespaces=["team-a"],
+                     node_cidr="172.16.2.0/24")
+    assert rc != 0 and st["code"] == "limit-eso-clusters"
+
+
+def test_group_members_bounded_in_the_policy_module():
+    many = [f"{i:08x}-0000-4000-8000-000000000000" for i in range(pol.MAX_GROUP_MEMBERS + 1)]
+    with pytest.raises(ValueError, match="at most"):
+        pol.group_body(CID, "ops", many)
+    assert len(pol.group_body(CID, "ops", many[:-1])["member_entity_ids"]) == pol.MAX_GROUP_MEMBERS

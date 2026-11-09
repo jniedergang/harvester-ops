@@ -2216,6 +2216,9 @@ def _pt_assistant(args):
              "console_cidr": cidr, "configured_at": time.time(),
              "configured_by": ARGS.actor or os.environ.get("SUDO_USER") or os.environ.get("USER") or "cli"}
     pt = _pt_doc(raw_settings())
+    if args.rancher not in pt["servers"] and args.rancher not in pt["pending"] \
+            and len(set(pt["servers"]) | set(pt["pending"])) >= pol.MAX_PERSON_MOUNTS:
+        return refuse("limit-jwt-mounts", f"at most {pol.MAX_PERSON_MOUNTS} Rancher jwt auth methods")
     step("person-token", "running", f"{mount} ({args.keys})")
     cmds = _pt_apply_jwt(s, cid, args.rancher, entry, pubkeys, pt["groups_only"])
     doc = raw_settings()
@@ -2276,12 +2279,43 @@ def _pt_disable(args):
     pt = _pt_doc(doc)
     cmds = None
     if not args.rancher:
-        if args.remove:
-            return refuse("bad-input", "--remove needs --rancher")
         pt["enabled"] = False
         save_settings(doc)
         step("disable", "done", "person tokens off")
-        out({"ok": True, "enabled": False})
+        if not args.remove:
+            out({"ok": True, "enabled": False})
+            return EXIT_OK
+        # tâche 12 (point 291) : tout retirer, avant un retour sous la 2.10.0
+        ranchers = sorted(set(pt["servers"]) | set(pt["pending"]))
+        groups = sorted(pt["groups"])
+        cmds = []
+        addr, _ca, _kv, _prefix = _pt_target(s) if (ranchers or groups) else (None, None, None, None)
+        for name in groups:
+            if s["mode"] == "b1":
+                agent_ok(run_agent({"op": "b1-groups", "name": name, "remove": True}))
+            else:
+                c = pol.group_remove_commands(addr, s["console_id"], name)
+                cmds += c if not cmds else c[1:]           # une seule ligne d'adresse
+            doc = raw_settings()
+            _pt_doc(doc)["groups"].pop(name, None)
+            save_settings(doc)
+        for i, r in enumerate(ranchers):
+            if s["mode"] == "b1":
+                agent_ok(run_agent({"op": "b1-jwt-remove", "rancher": r}))
+            else:
+                try:
+                    c = pol.person_remove_commands(addr, s["console_id"], r, last=i == len(ranchers) - 1)
+                    cmds += c if not cmds else c[1:]
+                except ValueError as e:
+                    return refuse("bad-input", str(e))
+            doc = raw_settings()
+            pt2 = _pt_doc(doc)
+            pt2["servers"].pop(r, None)
+            pt2["pending"].pop(r, None)
+            save_settings(doc)
+        step("remove", "done", f"{len(ranchers)} Rancher method(s) and {len(groups)} group(s) removed")
+        out({"ok": True, "enabled": False, "removed": ranchers, "groups_removed": groups,
+             "commands": cmds or None})
         return EXIT_OK
     known = args.rancher in pt["servers"] or args.rancher in pt["pending"]
     if not known and not args.remove:
@@ -2344,6 +2378,8 @@ def _pt_groups(args):
             _pt_doc(doc)["groups"].pop(args.name, None)
         else:
             classes, clusters, members = args.cls or [], args.cluster or [], args.member or []
+            if args.name not in pt["groups"] and len(pt["groups"]) >= pol.MAX_GROUPS:
+                return refuse("limit-groups", f"at most {pol.MAX_GROUPS} groups")
             pol.group_rules(kv, prefix, cid, args.name, classes, clusters)
             pol.group_body(cid, args.name, members)
             if s["mode"] == "b1":
@@ -2793,7 +2829,8 @@ def parser():
         x.add_argument("--spec", help=argparse.SUPPRESS)
     x = pt.add_parser("disable")
     x.add_argument("--rancher")
-    x.add_argument("--remove", action="store_true", help="with --rancher: remove its jwt auth method too")
+    x.add_argument("--remove", action="store_true",
+                   help="remove the jwt auth method of --rancher, or of every Rancher and every group")
     x = pt.add_parser("groups", help="internal OpenBao groups: list | set NAME | remove NAME | only on|off")
     x.add_argument("action", choices=("list", "set", "remove", "only"))
     x.add_argument("name", nargs="?")

@@ -12,6 +12,9 @@
  *  - Rotation : secret_id, clé de descellement, clés SSH des hôtes KVM, clés
  *    transit, âge des secrets que la console ne possède pas, clés transit
  *    gardées 30 jours, entités à retirer en mode A ;
+ *  - Jetons personnels (2.10.0) : méthode jwt de chaque Rancher, assistant
+ *    à onglets (Serveur, Vérifications, Confirmation), activation et
+ *    désactivation à chaud, clés de Rancher, groupes internes et entités vues ;
  *  - Instantanés (B1) : réglages, liste, prendre, restaurer.
  * L'assistant d'activation est une fenêtre à onglets (Serveur,
  * Vérifications, Confirmation) : « Activer » reste grisé tant qu'une
@@ -29,9 +32,9 @@ const Secrets = (() => {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const icon = (n, size = 13) => (window.Icons ? Icons.svg(n, { size }) : '');
   const tipAttr = (t) => `data-tip="${esc(t)}" title="${esc(t)}"`;
-  const TABS = ['status', 'classes', 'versions', 'rotation', 'snapshots'];
+  const TABS = ['status', 'classes', 'persons', 'versions', 'rotation', 'snapshots'];
   const cur = { tab: 'status', status: null, eso: null, classes: null, rotation: null, snaps: null, tfkeys: null,
-                versionsClass: null, busy: false };
+                persons: null, versionsClass: null, busy: false };
 
   // Textes par code (clés en toutes lettres : le contrôle de parité ne lit que des littéraux)
   const CLASS = {
@@ -46,6 +49,8 @@ const Secrets = (() => {
     'offline-copy-pending': () => tr('sx.w.offlineCopy'), 'snapshot-dir-unset': () => tr('sx.w.snapDirUnset'),
     'snapshot-stale': () => tr('sx.w.snapStale'), 'snapshot-failed': () => tr('sx.w.snapFailed'),
     'audit-space-low': () => tr('sx.w.auditLow'), 'tf-entities-pending': () => tr('sx.w.entities'),
+    'openbao-jwt-keys-changed': () => tr('sx.w.jwtKeysChanged'), 'openbao-jwt-keys-unreadable': () => tr('sx.w.jwtKeysUnreadable'),
+    'eso-keys-changed': () => tr('sx.w.esoKeysChanged'),
   };
   const GATE = {
     'migrate-another-first': () => tr('sx.gate.another'), 'outage-test-first': () => tr('sx.gate.outage'),
@@ -61,6 +66,7 @@ const Secrets = (() => {
   const TAB = {
     status: [() => tr('sx.tab.status'), () => tr('sx.tab.statusTip')],
     classes: [() => tr('sx.tab.classes'), () => tr('sx.tab.classesTip')],
+    persons: [() => tr('sx.tab.persons'), () => tr('sx.tab.personsTip')],
     versions: [() => tr('sx.tab.versions'), () => tr('sx.tab.versionsTip')],
     rotation: [() => tr('sx.tab.rotation'), () => tr('sx.tab.rotationTip')],
     snapshots: [() => tr('sx.tab.snapshots'), () => tr('sx.tab.snapshotsTip')],
@@ -245,6 +251,9 @@ const Secrets = (() => {
       cur.rotation = a.ok ? a.d : null;
       cur.tfkeys = b.ok ? b.d : null;
       cur.entities = e.ok ? e.d.entities : [];
+    } else if (cur.tab === 'persons') {
+      const p = r.d.active ? await api('GET', '/api/secrets/person-token') : null;
+      cur.persons = p && p.ok ? p.d : null;
     } else if (cur.tab === 'snapshots') {
       const s = await api('GET', '/api/secrets/snapshots');
       cur.snaps = s.ok ? s.d : null;
@@ -258,8 +267,8 @@ const Secrets = (() => {
   function render() {
     const pane = shell();
     if (!pane || !cur.status) return;
-    const html = { status: statusHtml, classes: classesHtml, versions: versionsHtml, rotation: rotationHtml,
-                   snapshots: snapshotsHtml }[cur.tab]();
+    const html = { status: statusHtml, classes: classesHtml, persons: personsHtml, versions: versionsHtml,
+                   rotation: rotationHtml, snapshots: snapshotsHtml }[cur.tab]();
     pane.innerHTML = html;
     if (cur.tab === 'versions' && cur.versionsClass) loadNames(cur.versionsClass);
   }
@@ -281,6 +290,7 @@ const Secrets = (() => {
       if (w.free != null) facts.push(tr('sx.f.free', { free: bytes(w.free), total: bytes(w.total) }));
       if (w.last_ok_at) facts.push(tr('sx.f.lastOk', { when: when(w.last_ok_at) }));
       if (w.count) facts.push(String(w.count));
+      if ((w.servers || []).length) facts.push(w.servers.join(', '));
       return `<div class="sto-finding ${sev}" data-sx-warning="${esc(w.code)}"><div class="sto-finding-title">${icon(w.level === 'info' ? 'info' : 'warn')} ${esc(text(WARN, w.code))}</div>
         ${facts.length ? `<div class="sto-finding-facts">${esc(facts.join(' · '))}</div>` : ''}</div>`;
     }).join('')}</div>`;
@@ -442,6 +452,351 @@ const Secrets = (() => {
         <tbody>${body}</tbody></table></div>
       <p class="form-hint">${esc(tr('sx.localForever'))}</p>
       <div class="apply-bar">${btn('data-sx="outage"', 'btn-secondary', 'test', tr('sx.outageTest'), tr('sx.t.outageTest'))}</div>`;
+  }
+
+  // -- Jetons personnels (2.10.0) ---------------------------------------------------------
+  const PT_CHECK = {
+    discovery: () => tr('sx.pt.chk.discovery'), login: () => tr('sx.pt.chk.login'), token: () => tr('sx.pt.chk.token'),
+    capabilities: () => tr('sx.pt.chk.capabilities'), revoke: () => tr('sx.pt.chk.revoke'),
+  };
+  const PT_CHECK_IDS = ['discovery', 'login', 'token', 'capabilities', 'revoke'];
+  const PT_CLASS = {
+    kubeconfig: () => tr('sx.cls.kubeconfig'), 'ssh-cluster': () => tr('sx.cls.ssh-cluster'),
+    'ssh-kvm': () => tr('sx.cls.ssh-kvm'), 'tf-kvm': () => tr('sx.cls.tf-kvm'), eso: () => tr('sx.pt.cls.eso'),
+  };
+  const ptRancher = (key) => (((cur.persons || {}).ranchers) || []).find((r) => r.key === key) || null;
+
+  /** Ce qui empêche l'administrateur qui regarde de lancer les
+   *  vérifications d'un Rancher (connexion réelle avec SON jeton
+   *  d'identité), ou '' quand il le peut. */
+  function ptCheckBlock(p, r) {
+    const me = p.me || {};
+    if (!me.sso) return tr('sx.pt.needRancher', { rancher: r.label });
+    if (!me.id_token) return tr('sx.pt.needNewSignIn');
+    if (me.rancher !== r.key) return tr('sx.pt.otherRancher', { rancher: r.label });
+    return '';
+  }
+
+  function personsHtml() {
+    const s = cur.status;
+    if (!s.active) return `<p class="form-hint">${esc(tr('sx.needActive'))}</p>`;
+    const p = cur.persons;
+    if (!p) return `<p class="form-hint">${esc(tr('sx.loadError'))}</p>`;
+    const rs = p.ranchers || [];
+    const anyMethod = rs.some((r) => r.configured || r.pending) || Object.keys(p.groups || {}).length > 0;
+    const head = `<div class="sx-head">
+        <span class="badge ${p.enabled ? 'ok' : 'dim'} tip" data-sx-pt-state="${p.enabled ? 'on' : 'off'}" ${tipAttr(tr('sx.pt.t.state'))}>${esc(p.enabled ? tr('sx.pt.on') : tr('sx.pt.off'))}</span>
+        ${p.enabled ? `<span class="res-dim tip" ${tipAttr(tr('sx.pt.t.tokens'))}>${esc(tr('sx.pt.tokens', { n: p.tokens || 0 }))}</span>` : ''}
+        <p class="form-hint">${esc(tr('sx.pt.intro'))}</p>
+      </div>`;
+    const me = p.me || {};
+    const meHint = !me.sso ? `<p class="form-hint sx-pt-me" data-sx-pt-me="local">${icon('info')} ${esc(tr('sx.pt.meLocal'))}</p>`
+      : (!me.id_token ? `<p class="form-hint sx-pt-me" data-sx-pt-me="no-token">${icon('info')} ${esc(tr('sx.pt.needNewSignIn'))}</p>` : '');
+    const rows = rs.map((r) => {
+      const e = r.configured || r.pending;
+      const state = r.configured ? (p.enabled ? 'active' : 'set') : r.pending ? 'pending' : 'none';
+      const stateTxt = { active: tr('sx.pt.st.active'), set: tr('sx.pt.st.set'), pending: tr('sx.pt.st.pending'), none: tr('sx.pt.st.none') }[state];
+      const stateCls = { active: 'ok', set: 'info', pending: 'warn', none: 'dim' }[state];
+      const keyBadges = e ? `${esc(e.keys === 'static' ? tr('sx.pt.keys.static') : tr('sx.pt.keys.discovery'))}
+          ${e.keys_changed ? ` <span class="badge warn tip" data-sx-pt-changed ${tipAttr(tr('sx.pt.t.changed'))}>${esc(tr('sx.pt.changed'))}</span>` : ''}
+          ${e.keys_unreadable ? ` <span class="badge warn tip" data-sx-pt-unreadable ${tipAttr(tr('sx.pt.t.unreadable'))}>${esc(tr('sx.pt.unreadable'))}</span>` : ''}
+          ${e.keys_pending_confirm ? ` <span class="badge info tip" ${tipAttr(tr('sx.pt.t.pendingConfirm'))}>${esc(tr('sx.pt.pendingConfirm'))}</span>` : ''}` : '–';
+      const gone = r.origin === 'gone';
+      const setupWhy = gone ? tr('sx.pt.t.gone') : (!r.sso ? tr('sx.pt.t.noSso') : '');
+      const actions = [
+        btn(`data-sx-pt-setup="${esc(r.key)}"`, r.configured ? 'btn-secondary' : 'btn-primary', 'key',
+          r.configured ? tr('sx.pt.redo') : tr('sx.pt.setup'), setupWhy || tr('sx.pt.t.setup'), !!setupWhy),
+        e && e.keys === 'static' ? btn(`data-sx-pt-keys="${esc(r.key)}"`, e.keys_changed ? 'btn-primary' : 'btn-secondary', 'refresh',
+          tr('sx.pt.updateKeys'), tr('sx.pt.t.updateKeys')) : '',
+        e && e.keys_pending_confirm ? btn(`data-sx-pt-confirm-keys="${esc(r.key)}"`, 'btn-secondary', 'ok',
+          tr('sx.pt.confirmKeys'), tr('sx.pt.t.confirmKeys')) : '',
+        e ? btn(`data-sx-pt-remove="${esc(r.key)}"`, 'btn-secondary', 'delete', tr('sx.pt.remove'), tr('sx.pt.t.remove')) : '',
+      ].join('');
+      return `<tr class="sx-pt-rancher" data-key="${esc(r.key)}">
+        <td><strong>${esc(r.label)}</strong>${r.url ? `<div class="res-dim">${esc(r.url)}</div>` : ''}
+          ${gone ? `<div class="res-dim">${esc(tr('sx.pt.gone'))}</div>` : ''}</td>
+        <td>${e ? `<code class="tip" ${tipAttr(tr('sx.pt.t.mount'))}>${esc(e.mount || '')}</code>` : '–'}</td>
+        <td>${keyBadges}</td>
+        <td><span class="badge ${stateCls}" data-sx-pt-rstate="${state}">${esc(stateTxt)}</span></td>
+        <td>${e ? esc(`${e.configured_by || '–'} · ${when(e.checked_at || e.configured_at)}`) : '–'}</td>
+        <td class="sx-row-actions">${actions}</td></tr>`;
+    }).join('');
+    const table = rs.length ? `<div class="sx-scroll"><table class="data-table sx-pt-ranchers"><thead><tr>
+        <th>${esc(tr('sx.pt.col.rancher'))}</th><th>${esc(tr('sx.pt.col.mount'))}</th><th>${esc(tr('sx.pt.col.keys'))}</th>
+        <th>${esc(tr('sx.pt.col.state'))}</th><th>${esc(tr('sx.pt.col.by'))}</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table></div>` : `<p class="form-hint">${esc(tr('sx.pt.noRancher'))}</p>`;
+    const actions = `<div class="apply-bar sx-actions">
+        ${btn('data-sx="pt-off"', 'btn-secondary', 'stop', tr('sx.pt.turnOff'), p.enabled ? tr('sx.pt.t.turnOff') : tr('sx.pt.t.alreadyOff'), !p.enabled)}
+        ${btn('data-sx="pt-remove-all"', 'btn-danger', 'delete', tr('sx.pt.removeAll'), anyMethod ? tr('sx.pt.t.removeAll') : tr('sx.pt.t.nothing'), !anyMethod)}
+      </div>`;
+    return `${head}${meHint}${table}${actions}${groupsHtml(p)}${entitiesSeenHtml(p)}`;
+  }
+
+  function groupsHtml(p) {
+    const gs = Object.entries(p.groups || {});
+    const names = {};
+    (p.entities || []).forEach((e) => { names[e.entity] = e.name || e.user || e.sub; });
+    const full = gs.length >= ((p.limits || {}).groups || 32);
+    const rows = gs.map(([n, g]) => `<tr class="sx-pt-group" data-name="${esc(n)}">
+        <td><code>${esc(n)}</code></td>
+        <td>${esc((g.classes || []).map((c) => text(PT_CLASS, c)).join(', '))}</td>
+        <td>${esc((g.clusters || []).join(', '))}</td>
+        <td class="tip" ${tipAttr((g.members || []).map((m) => names[m] || m).join(', ') || tr('sx.pt.noMember'))}>${esc(String((g.members || []).length))}</td>
+        <td class="sx-row-actions">${btn(`data-sx-pt-group="${esc(n)}"`, 'btn-secondary', 'edit', tr('sx.pt.editGroup'), tr('sx.pt.t.editGroup'))}
+          ${btn(`data-sx-pt-group-remove="${esc(n)}"`, 'btn-secondary', 'delete', tr('sx.pt.removeGroup'), tr('sx.pt.t.removeGroup'))}</td></tr>`).join('');
+    return `<div class="card sx-card sx-pt-groups">
+        <h5>${icon('users')} ${esc(tr('sx.pt.groups'))}</h5>
+        <p class="form-hint">${esc(tr('sx.pt.groupsIntro'))}</p>
+        <div class="sx-inline-row">
+          <span class="badge ${p.groups_only ? 'warn' : 'dim'}" data-sx-pt-groups-only="${p.groups_only ? 'on' : 'off'}">${esc(p.groups_only ? tr('sx.pt.groupsOnlyOn') : tr('sx.pt.groupsOnlyOff'))}</span>
+          ${btn('data-sx="pt-groups-only"', 'btn-secondary', 'users', p.groups_only ? tr('sx.pt.groupsOnlyDisable') : tr('sx.pt.groupsOnlyEnable'),
+            p.groups_only ? tr('sx.pt.t.groupsOnlyDisable') : tr('sx.pt.t.groupsOnlyEnable'))}
+          ${btn('data-sx="pt-group-new"', 'btn-primary', 'add', tr('sx.pt.newGroup'), full ? tr('sx.pt.t.groupsFull') : tr('sx.pt.t.newGroup'), full)}
+        </div>
+        ${rows ? `<div class="sx-scroll"><table class="data-table sx-pt-groups-table"><thead><tr>
+          <th>${esc(tr('sx.pt.col.group'))}</th><th>${esc(tr('sx.pt.col.classes'))}</th><th>${esc(tr('sx.pt.col.clusters'))}</th>
+          <th>${esc(tr('sx.pt.col.members'))}</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+          : `<p class="form-hint">${esc(tr('sx.pt.noGroup'))}</p>`}
+      </div>`;
+  }
+
+  function entitiesSeenHtml(p) {
+    const es = p.entities || [];
+    const rancherLabel = (k) => (ptRancher(k) || {}).label || k;
+    return `<details class="sx-settings sx-pt-entities" ${es.length ? '' : 'data-empty'}>
+        <summary class="tip" ${tipAttr(tr('sx.pt.t.entities'))}>${esc(tr('sx.pt.entities', { n: es.length }))}</summary>
+        <p class="form-hint">${esc(tr('sx.pt.entitiesIntro'))}</p>
+        ${es.length ? `<div class="sx-scroll"><table class="data-table sx-pt-entity-table"><thead><tr>
+          <th>${esc(tr('sx.pt.col.person'))}</th><th>${esc(tr('sx.pt.col.alias'))}</th><th>${esc(tr('sx.pt.col.rancher'))}</th>
+          <th>${esc(tr('sx.pt.col.last'))}</th><th>${esc(tr('sx.pt.col.entity'))}</th></tr></thead><tbody>
+          ${es.map((e) => `<tr class="sx-pt-entity" data-entity="${esc(e.entity)}"><td>${esc(e.name || '–')}<div class="res-dim">${esc(e.user || '')}</div></td>
+            <td><code>${esc(e.sub || '')}</code></td><td>${esc(rancherLabel(e.rancher))}</td><td>${esc(when(e.last_at))}</td>
+            <td><code class="tip" ${tipAttr(e.entity)}>${esc(String(e.entity).slice(0, 8))}</code></td></tr>`).join('')}
+          </tbody></table></div>` : `<p class="form-hint">${esc(tr('sx.pt.noEntity'))}</p>`}
+      </details>`;
+  }
+
+  /** Commandes du mode A rendues par une action (aucune valeur secrète :
+   *  l'administrateur d'OpenBao les lance chez lui). */
+  function showCommands(title, cmds, policy) {
+    const textValue = (cmds || []).join('\n');
+    const w = modal('sx-pt-commands', title, `<p class="form-hint">${esc(tr('sx.pt.commandsIntro'))}</p>
+        <pre class="sx-cmds" data-sx-pt-cmds>${esc(textValue)}</pre>
+        ${btn(`data-sx-copy="${esc(textValue)}"`, 'btn-secondary', 'copy', tr('sx.copy'), tr('sx.t.copy'))}
+        ${policy ? `<details><summary>${esc(tr('sx.wiz.policy'))}</summary><pre class="sx-cmds">${esc(policy)}</pre></details>` : ''}`,
+      btn('data-x="close"', 'btn-primary', 'ok', tr('common.close'), tr('common.close')));
+    w.el.addEventListener('click', (e) => { const c = e.target.closest('[data-sx-copy]'); if (c) copy(c.dataset.sxCopy, c); });
+    return w;
+  }
+
+  async function ptGesture(url, body, doneText, cmdTitle) {
+    const f = await gesture('POST', url, body, doneText);
+    const out = (f && f.output) || {};
+    if (f && f.ok && (out.commands || []).length) showCommands(cmdTitle || tr('sx.pt.commandsTitle'), out.commands, out.policy);
+    return f;
+  }
+
+  /** Assistant d'un Rancher : Serveur (méthode posée par l'agent en B1,
+   *  commandes en A), Vérifications (connexion réelle de l'administrateur),
+   *  Confirmation (Activer, grisé tant qu'une vérification est rouge). */
+  function openPersonWizard(key) {
+    const p = cur.persons || {};
+    const r = ptRancher(key);
+    if (!r) return null;
+    const b1 = p.mode === 'b1';
+    const e = r.configured || r.pending;
+    const st = { tab: 'server', keys: (e && e.keys) || 'discovery', applied: !!e, checks: null, busy: false };
+    const block = ptCheckBlock(p, r);
+    const tabs = ['server', 'checks', 'confirm'];
+    const w = modal('sx-pt-wizard', tr('sx.pt.wizTitle', { rancher: r.label }), `
+      <div class="sub-tabs sub-tabs-inline" role="tablist">${tabs.map((t) => `<button type="button" class="sub-tab tip${t === 'server' ? ' active' : ''}"
+          role="tab" data-pw-tab="${t}" ${tipAttr(WIZ[t][1]())}>${esc(WIZ[t][0]())}</button>`).join('')}</div>
+      <div data-pw-pane="server">
+        <p class="form-hint">${esc(b1 ? tr('sx.pt.wizB1') : tr('sx.pt.wizA'))}</p>
+        ${kv([[tr('sx.pt.k.rancher'), esc(r.label)], [tr('sx.pt.k.issuer'), `<code>${esc(r.issuer || '')}</code>`, tr('sx.pt.t.issuer')],
+              [tr('sx.pt.k.client'), `<code>${esc(r.client_id || '')}</code>`, tr('sx.pt.t.client')],
+              [tr('sx.pt.k.ca'), esc(r.has_ca ? tr('sx.pt.caSet') : tr('sx.pt.caPublic')), tr('sx.pt.t.ca')]])}
+        <div class="sub-tabs sub-tabs-inline sx-modes" role="radiogroup" aria-label="${esc(tr('sx.pt.k.keys'))}">
+          <button type="button" class="sub-tab tip${st.keys === 'discovery' ? ' active' : ''}" data-pw-keys="discovery" ${tipAttr(tr('sx.pt.t.discovery'))}>${esc(tr('sx.pt.keys.discovery'))}</button>
+          <button type="button" class="sub-tab tip${st.keys === 'static' ? ' active' : ''}" data-pw-keys="static" ${tipAttr(b1 ? tr('sx.pt.t.staticB1') : tr('sx.pt.t.static'))}${b1 ? ' disabled' : ''}>${esc(tr('sx.pt.keys.static'))}</button>
+        </div>
+        ${b1 ? '' : `<label class="login-field"><span>${esc(tr('sx.pt.cidr'))}</span>
+          <input type="text" data-pw="cidr" spellcheck="false" placeholder="10.0.0.5/32" value="${esc((e && e.console_cidr) || '')}" class="tip" ${tipAttr(tr('sx.pt.t.cidr'))}></label>`}
+        <div class="apply-bar">${btn('data-pw="apply"', 'btn-primary', 'key', b1 ? tr('sx.pt.applyB1') : tr('sx.pt.applyA'), b1 ? tr('sx.pt.t.applyB1') : tr('sx.pt.t.applyA'))}</div>
+        <p class="form-hint" data-pw="applied">${esc(st.applied ? tr('sx.pt.alreadySet') : '')}</p>
+      </div>
+      <div data-pw-pane="checks" hidden>
+        <p class="form-hint">${esc(tr('sx.pt.checksIntro'))}</p>
+        ${block ? `<p class="res-error sx-pt-block" data-pw="block">${esc(block)}</p>` : ''}
+        <div class="apply-bar">${btn('data-pw="run-checks"', 'btn-primary', 'test', tr('sx.wiz.runChecks'), block || (!st.applied ? tr('sx.pt.t.applyFirst') : tr('sx.pt.t.runChecks')), !!block || !st.applied)}</div>
+        <ul class="sx-checks" data-pw="checks-list" aria-live="polite"></ul>
+      </div>
+      <div data-pw-pane="confirm" hidden><div data-pw="summary"></div></div>
+      <div class="res-feedback" data-pw="msg" role="status"></div>`,
+      `${btn('data-x="close"', 'btn-secondary', '', tr('common.cancel'), tr('sx.t.cancel'))}
+       ${btn('data-pw="activate"', 'btn-primary', 'lock', tr('sx.pt.activate'), tr('sx.pt.t.activateBlocked'), true)}`);
+    const q = w.q;
+    const msg = (html, bad) => { q('[data-pw="msg"]').innerHTML = bad ? `<span class="res-error">${html}</span>` : html; };
+    function setTab(t) {
+      st.tab = t;
+      w.el.querySelectorAll('[data-pw-tab]').forEach((b) => { b.classList.toggle('active', b.dataset.pwTab === t); b.setAttribute('aria-selected', String(b.dataset.pwTab === t)); });
+      w.el.querySelectorAll('[data-pw-pane]').forEach((x) => { x.hidden = x.dataset.pwPane !== t; });
+      if (t === 'confirm') paintSummary();
+    }
+    // les cinq vérifications, toutes vertes, dans cette fenêtre
+    function green() {
+      const got = st.checks || [];
+      return PT_CHECK_IDS.every((id) => got.some((c) => c.id === id && c.ok === true)) && got.every((c) => c.ok === true);
+    }
+    function paintActivate() {
+      const why = block || (!st.applied ? tr('sx.pt.t.applyFirst') : (!green() ? tr('sx.pt.t.activateBlocked') : tr('sx.pt.t.activate')));
+      const b = q('[data-pw="activate"]');
+      b.disabled = why !== tr('sx.pt.t.activate');
+      b.dataset.tip = why;
+      b.title = why;
+      const rc = q('[data-pw="run-checks"]');
+      const rcWhy = block || (!st.applied ? tr('sx.pt.t.applyFirst') : tr('sx.pt.t.runChecks'));
+      rc.disabled = !!block || !st.applied;
+      rc.dataset.tip = rcWhy;
+      rc.title = rcWhy;
+    }
+    function paintChecks() {
+      q('[data-pw="checks-list"]').innerHTML = (st.checks || []).map((c) => `<li class="${c.ok === false ? 'fail' : c.ok ? 'ok' : 'skip'}" data-pw-check="${esc(c.id)}">
+        ${icon(c.ok === false ? 'fail' : c.ok ? 'ok' : 'pending')} <b>${esc(text(PT_CHECK, c.id))}</b> <span class="res-dim">${esc(c.reason || '')}</span></li>`).join('');
+      paintActivate();
+    }
+    function paintSummary() {
+      q('[data-pw="summary"]').innerHTML = kv([[tr('sx.pt.k.rancher'), esc(r.label)],
+        [tr('sx.pt.k.keys'), esc(st.keys === 'static' ? tr('sx.pt.keys.static') : tr('sx.pt.keys.discovery'))],
+        [tr('sx.k.checks'), esc(green() ? tr('sx.wiz.allGreen') : tr('sx.wiz.notGreen'))]])
+        + `<p class="form-hint">${esc(tr('sx.pt.after'))}</p>`;
+      paintActivate();
+    }
+    async function apply() {
+      if (st.busy) return;
+      st.busy = true;
+      msg(`<span class="spinner-inline"></span> ${esc(tr('sx.running'))}`);
+      const body = { rancher: r.key, keys: st.keys };
+      if (!b1) body.console_cidr = ((q('[data-pw="cidr"]') || {}).value || '').trim();
+      const res = await api('POST', '/api/secrets/person-token/assistant', body);
+      if (!res.ok) { msg(errOf(res), true); st.busy = false; return; }
+      const f = await follow(res.d.action_id);
+      st.busy = false;
+      const out = f.output || {};
+      if (!f.ok) { msg(esc(tr('sx.failed', { msg: out.error || out.code || (f.run || {}).error_summary || '?' })), true); return; }
+      st.applied = true;
+      st.checks = null;
+      q('[data-pw="applied"]').textContent = b1 ? tr('sx.pt.setByAgent') : tr('sx.pt.commandsGiven');
+      msg(`${icon('ok')} ${esc(b1 ? tr('sx.pt.setByAgent') : tr('sx.pt.commandsGiven'))}`);
+      if ((out.commands || []).length) {
+        const box = document.createElement('div');
+        box.innerHTML = `<pre class="sx-cmds" data-pw="cmds">${esc(out.commands.join('\n'))}</pre>
+          ${btn(`data-sx-copy="${esc(out.commands.join('\n'))}"`, 'btn-secondary', 'copy', tr('sx.copy'), tr('sx.t.copy'))}`;
+        q('[data-pw-pane="server"]').appendChild(box);
+      }
+      paintChecks();
+    }
+    async function runChecks() {
+      if (st.busy || block || !st.applied) return;
+      st.busy = true;
+      msg(`<span class="spinner-inline"></span> ${esc(tr('sx.wiz.checking'))}`);
+      const res = await api('POST', '/api/secrets/person-token/check', { rancher: r.key });
+      if (!res.ok) { msg(errOf(res), true); st.busy = false; return; }
+      const f = await follow(res.d.action_id);
+      st.busy = false;
+      st.checks = (f.output || {}).checks || [{ id: 'login', ok: false, reason: (f.output || {}).error || (f.run || {}).error_summary || '?' }];
+      msg(esc(green() ? tr('sx.wiz.allGreen') : tr('sx.wiz.notGreen')));
+      paintChecks();
+    }
+    async function activate() {
+      paintActivate();
+      if (q('[data-pw="activate"]').disabled || st.busy) return;
+      st.busy = true;
+      msg(`<span class="spinner-inline"></span> ${esc(tr('sx.wiz.activating'))}`);
+      const res = await api('POST', '/api/secrets/person-token/enable', { rancher: r.key });
+      if (!res.ok) { msg(errOf(res), true); st.busy = false; return; }
+      const f = await follow(res.d.action_id);
+      st.busy = false;
+      if (f.ok) { w.close(); say(`${icon('ok')} ${esc(tr('sx.pt.activated', { rancher: r.label }))}`); load(); return; }
+      st.checks = (f.output || {}).checks || st.checks;
+      paintChecks();
+      msg(esc(tr('sx.failed', { msg: (f.output || {}).error || (f.output || {}).code || (f.run || {}).error_summary || '?' })), true);
+    }
+    w.el.addEventListener('click', (ev) => {
+      const t = ev.target.closest('[data-pw-tab]');
+      if (t) { setTab(t.dataset.pwTab); return; }
+      const k = ev.target.closest('[data-pw-keys]');
+      if (k && !k.disabled) {
+        st.keys = k.dataset.pwKeys;
+        st.applied = false;
+        st.checks = null;
+        w.el.querySelectorAll('[data-pw-keys]').forEach((b) => b.classList.toggle('active', b.dataset.pwKeys === st.keys));
+        q('[data-pw="applied"]').textContent = '';
+        paintChecks();
+        return;
+      }
+      if (ev.target.closest('[data-pw="apply"]')) { apply(); return; }
+      if (ev.target.closest('[data-pw="run-checks"]')) { runChecks(); return; }
+      if (ev.target.closest('[data-pw="activate"]')) { activate(); return; }
+      const c = ev.target.closest('[data-sx-copy]');
+      if (c) copy(c.dataset.sxCopy, c);
+    });
+    w.el.addEventListener('input', (ev) => { if (ev.target.closest('[data-pw="cidr"]')) { st.applied = false; st.checks = null; paintChecks(); } });
+    paintChecks();
+    return w;
+  }
+
+  /** Groupe interne : classes, clusters, membres parmi les entités vues. */
+  function openGroupModal(name) {
+    const p = cur.persons || {};
+    const g = name ? (p.groups || {})[name] || {} : {};
+    const members = new Set(g.members || []);
+    const seen = (p.entities || []);
+    const unknown = [...members].filter((m) => !seen.some((e) => e.entity === m));
+    const limit = (p.limits || {}).members || 200;
+    const w = modal('sx-pt-group', name ? tr('sx.pt.editGroupTitle', { name }) : tr('sx.pt.newGroup'), `
+      <p class="form-hint">${esc(tr('sx.pt.groupHint'))}</p>
+      <label class="login-field"><span>${esc(tr('sx.pt.col.group'))}</span>
+        <input type="text" data-pg="name" spellcheck="false" autocomplete="off" maxlength="31" value="${esc(name || '')}" ${name ? 'disabled' : ''}
+               placeholder="team-a" class="tip" ${tipAttr(tr('sx.pt.t.groupName'))}></label>
+      <fieldset class="sx-pt-classes"><legend>${esc(tr('sx.pt.col.classes'))}</legend>
+        ${(p.group_classes || []).map((c) => `<label class="tip" ${tipAttr(tr('sx.pt.t.class'))}><input type="checkbox" data-pg-class="${esc(c)}" ${(g.classes || []).includes(c) ? 'checked' : ''}> ${esc(text(PT_CLASS, c))}</label>`).join(' ')}
+      </fieldset>
+      <label class="login-field"><span>${esc(tr('sx.pt.col.clusters'))}</span>
+        <input type="text" data-pg="clusters" spellcheck="false" value="${esc((g.clusters || []).join(', '))}" placeholder="harv1, node2"
+               class="tip" ${tipAttr(tr('sx.pt.t.clusters'))}></label>
+      <h5>${esc(tr('sx.pt.col.members'))}</h5>
+      ${seen.length || unknown.length ? `<div class="sx-scroll"><table class="data-table sx-pt-member-table"><thead><tr><th></th>
+          <th>${esc(tr('sx.pt.col.person'))}</th><th>${esc(tr('sx.pt.col.alias'))}</th><th>${esc(tr('sx.pt.col.last'))}</th></tr></thead><tbody>
+        ${seen.map((e) => `<tr><td><input type="checkbox" data-pg-member="${esc(e.entity)}" ${members.has(e.entity) ? 'checked' : ''} class="tip" ${tipAttr(tr('sx.pt.t.member'))}
+            aria-label="${esc(e.name || e.sub || e.entity)}"></td>
+          <td>${esc(e.name || '–')}<div class="res-dim">${esc(e.user || '')}</div></td><td><code>${esc(e.sub || '')}</code></td><td>${esc(when(e.last_at))}</td></tr>`).join('')}
+        ${unknown.map((m) => `<tr><td><input type="checkbox" data-pg-member="${esc(m)}" checked class="tip" ${tipAttr(tr('sx.pt.t.member'))} aria-label="${esc(m)}"></td>
+          <td class="res-dim">${esc(tr('sx.pt.unknownEntity'))}</td><td><code>${esc(m)}</code></td><td>–</td></tr>`).join('')}
+        </tbody></table></div>` : `<p class="form-hint">${esc(tr('sx.pt.noEntity'))}</p>`}
+      <p class="form-hint">${esc(tr('sx.pt.membersLimit', { n: limit }))}</p>
+      <div class="res-feedback" data-pg="msg" role="status"></div>`,
+      `${btn('data-x="close"', 'btn-secondary', '', tr('common.cancel'), tr('sx.t.cancel'))}
+       ${btn('data-pg="save"', 'btn-primary', 'save', tr('sx.save'), tr('sx.pt.t.saveGroup'))}`);
+    w.q('[data-pg="save"]').addEventListener('click', async () => {
+      const body = {
+        name: name || (w.q('[data-pg="name"]').value || '').trim(),
+        classes: [...w.el.querySelectorAll('[data-pg-class]:checked')].map((i) => i.dataset.pgClass),
+        clusters: (w.q('[data-pg="clusters"]').value || '').split(/[\s,]+/).map((x) => x.trim()).filter(Boolean),
+        members: [...w.el.querySelectorAll('[data-pg-member]:checked')].map((i) => i.dataset.pgMember),
+      };
+      if (!/^[a-z0-9][a-z0-9-]{0,30}$/.test(body.name) || !body.classes.length || !body.clusters.length) {
+        w.q('[data-pg="msg"]').innerHTML = `<span class="res-error">${esc(tr('sx.pt.groupIncomplete'))}</span>`;
+        return;
+      }
+      if (body.members.length > limit) {
+        w.q('[data-pg="msg"]').innerHTML = `<span class="res-error">${esc(tr('sx.pt.membersLimit', { n: limit }))}</span>`;
+        return;
+      }
+      w.close();
+      ptGesture('/api/secrets/person-token/groups', body, tr('sx.pt.groupSaved'));
+    });
+    return w;
   }
 
   // -- Versions -------------------------------------------------------------------------
@@ -793,6 +1148,50 @@ const Secrets = (() => {
       if (confirm(tr('sx.eso.offConfirm'))) gesture('POST', '/api/secrets/eso/listener', { off: true }, tr('sx.eso.turnedOff'));
       return;
     }
+    if (k === 'pt-off') {
+      if (confirm(tr('sx.pt.offConfirm'))) ptGesture('/api/secrets/person-token/disable', {}, tr('sx.pt.turnedOff'));
+      return;
+    }
+    if (k === 'pt-remove-all') {
+      const v = await typedConfirm({ title: tr('sx.pt.removeAll'), intro: tr('sx.pt.removeAllIntro'), expect: cid,
+                                     label: tr('sx.typeConsoleId'), action: tr('sx.pt.removeAll') });
+      if (v) ptGesture('/api/secrets/person-token/disable', { remove: true, confirm: v }, tr('sx.pt.removedAll'));
+      return;
+    }
+    if (k === 'pt-groups-only') {
+      const on = !((cur.persons || {}).groups_only);
+      if (confirm(on ? tr('sx.pt.groupsOnlyConfirmOn') : tr('sx.pt.groupsOnlyConfirmOff'))) {
+        ptGesture('/api/secrets/person-token/groups-only', { on }, tr('sx.saved'));
+      }
+      return;
+    }
+    if (k === 'pt-group-new') { openGroupModal(null); return; }
+    const pts = e.target.closest('[data-sx-pt-setup]');
+    if (pts) { openPersonWizard(pts.dataset.sxPtSetup); return; }
+    const ptk = e.target.closest('[data-sx-pt-keys]');
+    if (ptk) { ptGesture('/api/secrets/person-token/keys', { rancher: ptk.dataset.sxPtKeys }, tr('sx.pt.keysUpdated')); return; }
+    const ptc = e.target.closest('[data-sx-pt-confirm-keys]');
+    if (ptc) {
+      if (confirm(tr('sx.pt.confirmKeysConfirm'))) ptGesture('/api/secrets/person-token/keys', { rancher: ptc.dataset.sxPtConfirmKeys, confirm: true }, tr('sx.pt.keysConfirmed'));
+      return;
+    }
+    const ptr = e.target.closest('[data-sx-pt-remove]');
+    if (ptr) {
+      const key = ptr.dataset.sxPtRemove;
+      const label = (ptRancher(key) || {}).label || key;
+      const v = await typedConfirm({ title: tr('sx.pt.remove'), intro: tr('sx.pt.removeIntro', { rancher: label }), expect: cid,
+                                     label: tr('sx.typeConsoleId'), action: tr('sx.pt.remove') });
+      if (v) ptGesture('/api/secrets/person-token/disable', { rancher: key, remove: true, confirm: v }, tr('sx.pt.removed'));
+      return;
+    }
+    const ptg = e.target.closest('[data-sx-pt-group]');
+    if (ptg) { openGroupModal(ptg.dataset.sxPtGroup); return; }
+    const ptgr = e.target.closest('[data-sx-pt-group-remove]');
+    if (ptgr) {
+      const name = ptgr.dataset.sxPtGroupRemove;
+      if (confirm(tr('sx.pt.removeGroupConfirm', { name }))) ptGesture('/api/secrets/person-token/groups', { name, remove: true }, tr('sx.pt.groupRemoved'));
+      return;
+    }
     const ek = e.target.closest('[data-sx-eso-keys]');
     if (ek) { gesture('POST', '/api/secrets/eso/keys', { cluster: ek.dataset.sxEsoKeys }, tr('sx.eso.keysUpdated')); return; }
     if (k === 'snapshot') { gesture('POST', '/api/secrets/snapshot', {}, tr('sx.snapTaken')); return; }
@@ -907,7 +1306,18 @@ const Secrets = (() => {
     if (!el) return;
     const r = await api('GET', '/api/secrets/banner');
     const b = r.ok ? r.d : null;
-    if (!b || !b.active || !['down', 'degraded'].includes(b.state)) { el.hidden = true; el.innerHTML = ''; return; }
+    if (!b || !b.active || !['down', 'degraded'].includes(b.state)) {
+      // 2.10.0 : refus personnel de cette session, clés changées (administrateur)
+      const notes = bannerNotes(b);
+      if (!notes.length) { el.hidden = true; el.innerHTML = ''; return; }
+      el.hidden = false;
+      el.className = 'access-notice secrets-banner sx-notes';
+      el.innerHTML = `<span class="an-icon">${icon('warn', 16)}</span><div class="an-body"><strong class="an-title">${esc(tr('sx.banner.notesTitle'))}</strong>
+        ${notes.map((n) => `<p class="an-hint" data-sx-banner-note="${esc(n.code)}">${esc(n.text)}${n.tab
+          ? ` ${btn(`data-sx-banner-open="${esc(n.tab)}"`, 'btn-secondary', 'settings', tr('sx.banner.open'), tr('sx.banner.t.open'))}` : ''}</p>`).join('')}</div>`;
+      el.querySelectorAll('[data-sx-banner-open]').forEach((x) => x.addEventListener('click', () => openTab(x.dataset.sxBannerOpen)));
+      return;
+    }
     const msg = b.state === 'degraded'
       ? tr('sx.banner.degraded', { since: when(b.down_since), until: b.cache_until ? new Date(b.cache_until * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '–' })
       : tr('sx.banner.down', { since: when(b.down_since) });
@@ -917,9 +1327,26 @@ const Secrets = (() => {
       <span data-sx-banner-text>${esc(msg)}</span>${b.error ? ` <code>${esc(b.error)}</code>` : ''}
       <p class="an-hint">${esc(tr('sx.banner.hint'))}</p></div>`;
   }
+  function bannerNotes(b) {
+    if (!b || !b.active) return [];
+    const out = [];
+    const pn = b.person || null;
+    if (pn) {
+      const t = { 'openbao-person-login-failed': tr('sx.banner.personLogin'), 'openbao-person-no-token': tr('sx.banner.personNoToken'),
+                  'openbao-person-expired': tr('sx.banner.personNoToken'), 'openbao-denied': tr('sx.banner.personDenied') }[pn.code];
+      if (t) out.push({ code: pn.code, text: t });
+    }
+    const admin = window.App && App.role && App.role() === 'admin';
+    if (admin && b.jwt_keys_changed) out.push({ code: 'openbao-jwt-keys-changed', text: tr('sx.banner.jwtKeys'), tab: 'persons' });
+    if (admin && b.jwt_keys_unreadable) out.push({ code: 'openbao-jwt-keys-unreadable', text: tr('sx.banner.jwtUnreadable'), tab: 'persons' });
+    if (admin && b.eso_keys_changed) out.push({ code: 'eso-keys-changed', text: tr('sx.banner.esoKeys'), tab: 'status' });
+    return out;
+  }
   function startBanner() {
     if (bannerTimer) return;
     banner();
+    // les notes de l'administrateur attendent que le rôle soit connu
+    document.addEventListener('hops:role', () => banner());
     bannerTimer = setInterval(() => { if (!document.hidden) banner(); }, 30000);
   }
 

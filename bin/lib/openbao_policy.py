@@ -198,6 +198,13 @@ TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")      # cluster, hôte KVM 
 ESO_KEY_RE = re.compile(r"^[0-9a-f]{8}$")
 ENTITY_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 JWT_ACCESSOR_RE = re.compile(r"^(auth_jwt_[0-9a-f]{6,64}|\$ACCESSOR)$")
+# revue 6-7 M-8 : bornes de ce que la console peut faire poser dans OpenBao
+# (disponibilité : une console ne bourre pas l'instance de montages, de
+# groupes ou de membres) ; relues par l'agent, l'outil et les routes
+MAX_PERSON_MOUNTS = 16                   # méthodes jwt des Rancher
+MAX_GROUPS = 32                          # groupes internes hops-<id>-*
+MAX_GROUP_MEMBERS = 200                  # entités d'un groupe
+MAX_ESO_CLUSTERS = 64                    # clusters enfants avec External Secrets
 
 
 def person_policy_name(cid):
@@ -300,6 +307,8 @@ def group_body(cid, name, members):
     members = list(members or [])
     if len(set(members)) != len(members) or not all(isinstance(e, str) and ENTITY_RE.match(e) for e in members):
         raise ValueError("group members: distinct entity ids (UUID)")
+    if len(members) > MAX_GROUP_MEMBERS:
+        raise ValueError(f"group members: at most {MAX_GROUP_MEMBERS}")
     return {"type": "internal", "policies": [group_policy_name(cid, name)], "member_entity_ids": members}
 
 

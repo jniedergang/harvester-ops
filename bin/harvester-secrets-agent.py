@@ -1464,6 +1464,9 @@ class Agent:
             groups_only = bool(st.get("person_groups_only"))
         cid, kv, prefix = self._person_layout(st)
         rancher = str(req["rancher"])
+        if rancher not in (st.get("person_jwt") or {}) and len(st.get("person_jwt") or {}) >= pol.MAX_PERSON_MOUNTS:
+            # revue 6-7 M-8 : une console ne bourre pas l'instance de montages
+            raise AgentError("limit-jwt-mounts", f"at most {pol.MAX_PERSON_MOUNTS} Rancher jwt auth methods")
         pin = self._pin_of(config, req["client_id"])
         self._pin_check(st, rancher, pin)
         self.step("mount", "running", mount)
@@ -1611,6 +1614,8 @@ class Agent:
         except ValueError as e:
             raise AgentError("bad-request", str(e)) from None
         groups = dict(st.get("person_groups") or {})
+        if not remove and name not in groups and len(groups) >= pol.MAX_GROUPS:
+            raise AgentError("limit-groups", f"at most {pol.MAX_GROUPS} groups")       # revue 6-7 M-8
         self.step("group", "running", gname)
         if remove:
             def drop(a):
@@ -1866,6 +1871,9 @@ class Agent:
         if not st.get("eso_listener"):
             raise AgentError("eso-listener-off", "the ESO listener is off: set its address first")
         key, mount, config, role = self._eso_spec(st, req)
+        if key not in (st.get("eso_clusters") or {}) and len(st.get("eso_clusters") or {}) >= pol.MAX_ESO_CLUSTERS:
+            raise AgentError("limit-eso-clusters", f"at most {pol.MAX_ESO_CLUSTERS} child clusters with "
+                                                   "External Secrets")                # revue 6-7 M-8
         cid, kv, prefix = self._person_layout(st)
         self.step("mount", "running", mount)
 

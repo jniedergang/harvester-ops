@@ -723,10 +723,117 @@ def _sso_person_closed(sess):
     """Déconnexion, session fermée, rafraîchissement refusé : revoke-self et
     purge du cache des personnes pour cette entité."""
     _sst.PERSON_TOKENS.drop(sess.sid)
+    with _PERSON_LOCK:
+        _PERSON_NOTICE.pop(sess.sid, None)
+
+
+# 2.10.0 tâche 11 : entités vues (membres de groupe proposés à
+# l'administrateur) et refus personnels du bandeau. Rien de secret : ni
+# jeton ni valeur, seulement l'entité d'OpenBao, le `sub`, le nom affiché.
+PERSON_ENTITIES_FILE = "person-entities.json"
+PERSON_ENTITIES_MAX = 500
+PERSON_ENTITY_REFRESH_S = 3600               # dernière connexion réécrite au plus une fois par heure
+PERSON_NOTICE_TTL_S = 3600
+_PERSON_LOCK = threading.Lock()
+_PERSON_NOTICE = {}                          # session -> {code, at} : dernier refus personnel
+
+
+def _rancher_key_of(sess):
+    """Clé du Rancher d'une session dans `person_token.servers` : `config`
+    pour celui de config.yaml (session sans `server_id`), sinon son id."""
+    sid = getattr(sess, "server_id", None)
+    return str(sid) if sid else "config"
+
+
+def _person_entities_path():
+    return _state_dir() / PERSON_ENTITIES_FILE
+
+
+def _person_entities():
+    try:
+        doc = json.loads(_person_entities_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in doc.items() if isinstance(v, dict) and _ENTITY_ID_RE.match(str(k))} \
+        if isinstance(doc, dict) else {}
+
+
+_ENTITY_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _person_seen(session_id, entity, now=None):
+    """Rappel de PersonTokens après une connexion réussie : l'entité est
+    notée (alias = `sub` Rancher, nom, Rancher, dernière connexion), le
+    refus personnel du bandeau oublié."""
+    now = time.time() if now is None else now
+    with _PERSON_LOCK:
+        _PERSON_NOTICE.pop(session_id, None)
+    sess = _sso_store().get(session_id) if session_id else None
+    if sess is None or not _ENTITY_ID_RE.match(str(entity or "")):
+        return False
+    ident = getattr(sess, "ident", None) or {}
+    entry = {"sub": str(ident.get("id") or "")[:128], "name": str(ident.get("name") or ident.get("username") or "")[:128],
+             "user": str(getattr(sess, "login", "") or "")[:160], "rancher": _rancher_key_of(sess), "last_at": now}
+    with _PERSON_LOCK:
+        doc = _person_entities()
+        old = doc.get(entity)
+        if old and all(old.get(k) == entry[k] for k in ("sub", "name", "user", "rancher")) \
+                and now - float(old.get("last_at") or 0) < PERSON_ENTITY_REFRESH_S:
+            return False
+        doc[entity] = entry
+        if len(doc) > PERSON_ENTITIES_MAX:
+            for k in sorted(doc, key=lambda k: float(doc[k].get("last_at") or 0))[:len(doc) - PERSON_ENTITIES_MAX]:
+                doc.pop(k, None)
+        try:
+            _su.write_json_atomic(_person_entities_path(), doc, mode=0o640)
+        except OSError as e:
+            log.warning("seen entities not written: %s", type(e).__name__)
+            return False
+    return True
+
+
+def _person_refusal_note(code):
+    """Refus personnel (connexion refusée, session sans jeton d'identité,
+    lecture refusée) : noté pour le bandeau de la session qui l'a reçu."""
+    sess = _sso_session()
+    if sess is None:
+        return
+    with _PERSON_LOCK:
+        if len(_PERSON_NOTICE) > 1000:
+            _PERSON_NOTICE.clear()
+        _PERSON_NOTICE[sess.sid] = {"code": code, "at": time.time()}
+
+
+def _person_notice(now=None):
+    """Dernier refus personnel de la session de la requête (moins d'une
+    heure), ou None."""
+    now = time.time() if now is None else now
+    sess = _sso_session()
+    if sess is None:
+        return None
+    with _PERSON_LOCK:
+        n = _PERSON_NOTICE.get(sess.sid)
+    if not n or now - float(n.get("at") or 0) > PERSON_NOTICE_TTL_S:
+        return None
+    return {"code": n["code"], "at": n["at"]}
+
+
+def _person_tokens_sweep():
+    """Revue des tâches 2 à 5 (point 5) et tâche 12 : réglage éteint (par
+    l'interface ou par `sudo harvester-secrets person-token disable`), les
+    jetons de personne encore en mémoire sont révoqués aussitôt. Rend le
+    nombre de sessions révoquées."""
+    if _person_token_enabled() or not _sst.PERSON_TOKENS.count():
+        return 0
+    n = _sst.PERSON_TOKENS.drop_all()
+    if n:
+        log.info("person tokens off: %d OpenBao person token(s) revoked", n)
+    return n
 
 
 _sst.PERSON_TOKENS.guard = has_request_context
 _sst.PERSON_TOKENS.id_token = _sso_person_id_token
+_sst.PERSON_TOKENS.on_login = _person_seen
 
 
 def _sso_http(s):
@@ -1620,8 +1727,23 @@ def _secret_store_refused(e):
     message porte la classe, le nom et le code, jamais une valeur. Erreurs
     du client (valeur trop grosse, classe non migrable, chemin désigné par
     une autre déclaration) : 413, 400, 409 (revue M9 de la tâche 8)."""
-    status = _SECRET_ERROR_STATUS.get(e.code, 503)
+    status = _secret_error_status(e)
+    if status == 403:
+        _person_refusal_note(e.code)
     return jsonify({"error": str(e)[:300], "code": e.code}), status
+
+
+def _secret_error_status(e):
+    """Statut HTTP d'une SecretError. 2.10.0 (revue M8) : un refus fait à
+    une personne (OpenBao a refusé SON jeton, ou la connexion personnelle a
+    échoué) est un 403, pas une panne ; une panne d'OpenBao reste 503."""
+    code = getattr(e, "code", "")
+    if code in PERSON_REFUSAL_CODES or (code == "openbao-denied" and getattr(e, "person", False)):
+        return 403
+    return _SECRET_ERROR_STATUS.get(code, 503)
+
+
+PERSON_REFUSAL_CODES = ("openbao-person-login-failed", "openbao-person-no-token", "openbao-person-expired")
 
 
 _SECRET_ERROR_STATUS = {"secret-too-big": 413, "class-not-migratable": 400, "secret-path-owned": 409}
@@ -3107,6 +3229,26 @@ def _update_hand_over(name, chk, b, kind, steps):
                             "code": "secrets-in-openbao", "blockers": blockers,
                             "steps": list(_sst.BACK_TO_LOCAL_STEPS),
                             "hint": "; ".join(_sst.BACK_TO_LOCAL_STEPS)}), 409
+    # 2.10.0 (point 291) : une 2.9.x refuse à la revue de restauration tout
+    # instantané de B1 qui porte un montage `jwt-hops-*` ou l'écouteur ESO ;
+    # en mode A la configuration est chez le client : permis, avec un
+    # avertissement dans l'action
+    try:
+        below_pt = _su.parse_version(chk["version"])[:3] < _sst.PERSON_TOKEN_VERSION
+    except _su.UpdateError:
+        below_pt = True
+    pt_warning = None
+    if older and below_pt:
+        ptb = _sst.person_token_blockers(_state_dir())
+        if ptb.get("b1"):
+            return jsonify({"error": f"{chk['version']} would refuse every OpenBao B1 snapshot taken now: "
+                                     "remove the per-person token methods and External Secrets first",
+                            "code": "secrets-person-token-b1", "blockers": ptb["b1"],
+                            "steps": list(_sst.PERSON_TOKEN_BACK_STEPS),
+                            "hint": "; ".join(_sst.PERSON_TOKEN_BACK_STEPS)}), 409
+        if ptb.get("warnings"):
+            pt_warning = (f"mode A: the OpenBao administrator keeps the per-person token and External Secrets "
+                          f"configuration ({', '.join(sorted(ptb['warnings']))}); {chk['version']} ignores it")
     with _update_lock:
         if (d / _su.REQUEST).exists():
             return jsonify({"error": "an update is already requested"}), 409
@@ -3118,12 +3260,16 @@ def _update_hand_over(name, chk, b, kind, steps):
     run.cluster_user = current_user()
     with ACTIONS_LOCK:
         ACTIONS[run.id] = run
-    for sid, msg in steps + [("request", f"{_harvester_ops_version()} -> {chk['version']} handed to the host "
-                                         "agent; the console restarts in a moment")]:
+    for sid, msg in steps + ([("person-token", pt_warning)] if pt_warning else []) + [
+            ("request", f"{_harvester_ops_version()} -> {chk['version']} handed to the host "
+                        "agent; the console restarts in a moment")]:
         run.emit({"type": "step", "step_id": sid, "status": "done", "message": msg, "ts": time.time()})
     run.status, run.exit_code = "done", 0
     run.close()
-    return jsonify({"ok": True, "action_id": run.id, "version": chk["version"]}), 202
+    out = {"ok": True, "action_id": run.id, "version": chk["version"]}
+    if pt_warning:
+        out["warning"] = pt_warning
+    return jsonify(out), 202
 
 
 @app.route("/api/update/apply", methods=["POST"])
@@ -31445,7 +31591,7 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
         try:
             secret_identity = _tf_kvm_prefetch(decl, rendered, secret_identities)
         except _sst.SecretError as e:
-            raise TfLaunchError(_SECRET_ERROR_STATUS.get(e.code, 503),
+            raise TfLaunchError(_secret_error_status(e),
                                 {"error": str(e)[:300], "code": e.code}) from None
 
     with TF_DECL_RUNNING_LOCK:
@@ -34810,7 +34956,8 @@ _OFFLINE_DOWNLOADED = set()
 _OFFLINE_LOCK = threading.Lock()
 
 
-def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=(), clear_cache=False):
+def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=(), clear_cache=False,
+                         after_fn=None):
     """Action suivie `harvester-secrets ...`. `private` : valeurs tapées
     (jeton d'enveloppe, CA) remises à l'outil par un fichier 0600 sur tmpfs
     (`--spec`), effacé à la fin de l'action ; jamais en argument.
@@ -34835,7 +34982,12 @@ def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=
                 _sst.store().clear_cache()
             except Exception as e:              # noqa: BLE001 : jamais l'issue de l'action
                 log.warning("secret cache not emptied: %s", type(e).__name__)
-    after = _after if (spec or clear_cache) else None
+        if after_fn is not None:
+            try:
+                after_fn()
+            except Exception as e:              # noqa: BLE001 : jamais l'issue de l'action
+                log.warning("after the secret store action: %s", type(e).__name__)
+    after = _after if (spec or clear_cache or after_fn is not None) else None
     who = actor or (current_user() if _has_request() else None) or "console"
     run, err = _cli_action("", label, [sys.executable, str(script), "--actor", who, *args, *cmd_tail],
                            "harvester-secrets", check_busy=False, capture=True, cluster_user=None, after=after,
@@ -35098,12 +35250,21 @@ def _secrets_warnings(s, health, store_st, now=None):
         # 2.10.0 tâche 7 : clé de signature de Rancher absente des clés
         # statiques ; « Mettre à jour les clés » (person-token keys --refresh)
         out.append({"code": "openbao-jwt-keys-changed", "level": "error", "servers": changed})
+    unreadable = _person_keys_unreadable(s)
+    if unreadable:
+        out.append({"code": "openbao-jwt-keys-unreadable", "level": "warn", "servers": unreadable})
+    eso_changed = _eso_keys_changed(s)
+    if eso_changed:
+        out.append({"code": "eso-keys-changed", "level": "warn", "count": len(eso_changed)})
     return out
 
 
 # -- 2.10.0 tâche 7 : clés de signature des Rancher en clés statiques ---------
 PERSON_KEYS_CHECK_S = 3600
-_PERSON_KEYS = {"at": 0.0, "seen": {}}         # Rancher -> empreinte du JWKS relu
+# revue 6-7 M-7 : un JWKS illisible plusieurs passages de suite se dit au
+# bandeau (une rotation pendant la coupure ne se verrait pas)
+PERSON_KEYS_UNREADABLE_AFTER = 3
+_PERSON_KEYS = {"at": 0.0, "seen": {}, "fails": {}}   # Rancher -> empreinte relue, échecs de suite
 
 
 def _person_keys_tick(now=None, fetch=None):
@@ -35118,15 +35279,30 @@ def _person_keys_tick(now=None, fetch=None):
     _PERSON_KEYS["at"] = now
     fetch = fetch or _oj.fetch_json
     seen = {}
-    for rid, e in _oj.settings_of(_secrets_settings())["servers"].items():
+    fails = _PERSON_KEYS.setdefault("fails", {})
+    servers = _oj.settings_of(_secrets_settings())["servers"]
+    for rid in [r for r in fails if r not in servers]:
+        fails.pop(rid, None)
+    for rid, e in servers.items():
         if e.get("keys") != "static" or not e.get("issuer"):
             continue
         try:
             seen[rid] = _oj.keys_sha256(fetch(_oj.jwks_url(e["issuer"]), e.get("ca_pem")))
+            fails.pop(rid, None)
         except ValueError as ex:
+            fails[rid] = int(fails.get(rid) or 0) + 1
             log.warning("Rancher %s: JWKS not read (%s)", rid, str(ex)[:120])
     _PERSON_KEYS["seen"] = seen
     return dict(seen)
+
+
+def _person_keys_unreadable(s):
+    """Rancher en clés statiques dont le JWKS n'a pas pu être relu
+    PERSON_KEYS_UNREADABLE_AFTER passages de suite, triés."""
+    servers = _oj.settings_of(s)["servers"]
+    return sorted(rid for rid, n in (_PERSON_KEYS.get("fails") or {}).items()
+                  if rid in servers and servers[rid].get("keys") == "static"
+                  and n >= PERSON_KEYS_UNREADABLE_AFTER)
 
 
 def _person_keys_changed(s):
@@ -35193,7 +35369,11 @@ def _secrets_banner():
     return {"active": _sst.openbao_active(s), "mode": s.get("mode"), "state": st.get("state"),
             "down_since": st.get("down_since"), "cache_until": st.get("cache_until"),
             "error": st.get("error"), "jwt_keys_changed": bool(_person_keys_changed(s)),
-            "eso_keys_changed": bool(_eso_keys_changed(s))}
+            "jwt_keys_unreadable": bool(_person_keys_unreadable(s)),
+            "eso_keys_changed": bool(_eso_keys_changed(s)),
+            # 2.10.0 tâche 11 : dernier refus personnel de CETTE session
+            # (connexion personnelle refusée, reconnexion par Rancher demandée)
+            "person": _person_notice()}
 
 
 def _secrets_status(admin=False):
@@ -35405,6 +35585,10 @@ def _secrets_inline_action(label, fn):
 # -- tâches de fond -----------------------------------------------------------
 def _secrets_probe_tick():
     """Sonde `sys/health` (sans jeton) : état du bandeau et métrique."""
+    try:
+        _person_tokens_sweep()                 # 2.10.0 : réglage éteint = jetons révoqués
+    except Exception as e:                     # noqa: BLE001 : la sonde continue
+        log.warning("person token sweep failed: %s", type(e).__name__)
     s = _secrets_settings()
     if not _sst.openbao_active(s):
         metric_openbao_up.set(0)
@@ -35982,6 +36166,300 @@ def api_secrets_eso_keys():
                                     ["eso", "keys", "--cluster", m.group(0), "--refresh", "--kubeconfig", kc])
     if run is not None:
         _ESO_KEYS["seen"].pop(m.group(0), None)
+    return _secrets_accepted(run, err)
+
+
+# -- 2.10.0 tâche 11 : jeton OpenBao par personne (Paramètres > Secrets >
+# Jetons personnels). La console n'écrit jamais politique, rôle ni montage
+# (décision 287) : chaque geste est une action `harvester-secrets
+# person-token ...` (agent en B1, commandes rendues en A).
+PERSON_RANCHER_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+PERSON_TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+
+def _person_rancher_choices():
+    """Rancher dont la connexion unique est réglée : clé des réglages
+    (`config` pour celui de config.yaml), émetteur et client tirés des
+    réglages du Rancher, jamais de la requête."""
+    out = []
+    for srv_ in _rancher_servers():
+        st = _server_settings(srv_["id"])
+        if not st or not st.get("client_id"):
+            continue
+        out.append({"key": "config" if srv_["origin"] == "config" else srv_["id"], "id": srv_["id"],
+                    "label": srv_.get("label") or srv_["id"], "url": srv_.get("url"), "origin": srv_["origin"],
+                    "issuer": st.get("issuer"), "client_id": st.get("client_id"), "sso": bool(st.get("sso")),
+                    "ca_file": st.get("ca_file")})
+    return out
+
+
+def _person_me():
+    """La session de l'administrateur qui regarde : connexion unique avec
+    un jeton d'identité ? (la vérification 2 en a besoin). Jamais le jeton."""
+    sess = _sso_session()
+    if sess is None:
+        return {"sso": False, "rancher": None, "id_token": False, "kind": "local"}
+    return {"sso": getattr(sess, "kind", "sso") == "sso", "rancher": _rancher_key_of(sess),
+            "id_token": bool(getattr(sess, "id_token", None)), "kind": getattr(sess, "kind", "sso")}
+
+
+@app.route("/api/secrets/person-token", methods=["GET"])
+@requires_auth
+def api_secrets_person_token():
+    """État du jeton par personne, sans valeur : réglage, méthode de chaque
+    Rancher (réglée ou en attente des vérifications), clés, groupes,
+    entités vues, session de l'administrateur, bornes."""
+    s = _secrets_settings()
+    raw = _secrets_raw().get("person_token")
+    raw = raw if isinstance(raw, dict) else {}
+    servers = raw.get("servers") if isinstance(raw.get("servers"), dict) else {}
+    pending = raw.get("pending") if isinstance(raw.get("pending"), dict) else {}
+    changed, unreadable = set(_person_keys_changed(s)), set(_person_keys_unreadable(s))
+    fields = ("mount", "keys", "keys_sha256", "keys_pending_confirm", "configured_at", "configured_by",
+              "checked_at", "console_cidr")
+
+    def view(e, key):
+        if not isinstance(e, dict):
+            return None
+        return dict({f: e.get(f) for f in fields}, keys_changed=key in changed, keys_unreadable=key in unreadable)
+    choices = _person_rancher_choices()
+    known = {c["key"] for c in choices}
+    ranchers = [dict({k: c[k] for k in ("key", "id", "label", "url", "origin", "issuer", "client_id", "sso")},
+                     has_ca=bool(c.get("ca_file")), configured=view(servers.get(c["key"]), c["key"]),
+                     pending=view(pending.get(c["key"]), c["key"])) for c in choices]
+    # méthode réglée pour un Rancher retiré depuis : montrée pour qu'on la retire
+    for k in sorted((set(servers) | set(pending)) - known):
+        ranchers.append({"key": k, "id": k, "label": k, "url": None, "origin": "gone", "issuer": None,
+                         "client_id": None, "sso": False, "has_ca": False,
+                         "configured": view(servers.get(k), k), "pending": view(pending.get(k), k)})
+    groups = {str(n): {f: g.get(f) for f in ("classes", "clusters", "members", "at", "by")}
+              for n, g in (raw.get("groups") or {}).items() if isinstance(g, dict)}
+    ents = [dict(v, entity=k) for k, v in sorted(_person_entities().items(),
+                                                 key=lambda kv: -float(kv[1].get("last_at") or 0))]
+    return jsonify({"mode": s.get("mode"), "active": _sst.openbao_active(s),
+                    "enabled": raw.get("enabled") is True, "groups_only": raw.get("groups_only") is True,
+                    "ranchers": ranchers, "groups": groups, "entities": ents, "me": _person_me(),
+                    "tokens": _sst.PERSON_TOKENS.count(), "group_classes": list(_opol.GROUP_CLASSES),
+                    "limits": {"ranchers": _opol.MAX_PERSON_MOUNTS, "groups": _opol.MAX_GROUPS,
+                               "members": _opol.MAX_GROUP_MEMBERS}})
+
+
+def _person_rancher_arg(data):
+    """(choix du Rancher, refus) : la clé doit désigner un Rancher réglé."""
+    key = str(data.get("rancher") or "")
+    if not PERSON_RANCHER_RE.match(key):
+        return None, (jsonify({"error": "rancher: the key of a Rancher", "code": "bad-input"}), 400)
+    c = next((x for x in _person_rancher_choices() if x["key"] == key), None)
+    if c is None:
+        return None, (jsonify({"error": f"no Rancher with sign-in set: {key}", "code": "rancher-unknown"}), 404)
+    return c, None
+
+
+def _person_cidr_arg(value):
+    """Plage par laquelle OpenBao voit la console (mode A) ; jamais une
+    plage qui ouvre tout (revue 6-7 M-5)."""
+    import ipaddress
+    try:
+        net = ipaddress.ip_network(str(value or ""), strict=False)
+    except ValueError:
+        return None
+    return str(net) if net.prefixlen >= 8 else None
+
+
+@app.route("/api/secrets/person-token/assistant", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_person_token_assistant():
+    """Pose (B1, agent) ou commandes (A) de la méthode jwt d'un Rancher.
+    Émetteur, client et CA viennent des réglages du Rancher."""
+    data = _secrets_body()
+    c, refused = _person_rancher_arg(data)
+    if refused:
+        return refused
+    keys = str(data.get("keys") or "discovery")
+    if keys not in ("discovery", "static"):
+        return jsonify({"error": "keys: discovery or static", "code": "bad-input"}), 400
+    s = _secrets_settings()
+    if not _sst.openbao_active(s):
+        return jsonify({"error": "OpenBao is not active", "code": "openbao-inactive"}), 409
+    if s.get("mode") == "b1" and keys == "static":
+        return jsonify({"error": "in mode B1 OpenBao reads the keys of Rancher by discovery",
+                        "code": "person-token-static-mode-a"}), 400
+    args = ["person-token", "assistant", "--rancher", c["key"], "--issuer", c["issuer"], "--client-id",
+            c["client_id"], "--keys", keys]
+    if s.get("mode") == "a":
+        cidr = _person_cidr_arg(data.get("console_cidr"))
+        if not cidr:
+            return jsonify({"error": "console_cidr: the address OpenBao sees for the console (a /8 or "
+                                     "narrower network)", "code": "bad-input"}), 400
+        args += ["--console-cidr", cidr]
+    private = None
+    if c.get("ca_file"):
+        try:
+            ca = Path(c["ca_file"]).read_text()
+        except OSError:
+            return jsonify({"error": "the CA file of this Rancher is unreadable", "code": "rancher-ca"}), 409
+        if len(ca) > 65536:
+            return jsonify({"error": "the CA of this Rancher is too long", "code": "rancher-ca"}), 409
+        private = {"rancher_ca": ca}
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-assistant:{c['key']}", args,
+                                                   private=private))
+
+
+def _person_check_args(data, what):
+    """check et enable : le jeton d'identité de l'administrateur connecté
+    par CE Rancher part par le fichier de spécification (0600, tmpfs),
+    jamais en argument ni dans une réponse."""
+    c, refused = _person_rancher_arg(data)
+    if refused:
+        return None, None, refused
+    sess = _sso_session()
+    if sess is None or getattr(sess, "kind", "sso") != "sso" or not getattr(sess, "id_token", None):
+        return None, None, (jsonify({"error": "connect through Rancher to run the checks: a real sign-in "
+                                              "with your own identity token is one of them",
+                                     "code": "openbao-person-no-token"}), 409)
+    if _rancher_key_of(sess) != c["key"]:
+        return None, None, (jsonify({"error": f"you are connected through another Rancher: connect through "
+                                              f"{c['label']} to check its method",
+                                     "code": "person-token-other-rancher"}), 409)
+    return c, {"id_token": sess.id_token}, None
+
+
+@app.route("/api/secrets/person-token/check", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_person_token_check():
+    c, private, refused = _person_check_args(_secrets_body(), "check")
+    if refused:
+        return refused
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-check:{c['key']}",
+                                                   ["person-token", "check", "--rancher", c["key"]], private=private))
+
+
+@app.route("/api/secrets/person-token/enable", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_person_token_enable():
+    """Activation à chaud (point 290) : l'outil rejoue les cinq
+    vérifications et n'allume le réglage que si toutes sont vertes."""
+    c, private, refused = _person_check_args(_secrets_body(), "enable")
+    if refused:
+        return refused
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-enable:{c['key']}",
+                                                   ["person-token", "enable", "--rancher", c["key"]],
+                                                   private=private))
+
+
+@app.route("/api/secrets/person-token/disable", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_person_token_disable():
+    """Désactivation à chaud (point 291) : sans Rancher, réglage éteint et
+    jetons de personne révoqués aussitôt ; `remove` retire aussi les
+    méthodes jwt (et les groupes, sans Rancher) d'OpenBao, identifiant de
+    la console retapé."""
+    data = _secrets_body()
+    remove = data.get("remove") is True
+    if remove and not _secrets_confirm_ok(data):
+        return jsonify({"error": "type the console identifier to confirm", "code": "confirmation-required"}), 400
+    key = str(data.get("rancher") or "")
+    args = ["person-token", "disable"]
+    mount = None
+    if key:
+        if not PERSON_RANCHER_RE.match(key):
+            return jsonify({"error": "rancher: the key of a Rancher", "code": "bad-input"}), 400
+        raw = _secrets_raw().get("person_token") or {}
+        entry = ((raw.get("servers") or {}).get(key) or (raw.get("pending") or {}).get(key)) \
+            if isinstance(raw, dict) else None
+        if not isinstance(entry, dict):
+            return jsonify({"error": f"no jwt auth method for the Rancher {key}", "code": "person-token-unconfigured"}), 404
+        mount = entry.get("mount")
+        args += ["--rancher", key]
+    if remove:
+        args.append("--remove")
+
+    def revoke():
+        # jetons des personnes révoqués dès la fin de l'action (point 5 de
+        # la revue des tâches 2 à 5) : réglage éteint, ou méthode retirée
+        if mount:
+            _sst.PERSON_TOKENS.drop_mount(mount)
+        _person_tokens_sweep()
+    label = f"secrets:person-token-{'remove' if remove else 'disable'}" + (f":{key}" if key else "")
+    return _secrets_accepted(*_secrets_tool_action(label, args, after_fn=revoke))
+
+
+@app.route("/api/secrets/person-token/groups", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_person_token_groups():
+    """Groupe interne (décision 303 A) : classes, clusters (ou hôtes KVM,
+    ou clés ESO), membres choisis parmi les entités vues ; retrait."""
+    data = _secrets_body()
+    name = str(data.get("name") or "")
+    if not _opol.GROUP_RE.match(name):
+        return jsonify({"error": "name: lowercase letters, digits and dashes (31 at most)", "code": "bad-input"}), 400
+    if data.get("remove") is True:
+        return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-group-remove:{name}",
+                                                       ["person-token", "groups", "remove", name]))
+    classes, clusters, members = data.get("classes"), data.get("clusters"), data.get("members") or []
+    if not isinstance(classes, list) or not classes or any(c not in _opol.GROUP_CLASSES for c in classes):
+        return jsonify({"error": "classes: " + ", ".join(_opol.GROUP_CLASSES), "code": "bad-input"}), 400
+    if not isinstance(clusters, list) or not clusters or len(clusters) > 200 \
+            or any(not PERSON_TARGET_RE.match(str(c)) for c in clusters):
+        return jsonify({"error": "clusters: names of clusters, KVM hosts or ESO keys", "code": "bad-input"}), 400
+    if not isinstance(members, list) or len(members) > _opol.MAX_GROUP_MEMBERS \
+            or any(not _ENTITY_ID_RE.match(str(m)) for m in members):
+        return jsonify({"error": f"members: entity ids ({_opol.MAX_GROUP_MEMBERS} at most)",
+                        "code": "bad-input"}), 400
+    raw = _secrets_raw().get("person_token") or {}
+    groups = raw.get("groups") if isinstance(raw, dict) and isinstance(raw.get("groups"), dict) else {}
+    if name not in groups and len(groups) >= _opol.MAX_GROUPS:
+        return jsonify({"error": f"at most {_opol.MAX_GROUPS} groups", "code": "limit-groups"}), 409
+    try:
+        _opol.group_rules(_opol.DEFAULT_MOUNT, "consoles/x", "abc123def456", name, classes, clusters)
+        _opol.group_body("abc123def456", name, members)
+    except ValueError as e:
+        return jsonify({"error": str(e), "code": "bad-input"}), 400
+    args = ["person-token", "groups", "set", name]
+    for c in classes:
+        args += ["--class", c]
+    for c in clusters:
+        args += ["--cluster", str(c)]
+    for m in members:
+        args += ["--member", str(m)]
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-group:{name}", args))
+
+
+@app.route("/api/secrets/person-token/groups-only", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_person_token_groups_only():
+    """Réglage « lecture seulement par groupe » : la politique commune est
+    réduite à `capabilities-self` (ou rendue)."""
+    on = _secrets_body().get("on")
+    if not isinstance(on, bool):
+        return jsonify({"error": "on: true or false", "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action("secrets:person-token-groups-only",
+                                                   ["person-token", "groups", "only", "on" if on else "off"]))
+
+
+@app.route("/api/secrets/person-token/keys", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_person_token_keys():
+    """« Mettre à jour les clés » d'un Rancher en clés statiques (mode A,
+    `openbao-jwt-keys-changed`) : ancienne et nouvelle clé ensemble, puis
+    confirmation qui ne garde que les clés publiées."""
+    data = _secrets_body()
+    key = str(data.get("rancher") or "")
+    if not PERSON_RANCHER_RE.match(key):
+        return jsonify({"error": "rancher: the key of a Rancher", "code": "bad-input"}), 400
+    what = "--confirm" if data.get("confirm") is True else "--refresh"
+    run, err = _secrets_tool_action(f"secrets:person-token-keys:{key}",
+                                    ["person-token", "keys", "--rancher", key, what])
+    if run is not None:
+        _PERSON_KEYS["seen"].pop(key, None)
+        (_PERSON_KEYS.get("fails") or {}).pop(key, None)
     return _secrets_accepted(run, err)
 
 

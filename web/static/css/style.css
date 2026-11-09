@@ -6162,3 +6162,20 @@ pre.eso-yaml { white-space: pre; overflow-x: auto; }
 }
 .sx-eso-clusters td:first-child code { white-space: nowrap; }
 .capi-eso [data-e-fields][hidden], .capi-eso [data-e-reason][hidden] { display: none; }
+
+/* 2.10.0 : jetons OpenBao par personne (Paramètres > Secrets > Jetons personnels) */
+.sx-pt-ranchers td, .sx-pt-groups-table td, .sx-pt-entity-table td { vertical-align: top; }
+.sx-pt-ranchers td:nth-child(2) code { white-space: nowrap; font-size: 12px; }
+.sx-pt-ranchers td:nth-child(5) { min-width: 120px; }
+.sx-pt-classes { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; margin: 8px 0;
+  display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.sx-pt-classes legend { padding: 0 4px; color: var(--text-dim); font-size: 12px; }
+.sx-pt-classes label { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
+.sx-pt-me { margin: 0 0 8px; }
+.secrets-banner.sx-notes .an-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 0; }
+.activity-type-badge.sid-person { background: var(--done); color: white; }
+.activity-type-badge.sid-service { background: var(--bg-elev); color: var(--text-dim); }
+.activity-type-badge.sid-late-service { background: var(--warn, #b7791f); color: white; }
+@media (max-width: 600px) {
+  .sx-pt-ranchers .sx-row-actions .btn { width: 100%; justify-content: center; }
+}

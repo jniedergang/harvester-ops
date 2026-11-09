@@ -226,6 +226,9 @@ class PersonTokens:
         self.id_token = id_token or (lambda _sid: None)
         self.base = None
         self._purgers = []        # weakref.WeakMethod : purge du cache d'une entité
+        # 2.10.0 tâche 11 : rappel `on_login(session, entité)` après chaque
+        # connexion réussie (entités vues, bandeau) ; jamais de jeton
+        self.on_login = None
 
     def __repr__(self):
         with self._lock:
@@ -305,7 +308,16 @@ class PersonTokens:
     def _login(self, session_id, mount, role, jwt):
         c, entity = self._connect(mount, role, jwt)
         self.set(session_id, c, entity, mount)
+        self._logged_in(session_id, entity)
         return c
+
+    def _logged_in(self, session_id, entity):
+        fn = self.on_login
+        if fn is not None:
+            try:
+                fn(session_id, entity)
+            except Exception:                    # noqa: BLE001 : le rappel ne bloque jamais une lecture
+                pass
 
     def login(self, identity):
         """Connexion de la personne avec le jeton d'identité de sa session
@@ -387,6 +399,7 @@ class PersonTokens:
                 return False
             if cur["client"] is not None:
                 _revoke_quietly(cur["client"])
+            self._logged_in(session_id, entity)
             return True
 
     def forget(self, session_id, client=None):
@@ -427,6 +440,20 @@ class PersonTokens:
         for sid in sids:
             self.drop(sid)
         return len(sids)
+
+    def drop_mount(self, mount):
+        """Révoque les jetons des sessions connectées par le montage `mount`
+        (méthode d'un Rancher retirée). Rend le nombre de sessions."""
+        with self._lock:
+            sids = [sid for sid, e in self._d.items() if e.get("mount") == mount]
+        for sid in sids:
+            self.drop(sid)
+        return len(sids)
+
+    def count(self):
+        """Sessions qui portent un jeton de personne (aucun jeton rendu)."""
+        with self._lock:
+            return sum(1 for e in self._d.values() if e["client"] is not None)
 
 
 def _revoke_quietly(client):
@@ -481,8 +508,11 @@ class SecretError(Exception):
     `secret-files-not-tmpfs`, `class-not-migratable`, `secret-too-big`, ou un
     code du client OpenBao), la classe et le nom visés. Jamais de valeur."""
 
-    def __init__(self, code, cls=None, name=None, detail=""):
+    def __init__(self, code, cls=None, name=None, detail="", person=False):
         self.code, self.cls, self.name, self.detail = code, cls, name, str(detail or "")[:300]
+        # 2.10.0 (revue M8) : refus fait à une personne par OpenBao (son
+        # jeton), rendu 403 par la console au lieu de 503
+        self.person = bool(person) or str(code).startswith("openbao-person-")
         super().__init__(code, cls, name, self.detail)
 
     def __str__(self):
@@ -490,7 +520,7 @@ class SecretError(Exception):
         return f"{self.code}:{where}" + (f" ({self.detail})" if self.detail else "")
 
     def __reduce__(self):
-        return (SecretError, (self.code, self.cls, self.name, self.detail))
+        return (SecretError, (self.code, self.cls, self.name, self.detail, self.person))
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +680,44 @@ def openbao_blockers(state_dir=None, tf_root=None):
     if enc:
         out["encrypted"] = enc
     return out
+
+
+# 2.10.0 (point 291) : une console d'avant la 2.10.0 refuse, à la revue de
+# restauration, tout instantané de B1 qui porte un montage `jwt-hops-*` ou
+# l'écouteur ESO : retour sous la 2.10.0 refusé tant que B1 en porte un
+PERSON_TOKEN_VERSION = (2, 10, 0)
+PERSON_TOKEN_BACK_STEPS = (
+    "remove the jwt auth methods of the Rancher sign-in: Settings > Secret store > Personal tokens > "
+    "Remove everything, or harvester-secrets person-token disable --remove",
+    "remove External Secrets from every child cluster and turn the listener off: "
+    "harvester-secrets eso remove --all",
+)
+
+
+def person_token_blockers(state_dir=None):
+    """Ce que B1 porte de la 2.10.0 d'après les réglages de la console :
+    méthodes `jwt` des Rancher (réglées ou en attente de vérification),
+    groupes, écouteur ESO, clusters enfants ESO ({} si rien). En mode A la
+    configuration est chez le client et ne gêne pas une 2.9.x : seulement
+    `warnings`."""
+    s = load_settings(state_dir)
+    pt = s.get("person_token") if isinstance(s.get("person_token"), dict) else {}
+    eso = s.get("eso") if isinstance(s.get("eso"), dict) else {}
+    found = {}
+    jwt = sorted(set(pt.get("servers") or {}) | set(pt.get("pending") or {}))
+    if jwt:
+        found["jwt"] = jwt
+    if pt.get("groups"):
+        found["groups"] = sorted(pt["groups"])
+    if eso.get("listener"):
+        found["eso_listener"] = eso["listener"]
+    if eso.get("clusters"):
+        found["eso_clusters"] = sorted(eso["clusters"])
+    if not found:
+        return {}
+    if s.get("mode") == "b1":
+        return {"b1": found}
+    return {"warnings": found} if s.get("mode") == "a" else {}
 
 
 def load_settings(state_dir=None):
@@ -1504,6 +1572,7 @@ class OpenBaoStore:
                                      or (e.code == "openbao-denied" and not self._still_valid(c))):
                     self._persons.forget(idt.session_id, c)
                     continue
+                e.person = True                  # revue M8 : refus fait à la personne
                 raise
         raise AssertionError("unreachable")
 
@@ -1530,7 +1599,8 @@ class OpenBaoStore:
                 self.last_error = e.code
         if getattr(e, "code", None) == "openbao-missing":
             return None
-        return SecretError(getattr(e, "code", "openbao-unreachable"), cls, name, getattr(e, "detail", ""))
+        return SecretError(getattr(e, "code", "openbao-unreachable"), cls, name, getattr(e, "detail", ""),
+                           person=getattr(e, "person", False))
 
     def _ok(self):
         with self._lock:

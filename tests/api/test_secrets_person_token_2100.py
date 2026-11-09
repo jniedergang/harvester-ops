@@ -290,8 +290,9 @@ def test_disable_global_then_per_rancher_with_remove(env, capsys, rancher):
     rc, doc, _ = cli(["person-token", "disable", "--rancher", "rmgr", "--remove"], capsys=capsys)
     assert rc == 0 and "rmgr" not in read_settings(env)["person_token"]["servers"]
     assert doc["commands"][-2:] == [f"bao auth disable {MOUNT}", f"bao policy delete {pol.person_policy_name(CID)}"]
+    # tâche 12 : sans --rancher, --remove retire tout (ici, plus rien à retirer)
     rc, doc, _ = cli(["person-token", "disable", "--remove"], capsys=capsys)
-    assert rc == 2
+    assert rc == 0 and doc["removed"] == [] and doc["groups_removed"] == [] and doc["commands"] is None
 
 
 def test_groups_mode_a(env, capsys, rancher):
@@ -425,3 +426,54 @@ def test_console_watch_survives_an_unreachable_rancher(watch):
         raise ValueError(f"{url}: URLError")
     assert wapp._person_keys_tick(now=10_000, fetch=down) == {}
     assert wapp._person_keys_changed(doc) == []
+
+
+# ---------------------------------------------------------------------------
+# Tâche 12 : tout retirer avant un retour sous la 2.10.0 ; bornes (revue 6-7 M-8)
+# ---------------------------------------------------------------------------
+def _two_ranchers_and_a_group(env):
+    doc = read_settings(env)
+    doc["person_token"] = {"enabled": True, "servers": {"rmgr": {"mount": MOUNT}},
+                           "pending": {"lab": {"mount": f"jwt-hops-{CID}-p-lab"}},
+                           "groups": {"ops": {"classes": ["ssh-kvm"], "clusters": ["node2"], "members": []}}}
+    (env["state"] / "secrets-settings.json").write_text(json.dumps(doc))
+
+
+def test_remove_everything_b1_asks_the_agent_groups_first(env, capsys, monkeypatch):
+    settings(env, mode="b1")
+    _two_ranchers_and_a_group(env)
+    sent = []
+    monkeypatch.setattr(hsc, "run_agent", lambda req, timeout=None: sent.append(req) or {"state": "done"})
+    rc, doc, _ = cli(["person-token", "disable", "--remove"], capsys=capsys)
+    assert rc == 0, doc
+    assert sent == [{"op": "b1-groups", "name": "ops", "remove": True},
+                    {"op": "b1-jwt-remove", "rancher": "lab"}, {"op": "b1-jwt-remove", "rancher": "rmgr"}]
+    pt = read_settings(env)["person_token"]
+    assert pt["enabled"] is False and not pt["servers"] and not pt["pending"] and not pt["groups"]
+    assert doc["removed"] == ["lab", "rmgr"] and doc["groups_removed"] == ["ops"] and doc["commands"] is None
+
+
+def test_remove_everything_mode_a_gives_one_command_list(env, capsys):
+    mode_a(env)
+    _two_ranchers_and_a_group(env)
+    rc, doc, _ = cli(["person-token", "disable", "--remove"], capsys=capsys)
+    assert rc == 0, doc
+    cmds = doc["commands"]
+    assert sum(1 for c in cmds if c.startswith("export BAO_ADDR")) == 1           # une seule ligne d'adresse
+    assert f"bao delete identity/group/name/hops-{CID}-ops" in cmds
+    assert f"bao auth disable jwt-hops-{CID}-p-lab" in cmds and f"bao auth disable {MOUNT}" in cmds
+    assert cmds[-1] == f"bao policy delete {pol.person_policy_name(CID)}"          # avec le dernier Rancher
+
+
+def test_limits_of_mounts_and_groups(env, capsys, rancher):
+    mode_a(env)
+    doc = read_settings(env)
+    doc["person_token"] = {"pending": {f"r{i}": {"mount": f"m{i}"} for i in range(pol.MAX_PERSON_MOUNTS)},
+                           "groups": {f"g{i}": {} for i in range(pol.MAX_GROUPS)}}
+    (env["state"] / "secrets-settings.json").write_text(json.dumps(doc))
+    rc, out, _ = assistant(env, capsys)
+    assert rc == 2 and out["code"] == "limit-jwt-mounts"
+    rc, out, _ = cli(["person-token", "groups", "set", "new", "--class", "ssh-kvm", "--cluster", "a"], capsys=capsys)
+    assert rc == 2 and out["code"] == "limit-groups"
+    rc, out, _ = cli(["person-token", "groups", "set", "g3", "--class", "ssh-kvm", "--cluster", "a"], capsys=capsys)
+    assert rc == 0, out                                                             # un groupe existant se modifie
