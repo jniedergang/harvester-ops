@@ -100,11 +100,21 @@ def world(env, tmp_path, monkeypatch):
 
 
 def wait(run_id, timeout=15):
+    """Action finie ET rangée : le fil écrit le statut final en mémoire, puis
+    ferme l'action (persistance dans actions.db), puis rend le verrou du
+    cluster. Revenir au seul statut laissait la suite (reprise relue dans
+    actions.db, défaire) courir contre la fermeture : tests instables sous
+    `-n 12` (revue finale 2.10.0 m-9)."""
     end = time.time() + timeout
     while time.time() < end:
         run = wapp.ACTIONS.get(run_id)
         if run is not None and run.status in ("done", "error", "cancelled"):
-            return run
+            while time.time() < end:
+                row, _ev = wapp._actions_db_get(run_id)
+                if getattr(run, "_closed", False) and (row or {}).get("status") == run.status:
+                    return run
+                time.sleep(0.02)
+            break
         time.sleep(0.02)
     raise AssertionError(f"action {run_id} did not end")
 
