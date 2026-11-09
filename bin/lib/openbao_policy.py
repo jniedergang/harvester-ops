@@ -55,6 +55,9 @@ WRAP_TTL = "15m"
 # Mode B1 (plan, « Mode B1 : OpenBao à côté de la console »)
 B1_LISTEN = "127.0.0.1:8210"
 B1_CLUSTER_LISTEN = "127.0.0.1:8211"
+# tâche 13 (réel) : port de cluster de l'écouteur ESO, sur la boucle locale
+# (sans lui, OpenBao l'ouvre sur <adresse de l'hôte>:<port+1>)
+ESO_CLUSTER_LISTEN = "127.0.0.1:8213"
 B1_ADDR = "https://127.0.0.1:8210"
 B1_CLUSTER_ADDR = "https://127.0.0.1:8211"
 B1_CIDR = "127.0.0.1/32"
@@ -689,7 +692,9 @@ def check_eso_listen(address):
 
 def eso_listener_block(address):
     """Strophe du second écouteur (point 298) : TLS par le certificat de
-    l'écouteur ESO, sans adresse de cluster (raft reste sur 127.0.0.1)."""
+    l'écouteur ESO. Son port de cluster est posé sur la boucle locale : sans
+    `cluster_address`, OpenBao 2.7.2 l'ouvre sur <adresse>:<port+1>, sur le
+    réseau des nœuds enfants (vu en banc, tâche 13)."""
     ip, port = check_eso_listen(address)
     # revue 8-10 I-5 : cet écouteur expose toute l'API sur le réseau des nœuds
     # enfants. Les rôles AppRole de la console et de l'agent, le rôle des
@@ -701,6 +706,7 @@ def eso_listener_block(address):
     return "\n".join(['# Écouteur ESO (2.10.0) : API joignable du réseau des nœuds enfants ; les rôles de la',
                       '# console, des personnes et les jetons d\'OpenTofu sont liés à 127.0.0.1/32',
                       'listener "tcp" {', f'  address       = "{ip}:{port}"',
+                      f'  cluster_address = "{ESO_CLUSTER_LISTEN}"',
                       f'  tls_cert_file = "{C_ESO_CERT}"', f'  tls_key_file  = "{C_ESO_KEY}"',
                       "  disable_unauthed_rekey_endpoints = true", "}"])
 

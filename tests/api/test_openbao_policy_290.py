@@ -508,7 +508,14 @@ def test_b1_config_eso_listener_only_at_its_line():
     on = pol.b1_config(CID, "hops-20261108-1", tpl, eso_listener="172.16.1.11:8212")
     assert on.count('listener "tcp"') == 2
     assert 'address       = "172.16.1.11:8212"' in on and pol.C_ESO_CERT in on and pol.C_ESO_KEY in on
-    assert on.count("cluster_address") == 1                         # raft reste sur 127.0.0.1
+    # tâche 13 (réel) : sans `cluster_address`, OpenBao ouvre aussi un port de
+    # cluster sur <adresse>:<port+1> (172.16.1.11:8213 vu en banc) ; il reste
+    # sur la boucle locale
+    assert on.count("cluster_address") == 2
+    eso = on[on.index('address       = "172.16.1.11:8212"'):]
+    eso = eso[:eso.index("}")]
+    assert f'cluster_address = "{pol.ESO_CLUSTER_LISTEN}"' in eso and pol.ESO_CLUSTER_LISTEN.startswith("127.0.0.1:")
+    assert pol.ESO_CLUSTER_LISTEN != pol.B1_CLUSTER_LISTEN
     old = tpl.replace("__ESO_LISTENER__\n", "")
     assert pol.b1_config(CID, "hops-20261108-1", old).count('listener "tcp"') == 1
     with pytest.raises(ValueError, match="__ESO_LISTENER__"):
