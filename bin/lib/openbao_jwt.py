@@ -93,6 +93,25 @@ def person_policy_name(console_id):
     return f"hops-person-{console_id}"
 
 
+# revue finale 2.10.0 m-2 : plage la plus large admise pour l'adresse de la
+# console vue par OpenBao en mode A (le rôle `person` y lie connexion et jeton)
+CONSOLE_CIDR_MIN_PREFIX = {4: 8, 6: 32}
+
+
+def console_cidr(value):
+    """Plage de la console en mode A, normalisée ; ValueError si illisible
+    ou trop large (jamais 0.0.0.0/0). Borne commune à l'outil et à la route."""
+    import ipaddress
+    try:
+        net = ipaddress.ip_network(str(value or ""), strict=False)
+    except ValueError:
+        raise ValueError(f"console address range: not a network ({str(value)[:60]!r})") from None
+    low = CONSOLE_CIDR_MIN_PREFIX[net.version]
+    if net.prefixlen < low:
+        raise ValueError(f"console address range too wide: /{low} at least for IPv{net.version}")
+    return str(net)
+
+
 def person_role_params(client_id, console_cidr, console_id, groups_claim=None):
     """Paramètres du rôle `person` (`auth/<montage>/role/person`). Le
     jeton OpenBao d'une personne vit 15 minutes, n'est accepté que depuis

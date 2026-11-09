@@ -161,6 +161,8 @@ def test_assistant_b1_without_ca(wapp, pt):
     ({"rancher": "config", "console_cidr": "0.0.0.0/0"}, "a", 400, "bad-input"),       # revue 6-7 M-5
     ({"rancher": "config", "console_cidr": "10.0.0.0/7"}, "a", 400, "bad-input"),
     ({"rancher": "config", "console_cidr": "not-a-net"}, "a", 400, "bad-input"),
+    ({"rancher": "config", "console_cidr": "2000::/8"}, "a", 400, "bad-input"),         # revue finale m-2
+    ({"rancher": "config", "console_cidr": "2001:db8::/31"}, "a", 400, "bad-input"),
 ])
 def test_assistant_refusals(wapp, pt, body, mode, status, code):
     pt.set(mode=mode)

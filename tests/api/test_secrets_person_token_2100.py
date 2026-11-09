@@ -137,6 +137,10 @@ def test_assistant_static_keys_unreadable_fails(env, capsys, rancher):
     (["--issuer", "https://rancher.example"], "bad-input"),
     (["--client-id", "a b"], "bad-input"),
     (["--console-cidr", "nope"], "bad-input"),
+    (["--console-cidr", "0.0.0.0/0"], "bad-input"),                 # revue finale m-2 (m-3 de la revue)
+    (["--console-cidr", "10.0.0.0/7"], "bad-input"),
+    (["--console-cidr", "2000::/8"], "bad-input"),
+    (["--console-cidr", "2001:db8::/31"], "bad-input"),
 ])
 def test_assistant_bad_input(env, capsys, rancher, args, code):
     mode_a(env)

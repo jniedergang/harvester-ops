@@ -36264,12 +36264,11 @@ def _person_rancher_arg(data):
 def _person_cidr_arg(value):
     """Plage par laquelle OpenBao voit la console (mode A) ; jamais une
     plage qui ouvre tout (revue 6-7 M-5)."""
-    import ipaddress
+    import openbao_jwt as _oj
     try:
-        net = ipaddress.ip_network(str(value or ""), strict=False)
+        return _oj.console_cidr(value)
     except ValueError:
         return None
-    return str(net) if net.prefixlen >= 8 else None
 
 
 @app.route("/api/secrets/person-token/assistant", methods=["POST"])

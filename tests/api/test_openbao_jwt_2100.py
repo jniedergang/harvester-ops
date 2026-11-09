@@ -352,3 +352,19 @@ def test_eso_role_bound_to_account_uids(uids, bound):
 def test_eso_account_uids_refused(uids):
     with pytest.raises(ValueError):
         oj.eso_role_params(CID, "1d905023", ["team-a", "team-b"], sa_uids=uids)
+
+
+@pytest.mark.parametrize("value,want", [
+    ("10.1.2.3/32", "10.1.2.3/32"), ("10.0.0.0/8", "10.0.0.0/8"), ("10.1.2.3", "10.1.2.3/32"),
+    ("2001:db8::/32", "2001:db8::/32"), ("2001:db8::1", "2001:db8::1/128"),
+    ("0.0.0.0/0", None), ("10.0.0.0/7", None), ("::/0", None), ("2000::/8", None), ("2001:db8::/31", None),
+    ("nope", None), ("", None), (None, None),
+])
+def test_console_cidr_bounds(value, want):
+    """Revue finale m-2 (m-3 de la revue) : borne commune de la plage de la
+    console en mode A (IPv4 /8 au moins, IPv6 /32 au moins), outil et route."""
+    if want is None:
+        with pytest.raises(ValueError):
+            oj.console_cidr(value)
+    else:
+        assert oj.console_cidr(value) == want

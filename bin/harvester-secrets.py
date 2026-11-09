@@ -2237,6 +2237,11 @@ def _pt_assistant(args):
     cidr = pol.B1_CIDR if s["mode"] == "b1" else args.console_cidr
     if s["mode"] != "b1" and not cidr:
         return refuse("bad-input", "mode a needs --console-cidr (the address OpenBao sees for the console)")
+    if s["mode"] != "b1":
+        try:
+            cidr = oj.console_cidr(cidr)
+        except ValueError as e:
+            return refuse("bad-input", str(e))
     rancher_ca = _pt_rancher_ca(args)
     try:
         mount = oj.person_mount(cid, args.rancher)
