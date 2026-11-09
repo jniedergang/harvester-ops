@@ -795,6 +795,13 @@ def seal_block(key_id, previous_key_id=None):
     return "\n".join(out + ["}"]) + "\n"
 
 
+def template_without_eso(template):
+    """Revue finale 2.10.0 I-2 : le modèle de B1 sans la ligne
+    `__ESO_LISTENER__`, que le rendu de la 2.9.x laisserait telle quelle
+    (configuration illisible). Ce que lit un agent 2.9.x après un retour."""
+    return re.sub(r"^__ESO_LISTENER__\n?", "", template, flags=re.M)
+
+
 def b1_config(cid, key_id, template, previous_key_id=None, init=True, mount=DEFAULT_MOUNT, eso_listener=None):
     """Configuration de B1 depuis le modèle (`config/openbao/openbao.hcl.tpl`,
     porté par le paquet OpenBao) : écoute, stockage raft, audit, descellement

@@ -133,6 +133,13 @@ CONSOLE_UNIT = "harvester-ops.service"
 CONTAINER = "harvester-ops-openbao"
 ACCOUNT = "harvester-ops-openbao"
 IMAGE = "localhost/harvester-ops-openbao"
+# revue finale 2.10.0 I-2 : le modèle de la 2.10 (ligne `__ESO_LISTENER__`)
+# vit sous ce nom ; `openbao.hcl.tpl` garde la même chose sans cette ligne,
+# seul nom que lit un agent 2.9.x après un retour arrière (son rendu ne
+# remplace que __SEAL__ et __INITIALIZE__ : la ligne resterait telle quelle et
+# OpenBao ne redémarrerait plus à la rotation ou à la restauration)
+TEMPLATE_2100 = "openbao-eso.hcl.tpl"
+TEMPLATE_29 = "openbao.hcl.tpl"
 SECRET, SECRET_PREV = "hops-openbao-unseal", "hops-openbao-unseal-prev"
 SECRET_ID_MAX_AGE = 30 * 86400          # point 260
 OLD_VOLUME_DAYS = 7
@@ -996,7 +1003,7 @@ class Agent:
         self.step("config", "running")
         self.render(st, info["template"], init=True)
         self.own(self.p.b1_etc / "openbao.hcl", uid)
-        _w(self.p.b1_etc / "openbao.hcl.tpl", info["template"], 0o644)
+        self._store_template(info["template"])
         self.unit_env(uid, f"{IMAGE}:current")
         self.p.logrotate.parent.mkdir(parents=True, exist_ok=True)
         _w(self.p.logrotate, pol.logrotate_conf(self.p.b1_data / "audit", ACCOUNT, CONTAINER), 0o644)
@@ -1087,7 +1094,7 @@ class Agent:
         """Retour arrière : configuration retirée ; la clé de descellement
         gardée seulement si sa copie hors ligne a été acquittée (elle resservira
         au prochain essai, la copie reste valable)."""
-        for f in ("openbao.hcl", "openbao.hcl.tpl", "unit.env", "ca.pem", "agent-role-id", "agent-secret-id",
+        for f in ("openbao.hcl", TEMPLATE_29, TEMPLATE_2100, "unit.env", "ca.pem", "agent-role-id", "agent-secret-id",
                   AGENT):
             (self.p.b1_etc / f).unlink(missing_ok=True)
         shutil.rmtree(self.p.b1_etc / "tls", ignore_errors=True)
@@ -1154,7 +1161,7 @@ class Agent:
                                                   f"{st.get('version')} restored") from None
         st.update(image=ref, tag=info["tag"], version=info["version"], index_digest=info["index_digest"])
         self.save_agent_state(st)
-        _w(self.p.b1_etc / "openbao.hcl.tpl", info["template"], 0o644)
+        self._store_template(info["template"])
         self.step("restart", "done")
         return f"OpenBao {info['version']} running"
 
@@ -1733,12 +1740,33 @@ class Agent:
             except OSError:
                 pass
 
+    def _store_template(self, tpl):
+        """Revue finale I-2 : modèle complet sous `TEMPLATE_2100`, et sous
+        `TEMPLATE_29` le même sans la ligne de l'écouteur (lisible par 2.9)."""
+        if re.search(r"^__ESO_LISTENER__$", tpl, re.M):
+            _w(self.p.b1_etc / TEMPLATE_2100, tpl, 0o644)
+        else:
+            (self.p.b1_etc / TEMPLATE_2100).unlink(missing_ok=True)
+        _w(self.p.b1_etc / TEMPLATE_29, pol.template_without_eso(tpl), 0o644)
+
+    def _stored_template(self):
+        """Le modèle posé, rangé sous les deux noms au passage s'il a été
+        écrit sous l'ancien nom avec la ligne de l'écouteur."""
+        try:
+            return (self.p.b1_etc / TEMPLATE_2100).read_text()
+        except OSError:
+            pass
+        cur = (self.p.b1_etc / TEMPLATE_29).read_text()
+        if re.search(r"^__ESO_LISTENER__$", cur, re.M):
+            self._store_template(cur)
+        return cur
+
     def _template(self):
         """Modèle de configuration de B1 : celui posé avec le paquet, ou, s'il
         est d'avant 2.10.0 (sans ligne `__ESO_LISTENER__`), celui
         qu'install.sh a posé dans /opt (root) ; il remplace alors l'ancien."""
         try:
-            cur = (self.p.b1_etc / "openbao.hcl.tpl").read_text()
+            cur = self._stored_template()
         except OSError:
             cur = ""
         if re.search(r"^__ESO_LISTENER__$", cur, re.M):
@@ -1750,7 +1778,7 @@ class Agent:
         if not re.search(r"^__ESO_LISTENER__$", new, re.M):
             raise AgentError("eso-listener-template", "the OpenBao template has no ESO listener line: upgrade "
                              "harvester-ops (install.sh --upgrade) first")
-        _w(self.p.b1_etc / "openbao.hcl.tpl", new, 0o644)
+        self._store_template(new)
         return new
 
     def _config_template(self, st):
@@ -1759,7 +1787,7 @@ class Agent:
         ou refuse) ; sinon le modèle posé."""
         if st.get("eso_listener"):
             return self._template()
-        return (self.p.b1_etc / "openbao.hcl.tpl").read_text()
+        return self._stored_template()
 
     @staticmethod
     def _trial_render(st, tpl, prev=None, init=False):

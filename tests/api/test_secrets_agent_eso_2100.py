@@ -107,15 +107,17 @@ def test_listener_takes_the_new_template_of_an_older_install(b1):
     """Modèle posé par un paquet d'avant 2.10.0 (sans `__ESO_LISTENER__`) :
     celui d'install.sh (/opt, root) le remplace ; sans lui, refus clair."""
     p = b1["p"]
-    tpl = (p.b1_etc / "openbao.hcl.tpl").read_text()
+    tpl = (p.b1_etc / hsa.TEMPLATE_2100).read_text()
     old = tpl.replace("__ESO_LISTENER__\n", "")
+    (p.b1_etc / hsa.TEMPLATE_2100).unlink()
     (p.b1_etc / "openbao.hcl.tpl").write_text(old)
     rc, st = listener(b1)
     assert rc == 1 and st["code"] == "eso-listener-template"
     (p.unit_src.parent / "openbao.hcl.tpl").write_text(tpl)
     rc, st = listener(b1)
     assert rc == 0, st
-    assert "__ESO_LISTENER__" in (p.b1_etc / "openbao.hcl.tpl").read_text()
+    assert "__ESO_LISTENER__" in (p.b1_etc / hsa.TEMPLATE_2100).read_text()
+    assert "\n__ESO_LISTENER__\n" not in (p.b1_etc / "openbao.hcl.tpl").read_text()
 
 
 def test_listener_restart_failure_puts_the_previous_config_back(b1):
@@ -361,8 +363,9 @@ def _old_template(b1, keep_opt=False):
     """Le modèle posé est d'avant 2.10.0 (sans `__ESO_LISTENER__`) ; celui
     d'install.sh (/opt) aussi, sauf `keep_opt`."""
     p = b1["p"]
-    tpl = (p.b1_etc / "openbao.hcl.tpl").read_text()
+    tpl = (p.b1_etc / hsa.TEMPLATE_2100).read_text()
     old = tpl.replace("__ESO_LISTENER__\n", "")
+    (p.b1_etc / hsa.TEMPLATE_2100).unlink()
     (p.b1_etc / "openbao.hcl.tpl").write_text(old)
     (p.unit_src.parent / "openbao.hcl.tpl").write_text(tpl if keep_opt else old)
     return tpl, old
@@ -413,7 +416,7 @@ def test_rotation_takes_the_template_of_install_and_keeps_the_listener(b1):
     rc, st = request(b1, op="rotate-unseal-key")
     assert rc == 0, st
     assert LISTEN in config_text(b1)
-    assert "__ESO_LISTENER__" in (b1["p"].b1_etc / "openbao.hcl.tpl").read_text()
+    assert "__ESO_LISTENER__" in (b1["p"].b1_etc / hsa.TEMPLATE_2100).read_text()
 
 
 def test_restore_with_an_old_template_refused_before_stopping_anything(b1):
@@ -534,3 +537,49 @@ def test_restore_keeping_the_eso_cluster_keeps_the_listener(b1):
     assert rc == 0, st
     assert b1["agent"]().agent_state()["eso_listener"] == LISTEN and LISTEN in config_text(b1)
     assert st["info"]["eso_clusters"] == [KEY] and st["info"]["eso_listener"] == LISTEN
+
+
+# ---------------------------------------------------------------------------
+# Revue finale I-2 : après un retour en 2.9.x, l'agent 2.9.1 rend
+# `openbao.hcl.tpl` à la rotation de la clé et à la restauration ; son
+# `b1_config` ne connaît que __SEAL__ et __INITIALIZE__. Le modèle de ce nom
+# reste donc lisible par 2.9 ; celui de la 2.10 vit sous un autre nom.
+# ---------------------------------------------------------------------------
+def _render_291(template):
+    """Copie figée du rendu de `b1_config` de la 2.9.1 (534cd3e,
+    bin/lib/openbao_policy.py:409-430), réduite aux remplacements."""
+    import re
+    if not (re.search(r"^__SEAL__$", template, re.M) and re.search(r"^__INITIALIZE__$", template, re.M)):
+        raise ValueError("OpenBao template without __SEAL__ or __INITIALIZE__ lines")
+    out = re.sub(r"^__SEAL__$", lambda _m: 'seal "static" {}', template, flags=re.M)
+    return re.sub(r"^__INITIALIZE__$", lambda _m: "", out, flags=re.M)
+
+
+def _left_for_291(b1):
+    import re
+    text = _render_291((b1["p"].b1_etc / "openbao.hcl.tpl").read_text())
+    return [ln for ln in text.splitlines() if re.match(r"^__[A-Z_]+__$", ln)]
+
+
+def test_template_left_for_a_291_agent_always_renders(b1):
+    p = b1["p"]
+    assert _left_for_291(b1) == []                                # paquet 2.10 posé
+    assert listener(b1)[0] == 0
+    assert _left_for_291(b1) == []                                # écouteur allumé
+    assert "__ESO_LISTENER__" in (p.b1_etc / hsa.TEMPLATE_2100).read_text()
+    assert listener(b1, None)[0] == 0
+    assert _left_for_291(b1) == []                                # puis éteint (eso remove --all)
+    rc, st = request(b1, op="b1-upgrade", bundle=b1["bundle"].name)
+    assert rc == 0, st
+    assert _left_for_291(b1) == []                                # mise à jour par un paquet 2.10
+
+
+def test_a_210_template_found_under_the_old_name_is_split(b1):
+    """Écrit par une construction de développement d'avant ce correctif : la
+    première opération qui lit le modèle le range sous les deux noms."""
+    p = b1["p"]
+    full = (p.b1_etc / hsa.TEMPLATE_2100).read_text()
+    (p.b1_etc / hsa.TEMPLATE_2100).unlink()
+    (p.b1_etc / "openbao.hcl.tpl").write_text(full)
+    assert listener(b1)[0] == 0
+    assert _left_for_291(b1) == [] and (p.b1_etc / hsa.TEMPLATE_2100).read_text() == full
