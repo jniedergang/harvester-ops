@@ -441,6 +441,28 @@ jour B1, fait tourner les clés et restaure les instantanés ; la console le
 sollicite par `<state>/secrets-agent/request.json`. Détails :
 [secrets.md](secrets.md).
 
+## Jetons personnels et External Secrets (2.10.0)
+
+`bin/lib/openbao_jwt.py` (pur) rend les méthodes `jwt` d'OpenBao : une par
+Rancher pour les personnes (`jwt-hops-<id>-p-<rancher>`, rôle `person`) et
+une par cluster enfant pour ESO (`jwt-hops-<id>-eso-<clé>`, rôle `eso`).
+`web/rancher_sso.py` garde le jeton d'identité de Rancher dans la session
+(mémoire seulement) et prévient à chaque rafraîchissement et à la
+fermeture ; `PersonTokens` (dans `bin/lib/secret_store.py`) connecte la
+personne à OpenBao à la première lecture personnelle, la reconnecte à
+chaque rafraîchissement et révoque à la déconnexion. L'identité de chaque
+lecture est figée au déclenchement d'une action (`identity_env` et copies
+tenues par le bail de l'action) : un fil de travail ne lit jamais avec le
+jeton d'une personne après le déclenchement. `bin/lib/child_eso.py` (pur)
+rend les valeurs du chart, le `SecretStore` et le compte `hops-eso` de
+chaque namespace activé, et les correctifs du retrait. La console n'écrit
+jamais de politique, de rôle ni de méthode : l'agent de l'hôte le fait en
+B1 (`b1-jwt`, `b1-groups`, `b1-eso-listener`, `b1-eso-cluster`),
+l'administrateur de votre OpenBao en mode A d'après les commandes de
+l'assistant. En B1, un second écouteur TLS avec sa propre CA sert ESO sur
+une adresse de l'hôte. Détails :
+[secrets.md](secrets.md#jetons-personnels-2100).
+
 ## Modèle de confiance
 
 - Le conteneur dispose d'un accès `cluster-admin` complet via les

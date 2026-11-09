@@ -418,6 +418,26 @@ list of operations) deposits the `secret_id`, poses and upgrades B1, rotates
 keys and restores snapshots; the console asks it by
 `<state>/secrets-agent/request.json`. Details: [secrets.md](secrets.md).
 
+## Per-person tokens and External Secrets (2.10.0)
+
+`bin/lib/openbao_jwt.py` (pure) renders the OpenBao `jwt` auth methods: one
+per Rancher for the persons (`jwt-hops-<id>-p-<rancher>`, role `person`)
+and one per child cluster for ESO (`jwt-hops-<id>-eso-<key>`, role `eso`).
+`web/rancher_sso.py` keeps Rancher's identity token in the session (memory
+only) and calls back on each refresh and close; `PersonTokens` (in
+`bin/lib/secret_store.py`) logs the person in to OpenBao at the first
+personal read, logs in again at each refresh and revokes on sign-out. The
+identity of each read is fixed when an action is launched (`identity_env`
+and frozen copies held by the action lease), so a worker thread never reads
+with a person's token after launch. `bin/lib/child_eso.py` (pure) renders
+the chart values, the `SecretStore` and `hops-eso` account of each enabled
+namespace, and the removal patches. The console never writes a policy, a
+role or an auth method: the host agent does it in B1 (`b1-jwt`,
+`b1-groups`, `b1-eso-listener`, `b1-eso-cluster`), your OpenBao
+administrator does it in mode A from the commands of the assistant. In B1 a
+second TLS listener with its own CA serves ESO on a host address.
+Details: [secrets.md](secrets.md#per-person-tokens-2100).
+
 ## Trust model
 
 - The container holds full `cluster-admin` access via mounted kubeconfigs

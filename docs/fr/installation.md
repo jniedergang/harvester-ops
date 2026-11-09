@@ -408,6 +408,12 @@ locaux, remettez en clair les états chiffrés et désactivez le magasin
 `install.sh` lancé à la main avec une version plus ancienne n'est pas
 gardé.
 
+**Revenir sous la 2.10.0 avec B1.** Refusé avec `secrets-person-token-b1`
+tant que B1 porte une méthode `jwt` d'un Rancher, un groupe, l'écouteur ESO
+ou un cluster ESO : lancez d'abord `harvester-secrets person-token disable
+--remove` et `harvester-secrets eso remove --all`. Permis avec un
+avertissement en mode A.
+
 **Revenir de la 2.6.0 à la 2.5.0.** La 2.5.0 ne connaît pas les registres.
 Elle liste comme **invalides** un plan enregistré avec une phase Registre
 active ou des `registries` sur une entrée de cluster (« coming in 2.6+: set
@@ -491,6 +497,29 @@ rafraîchissement des politiques de l'agent et du jeton d'OpenTofu
 Sur openSUSE, `sudo harvester-secrets` est introuvable (`secure_path` ne
 contient pas `/usr/local/bin`) : employez `sudo
 /usr/local/bin/harvester-secrets`.
+
+### 2.10.0 : jetons personnels et écouteur ESO
+
+La mise à jour vers la 2.10.0 ne change rien tant qu'un administrateur
+n'allume pas les jetons personnels ou External Secrets. Avec B1 posé,
+`install.sh --upgrade` met en file `b1-policies`, qui élargit la politique
+de l'agent (méthodes jwt de la console, ses politiques de personne, de
+groupe et ESO, ses groupes) sans redémarrer OpenBao, et lie le rôle de jeton
+d'OpenTofu à `127.0.0.1/32`.
+
+Pour External Secrets en B1, préparez l'écouteur ESO avant de l'allumer :
+
+- une adresse IPv4 **statique** de l'hôte, joignable depuis les réseaux des
+  nœuds des clusters enfants (l'unité se replie sur la boucle locale quand
+  l'adresse manque au démarrage, et la console le dit en moins d'une
+  heure) ;
+- le port 8212 (par défaut) ouvert dans le pare-feu de l'hôte à ces seuls
+  réseaux, par exemple
+  `sudo firewall-cmd --zone=public --add-rich-rule='rule family=ipv4 source address=<réseau des nœuds enfants> port port=8212 protocol=tcp accept'`
+  et la même avec `--permanent` ; la console ne modifie jamais le pare-feu ;
+- un paquet B1 construit avec la 2.10.0 ou plus récente (un paquet plus
+  ancien n'a pas l'écouteur dans son modèle et `upgrade-b1` le refuse tant
+  que l'écouteur est allumé).
 
 ## Déplacer harvops vers un autre hôte
 

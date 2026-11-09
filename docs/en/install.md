@@ -394,6 +394,12 @@ states back in clear and disable the store first
 ([secrets.md](secrets.md#disabling-switching-mode-going-back-to-an-older-console)).
 `install.sh` run by hand with an older release is not guarded.
 
+**Back below 2.10.0 with B1.** Refused with `secrets-person-token-b1` while
+B1 carries a Rancher `jwt` method, a group, the ESO listener or an ESO
+cluster: run `harvester-secrets person-token disable --remove` and
+`harvester-secrets eso remove --all` first. Allowed with a warning in mode
+A.
+
 **Back from 2.6.0 to 2.5.0.** 2.5.0 does not know the registries. It lists
 as **invalid** a plan saved with an enabled Registry phase or with
 `registries` on a cluster entry ("coming in 2.6+: set enabled: false", "unknown
@@ -468,6 +474,26 @@ agent and OpenTofu token policies (Settings > Secret store shows it done).
 
 On openSUSE, `sudo harvester-secrets` is not found (`secure_path` has no
 `/usr/local/bin`): use `sudo /usr/local/bin/harvester-secrets`.
+
+### 2.10.0: per-person tokens and the ESO listener
+
+The update to 2.10.0 changes nothing until an administrator turns personal
+tokens or External Secrets on. With B1 posed, `install.sh --upgrade`
+queues `b1-policies`, which widens the agent policy (jwt auth methods of
+the console, its person, group and ESO policies, its groups) without
+restarting OpenBao, and binds the OpenTofu token role to `127.0.0.1/32`.
+
+For External Secrets in B1, plan the ESO listener before turning it on:
+
+- a **static** IPv4 address of the host, reachable from the node networks
+  of the child clusters (the unit falls back to the loopback when the
+  address is missing at start, and the console says so within an hour);
+- port 8212 (default) opened in the host firewall to those node networks
+  only, for example
+  `sudo firewall-cmd --zone=public --add-rich-rule='rule family=ipv4 source address=<child node network> port port=8212 protocol=tcp accept'`
+  and the same with `--permanent`; the console never changes the firewall;
+- a B1 bundle built with 2.10.0 or later (an older bundle has no listener in
+  its template and `upgrade-b1` refuses it while the listener is on).
 
 ## Moving harvops to another host
 
