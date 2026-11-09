@@ -2064,6 +2064,13 @@ def _static_findings(kube, spec):
     y est rejugé contre le cluster enfant, pas tranché ici."""
     objs, found = manifest_objects(spec)
     found = [f for f in found if f["code"] != "manifest-kind-unknown"]
+    if spec.get("item") != ce.ITEM and mf.needs_eso(objs):
+        # revue 8-10 M-4 : des objets d'External Secrets livrés avant que le
+        # chart eso soit prêt ne s'appliquent qu'une fois ses CRD posées
+        # (le ClusterResourceSet réessaie) : dit, sans bloquer
+        _present, ready, _locked = _eso_service(kube, spec["namespace"], spec["cluster"])
+        if not ready:
+            found.append(mf.finding("artefact-eso-before-chart", "warn", service=ce.SERVICE))
     return objs, found + _manifest_owner(kube, spec)
 
 

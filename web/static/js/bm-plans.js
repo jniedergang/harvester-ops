@@ -151,6 +151,7 @@ const BMPlans = (() => {
     'artefact-images-not-published': () => tr('dpw.f.artefactImagesNotPublished'),
     'manifest-kind-refused': () => tr('dpw.f.manifestKindRefused'),
     'manifest-kind-unknown': () => tr('dpw.f.manifestKindUnknown'),
+    'artefact-eso-before-chart': () => tr('dpw.f.manifestEsoBeforeChart'),
     'manifest-system-namespace': () => tr('dpw.f.manifestSystemNamespace'),
     'manifest-object-taken': () => tr('dpw.f.manifestObjectTaken'),
     'manifest-too-big': () => tr('dpw.f.manifestTooBig'),

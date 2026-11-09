@@ -9563,6 +9563,7 @@ const translations = {
     "eso.fd.eso-account-missing": "The hops-eso account is missing in {namespace}.",
     "sx.w.esoListenerAbsent": "The address of the ESO listener is no longer on this host: OpenBao started on the loopback only and the child clusters no longer reach it. Give the host back its address, or set another one.",
     "sx.banner.esoListenerAbsent": "OpenBao started without its listener for the child clusters: its address left this host",
+    "dpw.f.manifestEsoBeforeChart": "The package carries External Secrets objects while the eso chart is not ready on the child cluster: they apply once its CRD are there.",
   },
 
   fr: {
@@ -19113,6 +19114,7 @@ const translations = {
     "eso.fd.eso-account-missing": "Le compte hops-eso manque dans {namespace}.",
     "sx.w.esoListenerAbsent": "L'adresse de l'écouteur ESO n'est plus sur cet hôte : OpenBao a démarré sur la boucle locale seule et les clusters enfants ne le joignent plus. Rendez son adresse à l'hôte, ou réglez-en une autre.",
     "sx.banner.esoListenerAbsent": "OpenBao a démarré sans son écouteur des clusters enfants : son adresse a quitté cet hôte",
+    "dpw.f.manifestEsoBeforeChart": "Le paquet porte des objets External Secrets alors que le chart eso n'est pas prêt sur le cluster enfant : ils s'appliquent une fois ses CRD posées.",
   },
 
   it: {
@@ -28661,6 +28663,7 @@ const translations = {
     "eso.fd.eso-account-missing": "Manca l'account hops-eso in {namespace}.",
     "sx.w.esoListenerAbsent": "L'indirizzo del listener ESO non è più su questo host: OpenBao è partito solo su loopback e i cluster figli non lo raggiungono più. Ridare l'indirizzo all'host o impostarne un altro.",
     "sx.banner.esoListenerAbsent": "OpenBao è partito senza il suo listener per i cluster figli: il suo indirizzo ha lasciato questo host",
+    "dpw.f.manifestEsoBeforeChart": "Il pacchetto contiene oggetti External Secrets mentre il chart eso non è pronto sul cluster figlio: si applicano quando le sue CRD sono presenti.",
   },
 
   es: {
@@ -38209,6 +38212,7 @@ const translations = {
     "eso.fd.eso-account-missing": "Falta la cuenta hops-eso en {namespace}.",
     "sx.w.esoListenerAbsent": "La dirección del listener ESO ya no está en este host: OpenBao arrancó solo en loopback y los clústeres hijos ya no lo alcanzan. Devuelva su dirección al host o configure otra.",
     "sx.banner.esoListenerAbsent": "OpenBao arrancó sin su listener para los clústeres hijos: su dirección dejó este host",
+    "dpw.f.manifestEsoBeforeChart": "El paquete lleva objetos de External Secrets mientras el chart eso no está listo en el clúster hijo: se aplican cuando sus CRD estén puestas.",
   },
 
   de: {
@@ -47758,6 +47762,7 @@ const translations = {
     "eso.fd.eso-account-missing": "Das Konto hops-eso fehlt in {namespace}.",
     "sx.w.esoListenerAbsent": "Die Adresse des ESO-Listeners ist nicht mehr auf diesem Host: OpenBao lief nur auf Loopback an und die Kind-Cluster erreichen es nicht mehr. Dem Host seine Adresse zurückgeben oder eine andere setzen.",
     "sx.banner.esoListenerAbsent": "OpenBao lief ohne seinen Listener für die Kind-Cluster an: seine Adresse hat diesen Host verlassen",
+    "dpw.f.manifestEsoBeforeChart": "Das Paket enthält External-Secrets-Objekte, während das Chart eso auf dem Kind-Cluster nicht bereit ist: sie greifen, sobald seine CRD vorhanden sind.",
   },
 };
 
