@@ -1831,6 +1831,18 @@ class Agent:
         if uid is None:
             raise AgentError("b1-not-installed", f"no {ACCOUNT} account on this host")
         tpl = self._template()                   # avant tout geste : un modèle trop ancien ne change rien
+        if addr:
+            # revue finale m-1 : jamais d'écouteur réseau avant que les jetons
+            # d'OpenTofu soient liés à la boucle locale (B1 d'avant la 2.10.0
+            # dont `b1-policies` n'a pas encore tourné) ; POST idempotent
+            cid = st["console_id"]
+            try:
+                self._with_agent(lambda a: a._call("POST", f"auth/token/roles/{pol.tf_role(cid)}",
+                                                   pol.tf_token_role_params(cid, [pol.B1_CIDR])))
+            except oc.OpenBaoError as e:
+                raise AgentError("eso-listener-tf-unbound", "the OpenTofu token role could not be bound to "
+                                 f"127.0.0.1 ({e.code}): refresh the agent policies first (b1-policies, queued "
+                                 "by install.sh --upgrade), then set the listener again") from None
         self.step("listener", "running", addr or "off")
         ca = None
         if addr:

@@ -583,3 +583,30 @@ def test_a_210_template_found_under_the_old_name_is_split(b1):
     (p.b1_etc / "openbao.hcl.tpl").write_text(full)
     assert listener(b1)[0] == 0
     assert _left_for_291(b1) == [] and (p.b1_etc / hsa.TEMPLATE_2100).read_text() == full
+
+
+# ---------------------------------------------------------------------------
+# Revue finale m-1 : l'écouteur ESO ne s'allume jamais avant que le rôle des
+# jetons d'OpenTofu soit lié à 127.0.0.1/32 (B1 d'avant 2.10.0 dont la demande
+# `b1-policies` attend encore)
+# ---------------------------------------------------------------------------
+def test_listener_binds_the_tf_token_role_first(b1):
+    srv = b1["srv"]
+    srv.token_roles[pol.tf_role(CID)] = pol.tf_token_role_params(CID)         # posé avant la 2.10.0
+    rc, st = listener(b1)
+    assert rc == 0, st
+    assert srv.token_roles[pol.tf_role(CID)]["token_bound_cidrs"] == [pol.B1_CIDR]
+
+
+def test_listener_refused_when_the_tf_token_role_cannot_be_bound(b1):
+    srv = b1["srv"]
+    srv.token_roles[pol.tf_role(CID)] = pol.tf_token_role_params(CID)
+    # politique de l'agent d'avant la 2.10.0 : aucun droit sur le rôle
+    srv.policies[pol.agent_role(CID)] = srv.policies[pol.agent_role(CID)].replace(
+        f'path "auth/token/roles/{pol.tf_role(CID)}"', 'path "auth/token/roles/nothing-here"')
+    before = config_text(b1)
+    rc, st = listener(b1)
+    assert rc == 1 and st["code"] == "eso-listener-tf-unbound", st
+    assert "b1-policies" in st["message"]
+    assert config_text(b1) == before and LISTEN not in before
+    assert "token_bound_cidrs" not in srv.token_roles[pol.tf_role(CID)]
