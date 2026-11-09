@@ -595,3 +595,40 @@ def test_service_remove_of_another_chart_does_not_read_the_child(cli, world, cap
     mgmt.delete = lambda kind, ns, name, **kw: None
     assert world["run"](mgmt, ["service-remove", "--kubeconfig", "/x", "--name", f"{NS}/podinfo",
                                "--timeout", "0"]) == 0
+
+
+def test_deploy_mode_a_prints_one_json_object_with_the_last_commands(cli, world, capsys, monkeypatch):
+    """Tâche 13 (réel) : la console garde stdout comme UN objet JSON
+    (`capture`) ; deux lignes (première pose, puis comptes liés par UID)
+    n'étaient pas lisibles et l'onglet ne montrait aucune commande. La seconde
+    pose est complète : ses commandes seules sont rendues."""
+    world["settings"](mode="a", addr="https://bao.example:8200")
+    world["box"]["child"] = Child(stores_ready=False)
+    calls = []
+
+    def secrets(argv, private=None, by=""):
+        calls.append(list(argv))
+        n = len(calls)
+        return 0, {"ok": True, "applied": False, "commands": [f"set {n}"],
+                   "store": dict(STORE, server="https://bao.example:8200")}
+    monkeypatch.setattr(cli, "_secrets_tool", secrets)
+    assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x"], req()) == 0
+    assert len(calls) == 2 and "--sa-uid" in calls[1]
+    doc = json.loads(capsys.readouterr().out)                    # un seul objet, rien d'autre
+    assert doc["commands"] == ["set 2"] and doc["key"]
+
+
+def test_deploy_mode_a_still_prints_the_commands_when_a_later_step_fails(cli, world, capsys, monkeypatch):
+    world["settings"](mode="a", addr="https://bao.example:8200")
+    world["box"]["child"] = Child(stores_ready=False)
+    calls = []
+
+    def secrets(argv, private=None, by=""):
+        calls.append(list(argv))
+        if len(calls) == 2:
+            return 1, {"ok": False, "code": "eso-openbao-failed", "error": "refused"}
+        return 0, {"ok": True, "applied": False, "commands": ["set 1"],
+                   "store": dict(STORE, server="https://bao.example:8200")}
+    monkeypatch.setattr(cli, "_secrets_tool", secrets)
+    assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x"], req()) == cli.EXIT_FAIL
+    assert json.loads(capsys.readouterr().out)["commands"] == ["set 1"]

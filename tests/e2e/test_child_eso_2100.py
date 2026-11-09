@@ -281,3 +281,46 @@ def test_screenshots_desktop_and_narrow(context, flask_server, size):
     page.screenshot(path=str(SHOTS / f"capi-eso-setup-{size[0]}.png"))
     m.locator('[data-eso-tab="checks"]').click()
     page.screenshot(path=str(SHOTS / f"capi-eso-checks-{size[0]}.png"))
+
+
+# ---------------------------------------------------------------------------
+# Tâche 13 (réel) : en mode A, les commandes de l'administrateur d'OpenBao
+# rendues par l'action (`result.output.commands`) s'ouvrent en fenêtre, avec
+# copie, échappées ; rien quand l'action n'en porte pas (B1)
+# ---------------------------------------------------------------------------
+def _end_with(context, result):
+    body = "event: end\ndata: " + json.dumps({"status": "done", "result": result}) + "\n\n"
+    context.route(re.compile(r".*/api/stream/[a-z0-9]+$"), lambda r, q: r.fulfill(
+        status=200, content_type="text/event-stream", body=body))
+
+
+def test_removal_in_mode_a_opens_the_commands_window(context, flask_server):
+    calls = {}
+    page, _ = open_eso(context, flask_server, calls)
+    _end_with(context, {"output": {"commands": ["export BAO_ADDR=https://bao.example:8200",
+                                                f"bao auth disable jwt-{HOSTILE}"]}})
+    page.locator('[data-eso-act="remove"]').click()
+    m = page.locator(".eso-remove-modal")
+    m.locator("[data-eso-typed]").fill("apps/apps")
+    m.locator("[data-eso-remove-go]").click()
+    w = page.locator(".eso-cmds-modal")
+    expect(w).to_be_visible(timeout=5000)
+    expect(w.locator("[data-eso-cmds]")).to_contain_text("bao auth disable")
+    expect(w.locator("[data-eso-cmds]")).to_contain_text(HOSTILE)
+    assert page.evaluate("window.__pwned") is None and w.locator("img").count() == 0
+    for b in w.locator("button").all():
+        assert b.get_attribute("data-tip") or b.get_attribute("title")
+    w.locator("[data-eso-close]").last.click()
+    expect(w).to_have_count(0)
+
+
+def test_no_commands_window_without_commands(context, flask_server):
+    calls = {}
+    page, _ = open_eso(context, flask_server, calls)
+    _end_with(context, {})
+    page.locator('[data-eso-act="remove"]').click()
+    m = page.locator(".eso-remove-modal")
+    m.locator("[data-eso-typed]").fill("apps/apps")
+    m.locator("[data-eso-remove-go]").click()
+    expect(page.locator("#eso-feedback")).to_contain_text("External Secrets removed", timeout=5000)
+    expect(page.locator(".eso-cmds-modal")).to_have_count(0)

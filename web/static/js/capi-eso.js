@@ -151,6 +151,37 @@ const CapiEso = (() => {
     el.innerHTML = text ? `<span class="${bad ? 'res-error' : ''}">${esc(text)}</span>` : '';
   }
 
+  /** Mode A (tâche 13) : commandes de l'administrateur d'OpenBao rendues par
+   *  l'action (`result.output.commands`, aucune valeur secrète), en fenêtre
+   *  avec copie. Rien en B1 (l'agent les a passées). */
+  function showCommands(x) {
+    const cmds = (((x || {}).result || {}).output || {}).commands || [];
+    if (!cmds.length) return null;
+    const textValue = cmds.join('\n');
+    closeModal();
+    modal = document.createElement('div');
+    modal.className = 'modal-overlay active reg-modal eso-cmds-modal';
+    modal.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-header"><h3>${icon('code')} ${esc(tr('eso.cmdTitle', 'Commands for the OpenBao administrator'))}</h3>
+          <button type="button" class="btn-close tip" data-eso-close ${tipAttr(tr('common.close', 'Close'))}>×</button></div>
+        <div class="modal-body">
+          <p class="form-hint">${esc(tr('eso.cmdIntro', 'Mode A: the administrator of your OpenBao runs these commands (they carry no secret value). The stores of the child cluster become ready once they are run.'))}</p>
+          <pre class="sx-cmds" data-eso-cmds>${esc(textValue)}</pre>
+        </div>
+        <div class="modal-footer apply-bar" style="margin:0;">
+          ${btn('data-eso-cmds-copy', 'btn-secondary', 'copy', tr('sx.copy', 'Copy'), tr('sx.t.copy', 'Copy the commands'))}
+          ${btn('data-eso-close', 'btn-primary', '', tr('common.close', 'Close'), tr('eso.t.close', 'Close this window'))}
+        </div></div>`;
+    document.body.appendChild(modal);
+    const m = modal;
+    m.addEventListener('click', (e) => {
+      if (e.target === m || e.target.closest('[data-eso-close]')) { closeModal(); return; }
+      const c = e.target.closest('[data-eso-cmds-copy]');
+      if (c) copy(textValue, c);
+    });
+    return m;
+  }
+
   /** Suit une action (SSE) puis relit l'état. */
   function follow(actionId, startText, doneText) {
     say(tr('eso.running', '{what} (action {id}), see the dock.', { what: startText, id: actionId }));
@@ -164,6 +195,7 @@ const CapiEso = (() => {
           es.close();
           if (x.status === 'done') say(doneText);
           else say(tr('eso.failed', 'The action failed: see the dock and the Activity tab.'), true);
+          showCommands(x);
           setTimeout(load, 300);
         },
       },
@@ -593,6 +625,7 @@ const CapiEso = (() => {
             try { x = JSON.parse(ev.data); } catch { /* fin sans détail */ }
             es.close();
             line.textContent = x.status === 'done' ? tr('eso.setupDone', 'External Secrets set up.') : tr('eso.failed', 'The action failed: see the dock and the Activity tab.');
+            showCommands(x);
             setTimeout(load, 300);
           },
         },

@@ -334,3 +334,40 @@ def test_cluster_create_with_eso_is_for_administrators(env, bao):
     r = env.client.post("/api/capi/harvlab2/cluster-create", json=body)
     assert r.status_code == 403 and r.get_json()["code"] == "eso-admin-only"
     assert calls(env) == []
+
+
+# ---------------------------------------------------------------------------
+# Tâche 13 (réel) : en mode A, les commandes de l'administrateur d'OpenBao que
+# l'outil écrit sur stdout sont gardées dans le résultat de l'action (l'onglet
+# les montre) ; avant, stdout partait vers /dev/null
+# ---------------------------------------------------------------------------
+CMDS = {"commands": ["export BAO_ADDR=https://bao.example:8200", "bao auth enable -path=jwt-x jwt"], "key": KEY}
+
+
+@pytest.mark.parametrize("method,path,body,sub,label", [
+    ("post", BASE, {"namespaces": ["team-a"]}, "eso-deploy", "capi-eso:web/web"),
+    ("delete", BASE, None, "eso-remove", "capi-eso-remove:web/web"),
+    ("post", BASE + "/namespaces/team-b", None, "eso-deploy", "capi-eso-namespace:web/web:add:team-b"),
+])
+def test_mode_a_commands_kept_in_the_action(admin, method, path, body, sub, label):
+    status_doc(admin)
+    (admin.fake / f"{sub}.json").write_text(json.dumps(CMDS))
+    call = getattr(admin.client, method)
+    r = call(path, json=body) if body is not None else call(path)
+    assert r.status_code == 202, r.get_json()
+    run = wait(r.get_json()["action_id"])
+    assert run.action == label
+    assert run.result["output"]["commands"] == CMDS["commands"]
+
+
+def test_plan_and_undo_launches_keep_the_commands(admin, monkeypatch):
+    seen = {}
+
+    def capi_action(cluster, label, cmd, spec=None, dry_run=False, parent=None, cluster_user=None, capture=False):
+        seen[cmd[2]] = capture
+        return None, ({"error": "stop"}, 409)
+    monkeypatch.setattr(wapp, "_capi_action", capi_action)
+    monkeypatch.setattr(wapp, "jsonify", lambda d: d)
+    for sub in ("eso-deploy", "eso-remove", "service-remove"):
+        wapp._capi_launch("harvlab2", "/kc", sub, [])
+    assert seen == {"eso-deploy": True, "eso-remove": True, "service-remove": False}

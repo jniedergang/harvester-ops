@@ -4193,8 +4193,21 @@ def cmd_eso_deploy(args):
     store = out.get("store") or {}
     step("openbao", "done", f"{store.get('jwt_mount')}: " + ("set by the agent" if out.get("applied")
                                                            else "commands for the OpenBao administrator"))
-    if out.get("commands"):
-        print(json.dumps({"commands": out["commands"], "key": key}))
+    # tâche 13 (réel) : UN seul objet JSON sur stdout (la console le garde dans
+    # le résultat de l'action) ; la seconde pose (comptes liés par UID)
+    # remplace la première, ses commandes sont complètes
+    shown = {"doc": {"commands": out["commands"], "key": key} if out.get("commands") else None}
+    try:
+        return _eso_deploy_rest(args, kube, spec, s, out, ns, cluster, nss, key, argv, keys_spec, uids, store, cl,
+                                harvester, shown)
+    finally:
+        if shown["doc"]:
+            print(json.dumps(shown["doc"]))
+
+
+def _eso_deploy_rest(args, kube, spec, s, out, ns, cluster, nss, key, argv, keys_spec, uids, store, cl, harvester,
+                     shown):
+    """Suite de `eso-deploy` après la première pose de l'authentification."""
     if s.get("mode") == "b1":
         bad = _eso_probe(kube, harvester, cl, store.get("server") or "")
         for f in bad:
@@ -4237,7 +4250,7 @@ def cmd_eso_deploy(args):
                  f"{str(out2.get('error') or '')[:200]}")
             return EXIT_FAIL
         if out2.get("commands"):
-            print(json.dumps({"commands": out2["commands"], "key": key}))
+            shown["doc"] = {"commands": out2["commands"], "key": key}
     step("accounts", "done", f"role bound to the hops-eso account of {len(now_uids)} namespace(s)")
     if not out.get("applied"):
         step("ready", "done", "the stores become ready once the OpenBao administrator has run the commands")

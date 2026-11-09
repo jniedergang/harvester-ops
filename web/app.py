@@ -18603,15 +18603,17 @@ def _capi_uninstall_refusal(cluster, holder=None):
             "code": "capi-uninstall-running", "running": rid}, 409
 
 
-def _capi_action(cluster, label, cmd, spec=None, dry_run=False, parent=None, cluster_user=_UNSET):
+def _capi_action(cluster, label, cmd, spec=None, dry_run=False, parent=None, cluster_user=_UNSET, capture=False):
+    """`capture` (2.10.0, tâche 13) : l'objet JSON de stdout gardé dans
+    `result.output` (commandes du mode A d'External Secrets, sans valeur)."""
     return _cli_action(cluster, label, cmd, "harvester-capi", spec, dry_run,
                        after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None),
-                       parent=parent, cluster_user=cluster_user,
+                       parent=parent, cluster_user=cluster_user, capture=capture,
                        busy_match=lambda r: r.action == f"{CAPI_UNINSTALL_PREFIX}{cluster}")
 
 
 def _capi_launch(cluster, kc, sub, args, spec=None, parent=None, cluster_user=None, label=None,
-                 dry_run=False):
+                 dry_run=False, capture=None):
     """Lancement hors requête (chaîne d'un plan, 2.5.0) : ne lit ni la
     requête, ni la session, ni l'identité de la personne ; `kc` et
     `cluster_user` sont figés au déclenchement. Même commande que les routes
@@ -18622,7 +18624,8 @@ def _capi_launch(cluster, kc, sub, args, spec=None, parent=None, cluster_user=No
         return None, {"error": f"{CAPI_SCRIPT} not deployed"}
     with app.app_context():                    # réponse d'occupation (jsonify) hors requête
         run, err = _capi_action(cluster, label or f"capi-{sub}:{cluster}", cmd + list(args), spec, dry_run,
-                                parent=parent, cluster_user=cluster_user)
+                                parent=parent, cluster_user=cluster_user,
+                                capture=sub in ESO_COMMAND_SUBS if capture is None else capture)
     if err:
         body = err[0].get_json(silent=True) if hasattr(err[0], "get_json") else None
         return None, body or {"error": "refused"}
@@ -23363,6 +23366,11 @@ def api_capi_gitops_list(cluster):
 # `eso`), jamais relue ni réaffichée.
 # ---------------------------------------------------------------------------
 ESO_KEYS = {"namespaces", "chart", "dry_run"}
+# tâche 13 (réel) : en mode A, ces sous-commandes écrivent sur stdout les
+# commandes de l'administrateur d'OpenBao ; l'action les garde dans
+# `result.output` (sinon stdout partait vers /dev/null et l'onglet ne les
+# montrait jamais)
+ESO_COMMAND_SUBS = ("eso-deploy", "eso-remove")
 ESO_SECRET_KEYS = {"namespace", "name", "fields"}
 
 
@@ -23399,7 +23407,7 @@ def _eso_launch(cluster, namespace, name, namespaces, chart=None, label=None):
     cmd, err = _capi_child_base(cluster, "eso-deploy", namespace, name)
     if err:
         return err
-    run, err = _capi_action(cluster, label or f"capi-eso:{namespace}/{name}", cmd, spec=spec)
+    run, err = _capi_action(cluster, label or f"capi-eso:{namespace}/{name}", cmd, spec=spec, capture=True)
     if err:
         return err
     return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}", "namespaces": list(namespaces)}), 202
@@ -23481,7 +23489,7 @@ def api_capi_eso_remove(cluster, namespace, name):
     args = ["--name", f"{namespace}/{name}", "--role", current_role() or "viewer", "--by", current_user() or ""]
     if request.args.get("keep_chart") in ("1", "true"):
         args.append("--keep-chart")
-    run, err = _capi_action(cluster, f"capi-eso-remove:{namespace}/{name}", cmd + args)
+    run, err = _capi_action(cluster, f"capi-eso-remove:{namespace}/{name}", cmd + args, capture=True)
     if err:
         return err
     return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}"}), 202
