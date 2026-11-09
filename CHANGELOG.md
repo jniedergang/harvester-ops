@@ -107,7 +107,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   fetch refused by OpenBao or busy (409) left the `actions_in_flight` gauge
   raised and the personal secret copies of the action held; a full B1
   template left by 2.10 and kept through a 2.9.x round trip took precedence
-  over the newer template of the package.
+  over the newer template of the package; the undo preflight took an
+  unreachable child cluster for one without ExternalSecrets (the removal
+  itself was still refused).
 - Found by the reviews of the tasks: shared KVM views mixed persons (now
   read by the service, gestures keep the person token); a missing personal
   secret at launch gave a 500; the `groups` scope made the whole Rancher

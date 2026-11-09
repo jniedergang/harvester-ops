@@ -40400,6 +40400,10 @@ def _undo_eso_chart_kept(kc, cluster, ns, c, item):
         return None
     st, _rc, err = _deploy_capi_json(kc, "eso-status", ["--name", f"{ns}/{c}", "--json"], timeout=120,
                                      cluster=cluster)
+    # revue finale m-D : enfant illisible = rc 0 avec `error` et une liste
+    # vide, jamais « aucun ExternalSecret » (sauf cluster parti)
+    if not err and (st or {}).get("error") not in (None, "", "eso-cluster-missing"):
+        err = st["error"]
     if err:
         return f"eso-status-unreadable: chart kept, the ExternalSecrets of {ns}/{c} could not be read: {str(err)[:120]}"
     left = sorted(f"{x.get('ns')}/{x.get('name')}" for x in (st or {}).get("externalsecrets") or [])
