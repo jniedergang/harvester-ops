@@ -55,6 +55,8 @@ const BMPlans = (() => {
     clusters: () => tr('bmpl.phase.clusters'), registry: () => tr('bmpl.phase.registry'),
     artefacts: () => tr('bmpl.phase.artefacts'), plan: () => tr('bmpl.phase.plan'),
     gitops: () => tr('bmpl.phase.gitops'),
+    // 2.10.0 : phase tirée de l'option `external_secrets` des clusters (sans interrupteur)
+    eso: () => tr('bmpl.phase.eso'),
   };
   const PHASE_TIPS = {
     readiness: () => tr('bmpl.phaseTip.readiness'), terraform: () => tr('bmpl.phaseTip.terraform'),
@@ -149,6 +151,7 @@ const BMPlans = (() => {
     'artefact-images-not-published': () => tr('dpw.f.artefactImagesNotPublished'),
     'manifest-kind-refused': () => tr('dpw.f.manifestKindRefused'),
     'manifest-kind-unknown': () => tr('dpw.f.manifestKindUnknown'),
+    'artefact-eso-before-chart': () => tr('dpw.f.manifestEsoBeforeChart'),
     'manifest-system-namespace': () => tr('dpw.f.manifestSystemNamespace'),
     'manifest-object-taken': () => tr('dpw.f.manifestObjectTaken'),
     'manifest-too-big': () => tr('dpw.f.manifestTooBig'),
@@ -178,6 +181,11 @@ const BMPlans = (() => {
     'gitops-package-not-published': () => tr('dpw.f.gitopsPackageNotPublished'),
     'gitops-check-failed': () => tr('dpw.f.gitopsCheckFailed'),
     'gitops-taken': () => tr('dpw.f.gitopsTaken'),
+    // 2.10.0 : External Secrets des clusters du plan
+    'eso-needs-openbao': () => tr('dpw.f.esoNeedsOpenbao'),
+    'eso-admin-only': () => tr('dpw.f.esoAdminOnly'),
+    'eso-no-namespace': () => tr('dpw.f.esoNoNamespace'),
+    'eso-chart-not-in-plan': () => tr('dpw.f.esoChartNotInPlan'),
     'gitops-cluster-unknown': () => tr('dpw.f.gitopsClusterUnknown'),
     'gitops-namespace-not-team': () => tr('dpw.f.gitopsNamespaceNotTeam'),
     'gitops-name-too-long': () => tr('dpw.f.gitopsNameTooLong'),
@@ -2142,13 +2150,14 @@ const BMPlans = (() => {
   // =========================================================================
   // Fenêtre « Défaire le déploiement » (2.7.0, décision 128)
   // =========================================================================
-  // ordre de retrait de deploy_undo.KINDS_ORDER (2.8.0 : gitops, rancher-import)
-  const UNDO_KINDS = ['gitops', 'chart', 'manifest', 'policies', 'rancher-import', 'capi-cluster', 'registry', 'tf-declaration'];
+  // ordre de retrait de deploy_undo.KINDS_ORDER (2.8.0 : gitops, rancher-import ; 2.10.0 : eso)
+  const UNDO_KINDS = ['gitops', 'eso', 'chart', 'manifest', 'policies', 'rancher-import', 'capi-cluster', 'registry', 'tf-declaration'];
   const UNDO_KIND_TEXT = {
     chart: () => tr('udw.kind.chart'), manifest: () => tr('udw.kind.manifest'), policies: () => tr('udw.kind.policies'),
     'capi-cluster': () => tr('udw.kind.capiCluster'), registry: () => tr('udw.kind.registry'),
     'tf-declaration': () => tr('udw.kind.tfDeclaration'),
     gitops: () => tr('udw.kind.gitops'), 'rancher-import': () => tr('udw.kind.rancherImport'),
+    eso: () => tr('udw.kind.eso'),
   };
   const UNDO_LIMITS = {
     'volumes-claimed': () => tr('udw.limit.volumesClaimed'), 'lb-dhcp': () => tr('udw.limit.lbDhcp'),
@@ -2242,6 +2251,11 @@ const BMPlans = (() => {
     }
     if (u.kind === 'gitops') {
       return `<p class="udw-gitops">${esc(tr('udw.gitopsGoes', { tool: d.tool || '?', name: d.name || u.ref }))}</p>`;
+    }
+    if (u.kind === 'eso') {
+      // 2.10.0 : les Secrets synchronisés restent à leur dernière valeur
+      return `<p class="udw-eso">${esc(tr('udw.esoGoes', { namespaces: (d.namespaces || []).join(', ') || '–', n: d.externalsecrets || 0 }))}</p>
+        ${d.note ? `<p class="form-hint udw-eso-note">${esc(d.note)}</p>` : ''}`;
     }
     if (u.kind === 'rancher-import') {
       return `<p class="udw-rancher">${esc(tr('udw.rancherGoes', { name: d.name || '', rancher: d.rancher || '' }))}</p>

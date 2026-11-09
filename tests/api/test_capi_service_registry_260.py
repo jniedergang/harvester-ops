@@ -282,3 +282,19 @@ def test_a_flux_release_already_posed_keeps_its_namespace(cli, world):
     resolved, found, _ = cli.service_source(kube, sv.normalize({"cluster": "web/web", "source": SRC,
                                                                 "name": "flux"}), "harvlab2")
     assert found == [] and resolved["namespace"] == "default"
+
+
+@pytest.mark.parametrize("asked,values", [(None, ""), ("outils", "processClusterStore: true\nvault:\n  enableTokenCache: true\n")])
+def test_the_eso_service_carries_the_imposed_values_in_external_secrets(cli, world, asked, values):
+    """2.10.0 (point 294) : le service `eso` porte les valeurs imposées de
+    child_eso, dans `external-secrets`, quoi que demande le formulaire."""
+    import child_eso as ce
+    world()
+    raw = {"cluster": "web/web", "source": SRC, "name": "eso"}
+    if asked:
+        raw["namespace"] = asked
+    if values:
+        raw["values"] = values
+    resolved, found, _ = cli.service_source(_kube(cli), sv.normalize(raw), "harvlab2")
+    assert found == [] and resolved["namespace"] == "external-secrets"
+    assert ce.chart_locked(yaml.safe_load(resolved["values"]))

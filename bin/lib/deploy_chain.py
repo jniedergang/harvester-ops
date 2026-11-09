@@ -72,7 +72,10 @@ import secret_store
 # crée peut servir) et avant Cluster API (les clusters ont besoin de leurs
 # registres à la création). La reprise repère les phases par `id`.
 # 2.8.0 : GitOps en dernier (le chart de Flux est un artefact, plan 2.8.0 point 223).
-ORDER = ("install", "readiness", "terraform", "registry", "capi", "clusters", "artefacts", "gitops")
+# 2.10.0 : External Secrets après les artefacts (son chart en est un) et
+# avant GitOps (une entrée peut livrer des ExternalSecret) ; phase sans
+# réglage propre, tirée de l'option `external_secrets` des clusters.
+ORDER = ("install", "readiness", "terraform", "registry", "capi", "clusters", "artefacts", "eso", "gitops")
 # phases du format pas encore livrées (aucune depuis la 2.7.0)
 COMING = ()
 CHECKED_MESSAGE = "already done (checked)"

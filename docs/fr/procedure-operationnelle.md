@@ -238,6 +238,13 @@ et ses sauvegardes passent en premier. Sans OpenBao, la console ne peut pas
 lire les kubeconfigs et les clés qu'elle y a migrés. Voir
 [secrets.md](secrets.md).
 
+Depuis la 2.10.0, un instantané B1 restauré garde les méthodes des jetons
+personnels, les groupes et les méthodes ESO qu'il porte, et la console
+range ses réglages d'après lui ; l'écouteur ESO ne revient que si son
+adresse statique est sur l'hôte. Les clusters enfants gardent leurs Secrets
+synchronisés à leur dernière valeur pendant qu'OpenBao est arrêté : ESO
+reprend seul dès qu'OpenBao répond.
+
 ## 13. Navigation par hôtes (2.0)
 
 Un **hôte** est un cluster Harvester entier ou un hyperviseur KVM, jamais un
@@ -935,6 +942,28 @@ exécution).
 5. Avant de ramener la console sous la 2.9.0, ou avant de désactiver :
    ramener toutes les classes, remettre en clair les états chiffrés, puis
    désactiver.
+6. Jetons personnels (2.10.0) : Paramètres > Magasin de secrets > Jetons
+   personnels, Mettre en place chaque Rancher, lancer les cinq
+   vérifications connecté par ce Rancher, Activer. Ajouter des groupes
+   internes si besoin.
+7. External Secrets (2.10.0) : en B1, poser l'écouteur ESO sur une adresse
+   statique et ouvrir le port 8212 aux réseaux des nœuds enfants ; puis,
+   sur chaque cluster enfant, onglet External Secrets : Mettre en place les
+   secrets externes, activer les namespaces d'équipe, écrire les valeurs.
+   Les équipes écrivent leurs `ExternalSecret` (`refreshInterval: 1h` ou
+   plus).
+8. Avant de ramener la console sous la 2.10.0 en B1 : `harvester-secrets
+   person-token disable --remove` et `harvester-secrets eso remove --all`.
+
+Vu en réel (2.10.0) : les jetons personnels en mode A sur OpenBao 2.7.2 et
+Vault 1.14.2 face à Rancher 2.14.1 (chaque vérification mise en échec une
+fois, puis activation, un geste KVM sur node2 nommé dans l'audit, un refus
+par groupe, révocation au rafraîchissement et à la déconnexion), B1 sur une
+VM client (mise à jour depuis la 2.9.1, activation, redémarrage de la VM,
+instantané et restauration, retour refusé puis permis, rotation par la
+2.9.1 après le retour), External Secrets en mode A sur un cluster enfant de
+harvlab2 (deux namespaces isolés, rotation en 16 s, retrait qui garde les
+Secrets, Défaire d'un plan avec et sans ExternalSecret d'équipe).
 
 Vu en réel (2.9.0) : le mode A sur OpenBao 2.7.2 (chaque vérification
 mise en échec une fois, puis activation, classes migrées, console

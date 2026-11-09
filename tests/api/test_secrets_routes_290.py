@@ -267,7 +267,9 @@ def test_status_and_banner_without_values(wapp, sx):
     assert status == 200 and doc["mode"] == "a" and doc["active"] is True
     assert doc["store"]["state"] == "ok" and "VALUE" not in json.dumps(doc)
     status, b = post(wapp, "/api/secrets/banner", method="get")
-    assert set(b) == {"active", "mode", "state", "down_since", "cache_until", "error"}
+    assert set(b) == {"active", "mode", "state", "down_since", "cache_until", "error", "jwt_keys_changed",
+                      "jwt_keys_unreadable", "eso_keys_changed", "eso_listener_absent", "person"}
+    assert b["person"] is None                         # compte local : aucun refus personnel
 
 
 def test_banner_tells_until_when_the_cache_holds(wapp, sx):

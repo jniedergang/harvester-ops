@@ -1508,7 +1508,24 @@ const App = (() => {
       resume: a.resume || null,
       parent: a.parent || null,
       children_count: a.children_count || 0,
+      secret_identity: a.secret_identity || null,
     };
+  }
+
+  /** 2.10.0 : identité qui a lu les secrets de l'action (jeton personnel,
+   *  service, service tardif) ; rien quand l'action n'a lu aucun secret. */
+  // clés en toutes lettres : le contrôle des clés orphelines ne lit que des littéraux
+  const SECRET_IDENTITY_KEYS = {
+    person: () => [i18n.t('activity.sid.person'), i18n.t('activity.sid.personTip')],
+    service: () => [i18n.t('activity.sid.service'), i18n.t('activity.sid.serviceTip')],
+    'late-service': () => [i18n.t('activity.sid.late'), i18n.t('activity.sid.lateTip')],
+  };
+  function secretIdentityBadge(it) {
+    const k = Object.prototype.hasOwnProperty.call(SECRET_IDENTITY_KEYS, it.secret_identity) ? SECRET_IDENTITY_KEYS[it.secret_identity] : null;
+    if (!k) return '';
+    const [label, tip] = k();
+    return ` <span class="activity-type-badge sid-${escapeHtml(it.secret_identity)}" data-secret-identity="${escapeHtml(it.secret_identity)}"
+      title="${escapeHtml(tip)}">${escapeHtml(label)}</span>`;
   }
 
   /** Bouton de dépliage (filles) et lien « fait partie de » (recherche). */
@@ -1569,6 +1586,7 @@ const App = (() => {
       <td>${typeBadge}</td>
       <td>${escapeHtml(it.cluster)}</td>
       <td class="act-name">${escapeHtml(it.action)}${it.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}${
+        it.kind === 'action' ? secretIdentityBadge(it) : ''}${
         it.kind === 'action' ? activityNestHtml(it, filtered) : ''}${
         it.kind === 'action' && typeof Dock !== 'undefined' && Dock.undoButton ? ' ' + Dock.undoButton(it, 'data-act-undo') + Dock.resumeButton(it, 'data-act-resume') : ''}</td>
       <td>${statusBadge}</td>
@@ -1837,6 +1855,7 @@ const App = (() => {
           it.status === 'running' ? 'Pending' : 'Stopped'}">${escapeHtml(it.status)}</span></div>
         <div><strong>When</strong> ${new Date(it.ts * 1000).toLocaleString()}</div>
         ${it.duration ? `<div><strong>Duration</strong> ${it.duration.toFixed(1)}s</div>` : ''}
+        ${secretIdentityBadge(it) ? `<div><strong>${escapeHtml(i18n.t('activity.sid.label'))}</strong>${secretIdentityBadge(it)}</div>` : ''}
         ${it.error_summary ? `<div class="activity-detail-error"><strong data-i18n="activity.errorLabel">Error</strong> <code title="${escapeHtml(it.error_summary)}">${escapeHtml(it.error_summary)}</code></div>` : ''}
       </div>
       <pre id="activity-detail-log" class="live-log"></pre>`;

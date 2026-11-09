@@ -12,6 +12,7 @@ cluster (place du jeton par personne de la 2.10.0, point 265) :
     replication-hook/<plan>/<action>      #hdr_<empreinte du nom d'en-tête>
     tf-kvm/<hôte>/<décl>/<variable>       #value
     plan-run/<action_id>/<nom>            #<champ>
+    eso/<clé du cluster>/<namespace>/<nom> #<champ>   (2.10.0, OpenBao seulement)
 
 Les noms de champ d'OpenBao sont limités à `[a-z0-9_]{1,64}` : un identifiant
 de canal (`[a-z0-9-]`) y entre en remplaçant `-` par `_` (bijectif, un
@@ -28,7 +29,11 @@ import hashlib
 import re
 from pathlib import Path
 
-ClassSpec = collections.namedtuple("ClassSpec", "local_paths bao_path migratable readers")
+ClassSpec = collections.namedtuple("ClassSpec", "local_paths bao_path migratable readers person",
+                                   defaults=(False,))
+# 2.10.0 : `person` = classe lue (ou écrite) avec le jeton OpenBao de la
+# personne connectée par Rancher quand elle en a un (table « Qui agit » du
+# plan 2.10.0) ; les autres classes restent lues par l'identité de service.
 # 2.9.0 tâche 8 : `eligible` (code d'un secret qui reste local, ou None),
 # `originals` (originaux gardés après migration, sans valeur) et
 # `erase_original` (confirmation ou délai de garde) ; facultatifs pour un
@@ -49,11 +54,11 @@ CLASS_TABLE = {
         ("<state>/clusters.d/<n>.yaml (ssh.key)", "<state>/ssh/<n>_id"),
         "ssh-cluster/{name}", True,
         ("web/app.py:_cluster_ssh_key_path", "bin/lib/cluster_decl.py:materialize",
-         "bin/lib/node_images.py:ssh_options", "bin/lib/common.sh:_secret_field")),
+         "bin/lib/node_images.py:ssh_options", "bin/lib/common.sh:_secret_field"), True),
     "ssh-kvm": ClassSpec(
         ("<state>/kvm.d/<n>.yaml (ssh_key)", "<state>/ssh/<n>_id"),
         "ssh-kvm/{name}", True,
-        ("bin/lib/kvm_host.py:_ssh_base", "web/app.py:_tf_kvm_stage")),
+        ("bin/lib/kvm_host.py:_ssh_base", "web/app.py:_tf_kvm_stage"), True),
     "rancher-oidc": ClassSpec(
         ("<state>/rancher.d/<id>.oidc-secret",),
         "rancher-oidc/{name}", True,
@@ -69,10 +74,14 @@ CLASS_TABLE = {
     "tf-kvm": ClassSpec(
         ("<terraform>/.kvm/<hôte>/decls/<décl>/.secrets/<variable>",),
         "tf-kvm/{host}/{decl}/{var}", True,
-        ("web/app.py:_tf_kvm_secret",)),
+        ("web/app.py:_tf_kvm_secret",), True),
     "plan-run": ClassSpec(
         ("memory",), "plan-run/{action}/{name}", True,
         ("web/app.py:_deploy_install_secrets_get", "web/app.py:_deploy_gitops_secret_get")),
+    # 2.10.0 : valeurs lues par External Secrets Operator dans un cluster
+    # enfant ; écrites par une personne (son jeton), jamais lues par la
+    # console, sans emplacement local (rien à migrer)
+    "eso": ClassSpec((), "eso/{key}/{namespace}/{name}", False, (), True),
     # restent locaux, toujours (refus `class-not-migratable`)
     "accounts": ClassSpec(("<state>/accounts.json", "<state>/setup-token"), None, False, ()),
     "web-auth": ClassSpec(("/etc/harvester-ops/htpasswd", "/etc/harvester-ops/tls/key.pem"), None, False, ()),
@@ -83,6 +92,10 @@ CLASS_TABLE = {
 }
 
 MIGRATABLE = tuple(c for c, s in CLASS_TABLE.items() if s.migratable)
+# 2.10.0 : classes personnelles (ssh-cluster, ssh-kvm, tf-kvm, eso) et
+# classes qui ne vivent que dans OpenBao (aucun emplacement local)
+PERSON = tuple(c for c, s in CLASS_TABLE.items() if s.person)
+BAO_ONLY = ("eso",)
 # Ordre proposé par l'interface (point 255) ; `plan-run` n'a rien à migrer.
 MIGRATION_ORDER = ("replication-notify", "replication-hook", "rancher-oidc", "tf-kvm", "ssh-kvm",
                    "ssh-cluster", "kubeconfig")
@@ -109,6 +122,12 @@ def spec(cls):
         return CLASS_TABLE[cls]
     except KeyError:
         raise ValueError("unknown secret class") from None
+
+
+def is_person(cls):
+    """Classe lue avec le jeton de la personne quand elle en a un."""
+    s = CLASS_TABLE.get(cls)
+    return bool(s and s.person)
 
 
 def require_migratable(cls):

@@ -35,7 +35,7 @@ STACK_READY = {"turtles": True, "core": {"type": "core", "name": "cluster-api", 
                "providers": [], "missing": [], "ready": True, "harvester_version": "v1.9.0", "bundle": {}}
 STACK_MISSING = dict(STACK_READY, ready=False, missing=["infrastructure/harvester"])
 SERVICES = {"caaph": True, "clusters": [], "catalog": [], "services": []}
-CAPI_TABS = ["clusters", "services", "gitops", "registries", "artefacts", "history", "installation"]
+CAPI_TABS = ["clusters", "services", "gitops", "secrets", "registries", "artefacts", "history", "installation"]
 TF_TABS = ["declarations", "resources", "history", "installation"]
 
 

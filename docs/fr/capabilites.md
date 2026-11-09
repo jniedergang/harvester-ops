@@ -2456,6 +2456,14 @@ gestion**) : le dernier hôte Harvester visité, sauf si vous en choisissez un
 autre dans le menu à côté. Ce choix est gardé par le navigateur et ne change
 pas l'hôte ouvert.
 
+**Onglet External Secrets (2.10.0).** À côté des autres onglets : External
+Secrets Operator dans les clusters enfants (mise en place, namespaces
+d'équipe, état des objets `ExternalSecret`, valeurs écrites avec votre propre
+jeton OpenBao, retrait qui garde les Secrets). Aussi une option de la
+fenêtre de création et des clusters d'un plan de déploiement
+(`external_secrets`). Voir
+[secrets.md](secrets.md#external-secrets-operator-dans-les-clusters-enfants-2100).
+
 **Quatre onglets (2.2.0).** Dans l'en-tête, dans cet ordre : **Clusters**
 (par défaut : les clusters créés par Cluster API, avec **Créer un cluster**,
 détails, kubeconfig, mise à l'échelle et suppression), **Services** (charts
@@ -5305,6 +5313,30 @@ jusqu'à la fin du déroulé.
 
 Tout est décrit dans [secrets.md](secrets.md), avec les limites et ce qui
 n'a pas été vérifié.
+
+### Jetons OpenBao par personne et External Secrets Operator (2.10.0)
+
+Une personne connectée par la connexion unique de Rancher lit et écrit les
+classes personnelles (`ssh-cluster`, `ssh-kvm`, `tf-kvm`, `eso` en écriture
+seule) avec son propre jeton OpenBao : OpenBao juge et son journal d'audit
+nomme la personne (entité, `sub`, `name`). Les comptes locaux, la connexion
+directe, les tâches de fond et la ligne de commande gardent l'identité de
+service. Les clusters enfants peuvent recevoir External Secrets Operator :
+un magasin par namespace d'équipe activé, valeurs gardées dans OpenBao et
+synchronisées vers leurs Secrets, rotation suivie seule, retrait sans perte
+des Secrets.
+
+| Fonction | Console | CLI |
+|---|---|---|
+| Jetons personnels : mettre en place un Rancher (agent en B1, commandes en mode A), cinq vérifications par une connexion réelle, activer, désactiver, retirer | Paramètres > Magasin de secrets > Jetons personnels | `harvester-secrets person-token assistant`, `check`, `enable`, `disable [--remove]` |
+| Groupes internes, lecture seulement par groupe, entités vues | onglet Jetons personnels | `person-token groups` |
+| Clés de signature de Rancher (clés statiques en mode A) : comparer, mettre à jour, confirmer | onglet Jetons personnels, bandeau | `person-token keys` |
+| Marque « jeton personnel / service / service tardif » des actions | Activité | - |
+| External Secrets sur un cluster enfant : mise en place, namespaces activés, état des ExternalSecret, écriture d'une valeur avec votre jeton, clés, retrait | Cluster API > onglet External Secrets ; option à la création ; option `external_secrets` des clusters d'un plan | `harvester-capi eso-deploy`, `eso-status`, `eso-remove` ; `harvester-secrets eso` |
+| Écouteur ESO de B1 (second écouteur TLS, CA propre) | Paramètres > Magasin de secrets > carte External Secrets | `harvester-secrets eso listener` |
+
+Détails, limites et ce qui n'a pas été vérifié :
+[secrets.md](secrets.md#jetons-personnels-2100).
 
 ## Ce qui nécessite quoi
 

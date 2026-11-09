@@ -1,0 +1,44 @@
+[
+ {
+  "apiVersion": "v1",
+  "automountServiceAccountToken": false,
+  "kind": "ServiceAccount",
+  "metadata": {
+   "name": "hops-eso",
+   "namespace": "team-a"
+  }
+ },
+ {
+  "apiVersion": "external-secrets.io/v1",
+  "kind": "SecretStore",
+  "metadata": {
+   "name": "hops-openbao",
+   "namespace": "team-a"
+  },
+  "spec": {
+   "provider": {
+    "vault": {
+     "auth": {
+      "jwt": {
+       "kubernetesServiceAccountToken": {
+        "audiences": [
+         "hops-openbao-abc123def456"
+        ],
+        "expirationSeconds": 600,
+        "serviceAccountRef": {
+         "name": "hops-eso"
+        }
+       },
+       "path": "jwt-hops-abc123def456-eso-1d905023",
+       "role": "eso"
+      }
+     },
+     "caBundle": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUJiYW5jCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K",
+     "path": "harvester-ops",
+     "server": "https://172.16.1.11:8212",
+     "version": "v2"
+    }
+   }
+  }
+ }
+]

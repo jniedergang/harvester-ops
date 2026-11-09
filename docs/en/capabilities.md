@@ -2233,6 +2233,13 @@ their header which cluster they work from (**Management cluster**): the last
 Harvester host visited, unless you pick another one in the menu next to it.
 That choice is kept per browser and does not change the host you have open.
 
+**External Secrets tab (2.10.0).** Next to the other tabs: External Secrets
+Operator on the child clusters (set up, team namespaces, state of the
+`ExternalSecret` objects, values written with your own OpenBao token,
+removal that keeps the Secrets). Also an option of the creation window and
+of the clusters of a deployment plan (`external_secrets`). See
+[secrets.md](secrets.md#external-secrets-operator-in-child-clusters-2100).
+
 **Four tabs (2.2.0).** In the header, in this order: **Clusters** (default:
 the clusters created by Cluster API, with **Create a cluster**, details,
 kubeconfig, scale and delete), **Services** (Helm charts through CAAPH),
@@ -4875,6 +4882,28 @@ until the run ends.
 
 Everything is described in [secrets.md](secrets.md), with the limits and
 what was not verified.
+
+### Per-person OpenBao tokens and External Secrets Operator (2.10.0)
+
+A person signed in through Rancher single sign-on reads and writes the
+personal classes (`ssh-cluster`, `ssh-kvm`, `tf-kvm`, write-only `eso`)
+with their own OpenBao token: OpenBao judges and its audit log names the
+person (entity, `sub`, `name`). Local accounts, direct sign-in, background
+tasks and the command line keep the service identity. Child clusters can
+get External Secrets Operator: one store per enabled team namespace, values
+kept in OpenBao and synced into their Secrets, rotation followed by itself,
+removal without losing the Secrets.
+
+| Function | Console | CLI |
+|---|---|---|
+| Personal tokens: set up a Rancher (agent in B1, commands in mode A), five checks with a real login, activate, turn off, remove | Settings > Secret store > Personal tokens | `harvester-secrets person-token assistant`, `check`, `enable`, `disable [--remove]` |
+| Internal groups, reading only through groups, entities seen | Personal tokens tab | `person-token groups` |
+| Rancher signing keys (static keys in mode A): compare, update, confirm | Personal tokens tab, banner | `person-token keys` |
+| Mark "personal token / service / late service" on actions | Activity | - |
+| External Secrets on a child cluster: set up, enable namespaces, state of the ExternalSecret objects, write a value with your token, update keys, remove | Cluster API > External Secrets tab; option at creation; plan option `external_secrets` | `harvester-capi eso-deploy`, `eso-status`, `eso-remove`; `harvester-secrets eso` |
+| B1 ESO listener (second TLS listener, own CA) | Settings > Secret store > External Secrets card | `harvester-secrets eso listener` |
+
+Details, limits and what was not verified: [secrets.md](secrets.md#per-person-tokens-2100).
 
 ## What needs what
 

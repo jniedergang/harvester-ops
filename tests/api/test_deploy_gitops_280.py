@@ -128,10 +128,14 @@ class FakeGit(ta.FakeArt):
             self.removals.append((sub, args[args.index("--name") + 1]))
         if sub == "create":
             spec = json.loads(Path(args[args.index("--spec") + 1]).read_text())
-            ta.FakeArt.runner(self, run, cmd, capture, summarize)
             origin = wapp._cc.parse_origin(args[args.index("--origin") + 1]) if "--origin" in args else {}
-            if spec.get("rancher_external") and self.clusters.get(spec["name"], {}).get("ready"):
+            # l'import est écrit AVANT la fin de l'action fille, comme le vrai
+            # `create` (point 223) : posé après, le fil du déroulé qui relit
+            # l'état dès la fin le manquait parfois (revue finale 2.10.0 m-9)
+            if spec.get("rancher_external") and "--dry-run" not in args \
+                    and self.outcome.get(spec["name"], "done") == "done":
                 self.imports[spec["name"]] = origin.get("run")
+            ta.FakeArt.runner(self, run, cmd, capture, summarize)
             return None
         return super().runner(run, cmd, capture, summarize)
 

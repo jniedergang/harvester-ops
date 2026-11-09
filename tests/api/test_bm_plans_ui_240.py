@@ -52,6 +52,7 @@ FINDING_CODES = ["plan-invalid", "template-missing", "var-missing", "var-invalid
                  "registry-cert-expiring", "artefact-invalid", "artefact-not-published", "artefact-taken",
                  "artefact-check-failed", "artefact-var-missing", "caaph-missing", "child-admin-required",
                  "artefact-later", "artefact-images-not-published", "manifest-kind-refused", "manifest-kind-unknown",
+                 "artefact-eso-before-chart",
                  "manifest-system-namespace", "manifest-object-taken", "manifest-too-big", "manifest-sa-token-refused",
                  "manifest-crb-admin", "manifest-duplicate", "manifest-no-name", "manifest-too-many",
                  "artefact-name-too-long", "artefact-name-reserved", "artefact-item-not-manifest",
@@ -61,6 +62,8 @@ FINDING_CODES = ["plan-invalid", "template-missing", "var-missing", "var-invalid
                  "gitops-fleet-admin-only", "gitops-fleet-not-confined", "gitops-fleet-needs-rancher",
                  "gitops-source-unsupported", "gitops-flux-in-plan", "gitops-flux-missing", "gitops-flux-not-locked",
                  "gitops-later", "gitops-package-not-published", "gitops-check-failed", "gitops-taken",
+                 # 2.10.0 : External Secrets des clusters du plan
+                 "eso-needs-openbao", "eso-admin-only", "eso-no-namespace", "eso-chart-not-in-plan",
                  "gitops-cluster-unknown", "gitops-namespace-not-team", "gitops-name-too-long", "gitops-invalid",
                  "gitops-cluster-missing", "rancher-session-needed", "rancher-import-conflict", "rancher-name-invalid",
                  "rancher-name-taken", "rancher-agent-image-missing", "rancher-agent-image-unmirrored",

@@ -21,12 +21,21 @@
     harvester-secrets settings [--set KEY=VALUE ...]
     harvester-secrets sweep-orphans [--class C ...] [--min-age-days N] [--dry-run]
     harvester-secrets restore FILE [--dry-run]
+    harvester-secrets restore-settle
     harvester-secrets bundle --registry R --user U --password-stdin [--repository P] [--tag T]
                              [--cosign-key FILE] -o DIR|FILE
     harvester-secrets file REF
     harvester-secrets tf-encryption status | ack-vault
     harvester-secrets tf-entity-remove DECL [--done] [--trial]
     harvester-secrets tf-keys list | delete DECL --confirm DECL | sweep
+    harvester-secrets person-token status
+    harvester-secrets person-token assistant --rancher ID --issuer URL --client-id ID [--ca FILE]
+                                             [--keys discovery|static] [--console-cidr CIDR]
+    harvester-secrets person-token check|enable --rancher ID --id-token-stdin
+    harvester-secrets person-token disable [--rancher ID [--remove]]
+    harvester-secrets person-token groups list | set NAME --class C --cluster X [--member ID]
+                                          | remove NAME | only on|off
+    harvester-secrets person-token keys --rancher ID [--refresh | --confirm]
 
 Options communes : `--id` (action de la console, en-tête X-Hops-Action),
 `--actor` (personne, en-tête X-Hops-Actor).
@@ -67,6 +76,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 import openbao_bundle as ob  # noqa: E402
 import openbao_client as oc  # noqa: E402
+import openbao_jwt as oj  # noqa: E402
 import openbao_policy as pol  # noqa: E402
 import secret_classes as sc  # noqa: E402
 import secret_store as ss  # noqa: E402
@@ -797,6 +807,13 @@ def cmd_upgrade_b1(args):
         except ob.BundleError as e:
             return refuse(e.code, str(e))
         step("bundle", "done", f"OpenBao {info['version']} ({info['tag']}, {info['index_digest'][:19]})")
+        if _eso_doc(raw_settings())["listener"] and not re.search(r"^__ESO_LISTENER__$", info.get("template") or "",
+                                                                   re.M):
+            # revue 8-10 I-4 : l'agent refuse aussi ; dit ici avant de déposer le paquet
+            return refuse("eso-listener-template", "this OpenBao bundle was built before 2.10.0: its template has "
+                          "no ESO listener while the listener is on. Build the bundle with harvester-ops 2.10.0 "
+                          "or later (harvester-secrets bundle), or remove External Secrets first "
+                          "(harvester-secrets eso remove --all)")
         if args.dry_run:
             out({"ok": True, "dry_run": True, "version": info["version"], "tag": info["tag"],
                  "would": ["stage the bundle", "pre-upgrade snapshot, new image, restart (agent)"]})
@@ -1708,8 +1725,74 @@ def cmd_restore(args):
         out({"ok": True, "dry_run": True, "would": f"restore {args.file} in a fresh instance (agent)"})
         return EXIT_OK
     st = agent_ok(run_agent({"op": "restore-snapshot", "file": args.file}))
-    out({"ok": True, "restored": args.file, "message": st.get("message")})
+    gone = _reconcile_after_restore(st.get("info"))
+    _restore_settled(st)
+    out({"ok": True, "restored": args.file, "message": st.get("message"), "settings_pruned": gone})
     return EXIT_OK
+
+
+def _restore_settled(st):
+    """Marque la restauration `st` (état final de l'agent) comme rangée."""
+    if isinstance(st.get("info"), dict) and "person_jwt" in st["info"]:
+        doc = raw_settings()
+        doc["restore_settled"] = st.get("started")
+        save_settings(doc)
+
+
+def cmd_restore_settle(args):
+    """Tâche 13 (vu sur un poste client) : une restauration lancée depuis la
+    console arrête la console, et l'outil qui l'a lancée avec elle, avant
+    qu'il range les réglages. La console relancée appelle ceci : réglages
+    rangés d'après l'état final de l'agent (`status.json`), une seule fois
+    par restauration (marque `restore_settled` = son heure de début)."""
+    try:
+        st = json.loads((state() / "secrets-agent" / "status.json").read_text())
+    except (OSError, ValueError):
+        st = {}
+    info = st.get("info") if isinstance(st, dict) else None
+    if not (st.get("op") == "restore-snapshot" and st.get("state") == "done" and isinstance(info, dict)
+            and "person_jwt" in info) or raw_settings().get("restore_settled") == st.get("started"):
+        out({"ok": True, "settings_pruned": []})
+        return EXIT_OK
+    gone = _reconcile_after_restore(info)
+    _restore_settled(st)
+    out({"ok": True, "settings_pruned": gone})
+    return EXIT_OK
+
+
+def _reconcile_after_restore(info):
+    """Revue 8-10 M-3 : un instantané plus ancien qu'une méthode jwt, qu'un
+    groupe ou qu'un cluster ESO ne les porte pas ; l'agent a rangé son état
+    sur l'instantané et le dit (`info`), les réglages de la console suivent
+    (sinon une personne serait renvoyée vers un montage absent, sans repli,
+    et l'onglet montrerait ESO posé). Rend ce qui a été retiré."""
+    if not isinstance(info, dict) or "person_jwt" not in info:
+        return []                                 # agent d'avant la 2.10.0 : rien à ranger
+    doc = raw_settings()
+    pt, eso = _pt_doc(doc), _eso_doc(doc)
+    keep_jwt, keep_groups = set(info.get("person_jwt") or []), set(info.get("person_groups") or [])
+    keep_eso = set(info.get("eso_clusters") or [])
+    gone = []
+    for k in ("servers", "pending"):
+        for r in sorted(set(pt[k]) - keep_jwt):
+            pt[k].pop(r, None)
+            gone.append(f"jwt {r}")
+    for g in sorted(set(pt["groups"]) - keep_groups):
+        pt["groups"].pop(g, None)
+        gone.append(f"group {g}")
+    for c in sorted(set(eso["clusters"]) - keep_eso):
+        eso["clusters"].pop(c, None)
+        gone.append(f"eso {c}")
+    if eso["listener"] and not info.get("eso_listener"):
+        eso["listener"] = None
+        gone.append("eso listener")
+    if pt["enabled"] and not pt["servers"]:
+        pt["enabled"] = False
+        gone.append("person tokens off")
+    if gone:
+        save_settings(doc)
+        step("settings", "done", "absent from the snapshot: " + ", ".join(gone))
+    return gone
 
 
 def _cosign_runner(key, registry, user, password):
@@ -1991,6 +2074,755 @@ def cmd_tf_keys(args):
 
 
 # ---------------------------------------------------------------------------
+# 2.10.0 : jeton OpenBao par personne (plan 2.10.0, tâches 6 et 7)
+# ---------------------------------------------------------------------------
+PERSON_SETTABLE = ("rancher", "client_id", "issuer")
+
+
+def _pt_doc(doc):
+    pt = doc.get("person_token") if isinstance(doc.get("person_token"), dict) else {}
+    pt.setdefault("enabled", False)
+    pt.setdefault("servers", {})
+    pt.setdefault("pending", {})
+    pt.setdefault("groups", {})
+    pt.setdefault("groups_only", False)
+    doc["person_token"] = pt
+    return pt
+
+
+def _pt_target(s):
+    """(adresse, CA, montage KV, préfixe) du serveur actif ; refus sinon."""
+    if not ss.openbao_active(s):
+        raise CliError("openbao-inactive", "OpenBao is not active (harvester-secrets enable first)", EXIT_REFUSED)
+    if s["mode"] == "b1":
+        return pol.B1_ADDR, ca_of(), pol.DEFAULT_MOUNT, s["prefix"] or f"consoles/{s['console_id']}"
+    return s["addr"], ca_of(s.get("ca_file")), s["mount"], s["prefix"] or f"consoles/{s['console_id']}"
+
+
+def _pt_identity_token(args):
+    """Jeton d'identité de l'administrateur qui lance la vérification : par
+    le fichier de spécification de la console (0600), ou sur l'entrée
+    standard ; jamais en argument. Un jeton d'accès de Rancher est refusé
+    avant tout envoi (point 280)."""
+    jwt = SPEC.get("id_token") or (sys.stdin.readline().strip() if getattr(args, "id_token_stdin", False) else None)
+    if not jwt:
+        raise CliError("openbao-person-no-token", "connect through Rancher to run the checks (the identity "
+                       "token of your session is needed)", EXIT_REFUSED)
+    try:
+        body = jwt.split(".")[1]
+        claims = json.loads(__import__("base64").urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+    except (IndexError, ValueError):
+        raise CliError("bad-input", "not a JWT", EXIT_REFUSED) from None
+    if oj.is_access_token(claims):
+        raise CliError("bad-input", "an access token was given, not the identity token", EXIT_REFUSED)
+    return jwt
+
+
+def _pt_rancher_ca(args):
+    """CA de Rancher (publique) : fichier de l'administrateur, ou fichier de
+    spécification de la console ; None quand Rancher a un certificat public
+    (essai 2 : `oidc_discovery_ca_pem` facultatif)."""
+    if getattr(args, "ca", None):
+        return read_input_text(args.ca)
+    return SPEC.get("rancher_ca") or None
+
+
+def _pt_entry(pt, rancher, pending_first=True):
+    order = ("pending", "servers") if pending_first else ("servers", "pending")
+    for k in order:
+        e = pt[k].get(rancher)
+        if isinstance(e, dict) and e.get("mount"):
+            return e
+    raise CliError("person-token-unconfigured", f"no jwt auth method configured for the Rancher {rancher!r}: "
+                   "run `person-token assistant` first", EXIT_REFUSED)
+
+
+def run_person_checks(addr, ca, kv, prefix, cid, entry, jwt, groups_only=False):
+    """Vérifications avant activation (plan 2.10.0, tâche 6), chacune son
+    résultat et sa raison. La politique de la console n'est pas élargie :
+    tout se prouve par une connexion réelle avec le jeton d'identité de
+    l'administrateur qui les lance, révoquée à la fin."""
+    res = []
+
+    def put(cid_, ok, reason=""):
+        res.append({"id": cid_, "ok": ok, "reason": reason})
+        step(f"check-{cid_}", "done" if ok else ("skipped" if ok is None else "error"), reason)
+        return ok
+
+    issuer, mount = entry["issuer"], entry["mount"]
+    try:
+        doc = oj.fetch_json(oj.discovery_url(issuer), entry.get("ca_pem"))
+        found = oj.check_discovery(doc, issuer)
+        put("discovery", all(ok for _r, ok in found), "; ".join(f"{r}: {'ok' if ok else 'no'}" for r, ok in found))
+    except ValueError as e:
+        put("discovery", False, f"Rancher discovery document unreadable ({ss_scrub(str(e), jwt)[:160]})")
+    base = oc.Client(addr, ca_pem=ca, timeout=10, actor=ARGS.actor or "service", action=ARGS.id)
+    c = base.for_token(None)
+    try:
+        info = c.login_jwt(mount, oj.PERSON_ROLE, jwt)
+    except oc.OpenBaoError as e:
+        put("login", False, f"{e.code}: {e.detail}"[:240])
+        return res
+    except ValueError:
+        put("login", False, "invalid mount name")
+        return res
+    put("login", True, f"{mount}: identity token accepted (entity {info.get('entity_id')})")
+    token = c._tok.value
+    try:
+        look = c.lookup_self()
+        pname = pol.person_policy_name(cid)
+        pols = set(look["policies"])
+        want_net = {str(n) for n in _pt_networks([entry.get("console_cidr") or pol.B1_CIDR])}
+        got_net = {str(n) for n in _pt_networks(look["bound_cidrs"])}
+        ttl = look.get("ttl")
+        bad = []
+        if pols != {"default", pname}:
+            bad.append("policies " + ", ".join(sorted(pols)))
+        if got_net != want_net:
+            bad.append("bound to " + (", ".join(sorted(got_net)) or "any address"))
+        if not isinstance(ttl, int) or not 0 < ttl <= 900:
+            bad.append(f"ttl {ttl}")
+        groups = ", ".join(look["identity_policies"]) or "none"
+        put("token", not bad, "; ".join(bad) if bad else
+            f"policies default and {pname}, bound to the console, {ttl} s; group policies: {groups}")
+        checks = pol.person_capability_checks(kv, prefix, cid, groups_only)
+        got = c.capabilities(list(checks))
+        wrong = [f"{p} ({','.join(got.get(p) or []) or 'none'}, want {want})" for p, want in checks.items()
+                 if not pol.capability_verdict(want, got.get(p))]
+        put("capabilities", not wrong, "personal classes readable, eso write-only, other classes and "
+            "consoles refused" if not wrong else "unexpected: " + "; ".join(wrong)[:300])
+    except oc.OpenBaoError as e:
+        put("token", False, f"{e.code}: {e.detail}"[:240])
+    finally:
+        try:
+            c.revoke_self()
+        except oc.OpenBaoError:
+            pass
+    try:
+        refused = not base.for_token(token).token_valid()
+        put("revoke", refused, "token revoked, then refused" if refused else "the revoked token is still accepted")
+    except oc.OpenBaoError as e:
+        put("revoke", False, f"{e.code}: {e.detail}"[:240])
+    return res
+
+
+def _pt_networks(values):
+    import ipaddress
+    out = set()
+    for v in values or []:
+        try:
+            out.add(ipaddress.ip_network(str(v), strict=False))
+        except ValueError:
+            out.add(str(v))
+    return out
+
+
+def _pt_apply_jwt(s, cid, rancher, entry, pubkeys, groups_only):
+    """Pose (ou met à jour) la méthode jwt d'un Rancher : agent en B1,
+    commandes rendues en mode A (décision 287)."""
+    addr, _ca, kv, prefix = _pt_target(s)
+    if s["mode"] == "b1":
+        if pubkeys:
+            raise CliError("person-token-static-mode-a", "in mode b1 the keys of Rancher are read by discovery",
+                           EXIT_REFUSED)
+        req = {"op": "b1-jwt", "rancher": rancher, "client_id": entry["client_id"], "issuer": entry["issuer"],
+               "groups_only": bool(groups_only)}
+        if entry.get("ca_pem"):
+            req["ca_pem"] = entry["ca_pem"]
+        agent_ok(run_agent(req))
+        return None
+    return pol.person_token_commands(addr, cid, rancher, entry["client_id"], entry["issuer"], entry.get("ca_pem"),
+                                     entry["console_cidr"], pubkeys or None, mount=kv, prefix=prefix,
+                                     groups_only=groups_only, jwks_sha256=entry.get("keys_sha256"))
+
+
+def cmd_person_token(args):
+    return {"status": _pt_status, "assistant": _pt_assistant, "check": _pt_check, "enable": _pt_enable,
+            "disable": _pt_disable, "groups": _pt_groups, "keys": _pt_keys}[args.what](args)
+
+
+def _pt_status(args):
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    view = {k: {f: e.get(f) for f in ("mount", "client_id", "issuer", "keys", "keys_sha256", "keys_pending_confirm",
+                                      "configured_at", "configured_by", "checked_at")}
+            for k, e in pt["servers"].items() if isinstance(e, dict)}
+    out({"ok": True, "enabled": pt["enabled"], "groups_only": pt["groups_only"], "servers": view,
+         "pending": sorted(pt["pending"]), "groups": pt["groups"]})
+    return EXIT_OK
+
+
+def _pt_assistant(args):
+    s = settings()
+    doc = raw_settings()
+    cid = ensure_console_id(doc)
+    _pt_target(s)
+    if not args.rancher or not args.issuer or not args.client_id:
+        return refuse("bad-input", "--rancher, --issuer and --client-id are needed")
+    if s["mode"] == "b1" and args.keys == "static":
+        # revue 6-7 I-1 (décision 313 B) : en B1, découverte seulement ; la
+        # confiance dans des clés statiques appartient à l'administrateur
+        # d'OpenBao du mode A
+        return refuse("person-token-static-mode-a", "in mode b1 the keys of Rancher are read by discovery; "
+                      "static keys are for mode a")
+    cidr = pol.B1_CIDR if s["mode"] == "b1" else args.console_cidr
+    if s["mode"] != "b1" and not cidr:
+        return refuse("bad-input", "mode a needs --console-cidr (the address OpenBao sees for the console)")
+    if s["mode"] != "b1":
+        try:
+            cidr = oj.console_cidr(cidr)
+        except ValueError as e:
+            return refuse("bad-input", str(e))
+    rancher_ca = _pt_rancher_ca(args)
+    try:
+        mount = oj.person_mount(cid, args.rancher)
+        oj.person_role_params(args.client_id, cidr, cid)
+        oj.mount_config(args.issuer)
+    except ValueError as e:
+        return refuse("bad-input", str(e))
+    issuer = args.issuer.rstrip("/")
+    pubkeys, sha = None, None
+    try:
+        jwks = oj.fetch_json(oj.jwks_url(issuer), rancher_ca)
+        sha = oj.keys_sha256(jwks)
+        if args.keys == "static":
+            pubkeys = oj.pubkeys_of(jwks)
+    except ValueError as e:
+        if args.keys == "static":
+            return fail("openbao-jwt-keys-unreadable", f"Rancher JWKS unreadable: {str(e)[:200]}")
+    entry = {"mount": mount, "client_id": args.client_id, "issuer": issuer, "keys": args.keys,
+             "keys_sha256": sha, "pubkeys": pubkeys, "ca_pem": None if pubkeys else rancher_ca,
+             "console_cidr": cidr, "configured_at": time.time(),
+             "configured_by": ARGS.actor or os.environ.get("SUDO_USER") or os.environ.get("USER") or "cli"}
+    pt = _pt_doc(raw_settings())
+    if args.rancher not in pt["servers"] and args.rancher not in pt["pending"] \
+            and len(set(pt["servers"]) | set(pt["pending"])) >= pol.MAX_PERSON_MOUNTS:
+        return refuse("limit-jwt-mounts", f"at most {pol.MAX_PERSON_MOUNTS} Rancher jwt auth methods")
+    step("person-token", "running", f"{mount} ({args.keys})")
+    cmds = _pt_apply_jwt(s, cid, args.rancher, entry, pubkeys, pt["groups_only"])
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    pt["pending"][args.rancher] = entry
+    save_settings(doc)
+    step("person-token", "done", "set by the agent" if cmds is None else "commands for the OpenBao administrator")
+    _a, _c, kv, prefix = _pt_target(s)
+    out({"ok": True, "mount": mount, "keys": args.keys, "keys_sha256": sha, "applied": cmds is None,
+         "commands": cmds, "policy": pol.person_policy(kv, prefix, cid, pt["groups_only"]),
+         "next": "person-token check, then person-token enable (connected through Rancher)"})
+    return EXIT_OK
+
+
+def _pt_run_checks(args):
+    s = settings()
+    addr, ca, kv, prefix = _pt_target(s)
+    pt = _pt_doc(raw_settings())
+    if not args.rancher:
+        raise CliError("bad-input", "--rancher is needed", EXIT_REFUSED)
+    entry = _pt_entry(pt, args.rancher)
+    jwt = _pt_identity_token(args)
+    return pt, entry, run_person_checks(addr, ca, kv, prefix, s["console_id"], entry, jwt, pt["groups_only"])
+
+
+def _pt_check(args):
+    _pt, _entry, res = _pt_run_checks(args)
+    ok = all_green(res)
+    out({"ok": ok, "checks": res})
+    return EXIT_OK if ok else EXIT_FAIL
+
+
+def _pt_enable(args):
+    """Rien n'est activé tant qu'une vérification est rouge (plan 2.10.0) :
+    les cinq sont rejouées, puis la méthode du Rancher passe des réglages
+    en attente aux réglages actifs et le réglage est allumé, à chaud."""
+    _pt, entry, res = _pt_run_checks(args)
+    if not all_green(res):
+        out({"ok": False, "code": "person-token-checks-failed", "checks": res})
+        return EXIT_FAIL
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    pt["servers"][args.rancher] = dict(entry, checked_at=time.time())
+    pt["pending"].pop(args.rancher, None)
+    pt["enabled"] = True
+    save_settings(doc)
+    step("enable", "done", f"person tokens on for the Rancher {args.rancher}")
+    out({"ok": True, "checks": res, "enabled": True})
+    return EXIT_OK
+
+
+def _pt_disable(args):
+    """Sans `--rancher` : réglage éteint (tout repasse au service, à chaud).
+    Avec : la méthode de ce Rancher retirée des réglages ; `--remove` la
+    retire aussi d'OpenBao (agent en B1, commandes en A)."""
+    s = settings()
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    cmds = None
+    if not args.rancher:
+        pt["enabled"] = False
+        save_settings(doc)
+        step("disable", "done", "person tokens off")
+        if not args.remove:
+            out({"ok": True, "enabled": False})
+            return EXIT_OK
+        # tâche 12 (point 291) : tout retirer, avant un retour sous la 2.10.0
+        ranchers = sorted(set(pt["servers"]) | set(pt["pending"]))
+        groups = sorted(pt["groups"])
+        cmds = []
+        addr, _ca, _kv, _prefix = _pt_target(s) if (ranchers or groups) else (None, None, None, None)
+        for name in groups:
+            if s["mode"] == "b1":
+                agent_ok(run_agent({"op": "b1-groups", "name": name, "remove": True}))
+            else:
+                c = pol.group_remove_commands(addr, s["console_id"], name)
+                cmds += c if not cmds else c[1:]           # une seule ligne d'adresse
+            doc = raw_settings()
+            _pt_doc(doc)["groups"].pop(name, None)
+            save_settings(doc)
+        for i, r in enumerate(ranchers):
+            if s["mode"] == "b1":
+                agent_ok(run_agent({"op": "b1-jwt-remove", "rancher": r}))
+            else:
+                try:
+                    c = pol.person_remove_commands(addr, s["console_id"], r, last=i == len(ranchers) - 1)
+                    cmds += c if not cmds else c[1:]
+                except ValueError as e:
+                    return refuse("bad-input", str(e))
+            doc = raw_settings()
+            pt2 = _pt_doc(doc)
+            pt2["servers"].pop(r, None)
+            pt2["pending"].pop(r, None)
+            save_settings(doc)
+        step("remove", "done", f"{len(ranchers)} Rancher method(s) and {len(groups)} group(s) removed")
+        out({"ok": True, "enabled": False, "removed": ranchers, "groups_removed": groups,
+             "commands": cmds or None})
+        return EXIT_OK
+    known = args.rancher in pt["servers"] or args.rancher in pt["pending"]
+    if not known and not args.remove:
+        return refuse("person-token-unconfigured", f"no jwt auth method for the Rancher {args.rancher!r}")
+    pt["servers"].pop(args.rancher, None)
+    pt["pending"].pop(args.rancher, None)
+    save_settings(doc)
+    if args.remove:
+        addr, _ca, _kv, _prefix = _pt_target(s)
+        if s["mode"] == "b1":
+            agent_ok(run_agent({"op": "b1-jwt-remove", "rancher": args.rancher}))
+        else:
+            try:
+                cmds = pol.person_remove_commands(addr, s["console_id"], args.rancher,
+                                                  last=not (pt["servers"] or pt["pending"]))
+            except ValueError as e:
+                return refuse("bad-input", str(e))
+    step("disable", "done", f"Rancher {args.rancher} removed from the person token settings")
+    out({"ok": True, "rancher": args.rancher, "removed": bool(args.remove), "commands": cmds})
+    return EXIT_OK
+
+
+def _pt_groups(args):
+    """Groupes internes (décision 303 A) : `list`, `set NOM --class C
+    --cluster X [--member ENTITÉ]`, `remove NOM`, `only on|off` (réglage
+    « lecture seulement par groupe »)."""
+    s = settings()
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    if args.action == "list":
+        out({"ok": True, "groups": pt["groups"], "groups_only": pt["groups_only"]})
+        return EXIT_OK
+    addr, _ca, kv, prefix = _pt_target(s)
+    cid = s["console_id"]
+    if args.action == "only":
+        if args.name not in ("on", "off"):
+            return refuse("bad-input", "groups only on|off")
+        on = args.name == "on"
+        cmds = None
+        if s["mode"] == "b1":
+            agent_ok(run_agent({"op": "b1-groups", "groups_only": on}))
+        else:
+            cmds = pol.person_policy_commands(addr, kv, prefix, cid, on)
+        doc = raw_settings()
+        _pt_doc(doc)["groups_only"] = on
+        save_settings(doc)
+        out({"ok": True, "groups_only": on, "commands": cmds})
+        return EXIT_OK
+    if not args.name:
+        return refuse("bad-input", "a group name is needed")
+    cmds = None
+    try:
+        if args.action == "remove":
+            pol.group_name(cid, args.name)
+            if s["mode"] == "b1":
+                agent_ok(run_agent({"op": "b1-groups", "name": args.name, "remove": True}))
+            else:
+                cmds = pol.group_remove_commands(addr, cid, args.name)
+            doc = raw_settings()
+            _pt_doc(doc)["groups"].pop(args.name, None)
+        else:
+            classes, clusters, members = args.cls or [], args.cluster or [], args.member or []
+            if args.name not in pt["groups"] and len(pt["groups"]) >= pol.MAX_GROUPS:
+                return refuse("limit-groups", f"at most {pol.MAX_GROUPS} groups")
+            pol.group_rules(kv, prefix, cid, args.name, classes, clusters)
+            pol.group_body(cid, args.name, members)
+            if s["mode"] == "b1":
+                agent_ok(run_agent({"op": "b1-groups", "name": args.name, "classes": classes, "clusters": clusters,
+                                    "members": members}))
+            else:
+                cmds = pol.group_commands(addr, kv, prefix, cid, args.name, classes, clusters, members)
+            doc = raw_settings()
+            _pt_doc(doc)["groups"][args.name] = {"classes": classes, "clusters": clusters, "members": members,
+                                                 "at": time.time(), "by": ARGS.actor or os.environ.get("USER")}
+    except ValueError as e:
+        return refuse("bad-input", str(e))
+    save_settings(doc)
+    out({"ok": True, "group": pol.group_name(cid, args.name), "removed": args.action == "remove",
+         "commands": cmds})
+    return EXIT_OK
+
+
+def _pt_keys(args):
+    """Tâche 7 : clés statiques de Rancher. Sans option, l'empreinte du JWKS
+    est comparée à celle des réglages (`openbao-jwt-keys-changed`) ;
+    `--refresh` pose l'ancienne et la nouvelle clé ensemble (aucune session
+    coupée pendant la rotation) ; `--confirm` ne garde que les clés
+    publiées. Mode `discovery` : rien à faire, OpenBao relit le JWKS."""
+    s = settings()
+    if not args.rancher:
+        return refuse("bad-input", "--rancher is needed")
+    pt = _pt_doc(raw_settings())
+    entry = _pt_entry(pt, args.rancher, pending_first=False)
+    if entry.get("keys") != "static":
+        out({"ok": True, "keys": "discovery", "changed": False,
+             "message": "OpenBao reads the JWKS of Rancher itself (discovery)"})
+        return EXIT_OK
+    try:
+        jwks = oj.fetch_json(oj.jwks_url(entry["issuer"]), entry.get("ca_pem"))
+        sha, now_keys = oj.keys_sha256(jwks), oj.pubkeys_of(jwks)
+    except ValueError as e:
+        return fail("openbao-jwt-keys-unreadable", f"Rancher JWKS unreadable: {str(e)[:200]}")
+    changed = sha != entry.get("keys_sha256") or entry.get("keys_pending_confirm")
+    if not args.refresh and not args.confirm:
+        out({"ok": True, "keys": "static", "changed": bool(sha != entry.get("keys_sha256")),
+             "pending_confirm": bool(entry.get("keys_pending_confirm")),
+             **({"code": "openbao-jwt-keys-changed"} if sha != entry.get("keys_sha256") else {})})
+        return EXIT_OK
+    if not changed and not args.confirm:
+        out({"ok": True, "keys": "static", "changed": False, "commands": None})
+        return EXIT_OK
+    # revue 6-7 I-1 : seulement les clés que Rancher publie (pendant une
+    # rotation, son JWKS porte l'ancienne et la nouvelle) ; jamais une clé lue
+    # dans les réglages, que la console écrit. `--confirm` reste accepté.
+    keys = now_keys
+    cid = s["console_id"]
+    if s["mode"] == "b1":
+        return refuse("person-token-static-mode-a", "in mode b1 the keys of Rancher are read by discovery")
+    addr, _ca, _kv, _prefix = _pt_target(s)
+    cmds = pol.person_keys_commands(addr, cid, args.rancher, entry["issuer"], keys, jwks_sha256=sha)
+    doc = raw_settings()
+    pt = _pt_doc(doc)
+    for k in ("servers", "pending"):
+        if args.rancher in pt[k]:
+            pt[k][args.rancher].update(pubkeys=keys, keys_sha256=sha, keys_pending_confirm=keys != now_keys)
+    save_settings(doc)
+    step("keys", "done", f"{len(keys)} key(s) set" + (" (old and new until confirm)" if keys != now_keys else ""))
+    out({"ok": True, "keys": "static", "count": len(keys), "pending_confirm": keys != now_keys, "commands": cmds})
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# 2.10.0 (tâche 9) : External Secrets Operator des clusters enfants
+# ---------------------------------------------------------------------------
+ESO_CLUSTER_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]{0,62})/([a-z0-9][-a-z0-9]{0,62})/([a-z0-9][-a-z0-9]{0,62})$")
+
+
+def _eso_doc(doc):
+    e = doc.get("eso") if isinstance(doc.get("eso"), dict) else {}
+    for k, v in (("listener", None), ("address", None), ("ca_pem", None), ("clusters", {})):
+        e.setdefault(k, v)
+    if not isinstance(e["clusters"], dict):
+        e["clusters"] = {}
+    doc["eso"] = e
+    return e
+
+
+def _eso_ref(args):
+    m = ESO_CLUSTER_RE.match(getattr(args, "cluster", None) or "")
+    if not m:
+        raise CliError("bad-input", "--cluster <harvester>/<namespace>/<cluster> is needed", EXIT_REFUSED)
+    h, ns, c = m.groups()
+    import child_eso as ce
+    return h, ns, c, ce.cluster_key(h, ns, c)
+
+
+def _eso_namespaces(args):
+    import child_eso as ce
+    try:
+        nss = ce.normalize_namespaces(list(getattr(args, "namespace", None) or []))
+    except ce.EsoError as e:
+        raise CliError(e.code, str(e), EXIT_REFUSED) from None
+    except ValueError as e:
+        raise CliError("bad-input", str(e), EXIT_REFUSED) from None
+    if not nss:
+        raise CliError("eso-no-namespace", "at least one --namespace (a team namespace) is needed", EXIT_REFUSED)
+    return nss
+
+
+def _eso_child_keys(args, h, ns, c):
+    """(émetteur, JWKS) des comptes de service du cluster enfant : par le
+    fichier de spécification de l'appelant (`harvester-capi` les a lus avec
+    le kubeconfig du cluster), sinon lus ici par `kubectl get --raw` avec le
+    kubeconfig du cluster Harvester (`--kubeconfig`, identité de qui lance) ;
+    l'accès anonyme est refusé par RKE2 (essai 7)."""
+    if SPEC.get("eso_jwks") and SPEC.get("eso_issuer"):
+        try:
+            return SPEC["eso_issuer"], json.loads(SPEC["eso_jwks"])
+        except ValueError:
+            raise CliError("bad-input", "the JWKS of the spec file is not JSON", EXIT_REFUSED) from None
+    kc = getattr(args, "kubeconfig", None)
+    if not kc:
+        from kube import cluster_config
+        kc = (cluster_config(h) or {}).get("kubeconfig")
+    if not kc:
+        raise CliError("bad-input", "--kubeconfig of the Harvester cluster is needed to read the child cluster",
+                       EXIT_REFUSED)
+    import child_access as ca
+    from kube import Kube, KubeError
+    try:
+        with ca.session(Kube(kc), ns, c) as path:
+            child = Kube(path)
+            disc = json.loads(child.run("get", "--raw", "/.well-known/openid-configuration"))
+            jwks = json.loads(child.run("get", "--raw", "/openid/v1/jwks"))
+    except ca.ChildAccessError as e:
+        raise CliError(e.code, str(e), EXIT_REFUSED) from None
+    except (KubeError, ValueError) as e:
+        raise CliError("eso-child-keys-unreadable", f"service account keys of {ns}/{c} unreadable: "
+                       f"{str(e)[:200]}", EXIT_FAIL) from None
+    return str(disc.get("issuer") or ""), jwks
+
+
+def _eso_store_params(s, e, cid, key):
+    """Ce que le magasin d'un namespace porte (aucune valeur secrète) :
+    adresse d'OpenBao vue du cluster enfant, montage KV, préfixe, CA
+    publique, montage jwt du cluster, audience."""
+    _addr, _ca, kv, prefix = _pt_target(s)
+    if s["mode"] == "b1":
+        server, ca = (f"https://{e['listener']}" if e.get("listener") else None), e.get("ca_pem")
+    else:
+        server, ca = s["addr"], ca_of(s.get("ca_file"))
+    return {"server": server, "ca_pem": ca, "kv_mount": kv, "prefix": prefix,
+            "jwt_mount": oj.eso_mount(cid, key), "audience": oj.eso_audience(cid)}
+
+
+def _eso_listener_on(s, address):
+    """B1 : second écouteur posé par l'agent ; adresse et CA publique
+    rangées dans les réglages."""
+    st = agent_ok(run_agent({"op": "b1-eso-listener", "address": address}))
+    info = st.get("info") or {}
+    doc = raw_settings()
+    e = _eso_doc(doc)
+    e["listener"] = info.get("eso_listener")
+    if address:
+        e["address"] = address
+    e["ca_pem"] = info.get("eso_ca_pem") if info.get("eso_listener") else None
+    save_settings(doc)
+    return e
+
+
+def cmd_eso(args):
+    return {"status": _eso_status, "listener": _eso_listener, "assistant": _eso_assistant, "add": _eso_add,
+            "keys": _eso_keys, "remove": _eso_remove}[args.what](args)
+
+
+def _eso_status(args):
+    e = _eso_doc(raw_settings())
+    view = {k: {f: v.get(f) for f in ("harvester", "namespace", "cluster", "mount", "issuer", "keys_sha256",
+                                      "namespaces", "node_cidr", "applied", "at", "by")}
+            for k, v in e["clusters"].items() if isinstance(v, dict)}
+    out({"ok": True, "mode": settings().get("mode"), "listener": e["listener"], "address": e["address"],
+         "clusters": view})
+    return EXIT_OK
+
+
+def _eso_listener(args):
+    s = settings()
+    _pt_target(s)
+    if s["mode"] != "b1":
+        return refuse("eso-listener-b1-only", "the ESO listener belongs to mode b1; in mode a, child clusters "
+                      "reach the OpenBao of the settings")
+    if args.off == bool(args.addr):
+        return refuse("bad-input", "--addr <address of the host>:<port>, or --off")
+    if args.addr:
+        try:
+            pol.check_eso_listen(args.addr)
+        except ValueError as e:
+            return refuse("bad-input", str(e))
+    e = _eso_doc(raw_settings())
+    if e["clusters"] and (args.off or (e["listener"] and e["listener"] != args.addr)):
+        # les magasins des clusters enfants visent l'adresse actuelle
+        return refuse("eso-listener-in-use", "child clusters still use the ESO listener: remove them first")
+    if args.addr and not e["listener"] and not e["clusters"]:
+        # point 298 : éteint tant qu'aucun cluster n'a ESO ; l'adresse est
+        # gardée, l'écouteur s'allume au premier `eso add`
+        doc = raw_settings()
+        _eso_doc(doc)["address"] = args.addr
+        save_settings(doc)
+        step("listener", "done", f"ESO listener address {args.addr} kept; on with the first child cluster")
+        out({"ok": True, "listener": None, "address": args.addr, "port": pol.ESO_PORT})
+        return EXIT_OK
+    step("listener", "running", args.addr or "off")
+    e = _eso_listener_on(s, None if args.off else args.addr)
+    step("listener", "done", f"ESO listener on {e['listener']}" if e["listener"] else "ESO listener off")
+    out({"ok": True, "listener": e["listener"], "port": pol.ESO_PORT,
+         "firewall": f"open {e['listener']} (TCP) to the node network of the child clusters"
+         if e["listener"] else None})
+    return EXIT_OK
+
+
+def _eso_prepare(args):
+    s = settings()
+    _pt_target(s)
+    cid = s["console_id"]
+    h, ns, c, key = _eso_ref(args)
+    nss = _eso_namespaces(args)
+    try:
+        uids = oj.eso_sa_uids(_eso_sa_uids_arg(args), nss)
+    except ValueError as e:
+        raise CliError("bad-input", str(e), EXIT_REFUSED) from None
+    args.sa_uids_doc = uids
+    issuer, jwks = _eso_child_keys(args, h, ns, c)
+    try:
+        pubkeys = oj.pubkeys_of(jwks)
+        sha = oj.keys_sha256(jwks)
+        oj.eso_mount_config(issuer, pubkeys)
+        oj.eso_role_params(cid, key, nss, args.node_cidr, uids)
+    except ValueError as e:
+        raise CliError("eso-child-keys-unreadable", str(e)[:200], EXIT_FAIL) from None
+    return s, cid, (h, ns, c, key), nss, issuer, pubkeys, sha
+
+
+def _eso_sa_uids_arg(args):
+    """`--sa-uid NAMESPACE=UID` (revue 8-10 I-3), ou le dict déjà rangé."""
+    raw = getattr(args, "sa_uid", None)
+    if isinstance(raw, dict):
+        return raw
+    out = {}
+    for item in raw or []:
+        n, sep, u = str(item).partition("=")
+        if not sep:
+            raise CliError("bad-input", "--sa-uid NAMESPACE=UID", EXIT_REFUSED)
+        out[n] = u
+    return out
+
+
+def _eso_assistant(args):
+    """Rendu sans rien écrire : commandes du mode A (ou ce que l'agent posera
+    en B1) et paramètres du magasin."""
+    s, cid, (h, ns, c, key), nss, issuer, pubkeys, sha = _eso_prepare(args)
+    addr, _ca, kv, prefix = _pt_target(s)
+    cmds = pol.eso_cluster_commands(addr, kv, prefix, cid, key, issuer, pubkeys, nss, args.node_cidr,
+                                    args.sa_uids_doc)
+    out({"ok": True, "key": key, "mount": oj.eso_mount(cid, key), "keys_sha256": sha, "namespaces": nss,
+         "commands": cmds if s["mode"] != "b1" else None,
+         "store": _eso_store_params(s, _eso_doc(raw_settings()), cid, key)})
+    return EXIT_OK
+
+
+def _eso_add(args):
+    """Pose (ou met à jour) l'authentification d'un cluster enfant : agent en
+    B1 (écouteur allumé au premier cluster), commandes en A ; réglages
+    tenus ; rend les paramètres du magasin (aucune valeur secrète)."""
+    s, cid, (h, ns, c, key), nss, issuer, pubkeys, sha = _eso_prepare(args)
+    e = _eso_doc(raw_settings())
+    cmds = None
+    step("eso", "running", f"{h}/{ns}/{c} ({key}), {len(nss)} namespace(s)")
+    if s["mode"] == "b1":
+        if not e["listener"]:
+            address = args.listen or e["address"]
+            if not address:
+                return refuse("eso-listener-needed", "the ESO listener has no address: harvester-secrets eso "
+                              "listener --addr <address of the host>:8212 (or --listen here)")
+            try:
+                pol.check_eso_listen(address)
+            except ValueError as err:
+                return refuse("bad-input", str(err))
+            e = _eso_listener_on(s, address)
+        agent_ok(run_agent({"op": "b1-eso-cluster", "key": key, "harvester": h, "namespace": ns, "cluster": c,
+                            "issuer": issuer, "pubkeys": pubkeys, "namespaces": nss,
+                            **({"node_cidr": args.node_cidr} if args.node_cidr else {}),
+                            **({"sa_uids": args.sa_uids_doc} if args.sa_uids_doc else {})}))
+    else:
+        addr, _ca, kv, prefix = _pt_target(s)
+        cmds = pol.eso_cluster_commands(addr, kv, prefix, cid, key, issuer, pubkeys, nss, args.node_cidr,
+                                        args.sa_uids_doc)
+    doc = raw_settings()
+    e = _eso_doc(doc)
+    e["clusters"][key] = {"harvester": h, "namespace": ns, "cluster": c, "mount": oj.eso_mount(cid, key),
+                          "issuer": issuer.rstrip("/"), "keys_sha256": sha, "namespaces": nss,
+                          "node_cidr": args.node_cidr, "sa_uids": args.sa_uids_doc,
+                          "applied": cmds is None, "at": time.time(),
+                          "by": ARGS.actor or os.environ.get("SUDO_USER") or os.environ.get("USER") or "cli"}
+    save_settings(doc)
+    step("eso", "done", "set by the agent" if cmds is None else "commands for the OpenBao administrator")
+    out({"ok": True, "key": key, "mount": oj.eso_mount(cid, key), "keys_sha256": sha, "namespaces": nss,
+         "applied": cmds is None, "commands": cmds, "store": _eso_store_params(s, e, cid, key)})
+    return EXIT_OK
+
+
+def _eso_keys(args):
+    """Clés des comptes de service d'un cluster enfant : empreinte comparée
+    (`eso-keys-changed`) ; `--refresh` repose l'authentification avec les
+    clés publiées (mêmes namespaces)."""
+    s = settings()
+    _pt_target(s)
+    h, ns, c, key = _eso_ref(args)
+    have = _eso_doc(raw_settings())["clusters"].get(key)
+    if not have:
+        return refuse("eso-cluster-unknown", f"ESO is not set on {h}/{ns}/{c}")
+    issuer, jwks = _eso_child_keys(args, h, ns, c)
+    try:
+        sha = oj.keys_sha256(jwks)
+    except ValueError as e:
+        return fail("eso-child-keys-unreadable", str(e)[:200])
+    changed = sha != have.get("keys_sha256") or issuer.rstrip("/") != have.get("issuer")
+    if not args.refresh:
+        out({"ok": True, "key": key, "changed": changed, **({"code": "eso-keys-changed"} if changed else {})})
+        return EXIT_OK
+    args.namespace = list(have.get("namespaces") or [])
+    args.node_cidr = have.get("node_cidr")
+    args.sa_uid = dict(have.get("sa_uids") or {})
+    args.listen = None
+    return _eso_add(args)
+
+
+def _eso_remove(args):
+    """Authentification d'un cluster enfant retirée (agent en B1, commandes
+    en A) ; au dernier cluster, l'écouteur de B1 est éteint (point 298)."""
+    s = settings()
+    addr, _ca, _kv, _prefix = _pt_target(s)
+    cid = s["console_id"]
+    e = _eso_doc(raw_settings())
+    if args.all:
+        keys = sorted(e["clusters"])
+    else:
+        h, ns, c, key = _eso_ref(args)
+        keys = [key]
+    cmds = []
+    for key in keys:
+        step("eso", "running", f"remove {key}")
+        if s["mode"] == "b1":
+            agent_ok(run_agent({"op": "b1-eso-cluster-remove", "key": key}))
+        else:
+            cmds += pol.eso_remove_commands(addr, cid, key)[0 if not cmds else 1:]
+        doc = raw_settings()
+        _eso_doc(doc)["clusters"].pop(key, None)
+        save_settings(doc)
+    left = _eso_doc(raw_settings())["clusters"]
+    if s["mode"] == "b1" and not left and _eso_doc(raw_settings())["listener"]:
+        _eso_listener_on(s, None)
+        step("listener", "done", "ESO listener off (no child cluster left)")
+    step("eso", "done", f"{len(keys)} child cluster(s) removed")
+    out({"ok": True, "removed": keys, "left": sorted(left), "commands": cmds or None})
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 def parser():
     p = argparse.ArgumentParser(prog="harvester-secrets", description="Console secret store (OpenBao).")
     p.add_argument("--id", help="action id of the console (X-Hops-Action)")
@@ -2067,6 +2899,7 @@ def parser():
     s = sub.add_parser("restore")
     s.add_argument("file")
     s.add_argument("--dry-run", action="store_true")
+    sub.add_parser("restore-settle", help="settings pruned to the last restored snapshot (console restart)")
     s = sub.add_parser("bundle")
     s.add_argument("--registry", default=ob.DEFAULT_REGISTRY)
     s.add_argument("--repository", default=ob.DEFAULT_REPOSITORY)
@@ -2084,6 +2917,59 @@ def parser():
     s.add_argument("decl")
     s.add_argument("--done", action="store_true", help="mode a: the administrator removed it")
     s.add_argument("--trial", action="store_true", help="declaration of a dry run: its transit key goes now")
+    s = sub.add_parser("person-token", help="per-person OpenBao tokens of the Rancher sign-in (2.10.0)")
+    pt = s.add_subparsers(dest="what", required=True)
+    pt.add_parser("status")
+    x = pt.add_parser("assistant", help="jwt auth method of a Rancher: agent (b1) or commands (a)")
+    for o in ("--rancher", "--issuer", "--client-id", "--ca", "--console-cidr"):
+        x.add_argument(o)
+    x.add_argument("--keys", choices=("discovery", "static"), default="discovery")
+    x.add_argument("--spec", help=argparse.SUPPRESS)
+    for name in ("check", "enable"):
+        x = pt.add_parser(name)
+        x.add_argument("--rancher")
+        x.add_argument("--id-token-stdin", action="store_true",
+                       help="the identity token of the administrator, on stdin (never as an argument)")
+        x.add_argument("--spec", help=argparse.SUPPRESS)
+    x = pt.add_parser("disable")
+    x.add_argument("--rancher")
+    x.add_argument("--remove", action="store_true",
+                   help="remove the jwt auth method of --rancher, or of every Rancher and every group")
+    x = pt.add_parser("groups", help="internal OpenBao groups: list | set NAME | remove NAME | only on|off")
+    x.add_argument("action", choices=("list", "set", "remove", "only"))
+    x.add_argument("name", nargs="?")
+    x.add_argument("--class", dest="cls", action="append")
+    x.add_argument("--cluster", action="append")
+    x.add_argument("--member", action="append", help="identity entity id")
+    x = pt.add_parser("keys", help="static keys of a Rancher: compare, --refresh (old and new), --confirm")
+    x.add_argument("--rancher")
+    g = x.add_mutually_exclusive_group()
+    g.add_argument("--refresh", action="store_true")
+    g.add_argument("--confirm", action="store_true")
+    s = sub.add_parser("eso", help="External Secrets Operator of the child clusters (2.10.0)")
+    es = s.add_subparsers(dest="what", required=True)
+    es.add_parser("status")
+    x = es.add_parser("listener", help="mode b1: second OpenBao listener for ESO on an address of the host")
+    x.add_argument("--addr")
+    x.add_argument("--off", action="store_true")
+    for name in ("assistant", "add"):
+        x = es.add_parser(name)
+        x.add_argument("--cluster", help="<harvester>/<namespace>/<cluster>")
+        x.add_argument("--namespace", action="append", help="enabled team namespace (the full list)")
+        x.add_argument("--kubeconfig", help="kubeconfig of the Harvester cluster (reads the child cluster)")
+        x.add_argument("--node-cidr", help="node network of the child cluster (token_bound_cidrs)")
+        x.add_argument("--listen", help="mode b1: listener address if it is not set yet")
+        x.add_argument("--sa-uid", action="append", metavar="NAMESPACE=UID",
+                       help="uid of the hops-eso service account of an enabled namespace (binds the role to it)")
+        x.add_argument("--spec", help=argparse.SUPPRESS)
+    x = es.add_parser("keys", help="service account keys of a child cluster: compare, --refresh")
+    x.add_argument("--cluster")
+    x.add_argument("--kubeconfig")
+    x.add_argument("--refresh", action="store_true")
+    x.add_argument("--spec", help=argparse.SUPPRESS)
+    x = es.add_parser("remove")
+    x.add_argument("--cluster")
+    x.add_argument("--all", action="store_true")
     s = sub.add_parser("tf-keys", help="transit keys of removed declarations (kept 30 days)")
     s.add_argument("what", choices=("list", "delete", "sweep"))
     s.add_argument("decl", nargs="?")
@@ -2094,11 +2980,11 @@ def parser():
 COMMANDS = {"status": cmd_status, "assistant": cmd_assistant, "check": cmd_check, "enable": cmd_enable,
             "upgrade-b1": cmd_upgrade_b1,
             "disable": cmd_disable, "migrate": cmd_migrate, "confirm": cmd_confirm, "versions": cmd_versions,
-            "rollback": cmd_rollback, "outage-test": cmd_outage_test, "rotate": cmd_rotate, "snapshot": cmd_snapshot, "restore": cmd_restore,
+            "rollback": cmd_rollback, "outage-test": cmd_outage_test, "rotate": cmd_rotate, "snapshot": cmd_snapshot, "restore": cmd_restore, "restore-settle": cmd_restore_settle,
             "bundle": cmd_bundle, "file": cmd_file, "offline-copy": cmd_offline_copy,
             "tf-encryption": cmd_tf_encryption, "tf-entity-remove": cmd_tf_entity_remove,
             "tf-keys": cmd_tf_keys, "snapshots": cmd_snapshots, "settings": cmd_settings,
-            "sweep-orphans": cmd_sweep_orphans}
+            "sweep-orphans": cmd_sweep_orphans, "person-token": cmd_person_token, "eso": cmd_eso}
 
 
 def _load_spec(path):
@@ -2115,7 +3001,9 @@ def _load_spec(path):
             raise CliError("bad-input", "the spec file must be private (0600, same owner)", EXIT_REFUSED)
         doc = json.loads(f.read(1 << 20) or "{}")
     if isinstance(doc, dict):
-        SPEC.update({k: v for k, v in doc.items() if k in ("wrap_token", "ca_pem") and isinstance(v, str)})
+        SPEC.update({k: v for k, v in doc.items() if k in ("wrap_token", "ca_pem", "id_token", "rancher_ca",
+                                                            "eso_jwks", "eso_issuer")
+                     and isinstance(v, str)})
 
 
 def main(argv=None):

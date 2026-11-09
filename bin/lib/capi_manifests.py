@@ -79,6 +79,8 @@ NAMESPACED_KINDS = frozenset((g, k) for g, ks in {
     "discovery.k8s.io": ("EndpointSlice",),
     "events.k8s.io": ("Event",),
     "storage.k8s.io": ("CSIStorageCapacity",),
+    # 2.10.0 : External Secrets Operator (API v1, chart 2.14.0, essai 7)
+    "external-secrets.io": ("ExternalSecret", "SecretStore", "PushSecret"),
 }.items() for k in ks)
 CLUSTER_SCOPED_KINDS = frozenset((g, k) for g, ks in {
     "": ("Namespace", "Node", "PersistentVolume", "ComponentStatus"),
@@ -94,7 +96,20 @@ CLUSTER_SCOPED_KINDS = frozenset((g, k) for g, ks in {
                                      "MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"),
     "flowcontrol.apiserver.k8s.io": ("FlowSchema", "PriorityLevelConfiguration"),
     "certificates.k8s.io": ("CertificateSigningRequest", "ClusterTrustBundle"),
+    "external-secrets.io": ("ClusterSecretStore", "ClusterExternalSecret", "ClusterPushSecret"),
 }.items() for k in ks)
+# 2.10.0 (plan 2.10.0, « External Secrets Operator ») : sortes d'ESO qu'un
+# paquet ne livre jamais, quel que soit leur namespace. `PushSecret` écrit
+# du cluster enfant vers OpenBao (hors 2.10.0) ; un magasin ou un secret de
+# portée cluster traverse les namespaces (points 296 et 305 : un
+# `SecretStore` par namespace activé, posé par la console seule).
+ESO_GROUP = "external-secrets.io"
+REFUSED_GROUP_KINDS = {
+    (ESO_GROUP, "PushSecret"): "PushSecret writes from the child cluster to OpenBao",
+    (ESO_GROUP, "ClusterPushSecret"): "PushSecret writes from the child cluster to OpenBao",
+    (ESO_GROUP, "ClusterSecretStore"): "a package does not create a store that crosses namespaces",
+    (ESO_GROUP, "ClusterExternalSecret"): "a package does not create a secret that crosses namespaces",
+}
 # Retrait d'un Namespace livré (revue 1-3, C1) : il n'est supprimé que si
 # aucun objet d'ailleurs n'y vit, toutes sortes listables comprises (Secrets,
 # ConfigMaps, ressources personnalisées) ; seules sont ignorées celles que
@@ -295,6 +310,10 @@ def check(objs, cluster, item=None, scopes=None, allow=()):
             continue
         if kind in REFUSED_KINDS:
             found.append(finding("manifest-kind-refused", object=where, kind=kind))
+            continue
+        why = REFUSED_GROUP_KINDS.get((_group(o.get("apiVersion")), kind))
+        if why:
+            found.append(finding("manifest-kind-refused", object=where, kind=kind, reason=why))
             continue
         ref = ref_of(o)
         scope = scope_of(o, scopes)
@@ -582,6 +601,12 @@ def state(crs, bindings, cm, secret=None):
         msg = "being applied"
     return {"applied": bool(crs and cm and clusters and all(c["applied"] for c in clusters)),
             "hash": want, "clusters": clusters, "message": msg}
+
+
+def needs_eso(objs):
+    """Vrai si des objets sont des sortes d'ESO : ils ne s'appliquent
+    qu'une fois le chart `eso` prêt (CRD posées par le chart)."""
+    return any(_group(o.get("apiVersion")) == ESO_GROUP for o in objs or [])
 
 
 def item_name_ok(item):

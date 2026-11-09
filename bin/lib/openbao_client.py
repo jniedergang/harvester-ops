@@ -31,6 +31,19 @@ par le faux serveur des tests :
   journalisée, alors que `sys/health` dit descellé ;
 * jeton hors de sa plage d'adresses : 403 « permission denied », comme une
   capacité manquante.
+
+2.10.0 (jeton par personne) : `login_jwt` connecte un client avec le jeton
+d'identité (`id_token`) d'une personne connectée par Rancher, sur la méthode
+`jwt` de son Rancher ; `for_token` donne une copie qui porte SON propre jeton
+(jamais celui du client de service). Un client de personne ne se reconnecte
+jamais seul (ni AppRole, ni renouvellement) : un jeton expiré rend
+`openbao-person-expired` à l'appelant, qui se reconnecte avec le jeton
+d'identité courant de la session. Réponses réelles (essais de la tâche 1) :
+
+* audience, émetteur, jeton expiré, clé inconnue, signature : 400
+  « error validating token: ... » ; plage d'adresses : 403 dès la connexion ;
+* un JWT expiré reste accepté une trentaine de secondes après `exp` ;
+* la même personne retrouve la même entité à chaque connexion.
 """
 
 import base64
@@ -52,6 +65,10 @@ RETRY_DELAYS = (0.5, 1, 2)
 DETAIL_MAX = 300
 # Jetons OpenBao (`s.`, `b.`, `r.`) et Vault (`hvs.`, `hvb.`, `hvr.`).
 TOKEN_RE = re.compile(r"\b(?:hvs|hvb|hvr|s|b|r)\.[A-Za-z0-9_-]{20,}")
+# 2.10.0 : un JWT (jeton d'identité de Rancher, jeton de compte de service)
+# commence par `eyJ` (`{"` en base64url) : retiré de tout message au-delà de 20
+# caractères, ses trois parties comprises.
+JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{18,}(?:\.[A-Za-z0-9_-]*){0,2}")
 _HEADER_RE = re.compile(r"[^A-Za-z0-9._@:+-]")
 # `sys/health` répond par des codes choisis selon l'état (actif, veille,
 # scellé...) avec un corps JSON : ce ne sont pas des erreurs.
@@ -69,7 +86,11 @@ CODES = (
     "openbao-missing",        # 404
     "openbao-internal",       # 500 répétés (journal d'audit plein ?)
     "openbao-bad-request",    # autre 4xx
+    # 2.10.0 : jeton par personne
+    "openbao-person-login-failed",  # connexion jwt refusée (audience, émetteur, clé, expiration, plage)
+    "openbao-person-expired",       # jeton de personne échu : le client ne se reconnecte pas seul
 )
+KINDS = ("service", "person")
 
 _CAS_MSG = "check-and-set parameter did not match"
 _UNWRAP_MSG = "wrapping token is not valid or does not exist"
@@ -86,7 +107,8 @@ def clamp_timeout(value):
 
 def scrub(text):
     """Texte sans jeton, tronqué à DETAIL_MAX caractères."""
-    text = TOKEN_RE.sub("[token]", str(text))
+    text = JWT_RE.sub("[jwt]", str(text))
+    text = TOKEN_RE.sub("[token]", text)
     return text[:DETAIL_MAX]
 
 
@@ -138,9 +160,17 @@ class _Token:
         self.renewable = False
         self.role_id = None
         self.secret_id = None
+        # 2.10.0 : « service » (AppRole, jeton d'amorce) ou « person »
+        # (méthode jwt) ; un jeton de personne ne se renouvelle ni ne se
+        # reconnecte jamais seul
+        self.kind = "service"
+        self.entity_id = None
+        self.accessor = None
+        self.policies = ()
 
     def clear(self):
         self.value, self.ttl, self.obtained, self.renewable = None, 0, 0.0, False
+        self.entity_id, self.accessor, self.policies = None, None, ()
 
     def __repr__(self):
         return "<token>"
@@ -211,7 +241,7 @@ class Client:
     # -- représentations sans secret -------------------------------------
     def __repr__(self):
         state = "logged-in" if self._tok.value else "anonymous"
-        return f"<openbao.Client {self.addr} {state}>"
+        return f"<openbao.Client {self.addr} {self._tok.kind} {state}>"
 
     __str__ = __repr__
 
@@ -230,9 +260,43 @@ class Client:
         c.action, c.actor = action, actor
         return c
 
+    def for_token(self, token, ttl=0, kind="person"):
+        """2.10.0 : copie du client (adresse, CA, délais, montages KV v2
+        connus) qui porte SON jeton, distinct de celui de ce client : se
+        connecter ou révoquer sur la copie ne touche jamais le jeton du
+        client d'origine (le client de service). `token` None : copie sans
+        jeton, à connecter par `login_jwt`."""
+        if kind not in KINDS:
+            raise ValueError("unknown token kind")
+        c = object.__new__(Client)
+        c.__dict__.update(self.__dict__)
+        c._tok = _Token()
+        c._tok.kind = kind
+        c._kv2 = dict(self._kv2)
+        if token is not None:
+            c._tok.value, c._tok.ttl, c._tok.obtained = token, int(ttl or 0), self._clock()
+        return c
+
     @property
     def logged_in(self):
         return self._tok.value is not None
+
+    @property
+    def kind(self):
+        return self._tok.kind
+
+    @property
+    def entity_id(self):
+        return self._tok.entity_id
+
+    def remaining(self):
+        """Secondes de validité restantes du jeton (None : sans durée)."""
+        t = self._tok
+        if t.value is None:
+            return 0
+        if not t.ttl:
+            return None
+        return max(0.0, t.ttl - (self._clock() - t.obtained))
 
     # -- transport -------------------------------------------------------
     def _headers(self, token):
@@ -353,7 +417,8 @@ class Client:
         try:
             return self._request(method, path, body, **kw)
         except OpenBaoError as e:
-            if e.code == "openbao-denied" and kw.get("token", True) is True and self._tok.value:
+            if e.code == "openbao-denied" and kw.get("token", True) is True and self._tok.value \
+                    and self._tok.kind == "service":
                 # Revue M3 : jeton révoqué ailleurs ou effacé par une
                 # restauration d'instantané : une seule reconnexion AppRole,
                 # puis la requête rejouée une fois.
@@ -366,6 +431,8 @@ class Client:
                             self._login(*creds)
                     if creds[0] and creds[1]:
                         return self._call(method, path, body, _relogged=True, **kw)
+                raise self._denied(e, path) from None
+            if e.code == "openbao-denied" and kw.get("token", True) is True and self._tok.value:
                 raise self._denied(e, path) from None
             raise
 
@@ -384,6 +451,16 @@ class Client:
         tentative de chaque : jamais de boucle."""
         t = self._tok
         with t.lock:
+            if t.kind == "person":
+                # 2.10.0 : jamais de renouvellement ni de reconnexion seule
+                # (ni AppRole, ni jwt : le jeton d'identité appartient à la
+                # session, l'appelant se reconnecte avec le courant)
+                if t.value is None:
+                    raise OpenBaoError("openbao-person-expired", None, "no person token")
+                if t.ttl and self._clock() - t.obtained >= t.ttl:
+                    t.clear()
+                    raise OpenBaoError("openbao-person-expired", None, "person token expired")
+                return t.value
             if t.value is None:
                 if t.role_id and t.secret_id:
                     self._login(t.role_id, t.secret_id)
@@ -427,10 +504,73 @@ class Client:
         les identifiants aussi pour une reconnexion si le renouvellement
         échoue."""
         t = self._tok
+        if t.kind == "person":
+            raise ValueError("a person client does not log in by AppRole")
         with t.lock:
             t.clear()
             self._login(role_id, secret_id)
             t.role_id, t.secret_id = role_id, secret_id
+
+    def login_jwt(self, mount, role, jwt, retry=True):
+        """2.10.0 : connexion par la méthode `jwt` (`auth/<montage>/login`)
+        avec le jeton d'identité d'une personne. Le jeton OpenBao obtenu
+        reste dans l'objet (mémoire seule) ; le JWT n'est gardé nulle part.
+        Rend {entity_id, ttl, policies, accessor}. Refus (400, 403) :
+        `openbao-person-login-failed` avec le message d'OpenBao filtré.
+        Seulement sur un client de personne (`for_token`) : le client de
+        service garde son jeton AppRole."""
+        t = self._tok
+        if t.kind != "person":
+            raise ValueError("login_jwt needs a person client (for_token)")
+        mount = self._seg(mount)
+        if not isinstance(jwt, str) or not jwt:
+            raise OpenBaoError("openbao-person-login-failed", None, "no identity token")
+        body = {"jwt": jwt}
+        if role:
+            body["role"] = str(role)
+        with t.lock:
+            t.clear()
+            try:
+                _, resp = self._request("POST", f"auth/{mount}/login", body, token=False, retry=retry)
+            except OpenBaoError as e:
+                if e.code in ("openbao-unreachable", "openbao-tls", "openbao-sealed", "openbao-internal"):
+                    raise
+                raise OpenBaoError("openbao-person-login-failed", e.http_status, e.detail) from None
+            auth = (resp or {}).get("auth")
+            if not isinstance(auth, dict) or not auth.get("client_token"):
+                raise OpenBaoError("openbao-person-login-failed", None, "no token in response")
+            self._set_auth(auth)
+            t.renewable = False             # jamais renouvelé par ce client (point 283)
+            t.entity_id = auth.get("entity_id") or None
+            t.accessor = auth.get("accessor") or None
+            t.policies = tuple(auth.get("policies") or ())
+            return {"entity_id": t.entity_id, "ttl": t.ttl, "policies": list(t.policies),
+                    "accessor": t.accessor}
+
+    def lookup_self(self):
+        """2.10.0 : ce que dit OpenBao du jeton courant, sans le jeton :
+        {entity_id, display_name, policies, identity_policies, meta, ttl,
+        expire_time, path, bound_cidrs}."""
+        data = self.token_lookup_self()
+        return {"entity_id": data.get("entity_id") or None, "display_name": data.get("display_name"),
+                "policies": list(data.get("policies") or []),
+                "identity_policies": list(data.get("identity_policies") or []),
+                "meta": dict(data.get("meta") or {}), "ttl": data.get("ttl"),
+                "expire_time": data.get("expire_time"), "path": data.get("path"),
+                "bound_cidrs": list(data.get("bound_cidrs") or [])}
+
+    def token_valid(self):
+        """Le jeton courant est-il encore accepté (lookup-self) ? Une erreur
+        réseau remonte."""
+        if self._tok.value is None:
+            return False
+        try:
+            self._request("GET", "auth/token/lookup-self", token=self._tok.value, retry=False)
+        except OpenBaoError as e:
+            if e.code == "openbao-denied":
+                return False
+            raise
+        return True
 
     def set_token(self, token, ttl=0):
         """Jeton fourni (jeton d'amorce de l'agent, essais)."""
@@ -444,6 +584,8 @@ class Client:
         self._set_auth((body or {}).get("auth"))
 
     def renew_self(self):
+        if self._tok.kind == "person":
+            raise OpenBaoError("openbao-person-expired", None, "a person token is not renewed")
         with self._tok.lock:
             if self._tok.value is None:
                 raise OpenBaoError("openbao-login-failed", None, "not logged in")
@@ -458,8 +600,15 @@ class Client:
         with t.lock:
             if t.value is None:
                 return
+            person = t.kind == "person"
             try:
                 self._request("POST", "auth/token/revoke-self", {}, token=t.value, retry=False)
+            except OpenBaoError as e:
+                # 2.10.0 : un jeton de personne déjà refusé (échu, révoqué
+                # ailleurs) n'a plus rien à révoquer ; il est oublié de toute
+                # façon
+                if not (person and e.code == "openbao-denied"):
+                    raise
             finally:
                 t.clear()
                 t.role_id = t.secret_id = None

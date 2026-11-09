@@ -603,3 +603,22 @@ def test_remove_with_the_object_list_lost_says_so(cli, world, capsys):
     assert world["run"](kube, child, ["manifest-remove", "--name", f"{NS}/{CL}/essai"]) == cli.EXIT_OK
     assert any("object list lost" in e[2] for e in events(capsys))
     assert child.deleted == [] and kube.get(mf.K_CRS, NS, "art-essai") is None
+
+
+# Revue 8-10 M-4 : un paquet qui livre des objets d'External Secrets avant
+# que le chart eso soit prêt le dit (ils s'appliquent une fois les CRD posées)
+ES_OBJ = {"apiVersion": "external-secrets.io/v1", "kind": "ExternalSecret",
+          "metadata": {"name": "db", "namespace": "equipe"}, "spec": {"secretStoreRef": {"name": "hops-openbao"}}}
+
+
+@pytest.mark.parametrize("chart_ready,warned", [(False, True), (True, False)])
+def test_check_warns_when_eso_objects_come_before_the_chart(cli, world, capsys, monkeypatch, chart_ready, warned):
+    world["tmp"].joinpath("artefacts.d", "banc-1.0.0", "manifests", "essai", "a.yaml").write_text(
+        "\n---\n".join(json.dumps(o) for o in [NSO, ES_OBJ]))
+    monkeypatch.setattr(cli, "_eso_service", lambda kube, ns, c: (chart_ready, chart_ready, True))
+    world["run"](mgmt_with_cluster(), Child([]), ["manifest-check", "--spec", world["spec"]()])
+    out = json.loads(capsys.readouterr().out)
+    codes = {f["code"]: f for f in out["findings"]}
+    assert ("artefact-eso-before-chart" in codes) == warned
+    if warned:
+        assert codes["artefact-eso-before-chart"]["level"] == "warn"

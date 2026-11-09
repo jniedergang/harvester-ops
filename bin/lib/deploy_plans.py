@@ -1561,6 +1561,13 @@ def check_capi_template(doc):
                 errors.append((f"spec.{k}.{sorted(set(v) - set(_co.KEYS))[0]}", "unknown key"))
             else:
                 clean[k] = v
+        elif k == "external_secrets" and isinstance(v, dict):
+            # 2.10.0 (tâche 13, réel) : {namespaces, chart}, la forme qu'écrit
+            # la fenêtre du modèle ; sans elle, aucun plan ne posait ESO
+            try:
+                clean[k] = _cc.normalize_external_secrets(v)
+            except ValueError as e:
+                errors.append((f"spec.{k}", str(e)))
         elif not (isinstance(v, (str, int, bool)) or v is None
                   or isinstance(v, list) and all(isinstance(x, str) for x in v)):
             errors.append((f"spec.{k}", "a string, a number, a boolean or a list of strings"))

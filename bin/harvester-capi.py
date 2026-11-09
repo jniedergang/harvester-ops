@@ -26,6 +26,10 @@
     harvester-capi gitops-deploy    --cluster C --spec FICHIER [--timeout S]
     harvester-capi gitops-remove    --cluster C --name ns/cluster/entrée [--expect-run ID] [--dry-run]
     harvester-capi gitops-status    --cluster C [--name ns/cluster] [--json]
+    harvester-capi eso-check        --cluster C --spec FICHIER
+    harvester-capi eso-deploy       --cluster C --spec FICHIER [--timeout S]
+    harvester-capi eso-remove       --cluster C --name ns/cluster [--keep-chart] [--expect-run ID]
+    harvester-capi eso-status       --cluster C --name ns/cluster [--json]
 
 Le cluster Harvester sert lui-même de cluster de gestion : Harvester 1.9
 embarque Rancher Turtles et son cœur Cluster API. `install` y déclare les
@@ -99,6 +103,7 @@ sys.path.insert(0, str(HERE / "lib"))
 import capi_cluster as cc  # noqa: E402
 import capi_manifests as mf  # noqa: E402
 import child_access as ca  # noqa: E402
+import child_eso as ce  # noqa: E402
 import child_gitops as cg  # noqa: E402
 import child_policies as cp  # noqa: E402
 import capi_identity as ci  # noqa: E402
@@ -1240,6 +1245,28 @@ def _after_create(kube, spec, harvester, origin, timeout):
             step("access", "error", f"{ns}/{name} is available; the import into Rancher failed "
                                     "(harvester-capi rancher-import resumes it)")
             return code
+    es = spec.get("external_secrets")
+    if es and not origin.get("plan"):
+        # 2.10.0 : hors plan, ESO posé juste après la création (un plan le
+        # pose après sa phase Artefacts, qui applique le chart `eso`)
+        if not es.get("namespaces"):
+            step("eso", "done", "External Secrets: no namespace yet, enable one from the External Secrets tab")
+            return EXIT_OK
+        raw = {"cluster": f"{ns}/{name}", "namespaces": es["namespaces"], "by": spec.get("by") or "",
+               "role": "admin"}
+        if es.get("chart"):
+            raw["chart"] = es["chart"]
+        work = work_dir.private_file(json.dumps(raw), prefix="hops-eso-", suffix=".json")
+        try:
+            code = cmd_eso_deploy(argparse.Namespace(cluster=None, kubeconfig=getattr(kube, "kubeconfig", None),
+                                                     harvester_name=harvester, spec=str(work),
+                                                     timeout=min(timeout, 1800)))
+        finally:
+            Path(work).unlink(missing_ok=True)
+        if code != EXIT_OK:
+            step("eso", "error", f"{ns}/{name} is available; External Secrets were not set "
+                                 "(set them again from the External Secrets tab)")
+            return code
     return EXIT_OK
 
 
@@ -1486,7 +1513,32 @@ def cmd_delete(args):
             step("delete", "error", f"cluster {ns}/{name} not found")
             return EXIT_FAIL
         step("delete", "running", f"{ns}/{name} already gone, its identity is left: resuming")
-    return remove_cluster(kube, ns, name, args.timeout)
+    code = remove_cluster(kube, ns, name, args.timeout)
+    if code == EXIT_OK:
+        _eso_forget(_harvester(args), ns, name)
+    return code
+
+
+def _eso_forget(harvester, ns, name):
+    """2.10.0 (tâche 9) : le cluster enfant parti, son authentification ESO
+    dans OpenBao part aussi (agent en B1, commandes en A) ; au mieux, un
+    échec est dit sans changer l'issue de la suppression."""
+    if not harvester:
+        return
+    try:
+        _s, active, e = _eso_settings()
+    except (OSError, ValueError):
+        return
+    if not active or ce.cluster_key(harvester, ns, name) not in (e.get("clusters") or {}):
+        return
+    rc, out = _secrets_tool(["eso", "remove", "--cluster", f"{harvester}/{ns}/{name}"])
+    if rc != 0 or not out.get("ok"):
+        step("eso", "error", f"External Secrets of {ns}/{name} left in OpenBao ({out.get('code') or rc}): "
+                             f"harvester-secrets eso remove --cluster {harvester}/{ns}/{name}")
+    else:
+        if out.get("commands"):
+            print(json.dumps({"commands": out["commands"]}))
+        step("eso", "done", f"External Secrets authentication of {ns}/{name} removed from OpenBao")
 
 
 def cluster_brief(kube, ns, name):
@@ -1662,6 +1714,16 @@ def service_source(kube, spec, harvester, read_creds=False):
             ns_, _, child_ = spec["cluster"].partition("/")
             have = kube.get(sv.K_HCP, ns_, cg.SERVICE)
             resolved["namespace"] = ((have or {}).get("spec") or {}).get("namespace") or cg.FLUX_NAMESPACE
+        elif spec["name"] == ce.SERVICE:
+            # 2.10.0 (point 294) : le service `eso` porte toujours les valeurs
+            # imposées (child_eso.VALUES), dans le namespace `external-secrets`
+            # (une release déjà posée garde le sien, comme Flux)
+            import yaml
+            resolved["values"] = yaml.safe_dump(ce.chart_values(yaml.safe_load(resolved["values"] or "") or {}),
+                                                sort_keys=False)
+            ns_, _, child_ = spec["cluster"].partition("/")
+            have = kube.get(sv.K_HCP, ns_, ce.SERVICE)
+            resolved["namespace"] = ((have or {}).get("spec") or {}).get("namespace") or ce.NAMESPACE
     except ValueError as e:
         return spec, found + [sv.finding("invalid-values", "block", message=str(e)[:200])], None
     if not any((p.get("package"), p.get("version")) == (src["package"], src["version"])
@@ -1773,6 +1835,11 @@ def cmd_service_remove(args):
         step("remove", "error", refused)
         return EXIT_BLOCKED
     label = sv.label_of(name)
+    if name == ce.SERVICE:
+        refused = _eso_chart_blockers(kube, ns, hcp, label)
+        if refused:
+            step("remove", "error", refused)
+            return EXIT_BLOCKED
     kube.delete(sv.K_HCP, ns, name)
     step("remove", "running", f"service {ns}/{name} deleted, releases being uninstalled")
     # 2.6.0 : identifiants et CA posés pour ce service, s'il était le dernier
@@ -1798,6 +1865,45 @@ def cmd_service_remove(args):
     _release_namespace_down(kube, ns, hcp)
     step("remove", "done", f"service {ns}/{name} removed")
     return EXIT_OK
+
+
+def _eso_chart_blockers(kube, ns, hcp, label):
+    """Revue finale 2.10.0 I-1 (point 300) : le chart `eso` emporte les CRD ;
+    tant qu'un ExternalSecret existe dans un cluster enfant visé (ceux des
+    équipes, laissés exprès par `eso-remove`), leurs finalizers ne seraient
+    plus retirés et leurs Secrets partiraient ensuite au ramasse-miettes.
+    Rend le refus (avant tout geste) ou None. Couvre le Défaire, l'onglet et
+    les Artefacts, qui passent tous par ce retrait."""
+    art = mf.artefact_of(hcp) or {}
+    names = {c["metadata"]["name"] for c in kube.list(cs.K_CLUSTER, ns)
+             if (c["metadata"].get("labels") or {}).get(label)}
+    if art.get("cluster"):
+        names.add(art["cluster"])
+    left = []
+    for c in sorted(names):
+        if kube.get(cs.K_CLUSTER, ns, c) is None:
+            continue                            # parti : rien à garder
+        try:
+            with ca.session(kube, ns, c) as path:
+                try:
+                    every = Kube(path).list(K_ES)
+                except KubeError as err:
+                    if not is_missing_type(err):
+                        raise
+                    every = []
+        except (KubeError, ca.ChildAccessError) as err:
+            return (f"eso-status-unreadable: chart kept, the ExternalSecrets of {ns}/{c} could not be read: "
+                    f"{str(err)[:160]}")
+        # revue finale m-C : le service vaut pour tout le namespace, le
+        # cluster est donc nommé avec chaque objet
+        left += [f"{c}:{(x.get('metadata') or {}).get('namespace')}/{(x.get('metadata') or {}).get('name')}"
+                 for x in every]
+    if not left:
+        return None
+    left.sort()
+    return (f"eso-foreign-objects: chart kept, {len(left)} ExternalSecret(s) left in {ns} "
+            f"(cluster:namespace/name: {', '.join(left[:10])}) would lose their CRD with the chart: "
+            "remove them first")
 
 
 def _release_namespace_down(kube, ns, hcp):
@@ -2002,6 +2108,13 @@ def _static_findings(kube, spec):
     y est rejugé contre le cluster enfant, pas tranché ici."""
     objs, found = manifest_objects(spec)
     found = [f for f in found if f["code"] != "manifest-kind-unknown"]
+    if spec.get("item") != ce.ITEM and mf.needs_eso(objs):
+        # revue 8-10 M-4 : des objets d'External Secrets livrés avant que le
+        # chart eso soit prêt ne s'appliquent qu'une fois ses CRD posées
+        # (le ClusterResourceSet réessaie) : dit, sans bloquer
+        _present, ready, _locked = _eso_service(kube, spec["namespace"], spec["cluster"])
+        if not ready:
+            found.append(mf.finding("artefact-eso-before-chart", "warn", service=ce.SERVICE))
     return objs, found + _manifest_owner(kube, spec)
 
 
@@ -3782,9 +3895,582 @@ def _renew_admin_binding(kube, ns, cluster, timeout):
     return code
 
 
+# ---------------------------------------------------------------------------
+# 2.10.0 (tâche 10) : External Secrets Operator (bin/lib/child_eso.py)
+# ---------------------------------------------------------------------------
+ESO_KEYS = {"cluster", "namespaces", "chart", "by", "origin", "role"}
+ESO_REMOVE_WAIT = 120                 # s : finalizers des ExternalSecret retirés par ESO
+ESO_STUCK_WAIT = 30                   # s : après le retrait des finalizers par la console
+SECRETS_TOOL = HERE / "harvester-secrets.py"
+K_ES = "externalsecrets.external-secrets.io"
+K_SS = "secretstores.external-secrets.io"
+
+
+def eso_spec_from(path):
+    """Demande des gestes ESO : `cluster` <ns>/<c>, `namespaces` activés (la
+    liste entière), `chart` {registry, package, version} facultatif (hors
+    plan : le chart `eso` d'un paquet publié), `by`, `origin`, `role`."""
+    raw = json.load(sys.stdin) if path == "-" else json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        raise ValueError("the request is not an object")
+    for k in sorted(set(raw) - ESO_KEYS):
+        raise ValueError(f"unknown key: {k}")
+    ns, cluster = _child_name(raw.get("cluster"))
+    try:
+        es = cc.normalize_external_secrets({k: raw[k] for k in ("namespaces", "chart") if k in raw}) \
+            or {"namespaces": []}
+    except ValueError as e:
+        raise ValueError(str(e).replace("external_secrets.", "")) from None
+    origin = raw.get("origin") or {}
+    if not isinstance(origin, dict):
+        raise ValueError("origin: an object")
+    by = raw.get("by", "")
+    _check_by(by)
+    role = raw.get("role") or "admin"
+    if role not in ROLES:
+        raise ValueError(f"role: one of {', '.join(ROLES)}")
+    return {"namespace": ns, "cluster": cluster, "namespaces": es["namespaces"], "chart": es.get("chart"),
+            "origin": cc.parse_origin(",".join(f"{k}={v}" for k, v in origin.items())), "by": by, "role": role}
+
+
+def _eso_settings():
+    import secret_store as ss
+    s = ss.load_settings()
+    e = s.get("eso") if isinstance(s.get("eso"), dict) else {}
+    return s, ss.openbao_active(s), e
+
+
+def eso_endpoint(s, e):
+    """Adresse d'OpenBao que joignent les nœuds du cluster enfant : l'écouteur
+    ESO de B1 (allumé ou à allumer), l'OpenBao du mode A ; None si inconnue."""
+    if s.get("mode") == "b1":
+        a = e.get("listener") or e.get("address")
+        return f"https://{a}" if a else None
+    return s.get("addr") or None
+
+
+def _eso_service(kube, ns, cluster):
+    """(posé, prêt, verrouillé) du service `eso` de ce cluster enfant."""
+    import yaml
+    hcp = kube.get(sv.K_HCP, ns, ce.SERVICE)
+    rel = _release_of(kube, ns, ce.SERVICE, cluster) if hcp else None
+    ready = bool(rel and any(c.get("type") == "Ready" and c.get("status") == "True"
+                             for c in (rel.get("status") or {}).get("conditions") or []))
+    try:
+        values = yaml.safe_load((hcp or {}).get("spec", {}).get("valuesTemplate") or "") or {}
+    except yaml.YAMLError:
+        values = {}
+    return hcp is not None, ready, ce.chart_locked(values)
+
+
+def eso_node_cidr(cl):
+    """Réseau des nœuds du cluster enfant (`gateway`, `subnetMask` de sa
+    topologie) : OpenBao voit l'adresse du nœud (essai 7) ; None inconnu."""
+    import ipaddress
+    gw, mask = _cluster_var(cl, "gateway"), _cluster_var(cl, "subnetMask")
+    try:
+        return str(ipaddress.ip_network(f"{gw}/{mask}", strict=False)) if gw and mask else None
+    except ValueError:
+        return None
+
+
+def eso_network(cl):
+    nets = _cluster_var(cl, "vmNetworks") or []
+    return nets[0] if isinstance(nets, list) and nets else None
+
+
+def _eso_probe(kube, harvester, cl, endpoint):
+    """Sonde depuis le réseau des VMs du cluster enfant (2.6.1) : constat
+    bloquant si le point d'accès ne répond pas, avertissement si la sonde
+    n'a pas pu juger."""
+    import vm_probe
+    from urllib.parse import urlsplit
+    u = urlsplit(endpoint)
+    ep = f"{u.hostname}:{u.port or 443}"
+    net = eso_network(cl)
+    res = VM_PROBE(_state(), harvester, kube, net or "", [ep], vm_probe.probe_image(_state())) if net else \
+        {"status": "unchecked", "reason": "no-network", "results": {}}
+    if res.get("status") == "probed":
+        r = (res.get("results") or {}).get(ep) or {}
+        if not r.get("ok"):
+            return [ce.finding("eso-openbao-unreachable", endpoint=ep, failed=r.get("failed") or "tcp",
+                               network=net or "")]
+        return []
+    return [ce.finding("eso-openbao-unchecked", "warn", endpoint=ep, reason=res.get("reason") or "")]
+
+
+def eso_findings(kube, spec, harvester, probe=True):
+    """Constats d'une pose d'ESO (lecture seule) : OpenBao actif, cluster,
+    namespaces, chart `eso` (posé et verrouillé, ou demandé), écouteur de
+    B1, joignabilité d'OpenBao depuis le réseau des VMs."""
+    found = []
+    s, active, e = _eso_settings()
+    if not active:
+        found.append(ce.finding("eso-needs-openbao"))
+    if spec.get("role") != "admin":
+        found.append(ce.finding("eso-admin-only"))
+    ns, cluster = spec["namespace"], spec["cluster"]
+    cl = kube.get(cs.K_CLUSTER, ns, cluster)
+    if cl is None:
+        return found + [ce.finding("eso-cluster-missing", cluster=f"{ns}/{cluster}")]
+    if not spec["namespaces"]:
+        found.append(ce.finding("eso-no-namespace"))
+    present, ready, locked = _eso_service(kube, ns, cluster)
+    if spec.get("chart"):
+        svc = _eso_service_spec(spec)
+        _resolved, extra, _ = service_source(kube, svc, harvester)
+        found += [ce.finding(f["code"], f["level"], **f["facts"]) for f in extra]
+    elif not present:
+        found.append(ce.finding("eso-chart-missing", service=ce.SERVICE))
+    elif not locked:
+        found.append(ce.finding("eso-chart-not-locked", service=ce.SERVICE))
+    endpoint = eso_endpoint(s, e) if active else None
+    if active and s.get("mode") == "b1" and not endpoint:
+        found.append(ce.finding("eso-listener-needed"))
+    if active and endpoint and not str(endpoint).startswith("https://"):
+        found.append(ce.finding("eso-openbao-not-https", endpoint=endpoint))
+    elif probe and endpoint:
+        if s.get("mode") == "b1" and not e.get("listener"):
+            # point 298 : l'écouteur s'allume avec le premier cluster ; la
+            # sonde est rejouée après, avant de poser le magasin
+            found.append(ce.finding("eso-openbao-unchecked", "warn", endpoint=endpoint, reason="listener-off"))
+        else:
+            found += _eso_probe(kube, harvester, cl, endpoint)
+    return found
+
+
+def _eso_service_raw(spec):
+    """Demande du service `eso` (chart d'un paquet) d'une pose d'ESO."""
+    raw = {"cluster": f"{spec['namespace']}/{spec['cluster']}", "name": ce.SERVICE,
+           "source": dict(spec["chart"]), "by": spec.get("by") or ""}
+    if spec.get("origin"):
+        raw["origin"] = spec["origin"]
+    return raw
+
+
+def _eso_service_spec(spec):
+    return service_spec_from_raw(_eso_service_raw(spec))
+
+
+def service_spec_from_raw(raw):
+    s = sv.normalize(raw)
+    if "origin" in s:
+        s["origin"] = cc.parse_origin(",".join(f"{k}={v}" for k, v in s["origin"].items()))
+    return s
+
+
+def cmd_eso_check(args):
+    kube, _, _ = kube_from(args)
+    spec = eso_spec_from(args.spec)
+    found = eso_findings(kube, spec, _harvester(args))
+    blocked = bool(ce.blocking(found))
+    s, _a, e = _eso_settings()
+    key = ce.cluster_key(_harvester(args), spec["namespace"], spec["cluster"])
+    print(json.dumps({"blocked": blocked, "findings": found, "key": key, "mode": s.get("mode"),
+                      "endpoint": eso_endpoint(s, e), "namespaces": spec["namespaces"]}))
+    return EXIT_BLOCKED if blocked else EXIT_OK
+
+
+SECRETS_RUNNER = None                 # remplacé par les tests
+
+
+def _secrets_tool(argv, private=None, by=""):
+    """`harvester-secrets <argv>` : sa sortie JSON rendue, ses étapes
+    relayées. `private` (émetteur et JWKS publics du cluster enfant) passe
+    par un fichier 0600 de l'espace de travail, effacé ensuite."""
+    if SECRETS_RUNNER is not None:
+        return SECRETS_RUNNER(argv, private)
+    spec_file = None
+    cmd = [sys.executable, str(SECRETS_TOOL), "--actor", by or "service", *argv]
+    if private:
+        spec_file = work_dir.private_file(json.dumps(private), prefix="hops-eso-", suffix=".json")
+        cmd += ["--spec", str(spec_file)]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    finally:
+        if spec_file:
+            Path(spec_file).unlink(missing_ok=True)
+    for line in (p.stderr or "").splitlines():
+        if line.startswith("STEP_EVENT|"):
+            sys.stderr.write(line + "\n")
+    sys.stderr.flush()
+    try:
+        doc = json.loads(p.stdout or "{}")
+    except ValueError:
+        doc = {}
+    return p.returncode, doc
+
+
+def _eso_child_keys(child):
+    disc = json.loads(child.run("get", "--raw", "/.well-known/openid-configuration"))
+    jwks = json.loads(child.run("get", "--raw", "/openid/v1/jwks"))
+    return str(disc.get("issuer") or ""), jwks
+
+
+def _eso_wait_stores(kube, ns, cluster, namespaces, timeout, sleep=None, now=None):
+    sleep, now = sleep or time.sleep, now or time.time
+    deadline, last = now() + timeout, None
+    while True:
+        with ca.session(kube, ns, cluster) as path:
+            stores = Kube(path).list(K_SS)
+        ok, waiting = ce.stores_ready(stores, namespaces)
+        if ok:
+            return []
+        msg = "waiting for " + ", ".join(waiting)
+        if msg != last:
+            step("ready", "running", msg)
+            last = msg
+        if now() > deadline:
+            st = {s["ns"]: s for s in ce.store_status(stores) if s["name"] == ce.STORE}
+            return [f"{n}: {(st.get(n) or {}).get('reason') or 'not ready'} {(st.get(n) or {}).get('message') or ''}"
+                    .strip() for n in waiting]
+        sleep(10)
+
+
+def cmd_eso_deploy(args):
+    """Ordre de pose (plan 2.10.0, tâche 10) : contrôles et sonde (mode A),
+    chart `eso` par CAAPH s'il est demandé (attente de sa release), émetteur
+    et clés du cluster enfant, authentification dans OpenBao (agent en B1,
+    écouteur allumé au premier cluster ; commandes en A), sonde (B1),
+    objets du magasin par le ClusterResourceSet `art-eso`, étiquette des
+    namespaces, condition `Ready` de chaque `SecretStore` (B1, ou mode A
+    une fois les commandes passées)."""
+    kube, _, _ = kube_from(args)
+    spec = eso_spec_from(args.spec)
+    harvester = _harvester(args)
+    s, _active, e = _eso_settings()
+    found = eso_findings(kube, spec, harvester, probe=s.get("mode") != "b1")
+    if ce.blocking(found):
+        for f in ce.blocking(found):
+            step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
+        return EXIT_BLOCKED
+    ns, cluster, nss = spec["namespace"], spec["cluster"], spec["namespaces"]
+    key = ce.cluster_key(harvester, ns, cluster)
+    step("check", "done", f"ESO for {ns}/{cluster} ({key}): {', '.join(nss)}")
+    cl = kube.get(cs.K_CLUSTER, ns, cluster)
+    present, ready, locked = _eso_service(kube, ns, cluster)
+    if spec.get("chart"):
+        work = work_dir.private_file(json.dumps(_eso_service_raw(spec)), prefix="hops-eso-svc-", suffix=".json")
+        try:
+            code = cmd_service_deploy(argparse.Namespace(cluster=args.cluster, kubeconfig=args.kubeconfig,
+                                                         harvester_name=getattr(args, "harvester_name", None),
+                                                         spec=str(work), timeout=args.timeout))
+        finally:
+            Path(work).unlink(missing_ok=True)
+        if code != EXIT_OK:
+            return code
+    elif not ready:
+        deadline = time.time() + args.timeout
+        while not ready and time.time() < deadline:
+            step("chart", "running", "waiting for the eso release")
+            time.sleep(10)
+            present, ready, locked = _eso_service(kube, ns, cluster)
+        if not ready:
+            step("chart", "error", f"the eso release is not ready after {args.timeout} s")
+            return EXIT_FAIL
+    step("chart", "done", f"{ce.SERVICE} ready on {cluster}")
+    with ca.session(kube, ns, cluster) as path:
+        child = Kube(path)
+        missing = [n for n in nss if child.get("Namespace", None, n) is None]
+        if missing:
+            step("check", "error", f"eso-namespace-missing: {', '.join(missing)} not in {cluster}")
+            return EXIT_BLOCKED
+        try:
+            issuer, jwks = _eso_child_keys(child)
+        except (KubeError, ValueError) as err:
+            step("keys", "error", f"eso-child-keys-unreadable: {str(err)[:200]}")
+            return EXIT_FAIL
+        uids = _eso_account_uids(child, nss)          # comptes déjà posés (réactivation)
+    step("keys", "done", f"service account issuer {issuer}, {len((jwks or {}).get('keys') or [])} key(s)")
+    argv = ["eso", "add", "--cluster", f"{harvester}/{ns}/{cluster}"]
+    for n in nss:
+        argv += ["--namespace", n]
+    cidr = eso_node_cidr(cl)
+    if cidr:
+        argv += ["--node-cidr", cidr]
+    keys_spec = {"eso_jwks": json.dumps(jwks), "eso_issuer": issuer}
+    rc, out = _secrets_tool(argv + _eso_uid_args(uids), keys_spec, spec["by"])
+    if rc != 0 or not out.get("ok"):
+        step("openbao", "error", f"{out.get('code') or 'eso-openbao-failed'}: {str(out.get('error') or '')[:200]}")
+        return EXIT_FAIL
+    store = out.get("store") or {}
+    step("openbao", "done", f"{store.get('jwt_mount')}: " + ("set by the agent" if out.get("applied")
+                                                           else "commands for the OpenBao administrator"))
+    # tâche 13 (réel) : UN seul objet JSON sur stdout (la console le garde dans
+    # le résultat de l'action) ; la seconde pose (comptes liés par UID)
+    # remplace la première, ses commandes sont complètes
+    shown = {"doc": {"commands": out["commands"], "key": key} if out.get("commands") else None}
+    try:
+        return _eso_deploy_rest(args, kube, spec, s, out, ns, cluster, nss, key, argv, keys_spec, uids, store, cl,
+                                harvester, shown)
+    finally:
+        if shown["doc"]:
+            print(json.dumps(shown["doc"]))
+
+
+def _eso_deploy_rest(args, kube, spec, s, out, ns, cluster, nss, key, argv, keys_spec, uids, store, cl, harvester,
+                     shown):
+    """Suite de `eso-deploy` après la première pose de l'authentification."""
+    if s.get("mode") == "b1":
+        bad = _eso_probe(kube, harvester, cl, store.get("server") or "")
+        for f in bad:
+            step("probe", "error" if f["level"] == "block" else "running",
+                 f"{f['code']} {json.dumps(f['facts'])}")
+        if ce.blocking(bad):
+            return EXIT_BLOCKED
+    try:
+        objs = ce.store_objects(nss, store.get("server"), store.get("kv_mount"), store.get("jwt_mount"),
+                                store.get("audience"), store.get("ca_pem"))
+    except (ValueError, ce.EsoError) as err:
+        step("store", "error", f"eso-store-invalid: {str(err)[:200]}")
+        return EXIT_FAIL
+    code = deliver(kube, ns, cluster, ce.ITEM, ce.PACKAGE, ce.PACKAGE_VERSION, objs, spec["origin"], spec["by"],
+                   args.timeout)
+    if code != EXIT_OK:
+        return code
+    with ca.session(kube, ns, cluster) as path:
+        child = Kube(path)
+        for n in child.list("Namespace", None, selector=f"{ce.NS_LABEL}=on"):
+            name = n["metadata"]["name"]
+            if name not in nss:
+                child.patch("Namespace", None, name, {"metadata": {"labels": {ce.NS_LABEL: None}}})
+        for n in nss:
+            child.patch("Namespace", None, n, {"metadata": {"labels": {ce.NS_LABEL: "on"}}})
+    step("store", "done", f"{ce.STORE} in {', '.join(nss)}")
+    # revue 8-10 I-3 : le rôle est lié aussi aux UID des comptes `hops-eso`
+    # posés par le ClusterResourceSet ; un namespace supprimé puis recréé (ou
+    # un compte recréé) n'hérite plus des secrets
+    with ca.session(kube, ns, cluster) as path:
+        now_uids = _eso_account_uids(Kube(path), nss, wait=min(args.timeout, ESO_ACCOUNT_WAIT))
+    if sorted(now_uids) != sorted(nss):
+        step("accounts", "error", "eso-account-missing: no hops-eso account yet in "
+             + ", ".join(sorted(set(nss) - set(now_uids))) + " (ClusterResourceSet art-eso not applied?)")
+        return EXIT_FAIL
+    if now_uids != uids:
+        rc, out2 = _secrets_tool(argv + _eso_uid_args(now_uids), keys_spec, spec["by"])
+        if rc != 0 or not out2.get("ok"):
+            step("accounts", "error", f"{out2.get('code') or 'eso-openbao-failed'}: "
+                 f"{str(out2.get('error') or '')[:200]}")
+            return EXIT_FAIL
+        if out2.get("commands"):
+            shown["doc"] = {"commands": out2["commands"], "key": key}
+    step("accounts", "done", f"role bound to the hops-eso account of {len(now_uids)} namespace(s)")
+    if not out.get("applied"):
+        step("ready", "done", "the stores become ready once the OpenBao administrator has run the commands")
+        return EXIT_OK
+    left = _eso_wait_stores(kube, ns, cluster, nss, min(args.timeout, 600))
+    if left:
+        step("ready", "error", "stores not ready: " + "; ".join(left)[:300])
+        return EXIT_FAIL
+    step("ready", "done", f"{len(nss)} store(s) ready")
+    return EXIT_OK
+
+
+ESO_ACCOUNT_WAIT = 120
+
+
+def _eso_account_uids(child, namespaces, wait=0, sleep=None, now=None):
+    """{namespace: uid} des comptes `hops-eso` présents ; `wait` : attend
+    qu'ils le soient tous (le ClusterResourceSet les pose en quelques
+    secondes), au plus `wait` s."""
+    sleep, now = sleep or time.sleep, now or time.time
+    deadline = now() + wait
+    while True:
+        out = {}
+        for n in namespaces:
+            sa = child.get("serviceaccounts", n, ce.ACCOUNT)
+            uid = ((sa or {}).get("metadata") or {}).get("uid")
+            if uid:
+                out[n] = uid
+        if len(out) == len(set(namespaces)) or now() >= deadline:
+            return out
+        sleep(3)
+
+
+def _eso_account_findings(child, namespaces, bound):
+    """Revue 8-10 I-3 : namespace activé absent du cluster enfant
+    (`eso-namespace-gone` : à retirer avant toute recréation), compte
+    `hops-eso` d'un autre UID que celui du rôle (`eso-account-changed` :
+    namespace ou compte recréé, refusé par OpenBao jusqu'à une nouvelle
+    activation par un administrateur)."""
+    out = []
+    for n in namespaces:
+        if child.get("Namespace", None, n) is None:
+            out.append({"code": "eso-namespace-gone", "level": "block", "facts": {"namespace": n}})
+            continue
+        uid = ((child.get("serviceaccounts", n, ce.ACCOUNT) or {}).get("metadata") or {}).get("uid")
+        if bound.get(n) and uid != bound[n]:
+            out.append({"code": "eso-account-changed", "level": "block", "facts": {"namespace": n}})
+    return out
+
+
+def _eso_uid_args(uids):
+    out = []
+    for n, u in sorted((uids or {}).items()):
+        out += ["--sa-uid", f"{n}={u}"]
+    return out
+
+
+def cmd_eso_remove(args):
+    """Point 300 : `ownerReferences` des Secrets synchronisés retirées (ils
+    restent, figés à leur dernière valeur), `ExternalSecret` supprimés tant
+    qu'ESO tourne (finalizers retirés en repli, `eso-remove-stuck` au-delà),
+    magasins (ClusterResourceSet `art-eso`), étiquettes des namespaces, chart
+    (sauf `--keep-chart`, posé par une phase d'artefacts), puis
+    l'authentification dans OpenBao."""
+    kube, _, _ = kube_from(args)
+    ns, cluster = _child_name(args.name)
+    harvester = _harvester(args)
+    if args.role != "admin":
+        step("remove", "error", "eso-admin-only: removing ESO is for administrators")
+        return EXIT_BLOCKED
+    expect_run = getattr(args, "expect_run", "") or None
+    if expect_run:
+        # revue 8-10 I-2 : le Défaire d'une exécution relit sa marque AVANT de
+        # toucher aux ExternalSecret (un autre déroulé ou l'onglet a pu
+        # réécrire les objets du magasin depuis)
+        crs = kube.get(mf.K_CRS, ns, mf.name_of(ce.ITEM)) or kube.get("configmaps", ns, mf.name_of(ce.ITEM))
+        refused = cc.run_mismatch(crs, expect_run) if crs is not None else None
+        if refused:
+            step("remove", "error", refused)
+            return EXIT_BLOCKED
+    present = kube.get(cs.K_CLUSTER, ns, cluster) is not None
+    if present:
+        _s, _active, e = _eso_settings()
+        enabled = ((e.get("clusters") or {}).get(ce.cluster_key(harvester, ns, cluster)) or {}).get("namespaces") or []
+        with ca.session(kube, ns, cluster) as path:
+            child = Kube(path)
+            try:
+                every = child.list(K_ES)
+            except KubeError as err:
+                if not is_missing_type(err):
+                    raise
+                every = []
+            # revue 8-10 I-1 : seulement nos ExternalSecret ; ceux des équipes
+            # (autre magasin, namespace non activé, livrés par Flux) restent
+            ess, foreign = ce.ours(every, enabled)
+            names = sorted(f"{(x.get('metadata') or {}).get('namespace')}/{(x.get('metadata') or {}).get('name')}"
+                           for x in foreign)
+            if foreign and not args.keep_chart:
+                # le chart emporte les CRD : leurs objets seraient perdus ou bloqueraient
+                step("remove", "error", f"eso-foreign-objects: {len(foreign)} ExternalSecret(s) of the teams "
+                     f"({', '.join(names[:10])}) would lose their CRD with the chart: remove them first, "
+                     "or keep the chart (--keep-chart)")
+                return EXIT_BLOCKED
+            secrets = []
+            for n in sorted({(x.get("metadata") or {}).get("namespace") for x in ess} - {None}):
+                secrets += child.list("secrets", n)
+            for sns, sname, patch in ce.orphan_patches(secrets, ess):
+                child.patch("secrets", sns, sname, patch)
+            step("secrets", "done", f"{len(ce.orphan_patches(secrets, ess))} synced Secret(s) kept")
+            for x in ess:
+                md = x["metadata"]
+                child.delete(K_ES, md["namespace"], md["name"])
+            mine = {(x["metadata"]["namespace"], x["metadata"]["name"]) for x in ess}
+            left = _eso_wait_gone(child, ESO_REMOVE_WAIT, only=mine)
+            if left:
+                for sns, sname, patch in ce.stuck_patches(left):
+                    child.patch(K_ES, sns, sname, patch)
+                left = _eso_wait_gone(child, ESO_STUCK_WAIT, only=mine)
+            if left:
+                step("remove", "error", f"eso-remove-stuck: {len(left)} ExternalSecret(s) still there")
+                return EXIT_FAIL
+            step("remove", "running", f"{len(ess)} ExternalSecret(s) deleted"
+                 + (f"; {len(foreign)} ExternalSecret(s) of the teams left ({', '.join(names[:10])})"
+                    if foreign else ""))
+    code = cmd_manifest_remove(argparse.Namespace(cluster=args.cluster, kubeconfig=args.kubeconfig,
+                                                  name=f"{ns}/{cluster}/{ce.ITEM}",
+                                                  expect_run=getattr(args, "expect_run", "") or None, dry_run=False))
+    if code != EXIT_OK:
+        return code
+    if present:
+        with ca.session(kube, ns, cluster) as path:
+            child = Kube(path)
+            for n in child.list("Namespace", None, selector=f"{ce.NS_LABEL}=on"):
+                child.patch("Namespace", None, n["metadata"]["name"], {"metadata": {"labels": {ce.NS_LABEL: None}}})
+    if not args.keep_chart and kube.get(sv.K_HCP, ns, ce.SERVICE) is not None:
+        code = cmd_service_remove(argparse.Namespace(cluster=args.cluster, kubeconfig=args.kubeconfig,
+                                                     name=f"{ns}/{ce.SERVICE}", timeout=args.timeout,
+                                                     expect_run=getattr(args, "expect_run", "") or None))
+        if code != EXIT_OK:
+            return code
+    rc, out = _secrets_tool(["eso", "remove", "--cluster", f"{harvester}/{ns}/{cluster}"], by=args.by)
+    if rc != 0 or not out.get("ok"):
+        step("openbao", "error", f"{out.get('code') or 'eso-openbao-failed'}: {str(out.get('error') or '')[:200]}")
+        return EXIT_FAIL
+    if out.get("commands"):
+        print(json.dumps({"commands": out["commands"]}))
+    step("remove", "done", f"ESO removed from {ns}/{cluster}; synced Secrets kept at their last value")
+    return EXIT_OK
+
+
+def _eso_wait_gone(child, timeout, sleep=None, now=None, only=None):
+    sleep, now = sleep or time.sleep, now or time.time
+    deadline = now() + timeout
+    while True:
+        try:
+            left = child.list(K_ES)
+        except KubeError as err:
+            if is_missing_type(err):
+                return []
+            raise
+        if only is not None:
+            left = [x for x in left if ((x.get("metadata") or {}).get("namespace"),
+                                        (x.get("metadata") or {}).get("name")) in only]
+        if not left or now() > deadline:
+            return left
+        sleep(5)
+
+
+def cmd_eso_status(args):
+    """État d'ESO d'un cluster enfant, sans aucune valeur : chart, réglage,
+    magasins, `ExternalSecret`, namespaces activés, exemple à copier."""
+    kube, _, _ = kube_from(args)
+    ns, cluster = _child_name(args.name)
+    harvester = _harvester(args)
+    s, active, e = _eso_settings()
+    key = ce.cluster_key(harvester, ns, cluster)
+    present, ready, locked = _eso_service(kube, ns, cluster)
+    entry = (e.get("clusters") or {}).get(key) or {}
+    out = {"cluster": f"{ns}/{cluster}", "key": key, "openbao": bool(active), "mode": s.get("mode"),
+           "listener": e.get("listener"), "endpoint": eso_endpoint(s, e) if active else None,
+           "chart": {"present": present, "ready": ready, "locked": locked},
+           "auth": {k: entry.get(k) for k in ("mount", "keys_sha256", "applied", "at", "by", "node_cidr")}
+           if entry else None, "namespaces": list(entry.get("namespaces") or []), "stores": [],
+           "externalsecrets": [], "labelled": [], "crs": None}
+    crs, cm = kube.get(mf.K_CRS, ns, mf.name_of(ce.ITEM)), kube.get("configmaps", ns, mf.name_of(ce.ITEM))
+    if crs or cm:
+        binding = kube.get(mf.K_CRSB, ns, cluster)
+        out["crs"] = mf.state(crs, [binding] if binding else [], cm)
+    if kube.get(cs.K_CLUSTER, ns, cluster) is None:
+        out["error"] = "eso-cluster-missing"
+    else:
+        try:
+            with ca.session(kube, ns, cluster) as path:
+                child = Kube(path)
+                try:
+                    out["stores"] = ce.store_status(child.list(K_SS))
+                    out["externalsecrets"] = ce.status(child.list(K_ES))
+                except KubeError as err:
+                    if not is_missing_type(err):
+                        raise
+                out["labelled"] = sorted(n["metadata"]["name"]
+                                         for n in child.list("Namespace", None, selector=f"{ce.NS_LABEL}=on"))
+                out["findings"] = _eso_account_findings(child, out["namespaces"], entry.get("sa_uids") or {})
+        except ca.ChildAccessError as err:
+            out["error"] = err.code
+        except KubeError as err:
+            out["error"] = f"child-unreachable: {str(err)[:160]}"
+    if active and out["namespaces"]:
+        prefix = s.get("prefix") or f"consoles/{s.get('console_id')}"
+        out["example"] = ce.example(out["namespaces"][0], key, prefix)
+    print(json.dumps(out) if args.json else json.dumps(out, indent=1))
+    return EXIT_OK
+
+
 CHILD_COMMANDS = ("manifest-check", "manifest-deploy", "manifest-remove", "manifest-verify", "token",
                   "rancher-import", "rancher-unimport", "oidc-kubeconfig", "gitops-check", "gitops-deploy",
-                  "gitops-remove", "renew")
+                  "gitops-remove", "renew", "eso-check", "eso-deploy", "eso-remove", "eso-status")
 
 
 def _exit_cancelled(signum, frame):
@@ -3834,7 +4520,11 @@ def main(argv=None):
             ("gitops-deploy", cmd_gitops_deploy, ("gspec", "timeout")),
             ("gitops-remove", cmd_gitops_remove, ("mname", "dry")),
             ("gitops-status", cmd_gitops_status, ("json", "optname")),
-            ("renew", cmd_renew, ("name", "dry", "renew"))):
+            ("renew", cmd_renew, ("name", "dry", "renew")),
+            ("eso-check", cmd_eso_check, ("espec",)),
+            ("eso-deploy", cmd_eso_deploy, ("espec", "timeout")),
+            ("eso-remove", cmd_eso_remove, ("name", "esoremove")),
+            ("eso-status", cmd_eso_status, ("name", "json"))):
         sp = sub.add_parser(name, allow_abbrev=False)
         common(sp)
         sp.set_defaults(fn=fn)
@@ -3862,7 +4552,7 @@ def main(argv=None):
             sp.add_argument("--id", default="", help="console action id, written in the cluster lock")
         if "timeout" in extra:
             sp.add_argument("--timeout", type=int,
-                            default=900 if name.startswith(("service", "manifest", "gitops")) else 2400)
+                            default=900 if name.startswith(("service", "manifest", "gitops", "eso")) else 2400)
             if name == "create":
                 sp.add_argument("--no-wait", action="store_true")
         if name == "gitops-remove":
@@ -3910,6 +4600,17 @@ def main(argv=None):
                             help="clear the mark of an unfinished renewal, removing nothing "
                                  "(administrators only in the console)")
             sp.add_argument("--id", default="", help="console action id, written in the cluster lock")
+        if "espec" in extra:
+            sp.add_argument("--spec", required=True, help="JSON request (cluster, namespaces, chart, by, role, "
+                                                          "origin), '-' for stdin")
+        if "esoremove" in extra:
+            sp.add_argument("--keep-chart", action="store_true",
+                            help="leave the eso chart (applied by the Artefacts phase of a plan)")
+            sp.add_argument("--role", default="admin", choices=("viewer", "operator", "admin"))
+            sp.add_argument("--by", default="")
+            sp.add_argument("--timeout", type=int, default=900)
+            sp.add_argument("--expect-run", default="", metavar="ID",
+                            help="refuse unless the store objects carry this plan run (the undo of a plan)")
         if "pspec" in extra:
             sp.add_argument("--spec", required=True, help="JSON policies request, '-' for stdin")
         if "token" in extra:
@@ -3944,6 +4645,9 @@ def main(argv=None):
         step(args.cmd, "error", str(e)[:300])
         return EXIT_BLOCKED
     except ca.ChildAccessError as e:
+        step(args.cmd, "error", f"{e.code}: {str(e)[:300]}")
+        return EXIT_BLOCKED
+    except ce.EsoError as e:
         step(args.cmd, "error", f"{e.code}: {str(e)[:300]}")
         return EXIT_BLOCKED
     except (ri.RancherImportError, cg.GitopsError) as e:

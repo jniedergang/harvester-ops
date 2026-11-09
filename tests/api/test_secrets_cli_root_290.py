@@ -245,3 +245,20 @@ def test_upgrade_b1_hands_a_verified_bundle_to_the_agent(env, capsys, tmp_path, 
     assert rc == 0, doc
     assert seen == [{"op": "b1-upgrade", "bundle": path.name}]
     assert (staged(env) / path.name).read_bytes() == path.read_bytes()
+
+
+def test_upgrade_b1_refuses_an_old_template_while_the_eso_listener_is_on(env, capsys, tmp_path, bundle, test_key,
+                                                                          monkeypatch):
+    """Revue 8-10 I-4 : un paquet d'avant 2.10.0 (modèle sans écouteur ESO)
+    est refusé avant d'être déposé quand l'écouteur est allumé."""
+    path, info = bundle
+    src = tmp_path / "admin" / path.name
+    src.parent.mkdir()
+    src.write_bytes(path.read_bytes())
+    settings(env, mode="b1", eso={"listener": "172.16.1.11:8212", "clusters": {}})
+    real = hsc.ob.verify
+    monkeypatch.setattr(hsc.ob, "verify", lambda *a, **k: dict(real(*a, **k), template="__SEAL__\n__INITIALIZE__\n"))
+    monkeypatch.setattr(hsc, "run_agent", lambda req: pytest.fail("the agent must not be asked"))
+    rc, doc, _ = cli(["upgrade-b1", "--bundle", str(src)], capsys=capsys)
+    assert rc == 2 and doc["code"] == "eso-listener-template" and "eso remove --all" in doc["error"]
+    assert not (staged(env) / path.name).exists()

@@ -186,3 +186,35 @@ def test_uninstall_removes_units_and_purges_b1():
 def test_scripts_parse():
     for s in ("install.sh", "uninstall.sh"):
         assert subprocess.run(["bash", "-n", str(ROOT / s)]).returncode == 0
+
+
+# Revue 8-10 I-6 : une adresse ESO absente de l'hôte ne fait pas tomber B1 :
+# OpenBao démarre sur la boucle locale seule (configuration sans l'écouteur
+# ESO, rendue par l'agent), et le dit
+@pytest.mark.parametrize("ip_file,host_has,want", [
+    (None, True, "openbao.hcl"),                       # pas d'écouteur ESO
+    ("172.16.1.11", True, "openbao.hcl"),              # adresse présente
+    ("172.16.1.11", False, "openbao-local.hcl"),       # adresse partie : boucle locale seule
+    ("172.16.1.1", True, "openbao-local.hcl"),         # préfixe d'une autre adresse : pas une égalité
+])
+def test_b1_unit_starts_without_an_eso_address_that_is_gone(tmp_path, ip_file, host_has, want):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    (etc / "openbao.hcl").write_text("full")
+    (etc / "openbao-local.hcl").write_text("local")
+    if ip_file:
+        (etc / "eso-listener.ip").write_text(ip_file + "\n")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "podman").write_text('#!/bin/bash\nfor a in "$@"; do echo "$a"; done\n')
+    addrs = "inet 172.16.1.11/16 brd 172.16.255.255" if host_has else "inet 10.0.0.9/24"
+    (bindir / "ip").write_text(f'#!/bin/sh\necho "1: lo    inet 127.0.0.1/8 scope host lo"\n'
+                               f'echo "2: eno1    {addrs} scope global eno1"\n')
+    for f in ("podman", "ip"):
+        (bindir / f).chmod(0o755)
+    cmd = exec_start(unit("harvester-ops-openbao.service")).replace("/usr/bin/podman", str(bindir / "podman")) \
+        .replace("/etc/harvester-ops-openbao", str(etc)).replace("[ -d /run/hops-openbao-boot ]", "false")
+    env = {"OPENBAO_IMAGE": "img", "OPENBAO_UID": "990", "PATH": f"{bindir}:{os.environ['PATH']}"}
+    r = subprocess.run(["/bin/sh", "-c", cmd], env=env, capture_output=True, text=True, check=True)
+    assert f"{etc}/{want}:/openbao/config/openbao.hcl:ro,Z" in r.stdout.split("\n")
+    assert ("starts without it" in r.stderr) == (want == "openbao-local.hcl")

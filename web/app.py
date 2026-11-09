@@ -103,6 +103,7 @@ from flask import (
     Response,
     abort,
     g,
+    has_request_context,
     jsonify,
     redirect,
     render_template,
@@ -162,6 +163,7 @@ BIN_DIR = _resolve_bin_dir()
 if str(BIN_DIR / "lib") not in sys.path:
     sys.path.append(str(BIN_DIR / "lib"))
 import secret_store as _sst  # noqa: E402  (2.9.0 : magasin de secrets)
+import openbao_jwt as _oj  # noqa: E402  (2.10.0 : jeton OpenBao par personne)
 import secret_classes as _ssc  # noqa: E402  (2.9.0 : classes de secrets)
 # 2.9.0 : seule la configuration de la console désigne OpenBao. `VAULT_*` et
 # `BAO_*` hérités de l'environnement sont retirés du processus, donc de tous
@@ -682,7 +684,156 @@ def _sso_store():
     global _SSO_SESSIONS
     if _SSO_SESSIONS is None:
         _SSO_SESSIONS = _rs.Sessions(_identity_dir)
+    # 2.10.0 : rappels du jeton OpenBao de la personne (posés une fois)
+    if _sso_person_renewed not in getattr(_SSO_SESSIONS, "on_renewed", [_sso_person_renewed]):
+        _SSO_SESSIONS.on_renewed.append(_sso_person_renewed)
+    if _sso_person_closed not in getattr(_SSO_SESSIONS, "on_closed", [_sso_person_closed]):
+        _SSO_SESSIONS.on_closed.append(_sso_person_closed)
     return _SSO_SESSIONS
+
+
+# 2.10.0 : jeton OpenBao par personne. Le magasin de secrets ne connaît pas
+# Rancher : la console lui donne le jeton d'identité courant d'une session,
+# et ne le laisse créer un jeton de personne que dans une requête (le fil
+# d'une action ne lit jamais avec un jeton de personne, décision 282).
+def _sso_person_id_token(sid):
+    """Le jeton d'identité de la session `sid` (jamais le jeton d'accès,
+    point 280 : il porte un jeton Rancher valable sur tous les clusters de
+    la personne), ou None."""
+    sess = _sso_store().get(sid) if sid else None
+    if sess is None or getattr(sess, "kind", "sso") != "sso":
+        return None
+    return getattr(sess, "id_token", None) or None
+
+
+def _sso_person_renewed(sess):
+    """Rafraîchissement Rancher : reconnexion du jeton OpenBao de la personne
+    avec le NOUVEAU jeton d'identité, révocation de l'ancien ; sans jeton
+    d'identité, le jeton de personne est révoqué."""
+    # revue M2 : réglage éteint, plus aucune reconnexion (jeton révoqué) ;
+    # revue I5 : la reconnexion part dans un fil à part, jamais dans celui
+    # qui renouvelle les sessions Rancher
+    if getattr(sess, "id_token", None) and _person_token_enabled():
+        _sst.PERSON_TOKENS.renew_async(sess.sid, sess.id_token)
+    else:
+        _sst.PERSON_TOKENS.drop(sess.sid)
+
+
+def _sso_person_closed(sess):
+    """Déconnexion, session fermée, rafraîchissement refusé : revoke-self et
+    purge du cache des personnes pour cette entité."""
+    _sst.PERSON_TOKENS.drop(sess.sid)
+    with _PERSON_LOCK:
+        _PERSON_NOTICE.pop(sess.sid, None)
+
+
+# 2.10.0 tâche 11 : entités vues (membres de groupe proposés à
+# l'administrateur) et refus personnels du bandeau. Rien de secret : ni
+# jeton ni valeur, seulement l'entité d'OpenBao, le `sub`, le nom affiché.
+PERSON_ENTITIES_FILE = "person-entities.json"
+PERSON_ENTITIES_MAX = 500
+PERSON_ENTITY_REFRESH_S = 3600               # dernière connexion réécrite au plus une fois par heure
+PERSON_NOTICE_TTL_S = 3600
+_PERSON_LOCK = threading.Lock()
+_PERSON_NOTICE = {}                          # session -> {code, at} : dernier refus personnel
+
+
+def _rancher_key_of(sess):
+    """Clé du Rancher d'une session dans `person_token.servers` : `config`
+    pour celui de config.yaml (session sans `server_id`), sinon son id."""
+    sid = getattr(sess, "server_id", None)
+    return str(sid) if sid else "config"
+
+
+def _person_entities_path():
+    return _state_dir() / PERSON_ENTITIES_FILE
+
+
+def _person_entities():
+    try:
+        doc = json.loads(_person_entities_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in doc.items() if isinstance(v, dict) and _ENTITY_ID_RE.match(str(k))} \
+        if isinstance(doc, dict) else {}
+
+
+_ENTITY_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _person_seen(session_id, entity, now=None):
+    """Rappel de PersonTokens après une connexion réussie : l'entité est
+    notée (alias = `sub` Rancher, nom, Rancher, dernière connexion), le
+    refus personnel du bandeau oublié."""
+    now = time.time() if now is None else now
+    with _PERSON_LOCK:
+        _PERSON_NOTICE.pop(session_id, None)
+    sess = _sso_store().get(session_id) if session_id else None
+    if sess is None or not _ENTITY_ID_RE.match(str(entity or "")):
+        return False
+    ident = getattr(sess, "ident", None) or {}
+    entry = {"sub": str(ident.get("id") or "")[:128], "name": str(ident.get("name") or ident.get("username") or "")[:128],
+             "user": str(getattr(sess, "login", "") or "")[:160], "rancher": _rancher_key_of(sess), "last_at": now}
+    with _PERSON_LOCK:
+        doc = _person_entities()
+        old = doc.get(entity)
+        if old and all(old.get(k) == entry[k] for k in ("sub", "name", "user", "rancher")) \
+                and now - float(old.get("last_at") or 0) < PERSON_ENTITY_REFRESH_S:
+            return False
+        doc[entity] = entry
+        if len(doc) > PERSON_ENTITIES_MAX:
+            for k in sorted(doc, key=lambda k: float(doc[k].get("last_at") or 0))[:len(doc) - PERSON_ENTITIES_MAX]:
+                doc.pop(k, None)
+        try:
+            _su.write_json_atomic(_person_entities_path(), doc, mode=0o640)
+        except OSError as e:
+            log.warning("seen entities not written: %s", type(e).__name__)
+            return False
+    return True
+
+
+def _person_refusal_note(code):
+    """Refus personnel (connexion refusée, session sans jeton d'identité,
+    lecture refusée) : noté pour le bandeau de la session qui l'a reçu."""
+    sess = _sso_session()
+    if sess is None:
+        return
+    with _PERSON_LOCK:
+        if len(_PERSON_NOTICE) > 1000:
+            _PERSON_NOTICE.clear()
+        _PERSON_NOTICE[sess.sid] = {"code": code, "at": time.time()}
+
+
+def _person_notice(now=None):
+    """Dernier refus personnel de la session de la requête (moins d'une
+    heure), ou None."""
+    now = time.time() if now is None else now
+    sess = _sso_session()
+    if sess is None:
+        return None
+    with _PERSON_LOCK:
+        n = _PERSON_NOTICE.get(sess.sid)
+    if not n or now - float(n.get("at") or 0) > PERSON_NOTICE_TTL_S:
+        return None
+    return {"code": n["code"], "at": n["at"]}
+
+
+def _person_tokens_sweep():
+    """Revue des tâches 2 à 5 (point 5) et tâche 12 : réglage éteint (par
+    l'interface ou par `sudo harvester-secrets person-token disable`), les
+    jetons de personne encore en mémoire sont révoqués aussitôt. Rend le
+    nombre de sessions révoquées."""
+    if _person_token_enabled() or not _sst.PERSON_TOKENS.count():
+        return 0
+    n = _sst.PERSON_TOKENS.drop_all()
+    if n:
+        log.info("person tokens off: %d OpenBao person token(s) revoked", n)
+    return n
+
+
+_sst.PERSON_TOKENS.guard = has_request_context
+_sst.PERSON_TOKENS.id_token = _sso_person_id_token
+_sst.PERSON_TOKENS.on_login = _person_seen
 
 
 def _sso_http(s):
@@ -984,6 +1135,12 @@ def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None, query_keys
     def deco(f):
         @wraps(f)
         def wrapped(*args, **kwargs):
+            if scope == KVM_SCOPE:
+                # 2.10.0 (décision 311, revue I1 des tâches 2 à 5) : une vue
+                # KVM partagée est une donnée de la console, lue avec SA clé
+                # (`ssh-kvm` par le service), jamais avec le jeton d'une
+                # personne : sa réponse sert tout le monde
+                g.kvm_shared_read = True
             fresh = request.args.get("fresh") == "1"
             if (not READ_SHARE_ENABLED or request.method != "GET"
                     or (fresh and not fresh_min)):
@@ -1570,8 +1727,23 @@ def _secret_store_refused(e):
     message porte la classe, le nom et le code, jamais une valeur. Erreurs
     du client (valeur trop grosse, classe non migrable, chemin désigné par
     une autre déclaration) : 413, 400, 409 (revue M9 de la tâche 8)."""
-    status = _SECRET_ERROR_STATUS.get(e.code, 503)
+    status = _secret_error_status(e)
+    if status == 403:
+        _person_refusal_note(e.code)
     return jsonify({"error": str(e)[:300], "code": e.code}), status
+
+
+def _secret_error_status(e):
+    """Statut HTTP d'une SecretError. 2.10.0 (revue M8) : un refus fait à
+    une personne (OpenBao a refusé SON jeton, ou la connexion personnelle a
+    échoué) est un 403, pas une panne ; une panne d'OpenBao reste 503."""
+    code = getattr(e, "code", "")
+    if code in PERSON_REFUSAL_CODES or (code == "openbao-denied" and getattr(e, "person", False)):
+        return 403
+    return _SECRET_ERROR_STATUS.get(code, 503)
+
+
+PERSON_REFUSAL_CODES = ("openbao-person-login-failed", "openbao-person-no-token", "openbao-person-expired")
 
 
 _SECRET_ERROR_STATUS = {"secret-too-big": 413, "class-not-migratable": 400, "secret-path-owned": 409}
@@ -1594,18 +1766,47 @@ def _secret_actor():
         return None
 
 
-def _secret_put(cls, path, field, value):
+def _secret_identity(cls):
+    """2.10.0 : identité de lecture (ou d'écriture) d'un secret de la classe
+    `cls` pour la requête en cours, table « Qui agit » du plan
+    (openbao_jwt.identity_for) : jeton de la personne pour une classe
+    personnelle d'une session Rancher par connexion unique quand le réglage
+    est allumé, service sinon. Hors requête (fil d'une action, tâche de
+    fond) : service, toujours."""
+    if not has_request_context():
+        return _sst.SERVICE
+    actor = _secret_actor()
+    try:
+        st = _sst.store()
+        settings = st.settings if st.active() else {}
+    except Exception:                          # noqa: BLE001 : réglages illisibles = service
+        return _sst.Identity("service", actor)
+    return _oj.identity_for(cls, _sso_session(), settings, actor=actor)
+
+
+def _person_token_enabled():
+    try:
+        st = _sst.store()
+        return st.active() and _oj.settings_of(st.settings)["enabled"]
+    except Exception:                          # noqa: BLE001
+        return False
+
+
+def _secret_put(cls, path, field, value, identity=None):
     """2.9.0 tâche 8 : écrit un secret nouveau dans OpenBao quand sa classe
     est migrée et rend sa référence ; None quand la classe est locale (ou
     pour une valeur de plus de 1 Mio, qui reste locale pour ce nom) :
     l'appelant écrit alors en local comme avant. SecretError si OpenBao
-    refuse (gestionnaire 503)."""
+    refuse (gestionnaire 503). 2.10.0 : `identity` (défaut : celle de la
+    requête pour cette classe)."""
     if not _secret_migrated(cls):
         return None
     if isinstance(value, bytes):
         value = value.decode()
+    if identity is None:
+        identity = _secret_identity(cls)
     try:
-        return _sst.store().put(cls, path, field, value, actor=_secret_actor())
+        return _sst.store().put(cls, path, field, value, identity=identity)
     except _sst.SecretError as e:
         if e.code == "secret-too-big":
             return None
@@ -1739,6 +1940,11 @@ class ActionRun:
         # à-dire exactement là où les gestes sont les plus lourds.
         self.identity_env = {}
         self.cluster_user = None
+        # 2.10.0 : identité des lectures de secrets de l'action, figée au
+        # déclenchement : « person » (jeton de la personne), « service »,
+        # « late-service » (lecture tardive inévitable faite par le
+        # service) ; None : aucun secret personnel lu, ou réglage éteint
+        self.secret_identity = None
         self.status = "starting"      # starting | running | done | error | cancelled
         self.exit_code = None
         # v1.6.5: last meaningful error line (kubectl stderr / script stderr)
@@ -1765,6 +1971,9 @@ class ActionRun:
         # demande autant (un opérateur n'annule pas l'ajout d'hôte d'un admin)
         self.required_role = None
         self.launch_role = None            # 2.4.0 : rôle figé de qui a lancé un plan
+        # 2.10.0 (revue I6 des tâches 2 à 5) : déroulé lancé par une personne
+        # qui a un jeton OpenBao ; ses enfants lisent par le service, marqués
+        self.person_launched = False
         # v1.96.0 : message d'une annulation pour un outil qui ne défait pas
         # tout (None : celui des transferts, « transfer undone »)
         self.cancel_summary = None
@@ -1888,6 +2097,8 @@ class ActionRun:
             # Sous quelle identité le cluster a vu cette action. None quand la
             # délégation est éteinte : l'action a employé le kubeconfig partagé.
             "cluster_user": self.cluster_user,
+            # 2.10.0 : « person », « service » ou « late-service » (sans valeur)
+            "secret_identity": self.secret_identity,
             # v1.46.0 : progression d'un transfert (dernier point par phase)
             "progress": dict(self.progress),
             "progress_current": self.progress_last,
@@ -2017,6 +2228,12 @@ def _actions_init_db():
         conn.execute("ALTER TABLE actions ADD COLUMN parent TEXT")
     except sqlite3.OperationalError:
         pass
+    # 2.10.0 : identité des lectures de secrets (person, service,
+    # late-service) ; même migration additive, à chaud
+    try:
+        conn.execute("ALTER TABLE actions ADD COLUMN secret_identity TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("CREATE INDEX IF NOT EXISTS actions_parent ON actions(parent)")
     conn.execute("CREATE INDEX IF NOT EXISTS actions_started ON actions(started_at DESC)")
     # v1.6.0: compound index for "recent actions per cluster" lookup
@@ -2046,8 +2263,8 @@ def _actions_persist(run):
     conn.execute("""
         INSERT INTO actions(id, action, cluster, status, exit_code,
                             started_at, ended_at, dry_run, cmd, events,
-                            error_summary, result, undo, parent)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            error_summary, result, undo, parent, secret_identity)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
             exit_code=excluded.exit_code,
@@ -2055,11 +2272,12 @@ def _actions_persist(run):
             events=excluded.events,
             error_summary=excluded.error_summary,
             result=excluded.result,
-            undo=excluded.undo
+            undo=excluded.undo,
+            secret_identity=excluded.secret_identity
     """, (run.id, run.action, run.cluster, run.status, run.exit_code,
           run.started_at, run.ended_at, int(bool(run.dry_run)),
           cmd_str, events_json, run.error_summary, result_json, undo_json,
-          getattr(run, "parent", None)))
+          getattr(run, "parent", None), getattr(run, "secret_identity", None)))
     conn.commit()
     _actions_purge(conn)
     conn.close()
@@ -2141,6 +2359,8 @@ def _actions_load_history():
             run.ended_at = row["ended_at"]
             if "error_summary" in row.keys():
                 run.error_summary = row["error_summary"]
+            if "secret_identity" in row.keys():
+                run.secret_identity = row["secret_identity"]
             # An action still flagged running at startup was killed by the restart.
             if run.status in ("starting", "running") and not run.ended_at:
                 run.status = "interrupted"
@@ -2198,7 +2418,7 @@ _actions_load_history()
 # /api/action/<id> and /api/stream/<id> for runs no longer in memory.
 _ACTIONS_LIST_COLUMNS = ("id", "action", "cluster", "status", "exit_code",
                          "started_at", "ended_at", "dry_run", "error_summary",
-                         "result", "undo", "parent")
+                         "result", "undo", "parent", "secret_identity")
 
 
 _FOLDER_RESUMABLE = ("error", "interrupted")
@@ -2360,8 +2580,11 @@ def run_action_thread(run: ActionRun):
 
     secret_env, secret_map = {}, None
     try:
-        secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
-                                                   getattr(run, "secret_refs", ()), getattr(run, "secret_files", None))
+        with _late_reads(run):
+            secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
+                                                       getattr(run, "secret_refs", ()),
+                                                       getattr(run, "secret_files", None), identity=_sst.SERVICE,
+                                                       skip=getattr(run, "secret_skip", ()))
         run.proc = subprocess.Popen(
             run.cmd,
             stdout=subprocess.PIPE,
@@ -2493,6 +2716,11 @@ def start_action(action, cluster, dry_run=False, interactive=False,
     _ident = current_cluster_identity()
     run.identity_env = identity_env(cluster=cluster)
     run.cluster_user = (_ident or {}).get("user")
+    try:
+        _freeze_person_secrets(run)            # 2.10.0 : secrets personnels lus ICI, avec la personne
+    except BaseException:                      # refus d'OpenBao, ou toute autre erreur : compteur rendu
+        _discard_unstarted(run)                # jamais lancée : jauge et bail rendus, rien à persister
+        raise
     with ACTIONS_LOCK:
         # Contrôle et inscription sous le même verrou : deux requêtes
         # simultanées ne peuvent pas passer toutes les deux.
@@ -2999,6 +3227,26 @@ def _update_hand_over(name, chk, b, kind, steps):
                             "code": "secrets-in-openbao", "blockers": blockers,
                             "steps": list(_sst.BACK_TO_LOCAL_STEPS),
                             "hint": "; ".join(_sst.BACK_TO_LOCAL_STEPS)}), 409
+    # 2.10.0 (point 291) : une 2.9.x refuse à la revue de restauration tout
+    # instantané de B1 qui porte un montage `jwt-hops-*` ou l'écouteur ESO ;
+    # en mode A la configuration est chez le client : permis, avec un
+    # avertissement dans l'action
+    try:
+        below_pt = _su.parse_version(chk["version"])[:3] < _sst.PERSON_TOKEN_VERSION
+    except _su.UpdateError:
+        below_pt = True
+    pt_warning = None
+    if older and below_pt:
+        ptb = _sst.person_token_blockers(_state_dir())
+        if ptb.get("b1"):
+            return jsonify({"error": f"{chk['version']} would refuse every OpenBao B1 snapshot taken now: "
+                                     "remove the per-person token methods and External Secrets first",
+                            "code": "secrets-person-token-b1", "blockers": ptb["b1"],
+                            "steps": list(_sst.PERSON_TOKEN_BACK_STEPS),
+                            "hint": "; ".join(_sst.PERSON_TOKEN_BACK_STEPS)}), 409
+        if ptb.get("warnings"):
+            pt_warning = (f"mode A: the OpenBao administrator keeps the per-person token and External Secrets "
+                          f"configuration ({', '.join(sorted(ptb['warnings']))}); {chk['version']} ignores it")
     with _update_lock:
         if (d / _su.REQUEST).exists():
             return jsonify({"error": "an update is already requested"}), 409
@@ -3010,12 +3258,16 @@ def _update_hand_over(name, chk, b, kind, steps):
     run.cluster_user = current_user()
     with ACTIONS_LOCK:
         ACTIONS[run.id] = run
-    for sid, msg in steps + [("request", f"{_harvester_ops_version()} -> {chk['version']} handed to the host "
-                                         "agent; the console restarts in a moment")]:
+    for sid, msg in steps + ([("person-token", pt_warning)] if pt_warning else []) + [
+            ("request", f"{_harvester_ops_version()} -> {chk['version']} handed to the host "
+                        "agent; the console restarts in a moment")]:
         run.emit({"type": "step", "step_id": sid, "status": "done", "message": msg, "ts": time.time()})
     run.status, run.exit_code = "done", 0
     run.close()
-    return jsonify({"ok": True, "action_id": run.id, "version": chk["version"]}), 202
+    out = {"ok": True, "action_id": run.id, "version": chk["version"]}
+    if pt_warning:
+        out["warning"] = pt_warning
+    return jsonify(out), 202
 
 
 @app.route("/api/update/apply", methods=["POST"])
@@ -3268,6 +3520,7 @@ def logout_local():
 def _sso_start(st, server_id):
     state, nonce, challenge, browser = _SSO_PENDING.start(_safe_next(request.args.get("next")),
                                                           server=server_id)
+    # 2.10.0, décision 310 : jamais la portée `groups` (aucune découverte ici)
     resp = redirect(_rs.authorize_url(st, _sso_redirect_uri(st), state, nonce, challenge))
     resp.set_cookie(_rs.PENDING_COOKIE, browser, max_age=_rs.PENDING_TTL, httponly=True,
                     secure=_sso_cookie_secure(st), samesite="Lax", path="/auth/rancher")
@@ -3328,7 +3581,8 @@ def sso_callback():
         app.logger.warning("Rancher sign-in refused: %s %s", e.code, e.detail)
         return redirect("/login?error=" + e.code)
     sess = _sso_store().open(ident, _rs.console_role(st, ident), tok["access_token"],
-                             tok["refresh_token"], st["session_seconds"], server_id=server_id)
+                             tok["refresh_token"], st["session_seconds"], server_id=server_id,
+                             id_token=tok["id_token"])
     _sso_start_renewer()
     app.logger.info("Rancher sign-in: %s (%s)", sess.login, sess.role)
     resp = redirect(pending.get("next") or "/")
@@ -3637,10 +3891,11 @@ def api_rancher_sso_register(server_id):
     x, st, admin, _ = got
     from urllib.parse import urlparse as _up
     name = (x.get("sso") or {}).get("oidc_client") or _radm.oidc_client_name(_up(redirect_uri).hostname)
+    # 2.10.0, décision 310 : le client garde les portées par défaut de Rancher
     try:
         with admin:
-            client_id, secret = _radm.register_oidc(admin, name, redirect_uri,
-                                                    refresh_seconds=int(x["session_hours"]) * 3600)
+            client_id, secret = _radm.register_oidc(
+                admin, name, redirect_uri, refresh_seconds=int(x["session_hours"]) * 3600)
     except _radm.AdminError as e:
         app.logger.warning("Rancher SSO registration on %s refused: %s", server_id, e)
         return jsonify({"error": str(e)}), e.status
@@ -9345,15 +9600,118 @@ def _cluster_kubeconfig_path(cluster, purpose="kubectl", missing_ok=False):
         return None
 
 
-def _cluster_ssh_key_path(ssh, purpose="ssh-cluster"):
+def _cluster_ssh_key_path(ssh, purpose="ssh-cluster", identity=None):
     """Chemin de la clé SSH d'un cluster (bloc `ssh` de son entrée), seul
     lecteur du champ `ssh.key` (2.9.0) : le fichier rangé, ou une copie
-    tmpfs quand le champ porte une référence du magasin de secrets."""
+    tmpfs quand le champ porte une référence du magasin de secrets.
+    2.10.0 : `identity` (défaut : celle de la requête pour `ssh-cluster`,
+    service hors requête)."""
     key = (ssh or {}).get("key")
-    return _sst.path_of(key, purpose) if key else key
+    if not key:
+        return key
+    return _sst.path_of(key, purpose, identity=identity if identity is not None else _secret_identity("ssh-cluster"))
 
 
-def _spawn_secret_env(clusters, refs=(), files=None):
+def _action_secret_refs(clusters, refs=()):
+    """Références des secrets qu'une action remet à son outil : clés des
+    hôtes KVM (`kvm:<hôte>`), `refs` (réplication), kubeconfig et clé SSH
+    des clusters nommés. Sans lecture de valeur."""
+    names = {c for c in clusters or () if c}
+    out = list(refs or ())
+    for n in sorted(names):
+        if n.startswith("kvm:") and _kvm_check_host(n[4:]):
+            try:
+                v = _kd.load(_state_dir(), n[4:]).get("ssh_key")
+            except (OSError, ValueError):
+                v = None
+            if isinstance(v, str) and _sst.is_ref(v):
+                out.append(v)
+    for entry in load_config_ro().get("clusters", []):
+        if entry.get("name") not in names:
+            continue
+        for v in (entry.get("kubeconfig"), (entry.get("ssh") or {}).get("key")
+                  if isinstance(entry.get("ssh"), dict) else None):
+            if isinstance(v, str) and _sst.is_ref(v):
+                out.append(v)
+    return list(dict.fromkeys(out))
+
+
+def _freeze_person_secrets(run):
+    """2.10.0 (tâche 5) : les secrets PERSONNELS que l'action remettra à son
+    outil sont lus ICI, dans la requête qui la déclenche, avec l'identité de
+    la personne (son jeton OpenBao juge la lecture), puis tenus par le bail
+    de l'action ; le fil de travail les trouve dans `secret_files` et ne lit
+    plus rien avec un jeton de personne. Un refus d'OpenBao remonte
+    (SecretError) : l'action n'est pas lancée, aucune relecture par le
+    service. Pose `run.secret_identity` quand le jeton par personne est
+    allumé (rien sinon : comportement 2.9.x)."""
+    if not has_request_context() or not _sst.is_active() or not _person_token_enabled():
+        return
+    import secret_classes as _scl
+    files = run.secret_files if isinstance(getattr(run, "secret_files", None), dict) else {}
+    used = set()
+    for ref in _action_secret_refs([run.cluster, *getattr(run, "secret_clusters", ())],
+                                   getattr(run, "secret_refs", ())):
+        try:
+            cls = _sst.parse_ref_full(ref)[1]
+        except ValueError:
+            continue
+        if not _scl.is_person(cls):
+            continue
+        idt = _secret_identity(cls)
+        if idt.kind != "person":
+            used.add("service")
+            continue
+        if ref not in files:
+            try:
+                files[ref] = str(_sst.store().shared_file(ref, "tool", identity=idt))
+            except _sst.SecretMissing:
+                # revue I2 des tâches 2 à 5 : valeur absente du magasin, comme
+                # `_spawn_secret_env` de la 2.9.1 (avertissement sans valeur,
+                # copie non remise, aucune lecture par le service)
+                log.warning("secret %s not handed to the tool: missing", ref.split("#")[0])
+                run.secret_skip = tuple(getattr(run, "secret_skip", ())) + (ref,)
+                used.add("person")
+                continue
+            run.hold_secrets(files[ref])
+        used.add("person")
+    run.secret_files = files
+    if used:
+        run.secret_identity = "person" if "person" in used else "service"
+
+
+def _person_launched():
+    """Vrai dans la requête d'une personne connectée par Rancher dont les
+    lectures personnelles passent par son jeton OpenBao. Une chaîne de plan
+    ou un défaire qu'elle lance lit ensuite dans son fil, par le service :
+    ses actions enfants sont marquées « service tardif » (revue I6)."""
+    if not has_request_context() or not _sst.is_active() or not _person_token_enabled():
+        return False
+    return _secret_identity("ssh-kvm").kind == "person"
+
+
+@contextlib.contextmanager
+def _late_reads(run):
+    """2.10.0 : dans le fil d'une action dont les secrets personnels ont été
+    lus avec le jeton de la personne, une lecture inévitable faite ensuite
+    par le service (copie absente, cache échu) est marquée `late-service`
+    dans l'action et dans une étape (sans valeur). Revue I6 : de même dans
+    un déroulé (plan, défaire) lancé par une personne qui a un jeton
+    OpenBao, et dans les actions qu'il lance (`person_launched`)."""
+    if getattr(run, "secret_identity", None) not in ("person", "late-service") \
+            and not getattr(run, "person_launched", False):
+        yield
+        return
+
+    def mark(cls, path):
+        run.secret_identity = "late-service"
+        run.emit({"type": "step", "step_id": "secrets", "status": "warn",
+                  "message": f"secret {cls}/{path} read late by the service identity", "ts": time.time()})
+    with _sst.action_reads(mark):
+        yield
+
+
+def _spawn_secret_env(clusters, refs=(), files=None, identity=None, skip=()):
     """Revue I6 : un outil lancé par la console ne se connecte pas à OpenBao.
     Pour les clusters de l'action dont le kubeconfig ou la clé SSH porte une
     référence, la console remet des copies de travail tmpfs (tenues par le
@@ -9366,34 +9724,20 @@ def _spawn_secret_env(clusters, refs=(), files=None):
         return {}, None
     # 2.9.0 tâche 8 : `kvm:<hôte>` remet la clé de l'hôte KVM ; `refs` des
     # références de plus (secrets de la réplication) ; `files` des copies
-    # déjà écrites par l'appelant ({référence: chemin}, clé d'un hôte ajouté)
-    names = {c for c in clusters or () if c}
-    wanted = list(refs or ())
-    for n in sorted(names):
-        if n.startswith("kvm:") and _kvm_check_host(n[4:]):
-            try:
-                v = _kd.load(_state_dir(), n[4:]).get("ssh_key")
-            except (OSError, ValueError):
-                v = None
-            if isinstance(v, str) and _sst.is_ref(v):
-                wanted.append(v)
+    # déjà écrites par l'appelant ({référence: chemin}, clé d'un hôte ajouté,
+    # 2.10.0 : secrets personnels lus au déclenchement). Appelé dans le fil
+    # de l'action : `identity` est celle du service (jamais une personne).
+    idt = identity if identity is not None else _sst.SERVICE
+    wanted = _action_secret_refs(clusters, refs)
     refs = dict(files or {})
     for v in wanted:
-        if v not in refs:
+        # `skip` : secret personnel absent au déclenchement (revue I2 des
+        # tâches 2 à 5), jamais relu par le service dans le fil
+        if v not in refs and v not in skip:
             try:
-                refs[v] = str(_sst.store().shared_file(v, "tool"))
+                refs[v] = str(_sst.store().shared_file(v, "tool", identity=idt))
             except (_sst.SecretError, _sst.SecretMissing) as e:
                 log.warning("secret %s not handed to the tool: %s", v.split("#")[0], getattr(e, "code", e))
-    for entry in load_config_ro().get("clusters", []):
-        if entry.get("name") not in names:
-            continue
-        for v in (entry.get("kubeconfig"), (entry.get("ssh") or {}).get("key")
-                  if isinstance(entry.get("ssh"), dict) else None):
-            if isinstance(v, str) and _sst.is_ref(v) and v not in refs:
-                try:
-                    refs[v] = str(_sst.store().shared_file(v, "tool"))
-                except (_sst.SecretError, _sst.SecretMissing) as e:
-                    log.warning("secret of %s not handed to the tool: %s", entry.get("name"), e)
     if not refs:
         return {}, None
     mp = _sst.write_private_copy(_sst.secret_files_dir(_sst.store().settings), "secret-files",
@@ -10107,6 +10451,49 @@ def _update_outcome_watch(timeout=1200, step=5):
 if not IS_READ_WORKER:
     threading.Thread(target=_update_outcome_watch, daemon=True, name="update-outcome").start()
 
+
+def _secrets_agent_status():
+    """`status.json` de l'agent des secrets (root, sans valeur), {} sinon."""
+    try:
+        st = json.loads((_secrets_agent_dir() / "status.json").read_text())
+        return st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+# 2.10.0 (tâche 13, vu sur un poste client) : une restauration lancée depuis
+# la console arrête la console, et l'outil qui l'a lancée avec elle, avant
+# qu'il range les réglages sur ce que porte l'instantané (méthodes jwt,
+# groupes, clusters ESO, écouteur). Relancée, la console attend l'état final
+# de l'agent et range une fois par restauration (`restore-settle`).
+def _secrets_restore_settle_watch(timeout=1800, step=5):
+    deadline = time.time() + timeout
+    while True:
+        st = _secrets_agent_status()
+        if st.get("op") != "restore-snapshot":
+            return
+        if st.get("state") not in (None, "running"):
+            break
+        if time.time() >= deadline:
+            return
+        time.sleep(step)
+    info = st.get("info")
+    if st.get("state") != "done" or not isinstance(info, dict) or "person_jwt" not in info:
+        return
+    if _secrets_raw().get("restore_settled") == st.get("started"):
+        return
+    with app.app_context():
+        _secrets_tool_action("secrets:restore-settle", ["restore-settle"], actor="console", clear_cache=True,
+                             after_fn=_person_tokens_sweep)
+
+
+
+def _start_secrets_restore_settle():
+    """Lancé depuis le point d'entrée, jamais à l'import : le fil appelle des
+    fonctions définies plus bas dans ce module (vu en réel : NameError quand
+    il partait pendant l'import)."""
+    threading.Thread(target=_secrets_restore_settle_watch, daemon=True, name="secrets-restore-settle").start()
+
 # Kick off watchers at import — the threads are daemons so Flask shutdown
 # cleans them up.
 try:
@@ -10411,7 +10798,8 @@ def _vms_all_kvm():
         return [], []
     state = _state_dir()
     decls = _kd.load_all(state)
-    hosts = [_kh.VirshHost(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
+    # part KVM partagée de /api/vms-all : service (décision 311)
+    hosts = [_kvm_virsh(d, state, identity=_sst.SERVICE, timeout=KVM_READ_TIMEOUT) for d in decls]
     entries = _kvm_cli.read_all(hosts, deadline=KVM_READ_DEADLINE, folders=True) if hosts else []
     sources, rows = [], []
     for inv in entries:
@@ -11506,7 +11894,7 @@ def _check_kvm_objects(objs):
     state = _state_dir()
     for host, items in sorted(by_host.items()):
         try:
-            vh = _kh.VirshHost(_kd.load(state, host), state, timeout=KVM_READ_TIMEOUT)
+            vh = _kvm_virsh(_kd.load(state, host), state, timeout=KVM_READ_TIMEOUT)
             res = vh.batch({f"d{i}": ("dominfo", "--domain", o["domain"]) for i, o in enumerate(items)},
                            idempotent=True)
         except Exception as e:  # noqa: BLE001 : hôte injoignable, clé refusée...
@@ -12528,7 +12916,26 @@ def _kvm_public(decl):
     return {k: d.get(k) for k in ("name", "address", "port", "user", "uri", "labels")}
 
 
-def _kvm_host(state, name):
+def _kvm_virsh(decl, state, identity=None, **kw):
+    """VirshHost d'une déclaration. 2.10.0 : quand la lecture de la clé de
+    l'hôte (`ssh-kvm`) se fait avec le jeton de la personne, la clé est lue
+    ICI, dans la requête, et remise à l'objet : les fils d'une lecture
+    parallèle ne relisent pas le magasin (ils n'ont pas de contexte de
+    requête). Service : lecture paresseuse de la 2.9.x."""
+    if identity is None:
+        # vue KVM partagée (décision 311) : service ; un geste : la personne
+        identity = _sst.SERVICE if has_request_context() and getattr(g, "kvm_shared_read", False) \
+            else _secret_identity("ssh-kvm")
+    idt = identity
+    key = None
+    if idt.kind == "person" and isinstance(decl, dict) and _sst.is_ref(decl.get("ssh_key")):
+        key = _kd.key_path(state, decl["ssh_key"], identity=idt)
+    if key is not None:
+        kw["key_path"] = key
+    return _kh.VirshHost(decl, state, **kw)
+
+
+def _kvm_host(state, name, identity=None):
     """(VirshHost, None) d'un hôte déclaré, ou (None, réponse d'erreur)."""
     if not _kvm_check_host(name):
         return None, _kvm_err("invalid host name")
@@ -12538,7 +12945,7 @@ def _kvm_host(state, name):
         return None, _kvm_err(f"host {name} is not declared", 404)
     except _kd.DeclError as e:
         return None, _kvm_err(str(e), 500)
-    return _kh.VirshHost(decl, state, timeout=KVM_READ_TIMEOUT), None
+    return _kvm_virsh(decl, state, identity=identity, timeout=KVM_READ_TIMEOUT), None
 
 
 def _kvm_read_all(details=False):
@@ -12547,7 +12954,7 @@ def _kvm_read_all(details=False):
     state = _state_dir()
     warnings = []
     decls = _kd.load_all(state, warn=warnings.append)
-    hosts = [_kh.VirshHost(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
+    hosts = [_kvm_virsh(d, state, identity=_sst.SERVICE, timeout=KVM_READ_TIMEOUT) for d in decls]
     entries = _kvm_cli.read_all(hosts, details=details, deadline=KVM_READ_DEADLINE) if hosts else []
     public = {d["name"]: _kvm_public(d) for d in decls}
     return [dict(public.get(e["name"], {}), **e) for e in entries], warnings
@@ -12561,7 +12968,7 @@ def _kvm_warm_surveys(names):
     en route, ou si l'hôte a déjà KVM_SURVEYS_PER_HOST relevés en cours."""
     state = _state_dir()
     for name in names:
-        vh, err = _kvm_host(state, name)
+        vh, err = _kvm_host(state, name, identity=_sst.SERVICE)
         if err:
             continue
         try:
@@ -18113,7 +18520,7 @@ _UNSET = object()
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
                 capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
                 setup=None, parent=None, cluster_user=_UNSET, sink=None, busy_match=None,
-                secret_clusters=(), secret_refs=(), secret_files=None):
+                secret_clusters=(), secret_refs=(), secret_files=None, after_run=None):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
@@ -18161,6 +18568,13 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     run.secret_clusters = tuple(c for c in (*(busy_clusters or ()), *(secret_clusters or ())) if c)
     run.secret_refs = tuple(secret_refs or ())
     run.secret_files = dict(secret_files or {})
+    try:
+        _freeze_person_secrets(run)            # 2.10.0 : secrets personnels lus ICI, avec la personne
+    except BaseException:                      # refus d'OpenBao, ou toute autre erreur : rien ne reste
+        _discard_unstarted(run)                # jamais lancée : jauge et bail rendus, rien à persister
+        if spec_file:
+            Path(spec_file).unlink(missing_ok=True)
+        raise
     if setup is not None:
         setup(run)
     with ACTIONS_LOCK:
@@ -18169,9 +18583,7 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
         pending = None if busy else _register_action(run, parent)
     _persist_parent(pending)
     if busy:
-        run.status = "cancelled"               # jamais lancée : rien à persister
-        run._closed = True
-        metric_actions_in_flight.dec()
+        _discard_unstarted(run)                # jamais lancée : jauge et bail rendus, rien à persister
         if spec_file:
             Path(spec_file).unlink(missing_ok=True)
         return None, _busy_response(busy)
@@ -18186,6 +18598,12 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
                 Path(spec_file).unlink(missing_ok=True)
             if after:
                 after()
+            if after_run:
+                # 2.10.0 (revue finale m-3) : rappel qui lit l'issue de l'action
+                try:
+                    after_run(run)
+                except Exception as e:          # noqa: BLE001 : jamais l'issue de l'action
+                    log_actions.warning("after %s: %s", run.id, type(e).__name__)
     threading.Thread(target=work, daemon=True).start()
     return run, None
 
@@ -18222,15 +18640,17 @@ def _capi_uninstall_refusal(cluster, holder=None):
             "code": "capi-uninstall-running", "running": rid}, 409
 
 
-def _capi_action(cluster, label, cmd, spec=None, dry_run=False, parent=None, cluster_user=_UNSET):
+def _capi_action(cluster, label, cmd, spec=None, dry_run=False, parent=None, cluster_user=_UNSET, capture=False):
+    """`capture` (2.10.0, tâche 13) : l'objet JSON de stdout gardé dans
+    `result.output` (commandes du mode A d'External Secrets, sans valeur)."""
     return _cli_action(cluster, label, cmd, "harvester-capi", spec, dry_run,
                        after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None),
-                       parent=parent, cluster_user=cluster_user,
+                       parent=parent, cluster_user=cluster_user, capture=capture,
                        busy_match=lambda r: r.action == f"{CAPI_UNINSTALL_PREFIX}{cluster}")
 
 
 def _capi_launch(cluster, kc, sub, args, spec=None, parent=None, cluster_user=None, label=None,
-                 dry_run=False):
+                 dry_run=False, capture=None):
     """Lancement hors requête (chaîne d'un plan, 2.5.0) : ne lit ni la
     requête, ni la session, ni l'identité de la personne ; `kc` et
     `cluster_user` sont figés au déclenchement. Même commande que les routes
@@ -18241,7 +18661,8 @@ def _capi_launch(cluster, kc, sub, args, spec=None, parent=None, cluster_user=No
         return None, {"error": f"{CAPI_SCRIPT} not deployed"}
     with app.app_context():                    # réponse d'occupation (jsonify) hors requête
         run, err = _capi_action(cluster, label or f"capi-{sub}:{cluster}", cmd + list(args), spec, dry_run,
-                                parent=parent, cluster_user=cluster_user)
+                                parent=parent, cluster_user=cluster_user,
+                                capture=sub in ESO_COMMAND_SUBS if capture is None else capture)
     if err:
         body = err[0].get_json(silent=True) if hasattr(err[0], "get_json") else None
         return None, body or {"error": "refused"}
@@ -22973,6 +23394,250 @@ def api_capi_gitops_list(cluster):
     return jsonify(res[0])
 
 
+# ---------------------------------------------------------------------------
+# 2.10.0 (tâche 10) : External Secrets Operator dans un cluster enfant
+# (décision 139, points 293 à 307). Tout passe par harvester-capi (parité) ;
+# poser, activer un namespace, retirer : administrateur (point 293) et
+# droit sur le cluster enfant ; écrire une valeur : opérateur avec le droit
+# d'administrer le cluster enfant, avec le jeton de la personne (classe
+# `eso`), jamais relue ni réaffichée.
+# ---------------------------------------------------------------------------
+ESO_KEYS = {"namespaces", "chart", "dry_run"}
+# tâche 13 (réel) : en mode A, ces sous-commandes écrivent sur stdout les
+# commandes de l'administrateur d'OpenBao ; l'action les garde dans
+# `result.output` (sinon stdout partait vers /dev/null et l'onglet ne les
+# montrait jamais)
+ESO_COMMAND_SUBS = ("eso-deploy", "eso-remove")
+ESO_SECRET_KEYS = {"namespace", "name", "fields"}
+
+
+def _eso_names_refusal(*names):
+    if not all(isinstance(x, str) and _K8S_NAME_RE.match(x) for x in names):
+        return _artefact_error("invalid name", 400)
+    return None
+
+
+def _eso_admin_refusal():
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return _artefact_error("External Secrets are set by an administrator", 403, "eso-admin-only")
+    return None
+
+
+def _eso_status_of(cluster, namespace, name):
+    """État ESO d'un cluster enfant (outil, lecture seule) : (doc, None) ou
+    (None, réponse). Revue 8-10 M-5 : droit sur le cluster enfant exigé
+    (l'outil y lit noms et messages de tous les namespaces)."""
+    cmd, err = _capi_child_base(cluster, "eso-status", namespace, name)
+    if err:
+        return None, err
+    res, err = _capi_run_json(cmd + ["--name", f"{namespace}/{name}", "--json"], timeout=90)
+    if err:
+        return None, err
+    return res[0], None
+
+
+def _eso_launch(cluster, namespace, name, namespaces, chart=None, label=None):
+    spec = {"cluster": f"{namespace}/{name}", "namespaces": list(namespaces), "by": current_user() or "",
+            "role": current_role() or "viewer"}
+    if chart:
+        spec["chart"] = chart
+    cmd, err = _capi_child_base(cluster, "eso-deploy", namespace, name)
+    if err:
+        return err
+    run, err = _capi_action(cluster, label or f"capi-eso:{namespace}/{name}", cmd, spec=spec, capture=True)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}", "namespaces": list(namespaces)}), 202
+
+
+@app.route("/api/capi/<cluster>/eso/<namespace>/<name>")
+@requires_auth
+def api_capi_eso_status(cluster, namespace, name):
+    """État ESO d'un cluster enfant, sans aucune valeur."""
+    bad = _eso_names_refusal(namespace, name)
+    if bad:
+        return bad
+    doc, err = _eso_status_of(cluster, namespace, name)
+    return err or jsonify(doc)
+
+
+@app.route("/api/capi/<cluster>/eso/<namespace>/<name>", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_eso_deploy(cluster, namespace, name):
+    """Pose ESO (chart s'il est demandé, authentification dans OpenBao,
+    magasins des namespaces activés) : action suivie `capi-eso:`.
+    `dry_run` : les constats de la fenêtre avant son bouton."""
+    import capi_cluster as _ccm
+    bad = _eso_names_refusal(namespace, name)
+    if bad:
+        return bad
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - ESO_KEYS):
+        return _artefact_error(f"{k}: unknown key", 400)
+    try:
+        es = _ccm.normalize_external_secrets({k: body[k] for k in ("namespaces", "chart") if k in body}) \
+            or {"namespaces": []}
+    except ValueError as e:
+        return _artefact_error(str(e).replace("external_secrets.", ""), 400)
+    if body.get("dry_run") is True:
+        cmd, err = _capi_base(cluster, "eso-check")
+        if err:
+            return err
+        spec = {"cluster": f"{namespace}/{name}", "namespaces": es["namespaces"], "by": current_user() or "",
+                "role": current_role() or "viewer"}
+        if es.get("chart"):
+            spec["chart"] = es["chart"]
+        res, err = _capi_run_json(cmd + ["--spec", "-"], spec=spec, timeout=150)
+        if err:
+            return err
+        out, rc = res
+        found = list(out.get("findings") or [])
+        ok, why = _child_admin_allowed(_kubectl_for_cluster(cluster), namespace, name)
+        if not ok and not any(f.get("code") == CHILD_ADMIN_REQUIRED for f in found):
+            found.append({"code": CHILD_ADMIN_REQUIRED if ok is False else "child-admin-unknown",
+                          "level": "block", "facts": {"cluster": f"{namespace}/{name}", "message": why}})
+        return jsonify(dict(out, findings=found, blocked=rc != 0 or bool(out.get("blocked")) or not ok))
+    refused = _eso_admin_refusal()
+    if refused:
+        return refused
+    if not es["namespaces"]:
+        return _artefact_error("at least one team namespace", 400, "eso-no-namespace")
+    return _eso_launch(cluster, namespace, name, es["namespaces"], es.get("chart"))
+
+
+@app.route("/api/capi/<cluster>/eso/<namespace>/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_capi_eso_remove(cluster, namespace, name):
+    """Retire ESO (point 300) : Secrets synchronisés gardés à leur dernière
+    valeur. `?keep_chart=1` laisse le chart `eso`."""
+    bad = _eso_names_refusal(namespace, name)
+    if bad:
+        return bad
+    refused = _eso_admin_refusal()
+    if refused:
+        return refused
+    cmd, err = _capi_child_base(cluster, "eso-remove", namespace, name)
+    if err:
+        return err
+    args = ["--name", f"{namespace}/{name}", "--role", current_role() or "viewer", "--by", current_user() or ""]
+    if request.args.get("keep_chart") in ("1", "true"):
+        args.append("--keep-chart")
+    run, err = _capi_action(cluster, f"capi-eso-remove:{namespace}/{name}", cmd + args, capture=True)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}"}), 202
+
+
+@app.route("/api/capi/<cluster>/eso/<namespace>/<name>/namespaces/<team>", methods=["POST", "DELETE"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_eso_namespace(cluster, namespace, name, team):
+    """Active (POST) ou retire (DELETE) un namespace d'équipe : rôle `eso`
+    réécrit avec la liste des namespaces activés (décision 304 B), magasin
+    posé ou retiré. Action suivie `capi-eso-namespace:`."""
+    import child_eso as _ce
+    bad = _eso_names_refusal(namespace, name, team)
+    if bad:
+        return bad
+    refused = _eso_admin_refusal()
+    if refused:
+        return refused
+    found = _ce.check_namespace(team)
+    if found:
+        return _artefact_error(f"{team}: not a team namespace", 400, found[0]["code"])
+    doc, err = _eso_status_of(cluster, namespace, name)
+    if err:
+        return err
+    if not doc.get("auth"):
+        return _artefact_error("External Secrets are not set on this child cluster", 409, "eso-not-set")
+    have = list(doc.get("namespaces") or [])
+    if request.method == "POST":
+        want = sorted(set(have) | {team})
+    else:
+        want = [n for n in have if n != team]
+        if not want:
+            return _artefact_error("the last namespace: remove External Secrets instead", 409, "eso-last-namespace")
+    if want == sorted(have):
+        return jsonify({"unchanged": True, "namespaces": have}), 200
+    verb = "add" if request.method == "POST" else "remove"
+    return _eso_launch(cluster, namespace, name, want, label=f"capi-eso-namespace:{namespace}/{name}:{verb}:{team}")
+
+
+@app.route("/api/capi/<cluster>/eso/<namespace>/<name>/secrets", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_capi_eso_secret(cluster, namespace, name):
+    """Écrit une valeur lue par ESO (classe `eso`, `eso/<clé>/<ns>/<nom>`)
+    avec le jeton de la personne (décision 312 : sans lecture préalable,
+    auteur gardé dans les métadonnées). Champs remplacés ensemble ; jamais
+    relus, jamais rendus. Action suivie `capi-eso-secret:`."""
+    import child_eso as _ce
+    bad = _eso_names_refusal(namespace, name)
+    if bad:
+        return bad
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["operator"]:
+        return jsonify({"error": "forbidden", "required": "operator"}), 403
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - ESO_SECRET_KEYS):
+        return _artefact_error(f"{k}: unknown key", 400)
+    team, sname = body.get("namespace"), body.get("name")
+    try:
+        fields = _ce.check_fields(body.get("fields"))
+        path = _ce.value_path(_ce.cluster_key(cluster, namespace, name), team, sname)
+    except ValueError as e:
+        return _artefact_error(str(e), 400)
+    if not _sst.openbao_active(_secrets_settings()):
+        return _artefact_error("External Secrets need OpenBao", 409, "eso-needs-openbao")
+    key = _ce.cluster_key(cluster, namespace, name)
+    entry = (((_secrets_settings().get("eso") or {}).get("clusters") or {}).get(key)) or {}
+    if team not in (entry.get("namespaces") or []):
+        return _artefact_error(f"{team} is not an enabled namespace of {namespace}/{name}", 409,
+                               "eso-namespace-not-enabled")
+    refusal = _child_admin_refusal(_kubectl_for_cluster(cluster), namespace, name)
+    if refusal:
+        return refusal
+    identity = _secret_identity("eso")
+    label = f"capi-eso-secret:{namespace}/{name}:{team}/{sname}"
+    run = ActionRun(uuid.uuid4().hex[:12], label, cluster, ["console", "eso-secret"], dry_run=False)
+    run.result = {"by": current_user() or "console", "fields": sorted(fields)}
+    run.required_role = "operator"
+    run.secret_identity = identity.kind
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    code, status = None, 200
+    try:
+        version = _sst.store().put_write_only("eso", path, fields, identity=identity, action=run.id)
+        meta_err = getattr(_sst.store(), "last_metadata_error", None)
+        msg = f"{team}/{sname}: version {version}, field(s) {', '.join(sorted(fields))}" + (
+            f" (author not recorded: {meta_err})" if meta_err else "")
+        run.emit({"type": "step", "step_id": "write", "status": "done", "message": msg, "ts": time.time()})
+        run.status, run.exit_code = "done", 0
+    except _sst.SecretError as e:
+        code = e.code
+        status = 403 if e.code in ("openbao-denied", "openbao-person-login-failed", "openbao-person-no-token",
+                                   "openbao-person-expired") else 503
+        run.emit({"type": "step", "step_id": "write", "status": "error", "message": e.code, "ts": time.time()})
+        run.status, run.exit_code = "error", 1
+        version = None
+    finally:
+        fields = None
+        body = None
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
+    run.close()
+    if code:
+        return jsonify({"error": "the value was not written", "code": code, "action_id": run.id}), status
+    return jsonify({"action_id": run.id, "version": version, "identity": identity.kind}), 200
+
+
 RENEW_KEYS = {"what", "registries", "oidc", "dry_run", "timeout", "mode"}
 RENEW_PREFIX = "capi-renew:"
 RENEW_ABANDON_PREFIX = "capi-renew-abandon:"
@@ -23152,6 +23817,14 @@ def api_capi_cluster_create(cluster):
     spec, err = _capi_spec_body()
     if err:
         return err
+    if spec.get("external_secrets"):
+        # 2.10.0 (point 293) : External Secrets posé par un administrateur
+        # seulement, avec OpenBao actif
+        refused = _eso_admin_refusal()
+        if refused:
+            return refused
+        if not _sst.openbao_active(_secrets_settings()):
+            return _artefact_error("External Secrets need OpenBao", 409, "eso-needs-openbao")
     errs = _cc.validate(spec)
     if errs:
         return jsonify({"error": "invalid request", "invalid": dict(errs)}), 400
@@ -24030,8 +24703,11 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None, sink=None):
         # dans le try : une erreur ici (disque plein) laissait l'action
         # « running » pour toujours
         out_file = tempfile.TemporaryFile() if capture and sink is None else None
-        secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
-                                                   getattr(run, "secret_refs", ()), getattr(run, "secret_files", None))
+        with _late_reads(run):
+            secret_env, secret_map = _spawn_secret_env([run.cluster, *getattr(run, "secret_clusters", ())],
+                                                       getattr(run, "secret_refs", ()),
+                                                       getattr(run, "secret_files", None), identity=_sst.SERVICE,
+                                                       skip=getattr(run, "secret_skip", ()))
         proc = subprocess.Popen(cmd, stdout=out_file or (subprocess.PIPE if sink is not None else subprocess.DEVNULL),
                                 stderr=subprocess.PIPE, text=True,
                                 **({"env": {**os.environ, **secret_env}} if secret_env else {}))
@@ -27280,8 +27956,18 @@ def _kvm_run_cli(run, cmd, prefix=""):
     posé que pendant le passage : entre deux, une annulation pose `_cancel`."""
     last_error = None
     out = tempfile.TemporaryFile()
+    secret_map = None
     try:
-        proc = _KVM_POPEN(cmd, stdout=out, stderr=subprocess.PIPE, text=True)
+        # 2.10.0 (essai R4) : comme `run_action_thread`, copies de travail
+        # remises par le service dans le fil (copies figées au déclenchement
+        # reprises) ; sans elles l'outil, lancé par la console, ne se connecte
+        # pas et échouait en SecretError sur une classe `ssh-kvm` migrée
+        with _late_reads(run):
+            secret_env, secret_map = _spawn_secret_env(
+                [run.cluster, *getattr(run, "secret_clusters", ())], (), getattr(run, "secret_files", None),
+                identity=_sst.SERVICE, skip=getattr(run, "secret_skip", ()))
+        proc = _KVM_POPEN(cmd, stdout=out, stderr=subprocess.PIPE, text=True,
+                          **({"env": {**os.environ, **secret_env}} if secret_env else {}))
         run.proc = proc
         for line in proc.stderr:
             line = line.strip()
@@ -27312,6 +27998,8 @@ def _kvm_run_cli(run, cmd, prefix=""):
     finally:
         run.proc = None
         out.close()
+        if secret_map:
+            secret_map.unlink(missing_ok=True)
 
 
 def _kvm_send_image(run, path, sha, size, hosts, pool, name, opts, url=None, hold=None):
@@ -27413,17 +28101,42 @@ def _kvm_cancel_asked(run):
     return bool(getattr(run, "_cancel", False) or getattr(run, "cancel_requested", False))
 
 
+def _discard_unstarted(run):
+    """Action jamais lancée ni inscrite (refus d'OpenBao, 409, erreur avant
+    l'inscription) : jauge `actions_in_flight` rendue et copies de travail
+    tenues par son bail rendues, sans rien persister (revue finale m-A)."""
+    run.status = "cancelled"
+    run._closed = True
+    metric_actions_in_flight.dec()
+    if run.secret_lease is not None and _sst._STORE is not None:
+        with contextlib.suppress(Exception):
+            _sst._STORE.release(run.secret_lease)
+
+
 def _kvm_image_run(host, label, hosts, pool, name, public):
     """Action suivie d'un envoi d'image, enregistrée sous le verrou des
     gestes : 409 si le même volume est déjà écrit ou supprimé sur l'un des
     hôtes, ou si son pool s'arrête ou se supprime."""
     holds = [(h, "volume", f"{pool}/{name}", "x") for h in hosts] + \
             [(h, "pool", pool, "s") for h in hosts]
+    run = ActionRun(uuid.uuid4().hex[:12], label, f"kvm:{host}", public)
+    # 2.10.0 (essai R4) : l'outil d'envoi reçoit la clé de chaque hôte visé
+    # (`_kvm_run_cli`) ; une clé personnelle est lue ICI, avec la personne,
+    # hors du verrou des gestes (une lecture lente ne bloque pas les autres)
+    run.secret_clusters = tuple(f"kvm:{h}" for h in hosts)
+    try:
+        _freeze_person_secrets(run)
+    except _sst.SecretError as e:              # refus d'OpenBao : rien d'inscrit, l'appelant libère sa place
+        _discard_unstarted(run)
+        return None, _secret_store_refused(e)
+    except BaseException:
+        _discard_unstarted(run)
+        raise
     with _KVM_GESTURE_LOCK:
         busy = _kvm_holds_busy(holds)
         if busy:
+            _discard_unstarted(run)
             return None, _busy_response(busy)
-        run = ActionRun(uuid.uuid4().hex[:12], label, f"kvm:{host}", public)
         run.cluster_user = (current_cluster_identity() or {}).get("user")
         run.author = current_user()
         run.required_role = required_role_for(request.path, request.method)
@@ -28848,16 +29561,20 @@ def _tf_private_write(path, data):
         f.write(data)
 
 
-def _tf_kvm_stage(ws, host_decl):
+def _tf_kvm_stage(ws, host_decl, identity=None):
     """Clé de l'hôte et empreinte épinglée, copiées en 0600 dans l'espace le
     temps d'une exécution, et le script ssh strict qui les utilise (le
-    provider le lance par l'URI ; ni clé ni chemin dans argv de tofu)."""
+    provider le lance par l'URI ; ni clé ni chemin dans argv de tofu).
+    2.10.0 : `identity` de la lecture de la clé (service dans le fil de
+    l'action : la copie lue au déclenchement par la personne est servie)."""
     state = _state_dir()
+    idt = identity if identity is not None else _secret_identity("ssh-kvm")
     for rel, name in ((host_decl["ssh_key"], _tfk.KEY_FILE),
                       (host_decl["known_hosts"], _tfk.KNOWN_FILE)):
         # 2.9.0 : la clé de l'hôte par le magasin de secrets (référence) ou
         # son fichier rangé sous l'état
-        src = _kd.key_path(state, rel, "tf-kvm-ssh") if name == _tfk.KEY_FILE else _kd.resolve(state, rel)
+        src = (_kd.key_path(state, rel, "tf-kvm-ssh", identity=idt) if name == _tfk.KEY_FILE
+               else _kd.resolve(state, rel))
         if name == _tfk.KEY_FILE and _sst.is_active():
             # revue I4 : OpenBao actif, la clé reste sur tmpfs ; l'espace
             # (disque) n'en porte qu'un lien, retiré avec elle au déstockage
@@ -28931,7 +29648,7 @@ def _tf_kvm_check_bases(host_decl, rendered):
     if not wanted:
         return None
     try:
-        vh = _kh.VirshHost(host_decl, _state_dir(), timeout=KVM_READ_TIMEOUT)
+        vh = _kvm_virsh(host_decl, _state_dir(), identity=_sst.SERVICE, timeout=KVM_READ_TIMEOUT)
         cat = _ks.list_images(vh, vh.decl, {}, fresh=True)
     except (_ko.OpError, _kh.KvmError) as e:
         return f"host {host_decl['name']}: the image catalogue cannot be read ({getattr(e, 'kind', 'failed')})"
@@ -28981,9 +29698,11 @@ except Exception as _e:          # noqa: BLE001 : le démarrage passe
     log_tf.warning("Terraform workspace repair failed: %s", _e)
 
 
-def _tf_kvm_secret(ws, var):
+def _tf_kvm_secret(ws, var, identity=None):
     """Le jeton d'une variable sensible, tiré une fois et gardé dans
-    `<espace>/.secrets/<variable>` (0600) ; jamais rendu par l'API."""
+    `<espace>/.secrets/<variable>` (0600) ; jamais rendu par l'API.
+    2.10.0 : `identity` de la lecture et de l'écriture (`tf-kvm`)."""
+    idt = identity if identity is not None else _secret_identity("tf-kvm")
     d = ws / _tfk.SECRETS_DIR
     d.mkdir(mode=0o700, exist_ok=True)
     os.chmod(d, 0o700)
@@ -28994,13 +29713,39 @@ def _tf_kvm_secret(ws, var):
         # 2.9.0 tâche 8 : classe tf-kvm migrée -> le jeton va dans OpenBao, le
         # fichier porte sa référence (`<hôte>/<décl>/<variable>`)
         if ws.parent.name == "decls" and ws.parent.parent.parent.name == ".kvm":
-            ref = _secret_put("tf-kvm", f"{ws.parent.parent.name}/{ws.name}/{var}", "value", value)
+            ref = _secret_put("tf-kvm", f"{ws.parent.parent.name}/{ws.name}/{var}", "value", value, identity=idt)
         _tf_private_write(f, ((ref + "\n") if ref else value).encode())
     # 2.9.0 : le fichier peut porter la référence du secret migré dans OpenBao
-    return _sst.resolve_value(f.read_text().strip())
+    return _sst.resolve_value(f.read_text().strip(), identity=idt)
 
 
-def _tf_kvm_env(ws, rendered):
+def _tf_kvm_prefetch(decl, rendered, identities):
+    """2.10.0 (tâche 5) : d'une déclaration KVM lancée par une personne, la
+    clé de l'hôte (`ssh-kvm`) et les jetons des variables (`tf-kvm`) sont
+    lus au déclenchement avec SON jeton ; le fil de l'action reçoit ensuite
+    la copie partagée et le cache commun. Rend « person », « service » ou
+    None (réglage éteint). SecretError si OpenBao refuse la personne."""
+    if not identities or not _sst.is_active() or not _person_token_enabled():
+        return None
+    host_decl, herr = _tf_kvm_host(decl["cluster"])
+    if herr:
+        return None                            # le fil le dira (preflight)
+    marks = set()
+    idt_key, idt_tf = identities.get("ssh-kvm"), identities.get("tf-kvm")
+    if idt_key is not None and _sst.is_ref(host_decl.get("ssh_key")):
+        if idt_key.kind == "person":
+            _kd.key_path(_state_dir(), host_decl["ssh_key"], "tf-kvm-ssh", identity=idt_key)
+        marks.add(idt_key.kind)
+    if idt_tf is not None and _tfk.token_vars(rendered):
+        if idt_tf.kind == "person":
+            ws = _tf_decl_ws(decl)
+            for var in _tfk.token_vars(rendered):
+                _tf_kvm_secret(ws, var, identity=idt_tf)
+        marks.add(idt_tf.kind)
+    return "person" if "person" in marks else ("service" if marks else None)
+
+
+def _tf_kvm_env(ws, rendered, identity=None):
     """Variables d'environnement d'une exécution KVM : TMPDIR privé (le
     provider y écrit les ISO cloud-init, en 0644, jeton compris) et le jeton
     de chaque modèle RKE2 en TF_VAR_<variable>."""
@@ -29009,7 +29754,7 @@ def _tf_kvm_env(ws, rendered):
     os.chmod(tmp, 0o700)
     env = {"TMPDIR": str(tmp)}
     for var in _tfk.token_vars(rendered):
-        env[f"TF_VAR_{var}"] = _tf_kvm_secret(ws, var)
+        env[f"TF_VAR_{var}"] = _tf_kvm_secret(ws, var, identity=identity)
     return env
 
 
@@ -30871,7 +31616,8 @@ class TfLaunchError(Exception):
 
 
 def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster_user=None,
-                    target_kind="harvester", holder=None, role=None, parent=None):
+                    target_kind="harvester", holder=None, role=None, parent=None, secret_identities=None,
+                    late_service=False):
     """Lance plan, apply ou destroy d'une déclaration gardée par la console,
     en action suivie ; rend (identifiant de l'action, empreinte du contenu).
     `mode` : plan | apply | destroy | destroy-plan. 2.3.0 : `target_kind`
@@ -30884,7 +31630,13 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
     plan l'appelle depuis son fil. Refus : TfLaunchError(statut, corps).
     `role` : rôle de qui a déclenché (figé comme `user`) ; les routes et la
     chaîne le passent toujours, None = appelant local (_tf_role_refusal).
-    Rôle et tf_guard sont contrôlés ICI : la chaîne d'un plan y passe aussi."""
+    Rôle et tf_guard sont contrôlés ICI : la chaîne d'un plan y passe aussi.
+    2.10.0 : `secret_identities` ({classe: Identity}, figées par la route)
+    pour lire au déclenchement les secrets personnels d'une cible KVM ; None
+    (chaîne d'un plan, appelant local) : service. `late_service` (revue I6) :
+    chaîne lancée par une personne qui a un jeton OpenBao ; toute lecture
+    d'une classe personnelle par le service dans le fil de l'action est
+    marquée « service tardif » (étape et `secret_identity`)."""
     decl = TF_DECLS.get(decl_id)
     if decl is None:
         raise TfLaunchError(404, {"error": "declaration not found", "id": decl_id})
@@ -30923,6 +31675,14 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
     if target_kind == "kvm" and (not _tf_libvirt_binary() or not _tf_libvirt_version()):
         raise TfLaunchError(503, {"error": "the libvirt Terraform provider is not installed",
                                   "hint": "it ships with the harvester-ops package; see the Installation tab"})
+    secret_identity = None
+    if target_kind == "kvm" and secret_identities:
+        try:
+            secret_identity = _tf_kvm_prefetch(decl, rendered, secret_identities)
+        except _sst.SecretError as e:
+            raise TfLaunchError(_secret_error_status(e),
+                                {"error": str(e)[:300], "code": e.code}) from None
+
     with TF_DECL_RUNNING_LOCK:
         if _tf_decl_busy(decl["id"], holder):
             raise TfLaunchError(409, {"error": "this declaration is already running",
@@ -30940,6 +31700,8 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
     run = ActionRun(run_id, f"{label}:{decl['name']}:{len(rendered)}", cluster, [],
                     dry_run=mode in ("plan", "destroy-plan"))
     run.cluster_user = cluster_user
+    run.secret_identity = secret_identity
+    run.person_launched = bool(late_service)
     user = user or ""
     # v1.55.0 : l'historique d'une déclaration retrouve ses actions par là.
     run.result = {"declaration_id": decl["id"], "by": user, "mode": mode}
@@ -30959,7 +31721,9 @@ def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None, target_kind="harv
         run_id, h = _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=plan_hash,
                                     user=current_user() or "",
                                     cluster_user=(current_cluster_identity() or {}).get("user"),
-                                    target_kind=target_kind, role=current_role())
+                                    target_kind=target_kind, role=current_role(),
+                                    secret_identities={c: _secret_identity(c) for c in ("ssh-kvm", "tf-kvm")}
+                                    if target_kind == "kvm" else None)
     except TfLaunchError as e:
         return jsonify(e.payload), e.status
     return jsonify({"action_id": run_id, "plan_hash": h}), 201
@@ -31035,14 +31799,16 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
             return _close_err(run, "preflight", herr[0])
         try:
             header = _tfk.header(host_decl)
-            _tf_kvm_stage(ws, host_decl)
+            with _late_reads(run):
+                _tf_kvm_stage(ws, host_decl, identity=_sst.SERVICE)
         except _tfk.SpecError as e:
             return _close_err(run, "preflight", str(e))
         except (OSError, _kd.DeclError):
             return _close_err(run, "preflight", f"host {cluster}: its SSH key or pinned host key "
                                                 "cannot be read in the console state")
         (ws / "_providers.tf").write_text(header)
-        env, drop = _tf_kvm_env(ws, rendered), ("SSH_AUTH_SOCK",)
+        with _late_reads(run):
+            env, drop = _tf_kvm_env(ws, rendered, identity=_sst.SERVICE), ("SSH_AUTH_SOCK",)
         kcp = ""
         why = _tf_kvm_preflight(ws, host_decl, env)
         if why:
@@ -34279,7 +35045,8 @@ _OFFLINE_DOWNLOADED = set()
 _OFFLINE_LOCK = threading.Lock()
 
 
-def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=(), clear_cache=False):
+def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=(), clear_cache=False,
+                         after_fn=None, after_ok=None):
     """Action suivie `harvester-secrets ...`. `private` : valeurs tapées
     (jeton d'enveloppe, CA) remises à l'outil par un fichier 0600 sur tmpfs
     (`--spec`), effacé à la fin de l'action ; jamais en argument.
@@ -34304,11 +35071,18 @@ def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=
                 _sst.store().clear_cache()
             except Exception as e:              # noqa: BLE001 : jamais l'issue de l'action
                 log.warning("secret cache not emptied: %s", type(e).__name__)
-    after = _after if (spec or clear_cache) else None
+        if after_fn is not None:
+            try:
+                after_fn()
+            except Exception as e:              # noqa: BLE001 : jamais l'issue de l'action
+                log.warning("after the secret store action: %s", type(e).__name__)
+    after = _after if (spec or clear_cache or after_fn is not None) else None
     who = actor or (current_user() if _has_request() else None) or "console"
+    extra = {"after_run": lambda r: after_ok() if (r.status, r.exit_code) == ("done", 0) else None} \
+        if after_ok is not None else {}
     run, err = _cli_action("", label, [sys.executable, str(script), "--actor", who, *args, *cmd_tail],
                            "harvester-secrets", check_busy=False, capture=True, cluster_user=None, after=after,
-                           secret_clusters=secret_clusters, id_arg=True)
+                           secret_clusters=secret_clusters, id_arg=True, **extra)
     if run is None and after:
         after()
     return run, err
@@ -34562,7 +35336,125 @@ def _secrets_warnings(s, health, store_st, now=None):
                 out.append({"code": "audit-space-low", "level": "error", "free": free, "total": total})
     if s.get("tf_entities_pending"):
         out.append({"code": "tf-entities-pending", "level": "info", "count": len(s["tf_entities_pending"])})
+    changed = _person_keys_changed(s)
+    if changed:
+        # 2.10.0 tâche 7 : clé de signature de Rancher absente des clés
+        # statiques ; « Mettre à jour les clés » (person-token keys --refresh)
+        out.append({"code": "openbao-jwt-keys-changed", "level": "error", "servers": changed})
+    if s.get("mode") == "b1" and health.get("eso_listener_present") is False:
+        # revue 8-10 I-6 : l'adresse de l'écouteur ESO n'est plus sur l'hôte ;
+        # OpenBao a démarré sans lui, les clusters enfants ne le joignent plus
+        out.append({"code": "eso-listener-address-absent", "level": "error",
+                    "address": health.get("eso_listener")})
+    unreadable = _person_keys_unreadable(s)
+    if unreadable:
+        out.append({"code": "openbao-jwt-keys-unreadable", "level": "warn", "servers": unreadable})
+    eso_changed = _eso_keys_changed(s)
+    if eso_changed:
+        out.append({"code": "eso-keys-changed", "level": "warn", "count": len(eso_changed)})
     return out
+
+
+# -- 2.10.0 tâche 7 : clés de signature des Rancher en clés statiques ---------
+PERSON_KEYS_CHECK_S = 3600
+# revue 6-7 M-7 : un JWKS illisible plusieurs passages de suite se dit au
+# bandeau (une rotation pendant la coupure ne se verrait pas)
+PERSON_KEYS_UNREADABLE_AFTER = 3
+_PERSON_KEYS = {"at": 0.0, "seen": {}, "fails": {}}   # Rancher -> empreinte relue, échecs de suite
+
+
+def _person_keys_tick(now=None, fetch=None):
+    """Chaque heure : JWKS de chaque Rancher dont la méthode jwt est en clés
+    statiques (lecture publique, sans jeton), empreinte comparée aux
+    réglages. Mode `discovery` : rien à faire, OpenBao relit le JWKS. Une
+    rotation propre de Rancher publie la nouvelle clé avant de signer avec :
+    le changement se voit dès l'ajout. Rend {Rancher: empreinte relue}."""
+    now = time.time() if now is None else now
+    if now - _PERSON_KEYS["at"] < PERSON_KEYS_CHECK_S:
+        return dict(_PERSON_KEYS["seen"])
+    _PERSON_KEYS["at"] = now
+    fetch = fetch or _oj.fetch_json
+    seen = {}
+    fails = _PERSON_KEYS.setdefault("fails", {})
+    servers = _oj.settings_of(_secrets_settings())["servers"]
+    for rid in [r for r in fails if r not in servers]:
+        fails.pop(rid, None)
+    for rid, e in servers.items():
+        if e.get("keys") != "static" or not e.get("issuer"):
+            continue
+        try:
+            seen[rid] = _oj.keys_sha256(fetch(_oj.jwks_url(e["issuer"]), e.get("ca_pem")))
+            fails.pop(rid, None)
+        except ValueError as ex:
+            fails[rid] = int(fails.get(rid) or 0) + 1
+            log.warning("Rancher %s: JWKS not read (%s)", rid, str(ex)[:120])
+    _PERSON_KEYS["seen"] = seen
+    return dict(seen)
+
+
+def _person_keys_unreadable(s):
+    """Rancher en clés statiques dont le JWKS n'a pas pu être relu
+    PERSON_KEYS_UNREADABLE_AFTER passages de suite, triés."""
+    servers = _oj.settings_of(s)["servers"]
+    return sorted(rid for rid, n in (_PERSON_KEYS.get("fails") or {}).items()
+                  if rid in servers and servers[rid].get("keys") == "static"
+                  and n >= PERSON_KEYS_UNREADABLE_AFTER)
+
+
+def _person_keys_changed(s):
+    """Rancher en clés statiques dont le JWKS relu diffère des réglages
+    (`openbao-jwt-keys-changed`), triés."""
+    servers = _oj.settings_of(s)["servers"]
+    return sorted(rid for rid, sha in _PERSON_KEYS["seen"].items()
+                  if rid in servers and sha != servers[rid].get("keys_sha256"))
+
+
+ESO_KEYS_CHECK_S = 3600
+_ESO_KEYS = {"at": 0.0, "seen": {}}            # <harvester>/<ns>/<c> -> changées ?
+
+
+def _eso_keys_tick(now=None, runner=None):
+    """Chaque heure (point « Clés du cluster enfant ») : empreinte du JWKS de
+    chaque cluster enfant qui a ESO relue par `harvester-secrets eso keys`
+    avec le kubeconfig de la console (lecture seule, aucune action) ;
+    changement : `eso-keys-changed` au bandeau et dans la carte."""
+    now = time.time() if now is None else now
+    if now - _ESO_KEYS["at"] < ESO_KEYS_CHECK_S:
+        return dict(_ESO_KEYS["seen"])
+    _ESO_KEYS["at"] = now
+    seen = {}
+    for _k, e in sorted(_oj.eso_settings_of(_secrets_settings())["clusters"].items()):
+        ref = f"{e.get('harvester')}/{e.get('namespace')}/{e.get('cluster')}"
+        if not ESO_CLUSTER_REF_RE.match(ref):
+            continue
+        kc = _deploy_console_kc(e["harvester"])
+        if not kc:
+            continue
+        argv = [sys.executable, str(BIN_DIR / SECRETS_TOOL), "--actor", "service", "eso", "keys", "--cluster", ref,
+                "--kubeconfig", kc]
+        try:
+            if runner is not None:
+                doc = runner(argv)
+            else:
+                p = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+                doc = json.loads(p.stdout or "{}")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as ex:
+            log.warning("ESO keys of %s not read (%s)", ref, type(ex).__name__)
+            continue
+        if isinstance(doc, dict) and doc.get("ok"):
+            seen[ref] = bool(doc.get("changed"))
+    _ESO_KEYS["seen"] = seen
+    return dict(seen)
+
+
+def _eso_keys_changed(s):
+    """Clés des clusters enfants dont l'empreinte a changé (clé ESO)."""
+    out = []
+    for k, e in _oj.eso_settings_of(s)["clusters"].items():
+        ref = f"{e.get('harvester')}/{e.get('namespace')}/{e.get('cluster')}"
+        if _ESO_KEYS["seen"].get(ref):
+            out.append(k)
+    return sorted(out)
 
 
 def _secrets_banner():
@@ -34572,7 +35464,13 @@ def _secrets_banner():
     st = _secrets_store_status(s)
     return {"active": _sst.openbao_active(s), "mode": s.get("mode"), "state": st.get("state"),
             "down_since": st.get("down_since"), "cache_until": st.get("cache_until"),
-            "error": st.get("error")}
+            "error": st.get("error"), "jwt_keys_changed": bool(_person_keys_changed(s)),
+            "jwt_keys_unreadable": bool(_person_keys_unreadable(s)),
+            "eso_keys_changed": bool(_eso_keys_changed(s)),
+            "eso_listener_absent": s.get("mode") == "b1" and _secrets_health().get("eso_listener_present") is False,
+            # 2.10.0 tâche 11 : dernier refus personnel de CETTE session
+            # (connexion personnelle refusée, reconnexion par Rancher demandée)
+            "person": _person_notice()}
 
 
 def _secrets_status(admin=False):
@@ -34784,6 +35682,10 @@ def _secrets_inline_action(label, fn):
 # -- tâches de fond -----------------------------------------------------------
 def _secrets_probe_tick():
     """Sonde `sys/health` (sans jeton) : état du bandeau et métrique."""
+    try:
+        _person_tokens_sweep()                 # 2.10.0 : réglage éteint = jetons révoqués
+    except Exception as e:                     # noqa: BLE001 : la sonde continue
+        log.warning("person token sweep failed: %s", type(e).__name__)
     s = _secrets_settings()
     if not _sst.openbao_active(s):
         metric_openbao_up.set(0)
@@ -34818,6 +35720,14 @@ def _secrets_housekeeping_tick(now=None):
     started = []
     if not _sst.openbao_active(s) or not (BIN_DIR / SECRETS_TOOL).is_file():
         return started
+    try:
+        _person_keys_tick(now)                 # 2.10.0 tâche 7 : lecture seule, aucune action
+    except Exception as e:                     # noqa: BLE001 : la tâche de fond continue
+        log.warning("Rancher keys check failed: %s", type(e).__name__)
+    try:
+        _eso_keys_tick(now)                    # 2.10.0 tâche 10 : lecture seule, aucune action
+    except Exception as e:                     # noqa: BLE001 : la tâche de fond continue
+        log.warning("ESO keys check failed: %s", type(e).__name__)
     snaps = s.get("snapshots") if isinstance(s.get("snapshots"), dict) else {}
     if s.get("mode") == "b1" and s.get("snapshot_dir"):
         slot = _snapshot_slot(s.get("snapshot_time"), now)
@@ -35296,6 +36206,361 @@ def api_secrets_settings():
     return _secrets_accepted(*_secrets_tool_action("secrets:settings", ["settings", *sets]))
 
 
+# 2.10.0 (tâche 10) : carte « External Secrets » de Paramètres > Secrets :
+# écouteur de B1 (adresse, état), clusters enfants, empreinte des clés.
+ESO_CLUSTER_REF_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]{0,62})/([a-z0-9][-a-z0-9]{0,62})/([a-z0-9][-a-z0-9]{0,62})$")
+
+
+@app.route("/api/secrets/eso", methods=["GET"])
+@requires_auth
+def api_secrets_eso():
+    """Réglage `eso` sans valeur (la CA de l'écouteur est publique mais pas
+    rendue ici) et clusters dont les clés ont changé (tâche de fond)."""
+    s = _secrets_settings()
+    e = _oj.eso_settings_of(s)
+    changed = set(_eso_keys_changed(s))
+    clusters = [dict({k: v.get(k) for k in ("harvester", "namespace", "cluster", "mount", "keys_sha256",
+                                            "namespaces", "node_cidr", "applied", "at", "by")},
+                     key=k, keys_changed=k in changed) for k, v in sorted(e["clusters"].items())]
+    return jsonify({"mode": s.get("mode"), "active": _sst.openbao_active(s), "listener": e["listener"],
+                    "address": e["address"], "port": _opol.ESO_PORT, "clusters": clusters})
+
+
+@app.route("/api/secrets/eso/listener", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_eso_listener():
+    """B1 : adresse de l'écouteur ESO (allumé avec le premier cluster
+    enfant), ou extinction. Action suivie `secrets:eso-listener`."""
+    data = _secrets_body()
+    if data.get("off") is True:
+        args = ["eso", "listener", "--off"]
+    else:
+        addr = str(data.get("address") or "")
+        try:
+            _opol.check_eso_listen(addr)
+        except ValueError as e:
+            return jsonify({"error": str(e), "code": "bad-input"}), 400
+        args = ["eso", "listener", "--addr", addr]
+    return _secrets_accepted(*_secrets_tool_action("secrets:eso-listener", args))
+
+
+@app.route("/api/secrets/eso/keys", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_eso_keys():
+    """« Mettre à jour les clés » d'un cluster enfant (`eso-keys-changed`) :
+    clés relues avec le kubeconfig du cluster Harvester de la personne, puis
+    authentification reposée. Action suivie `secrets:eso-keys:`."""
+    data = _secrets_body()
+    m = ESO_CLUSTER_REF_RE.match(str(data.get("cluster") or ""))
+    if not m:
+        return jsonify({"error": "cluster: <harvester>/<namespace>/<cluster>", "code": "bad-input"}), 400
+    kc = _kubectl_for_cluster(m.group(1))
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {m.group(1)}"}), 404
+    run, err = _secrets_tool_action(f"secrets:eso-keys:{m.group(0)}",
+                                    ["eso", "keys", "--cluster", m.group(0), "--refresh", "--kubeconfig", kc])
+    if run is not None:
+        _ESO_KEYS["seen"].pop(m.group(0), None)
+    return _secrets_accepted(run, err)
+
+
+# -- 2.10.0 tâche 11 : jeton OpenBao par personne (Paramètres > Secrets >
+# Jetons personnels). La console n'écrit jamais politique, rôle ni montage
+# (décision 287) : chaque geste est une action `harvester-secrets
+# person-token ...` (agent en B1, commandes rendues en A).
+PERSON_RANCHER_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+PERSON_TARGET_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+
+
+def _person_rancher_choices():
+    """Rancher dont la connexion unique est réglée : clé des réglages
+    (`config` pour celui de config.yaml), émetteur et client tirés des
+    réglages du Rancher, jamais de la requête."""
+    out = []
+    for srv_ in _rancher_servers():
+        st = _server_settings(srv_["id"])
+        if not st or not st.get("client_id"):
+            continue
+        out.append({"key": "config" if srv_["origin"] == "config" else srv_["id"], "id": srv_["id"],
+                    "label": srv_.get("label") or srv_["id"], "url": srv_.get("url"), "origin": srv_["origin"],
+                    "issuer": st.get("issuer"), "client_id": st.get("client_id"), "sso": bool(st.get("sso")),
+                    "ca_file": st.get("ca_file")})
+    return out
+
+
+def _person_me():
+    """La session de l'administrateur qui regarde : connexion unique avec
+    un jeton d'identité ? (la vérification 2 en a besoin). Jamais le jeton."""
+    sess = _sso_session()
+    if sess is None:
+        return {"sso": False, "rancher": None, "id_token": False, "kind": "local"}
+    return {"sso": getattr(sess, "kind", "sso") == "sso", "rancher": _rancher_key_of(sess),
+            "id_token": bool(getattr(sess, "id_token", None)), "kind": getattr(sess, "kind", "sso")}
+
+
+@app.route("/api/secrets/person-token", methods=["GET"])
+@requires_auth
+def api_secrets_person_token():
+    """État du jeton par personne, sans valeur : réglage, méthode de chaque
+    Rancher (réglée ou en attente des vérifications), clés, groupes,
+    entités vues, session de l'administrateur, bornes."""
+    s = _secrets_settings()
+    raw = _secrets_raw().get("person_token")
+    raw = raw if isinstance(raw, dict) else {}
+    servers = raw.get("servers") if isinstance(raw.get("servers"), dict) else {}
+    pending = raw.get("pending") if isinstance(raw.get("pending"), dict) else {}
+    changed, unreadable = set(_person_keys_changed(s)), set(_person_keys_unreadable(s))
+    fields = ("mount", "keys", "keys_sha256", "keys_pending_confirm", "configured_at", "configured_by",
+              "checked_at", "console_cidr")
+
+    def view(e, key):
+        if not isinstance(e, dict):
+            return None
+        return dict({f: e.get(f) for f in fields}, keys_changed=key in changed, keys_unreadable=key in unreadable)
+    choices = _person_rancher_choices()
+    known = {c["key"] for c in choices}
+    ranchers = [dict({k: c[k] for k in ("key", "id", "label", "url", "origin", "issuer", "client_id", "sso")},
+                     has_ca=bool(c.get("ca_file")), configured=view(servers.get(c["key"]), c["key"]),
+                     pending=view(pending.get(c["key"]), c["key"])) for c in choices]
+    # méthode réglée pour un Rancher retiré depuis : montrée pour qu'on la retire
+    for k in sorted((set(servers) | set(pending)) - known):
+        ranchers.append({"key": k, "id": k, "label": k, "url": None, "origin": "gone", "issuer": None,
+                         "client_id": None, "sso": False, "has_ca": False,
+                         "configured": view(servers.get(k), k), "pending": view(pending.get(k), k)})
+    groups = {str(n): {f: g.get(f) for f in ("classes", "clusters", "members", "at", "by")}
+              for n, g in (raw.get("groups") or {}).items() if isinstance(g, dict)}
+    ents = [dict(v, entity=k) for k, v in sorted(_person_entities().items(),
+                                                 key=lambda kv: -float(kv[1].get("last_at") or 0))]
+    return jsonify({"mode": s.get("mode"), "active": _sst.openbao_active(s),
+                    "enabled": raw.get("enabled") is True, "groups_only": raw.get("groups_only") is True,
+                    "ranchers": ranchers, "groups": groups, "entities": ents, "me": _person_me(),
+                    "tokens": _sst.PERSON_TOKENS.count(), "group_classes": list(_opol.GROUP_CLASSES),
+                    "limits": {"ranchers": _opol.MAX_PERSON_MOUNTS, "groups": _opol.MAX_GROUPS,
+                               "members": _opol.MAX_GROUP_MEMBERS}})
+
+
+def _person_rancher_arg(data):
+    """(choix du Rancher, refus) : la clé doit désigner un Rancher réglé."""
+    key = str(data.get("rancher") or "")
+    if not PERSON_RANCHER_RE.match(key):
+        return None, (jsonify({"error": "rancher: the key of a Rancher", "code": "bad-input"}), 400)
+    c = next((x for x in _person_rancher_choices() if x["key"] == key), None)
+    if c is None:
+        return None, (jsonify({"error": f"no Rancher with sign-in set: {key}", "code": "rancher-unknown"}), 404)
+    return c, None
+
+
+def _person_cidr_arg(value):
+    """Plage par laquelle OpenBao voit la console (mode A) ; jamais une
+    plage qui ouvre tout (revue 6-7 M-5)."""
+    import openbao_jwt as _oj
+    try:
+        return _oj.console_cidr(value)
+    except ValueError:
+        return None
+
+
+@app.route("/api/secrets/person-token/assistant", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_person_token_assistant():
+    """Pose (B1, agent) ou commandes (A) de la méthode jwt d'un Rancher.
+    Émetteur, client et CA viennent des réglages du Rancher."""
+    data = _secrets_body()
+    c, refused = _person_rancher_arg(data)
+    if refused:
+        return refused
+    keys = str(data.get("keys") or "discovery")
+    if keys not in ("discovery", "static"):
+        return jsonify({"error": "keys: discovery or static", "code": "bad-input"}), 400
+    s = _secrets_settings()
+    if not _sst.openbao_active(s):
+        return jsonify({"error": "OpenBao is not active", "code": "openbao-inactive"}), 409
+    if s.get("mode") == "b1" and keys == "static":
+        return jsonify({"error": "in mode B1 OpenBao reads the keys of Rancher by discovery",
+                        "code": "person-token-static-mode-a"}), 400
+    args = ["person-token", "assistant", "--rancher", c["key"], "--issuer", c["issuer"], "--client-id",
+            c["client_id"], "--keys", keys]
+    if s.get("mode") == "a":
+        cidr = _person_cidr_arg(data.get("console_cidr"))
+        if not cidr:
+            return jsonify({"error": "console_cidr: the address OpenBao sees for the console (a /8 or "
+                                     "narrower network)", "code": "bad-input"}), 400
+        args += ["--console-cidr", cidr]
+    private = None
+    if c.get("ca_file"):
+        try:
+            ca = Path(c["ca_file"]).read_text()
+        except OSError:
+            return jsonify({"error": "the CA file of this Rancher is unreadable", "code": "rancher-ca"}), 409
+        if len(ca) > 65536:
+            return jsonify({"error": "the CA of this Rancher is too long", "code": "rancher-ca"}), 409
+        private = {"rancher_ca": ca}
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-assistant:{c['key']}", args,
+                                                   private=private))
+
+
+def _person_check_args(data, what):
+    """check et enable : le jeton d'identité de l'administrateur connecté
+    par CE Rancher part par le fichier de spécification (0600, tmpfs),
+    jamais en argument ni dans une réponse."""
+    c, refused = _person_rancher_arg(data)
+    if refused:
+        return None, None, refused
+    sess = _sso_session()
+    if sess is None or getattr(sess, "kind", "sso") != "sso" or not getattr(sess, "id_token", None):
+        return None, None, (jsonify({"error": "connect through Rancher to run the checks: a real sign-in "
+                                              "with your own identity token is one of them",
+                                     "code": "openbao-person-no-token"}), 409)
+    if _rancher_key_of(sess) != c["key"]:
+        return None, None, (jsonify({"error": f"you are connected through another Rancher: connect through "
+                                              f"{c['label']} to check its method",
+                                     "code": "person-token-other-rancher"}), 409)
+    return c, {"id_token": sess.id_token}, None
+
+
+@app.route("/api/secrets/person-token/check", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_person_token_check():
+    c, private, refused = _person_check_args(_secrets_body(), "check")
+    if refused:
+        return refused
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-check:{c['key']}",
+                                                   ["person-token", "check", "--rancher", c["key"]], private=private))
+
+
+@app.route("/api/secrets/person-token/enable", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_person_token_enable():
+    """Activation à chaud (point 290) : l'outil rejoue les cinq
+    vérifications et n'allume le réglage que si toutes sont vertes."""
+    c, private, refused = _person_check_args(_secrets_body(), "enable")
+    if refused:
+        return refused
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-enable:{c['key']}",
+                                                   ["person-token", "enable", "--rancher", c["key"]],
+                                                   private=private))
+
+
+@app.route("/api/secrets/person-token/disable", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_person_token_disable():
+    """Désactivation à chaud (point 291) : sans Rancher, réglage éteint et
+    jetons de personne révoqués aussitôt ; `remove` retire aussi les
+    méthodes jwt (et les groupes, sans Rancher) d'OpenBao, identifiant de
+    la console retapé."""
+    data = _secrets_body()
+    remove = data.get("remove") is True
+    if remove and not _secrets_confirm_ok(data):
+        return jsonify({"error": "type the console identifier to confirm", "code": "confirmation-required"}), 400
+    key = str(data.get("rancher") or "")
+    args = ["person-token", "disable"]
+    mount = None
+    if key:
+        if not PERSON_RANCHER_RE.match(key):
+            return jsonify({"error": "rancher: the key of a Rancher", "code": "bad-input"}), 400
+        raw = _secrets_raw().get("person_token") or {}
+        entry = ((raw.get("servers") or {}).get(key) or (raw.get("pending") or {}).get(key)) \
+            if isinstance(raw, dict) else None
+        if not isinstance(entry, dict):
+            return jsonify({"error": f"no jwt auth method for the Rancher {key}", "code": "person-token-unconfigured"}), 404
+        mount = entry.get("mount")
+        args += ["--rancher", key]
+    if remove:
+        args.append("--remove")
+
+    def revoke():
+        # jetons des personnes révoqués dès la fin de l'action (point 5 de
+        # la revue des tâches 2 à 5) : réglage éteint, ou méthode retirée
+        if mount:
+            _sst.PERSON_TOKENS.drop_mount(mount)
+        _person_tokens_sweep()
+    label = f"secrets:person-token-{'remove' if remove else 'disable'}" + (f":{key}" if key else "")
+    return _secrets_accepted(*_secrets_tool_action(label, args, after_fn=revoke))
+
+
+@app.route("/api/secrets/person-token/groups", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_secrets_person_token_groups():
+    """Groupe interne (décision 303 A) : classes, clusters (ou hôtes KVM,
+    ou clés ESO), membres choisis parmi les entités vues ; retrait."""
+    data = _secrets_body()
+    name = str(data.get("name") or "")
+    if not _opol.GROUP_RE.match(name):
+        return jsonify({"error": "name: lowercase letters, digits and dashes (31 at most)", "code": "bad-input"}), 400
+    if data.get("remove") is True:
+        return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-group-remove:{name}",
+                                                       ["person-token", "groups", "remove", name]))
+    classes, clusters, members = data.get("classes"), data.get("clusters"), data.get("members") or []
+    if not isinstance(classes, list) or not classes or any(c not in _opol.GROUP_CLASSES for c in classes):
+        return jsonify({"error": "classes: " + ", ".join(_opol.GROUP_CLASSES), "code": "bad-input"}), 400
+    if not isinstance(clusters, list) or not clusters or len(clusters) > 200 \
+            or any(not PERSON_TARGET_RE.match(str(c)) for c in clusters):
+        return jsonify({"error": "clusters: names of clusters, KVM hosts or ESO keys", "code": "bad-input"}), 400
+    if not isinstance(members, list) or len(members) > _opol.MAX_GROUP_MEMBERS \
+            or any(not _ENTITY_ID_RE.match(str(m)) for m in members):
+        return jsonify({"error": f"members: entity ids ({_opol.MAX_GROUP_MEMBERS} at most)",
+                        "code": "bad-input"}), 400
+    raw = _secrets_raw().get("person_token") or {}
+    groups = raw.get("groups") if isinstance(raw, dict) and isinstance(raw.get("groups"), dict) else {}
+    if name not in groups and len(groups) >= _opol.MAX_GROUPS:
+        return jsonify({"error": f"at most {_opol.MAX_GROUPS} groups", "code": "limit-groups"}), 409
+    try:
+        _opol.group_rules(_opol.DEFAULT_MOUNT, "consoles/x", "abc123def456", name, classes, clusters)
+        _opol.group_body("abc123def456", name, members)
+    except ValueError as e:
+        return jsonify({"error": str(e), "code": "bad-input"}), 400
+    args = ["person-token", "groups", "set", name]
+    for c in classes:
+        args += ["--class", c]
+    for c in clusters:
+        args += ["--cluster", str(c)]
+    for m in members:
+        args += ["--member", str(m)]
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-group:{name}", args))
+
+
+@app.route("/api/secrets/person-token/groups-only", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_person_token_groups_only():
+    """Réglage « lecture seulement par groupe » : la politique commune est
+    réduite à `capabilities-self` (ou rendue)."""
+    on = _secrets_body().get("on")
+    if not isinstance(on, bool):
+        return jsonify({"error": "on: true or false", "code": "bad-input"}), 400
+    return _secrets_accepted(*_secrets_tool_action("secrets:person-token-groups-only",
+                                                   ["person-token", "groups", "only", "on" if on else "off"]))
+
+
+@app.route("/api/secrets/person-token/keys", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_person_token_keys():
+    """« Mettre à jour les clés » d'un Rancher en clés statiques (mode A,
+    `openbao-jwt-keys-changed`) : ancienne et nouvelle clé ensemble, puis
+    confirmation qui ne garde que les clés publiées."""
+    data = _secrets_body()
+    key = str(data.get("rancher") or "")
+    if not PERSON_RANCHER_RE.match(key):
+        return jsonify({"error": "rancher: the key of a Rancher", "code": "bad-input"}), 400
+    what = "--confirm" if data.get("confirm") is True else "--refresh"
+    def cleared():
+        # revue finale m-3 : l'alerte part quand les clés sont à jour, pas au
+        # lancement (une action en échec la ferait disparaître une heure)
+        _PERSON_KEYS["seen"].pop(key, None)
+        (_PERSON_KEYS.get("fails") or {}).pop(key, None)
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-keys:{key}",
+                                                   ["person-token", "keys", "--rancher", key, what],
+                                                   after_ok=cleared))
+
+
 @app.route("/api/secrets/tf-keys/delete", methods=["POST"])
 @requires_auth
 @_rate_limit("5/minute")
@@ -35367,7 +36632,9 @@ def api_tf_declaration_decrypt_state(decl_id):
     try:
         run_id, _h = _tf_decl_launch(d["cluster"], kc, decl_id, "decrypt-state", user=current_user() or "",
                                      cluster_user=(current_cluster_identity() or {}).get("user"),
-                                     target_kind=kind, role=current_role())
+                                     target_kind=kind, role=current_role(),
+                                     secret_identities={c: _secret_identity(c) for c in ("ssh-kvm", "tf-kvm")}
+                                     if kind == "kvm" else None)
     except TfLaunchError as e:
         return jsonify(e.payload), e.status
     return jsonify({"action_id": run_id}), 202
@@ -35699,6 +36966,9 @@ DEPLOY_FINDING_LEVELS = {
     "rancher-session-in-chain": "blocking",
     "gitops-package-not-published": "blocking", "gitops-taken": "blocking", "gitops-check-failed": "blocking",
     "gitops-var-missing": "blocking", "gitops-later": "info", "gitops-flux-in-plan": "info",
+    # 2.10.0 : External Secrets des clusters du plan
+    "eso-needs-openbao": "blocking", "eso-admin-only": "blocking", "eso-no-namespace": "blocking",
+    "eso-chart-not-in-plan": "warning",
 }
 # Constats de `harvester-capi check --many` repris dans la phase clusters :
 # niveau de l'outil -> niveau d'un lancement
@@ -36062,6 +37332,7 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
     arts = _deploy_artefacts_prepare(kc, plan, values, install, findings, capi["entries"], cluster, later)
     gops = _deploy_gitops_prepare(kc, plan, values, install, findings, capi["entries"], arts["rows"], cluster,
                                   later, gitops_secrets, role)
+    esos = _deploy_eso_prepare(plan, findings, capi["entries"], arts["rows"], role)
     if install:
         # revue finale 2.8.0 I-3 : une chaîne qui installe le cluster Harvester
         # n'a ni session Rancher (kubeconfig de la console) ni cluster connu
@@ -36080,22 +37351,26 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
                     f"{r['entry']} on {r['ref']}: Fleet needs a Harvester cluster known to your Rancher session, "
                     "not possible in a chain that installs it"))
     estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) \
-        + (30 if install else 0) + reg["estimate"] + capi["estimate"] + arts["estimate"] + gops["estimate"]
+        + (30 if install else 0) + reg["estimate"] + capi["estimate"] + arts["estimate"] + gops["estimate"] \
+        + 3 * len(esos)
     summary = {"declarations": decls, "estimate_minutes": estimate, "capi": capi["capi"],
                "clusters": capi["summary"], "registries": reg["summary"], "publish": reg["publish"],
-               "artefacts": arts["summary"], "gitops": gops["summary"]}
+               "artefacts": arts["summary"], "gitops": gops["summary"],
+               "eso": [{"ref": r["ref"], "namespaces": r["namespaces"]} for r in esos]}
     ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
            "update_differing": bool(update_differing), "clusters": capi["entries"],
            "deferred": capi["deferred"],
-           "registries": reg["entries"], "artefacts": arts["rows"], "gitops": gops["rows"]}
+           "registries": reg["entries"], "artefacts": arts["rows"], "gitops": gops["rows"], "eso": esos}
     return findings, summary, ctx
 
 
-def _deploy_capi_json(kc, sub, args, spec=None, timeout=180):
+def _deploy_capi_json(kc, sub, args, spec=None, timeout=180, cluster=None):
     """Sous-commande en lecture de harvester-capi (même commande que les
     routes) : (sortie JSON, code, None) ou (None, None, message d'erreur).
-    Hors requête comme dans la requête."""
-    cmd = _capi_cmd(kc, sub)
+    Hors requête comme dans la requête. `cluster` : nom du cluster Harvester
+    dans la console, exigé par les lectures qui calculent la clé d'un
+    cluster enfant (`eso-status`)."""
+    cmd = _capi_cmd(kc, sub, cluster)
     if cmd is None:
         return None, None, f"{CAPI_SCRIPT} not deployed"
     with app.app_context():
@@ -36803,7 +38078,7 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
             kc = kc_ref()
             pid, h = _tf_decl_launch(cluster, kc, decl["id"], "plan", user=user,
                                      cluster_user=cluster_user, holder=run.id, role=run.launch_role,
-                                     parent=run.id)
+                                     parent=run.id, late_service=run.person_launched)
             actions.append(pid)
             status, child = _deploy_wait_child(pid)
             if not _tf_decl_wait_idle(decl["id"]):
@@ -36832,7 +38107,7 @@ def _deploy_terraform_phase(run, cluster, kc_ref, dctx, user, cluster_user, crea
                                         else "nothing to change", data=data)
             aid, _h = _tf_decl_launch(cluster, kc, decl["id"], "apply", plan_hash=h, user=user,
                                       cluster_user=cluster_user, holder=run.id, role=run.launch_role,
-                                      parent=run.id)
+                                      parent=run.id, late_service=run.person_launched)
             actions.append(aid)
             status, _child = _deploy_wait_child(aid)
             if not _tf_decl_wait_idle(decl["id"]):
@@ -37946,6 +39221,93 @@ def _deploy_gitops_phase(run, cluster, kc_ref, dctx, store=None):
                       item_key="id", item_step="", after_failure_of=("clusters", "artefacts"))
 
 
+# 2.10.0 (tâche 10) : External Secrets des clusters d'un plan (option
+# `external_secrets` d'une entrée de la phase Clusters), posé après la phase
+# Artefacts qui applique le chart `eso` (point 294).
+ESO_PHASE_TIMEOUT_S = 1800
+
+
+def _deploy_eso_prepare(plan, findings, cluster_entries, art_rows, role):
+    """Rangées de la phase ESO et constats du lancement (lecture seule)."""
+    import child_eso as _ce
+    rows = []
+    if not (plan["phases"].get("clusters") or {}).get("enabled"):
+        return rows
+    for e in cluster_entries or []:
+        es = (e.get("spec") or {}).get("external_secrets")
+        if not es:
+            continue
+        ref = f"{e['spec'].get('namespace') or e['name']}/{e['name']}"
+        rows.append({"id": f"eso-{ref}", "ref": ref, "namespaces": list(es.get("namespaces") or []),
+                     "depends_on": []})
+        if not es.get("namespaces"):
+            findings.append(_deploy_finding("eso-no-namespace", "eso", f"{ref}: at least one team namespace"))
+        if role is not None and role != "admin":
+            findings.append(_deploy_finding("eso-admin-only", "eso", f"{ref}: External Secrets are set by an "
+                                                                       "administrator"))
+        if not any(r.get("ref") == ref and (r.get("item") == _ce.SERVICE) for r in art_rows or []):
+            findings.append(_deploy_finding("eso-chart-not-in-plan", "eso",
+                                            f"{ref}: the Artefacts phase does not apply the chart item "
+                                            f"{_ce.SERVICE}; it must already be on the child cluster"))
+    if rows and not _sst.openbao_active(_secrets_settings()):
+        findings.append(_deploy_finding("eso-needs-openbao", "eso", "External Secrets need OpenBao (Settings > "
+                                                                    "Secrets)"))
+    return rows
+
+
+def _deploy_eso_ours(kc, ref, run_ids):
+    """(présent, exécution lue) des objets du magasin d'un cluster (CRS
+    `art-eso`, origine posée par `deliver`), ou (None, None)."""
+    out, _rc, err = _deploy_capi_json(kc, "manifest-verify", ["--name", f"{ref}/eso"], timeout=120)
+    if err:
+        return None, None
+    return bool((out or {}).get("present")), ((out or {}).get("origin") or {}).get("run")
+
+
+def _deploy_eso_phase(run, cluster, kc_ref, dctx):
+    """Un élément par cluster à External Secrets : `harvester-capi
+    eso-deploy` en action fille (authentification, magasins, `Ready`) ;
+    `created` et `undo` seulement pour ce que CETTE exécution a posé."""
+    plan = dctx["plan"]
+    rows = {r["id"]: r for r in dctx.get("eso") or []}
+    by = (run.result or {}).get("by") or ""
+
+    def run_item(ctx, state, item):
+        r = rows[item.id]
+        data = {"cluster": r["ref"], "namespaces": r["namespaces"], "created": False, "actions": []}
+        prev = next((it for it in ((state.get("previous") or {}).get("items") or []) if it.get("id") == item.id), {})
+        if prev.get("created"):
+            data.update({k: prev[k] for k in ("created", "undo") if k in prev})
+        if run.dry_run:
+            return _dch.ItemOutcome("done", "checked (dry run): would be set", data=data)
+        kc = kc_ref()
+        spec = {"cluster": r["ref"], "namespaces": r["namespaces"], "by": by,
+                "role": run.launch_role or "admin", "origin": {"plan": plan["name"], "run": run.id}}
+        child, err = _capi_launch(cluster, kc, "eso-deploy", ["--timeout", str(ESO_PHASE_TIMEOUT_S)], spec=spec,
+                                  parent=run.id, cluster_user=run.cluster_user, label=f"capi-eso:{r['ref']}")
+        if err:
+            return _dch.ItemOutcome("error", str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        status, _c = _deploy_wait_child(child.id)
+        present, origin_run = _deploy_eso_ours(kc, r["ref"], {run.id})
+        if present and origin_run == run.id:
+            data["created"] = True
+            data["undo"] = {"kind": "eso", "ref": r["ref"]}
+        if status == "done":
+            return _dch.ItemOutcome("done", "set", data=data)
+        return _dch.ItemOutcome("error", f"set failed (action {child.id})", data=data)
+
+    def verify_item(ctx, state, prev):
+        r = rows.get(prev.get("id"))
+        if r is None:
+            return False
+        present, _o = _deploy_eso_ours(kc_ref(), r["ref"], set())
+        return bool(present)
+    items = [_dch.Item(r["id"], tuple(r["depends_on"])) for r in rows.values()]
+    return _dch.Phase("eso", items=items, run_item=run_item, verify_item=verify_item, item_key="id",
+                      item_step="", after_failure_of=("clusters", "artefacts"))
+
+
 def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=None, store=None):
     """Phases du déroulé, branchées sur les mécanismes existants."""
     plan = dctx["plan"]
@@ -37977,6 +39339,10 @@ def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=
             phases.append(_deploy_artefacts_phase(run, cluster, kc_ref, dctx))
         elif pid == "gitops":
             phases.append(_deploy_gitops_phase(run, cluster, kc_ref, dctx, store))
+    if dctx.get("eso"):
+        # 2.10.0 : tirée de l'option `external_secrets` des clusters du plan
+        # (deploy_chain.ORDER la place après les artefacts)
+        phases.append(_deploy_eso_phase(run, cluster, kc_ref, dctx))
     return phases
 
 
@@ -38004,7 +39370,8 @@ def _deploy_cleanup_dry(created):
 
 def _deploy_runner(run, cluster, kc, dctx, user, cluster_user, previous, install, store, lock_fd=None):
     try:
-        _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, install, store)
+        with _late_reads(run):                 # revue I6 : lectures tardives d'un déroulé marquées
+            _deploy_runner_body(run, cluster, kc, dctx, user, cluster_user, previous, install, store)
     finally:
         # rendu APRÈS l'écriture du statut final : une ligne `running` dans
         # actions.db a toujours son verrou tenu (revue B2-I1)
@@ -38285,6 +39652,7 @@ def _deploy_start(cluster, kc, dctx, dry_run=False, user="", cluster_user=None, 
     run.cluster_user = cluster_user
     run.required_role = required_role
     run.launch_role = role                 # figé : chaque déclaration lancée par la chaîne le reprend
+    run.person_launched = _person_launched()
     plan = dctx["plan"]
     run.result = {"plan": plan["name"], "plan_revision": plan["revision"], "cluster": cluster,
                   "resumes": resumes, "dry_run": bool(dry_run), "by": user or "",
@@ -38954,6 +40322,12 @@ def _undo_target(kc, cluster, u, runs, services=None):
         if err:
             return None, None
         return judge(bool((out or {}).get("present")), (out or {}).get("origin"))
+    if kind == "eso":
+        # 2.10.0 : magasins posés par la chaîne (CRS `art-eso`, origine du plan)
+        out, _rc, err = _deploy_capi_json(kc, "manifest-verify", ["--name", f"{ref}/eso"], timeout=120)
+        if err:
+            return None, None
+        return judge(bool((out or {}).get("present")), (out or {}).get("origin"))
     if kind == "capi-cluster":
         out, _rc, err = _deploy_capi_json(kc, "state", ["--name", ref, "--json"], timeout=60)
         if err:
@@ -39013,6 +40387,32 @@ def _undo_carriers_present(kc, refs):
     return out, None
 
 
+def _undo_eso_chart_kept(kc, cluster, ns, c, item):
+    """2.10.0 (point 300) : le chart `eso` d'un cluster enfant qui reste
+    n'est pas retiré tant que des `ExternalSecret` y existent (ceux des
+    équipes, laissés exprès par `eso-remove`) : il emporterait leurs CRD.
+    Rend le constat, ou None si le retrait peut se faire. Même règle que
+    `service-remove` (revue finale I-1), lue ici pour dire la raison sans
+    lancer une action vouée au refus ; elle vaut aussi quand le cluster part
+    dans le même Défaire (décocher le chart laisse le cluster l'emporter)."""
+    import child_eso as _ce
+    if item != _ce.SERVICE:
+        return None
+    st, _rc, err = _deploy_capi_json(kc, "eso-status", ["--name", f"{ns}/{c}", "--json"], timeout=120,
+                                     cluster=cluster)
+    # revue finale m-D : enfant illisible = rc 0 avec `error` et une liste
+    # vide, jamais « aucun ExternalSecret » (sauf cluster parti)
+    if not err and (st or {}).get("error") not in (None, "", "eso-cluster-missing"):
+        err = st["error"]
+    if err:
+        return f"eso-status-unreadable: chart kept, the ExternalSecrets of {ns}/{c} could not be read: {str(err)[:120]}"
+    left = sorted(f"{x.get('ns')}/{x.get('name')}" for x in (st or {}).get("externalsecrets") or [])
+    if not left:
+        return None
+    return (f"eso-foreign-objects: chart kept, {len(left)} ExternalSecret(s) of the teams ({', '.join(left[:10])}) "
+            "would lose their CRD with the chart: remove them first, then undo again")
+
+
 def _undo_details(kc, cluster, u, services):
     """Ce qui partira pour un élément (lectures seules, suppressions jugées
     par le serveur pour les objets d'un cluster enfant)."""
@@ -39031,6 +40431,14 @@ def _undo_details(kc, cluster, u, services):
             return {"error": err}
         return {"present": not out.get("absent"), "delete": out.get("delete") or [], "kept": out.get("kept") or [],
                 "refused": out.get("refused") or [], "cluster_present": out.get("cluster_present", True)}
+    if kind == "eso":
+        st, _rc, err = _deploy_capi_json(kc, "eso-status", ["--name", ref, "--json"], timeout=120, cluster=cluster)
+        if err:
+            return {"error": err}
+        return {"present": bool((st or {}).get("auth") or (st or {}).get("crs")),
+                "namespaces": (st or {}).get("namespaces") or [],
+                "externalsecrets": len((st or {}).get("externalsecrets") or []),
+                "note": "synced Secrets are kept at their last value; the eso chart is undone with the artefacts"}
     if kind == "capi-cluster":
         out, _rc, err = _deploy_capi_json(kc, "delete", ["--name", ref, "--dry-run"], timeout=120)
         return {"error": err} if err else out
@@ -39172,6 +40580,9 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
         expect = ["--expect-run", run_id] if run_id else []
         if kind == "chart":
             ns, _c, it = ref.split("/")
+            kept = _undo_eso_chart_kept(kc, cluster, ns, _c, it)
+            if kept:
+                return _dch.ItemOutcome("error", kept, data=data)
             child, err = capi("service-remove", ["--name", f"{ns}/{it}", "--timeout", str(UNDO_CHART_TIMEOUT)]
                               + expect,
                               f"capi-service-remove:{ns}/{it}")
@@ -39183,6 +40594,14 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
             child, err = capi("delete", ["--name", ref, "--timeout", str(UNDO_CLUSTER_TIMEOUT)] + expect,
                               f"capi-cluster-delete:{ref}")
             timeout = None
+        elif kind == "eso":
+            # 2.10.0 (point 300) : Secrets gardés, ExternalSecret supprimés tant
+            # qu'ESO tourne, magasins, authentification ; le chart part avec
+            # la phase Artefacts du défaire
+            child, err = capi("eso-remove", ["--name", ref, "--keep-chart", "--role", run.launch_role or "admin",
+                                             "--by", (run.result or {}).get("by") or ""] + expect,
+                              f"capi-eso-remove:{ref}")
+            timeout = UNDO_MANIFEST_TIMEOUT
         elif kind == "gitops":
             # 2.8.0 : Flux, comme un élément (Kustomization d'abord) ; Fleet,
             # l'objet de Rancher et ses Secrets
@@ -39240,7 +40659,7 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
         try:
             aid, _h = _tf_decl_launch(cluster, kc, decl_id, "destroy", user=(run.result or {}).get("by") or "",
                                       cluster_user=run.cluster_user, holder=run.id, role=run.launch_role,
-                                      parent=run.id)
+                                      parent=run.id, late_service=run.person_launched)
             data["actions"].append(aid)
             status, _c = _deploy_wait_child(aid)
             if not _tf_decl_wait_idle(decl_id):
@@ -39270,8 +40689,9 @@ def _undo_runner(run, cluster, kc, steps, delete_data, previous, orig_id, lock_f
         ctx = _DeployCtx(run, base)
         res = None
         try:
-            res = _dch.run(ctx, _undo_phases(run, cluster, kc, steps, delete_data, runs), previous=previous,
-                           order=_du.ORDER, secrets=_sst.store())
+            with _late_reads(run):             # revue I6 : lectures tardives d'un défaire marquées
+                res = _dch.run(ctx, _undo_phases(run, cluster, kc, steps, delete_data, runs), previous=previous,
+                               order=_du.ORDER, secrets=_sst.store())
         except BaseException as e:
             log.exception("undo %s", run.id)
             res = dict(run.result or {}, status="error", error_summary=type(e).__name__)
@@ -39369,6 +40789,7 @@ def _undo_start(cluster, kc, action_id, include, confirm, delete_data, confirm_r
             run.cluster_user = cluster_user
             run.required_role = "admin"
             run.launch_role = role
+            run.person_launched = _person_launched()
             run.result = {"undoes": action_id, "plan": res.get("plan"), "cluster": cluster, "by": user or "",
                           "selected": [s["id"] for s in steps], "delete_data": sorted(delete_data), "phases": []}
             with ACTIONS_LOCK:
@@ -40449,6 +41870,7 @@ if __name__ == "__main__":
     try:
         _start_secret_originals_sweeper()        # 2.9.0 : délai de garde des originaux migrés
         _start_secrets_background()              # 2.9.0 : sonde, instantanés, clés transit, orphelins
+        _start_secrets_restore_settle()          # 2.10.0 : réglages rangés après une restauration
         _start_plan_secrets_sweeper()            # 2.9.0 : secrets des déroulés finis ou expirés
     except Exception as _e:                      # noqa: BLE001
         log.warning("secret originals sweeper startup failed: %s", _e)

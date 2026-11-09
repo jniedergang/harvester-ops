@@ -231,6 +231,12 @@ offline copy) before anything else (Settings > Secret store > Snapshots, or
 server and its backups come first. Without OpenBao the console cannot read
 the kubeconfigs and keys it moved there. See [secrets.md](secrets.md).
 
+Since 2.10.0, a restored B1 snapshot keeps the per-person token methods,
+groups and ESO auth methods it holds, and the console puts its settings in
+line with it; the ESO listener comes back only if its static address is on
+the host. Child clusters keep their synced Secrets at their last value while
+OpenBao is down: ESO resumes by itself once OpenBao answers.
+
 ## 13. Navigation by hosts (2.0)
 
 A **host** is a whole Harvester cluster or a KVM hypervisor, never a
@@ -877,6 +883,25 @@ secret, more than two child clusters, harv4 (two clusters in one run).
    **Test an outage**; confirm the originals once the console works.
 5. Before rolling the console back below 2.9.0, or before disabling: bring
    every class back, put encrypted states back in clear, then disable.
+6. Personal tokens (2.10.0): Settings > Secret store > Personal tokens, Set
+   up each Rancher, run the five checks while signed in through that
+   Rancher, Activate. Add internal groups if needed.
+7. External Secrets (2.10.0): in B1, set the ESO listener on a static
+   address and open port 8212 to the child node networks; then, on each
+   child cluster, External Secrets tab: Set up External Secrets, enable
+   the team namespaces, write the values. The teams write their
+   `ExternalSecret` objects (`refreshInterval: 1h` or more).
+8. Before rolling the console back below 2.10.0 in B1: `harvester-secrets
+   person-token disable --remove` and `harvester-secrets eso remove --all`.
+
+Seen for real (2.10.0): personal tokens in mode A on OpenBao 2.7.2 and Vault
+1.14.2 against Rancher 2.14.1 (each check failed once, then activation, a
+KVM gesture on node2 named in the audit, a refusal by group, refresh and
+sign-out revocation), B1 on a client VM (update from 2.9.1, activation, VM
+reboot, snapshot and restore, rollback refused then allowed, rotation by
+2.9.1 after the rollback), External Secrets in mode A on a harvlab2 child
+(two namespaces isolated, rotation in 16 s, removal keeping the Secrets,
+undo of a plan with and without a team ExternalSecret).
 
 Seen for real (2.9.0): mode A on OpenBao 2.7.2 (each check failed once
 then activation, classes moved, console restarted, values identical, back

@@ -1,0 +1,9 @@
+path "harvester-ops/data/consoles/abc123def456/ssh-cluster/*" { capabilities = ["read", "create", "update"] }
+path "harvester-ops/data/consoles/abc123def456/ssh-kvm/*" { capabilities = ["read", "create", "update"] }
+path "harvester-ops/data/consoles/abc123def456/tf-kvm/*" { capabilities = ["read", "create", "update"] }
+path "harvester-ops/data/consoles/abc123def456/eso/*" { capabilities = ["create", "update"] }
+path "harvester-ops/metadata/consoles/abc123def456/ssh-cluster/*" { capabilities = ["read", "create", "update"] }
+path "harvester-ops/metadata/consoles/abc123def456/ssh-kvm/*" { capabilities = ["read", "create", "update"] }
+path "harvester-ops/metadata/consoles/abc123def456/tf-kvm/*" { capabilities = ["read", "create", "update"] }
+path "harvester-ops/metadata/consoles/abc123def456/eso/*" { capabilities = ["create", "update"] }
+path "sys/capabilities-self" { capabilities = ["update"] }

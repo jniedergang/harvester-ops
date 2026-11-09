@@ -98,12 +98,14 @@ def _map_paths(cluster, fn):
     return out
 
 
-def materialize(cluster, purpose="tool"):
+def materialize(cluster, purpose="tool", identity=None):
     """2.9.0 : l'entrée d'un cluster dont le kubeconfig ou la clé SSH porte
     une référence du magasin de secrets, avec à la place un chemin de
     travail (copie tmpfs gardée le temps du processus). Une entrée sans
     référence est rendue telle quelle. Pour les outils de bin/ lancés seuls ;
-    la console passe par `_cluster_kubeconfig_path`."""
+    la console passe par `_cluster_kubeconfig_path`. `identity` (2.10.0) :
+    identité de la lecture de la clé SSH (classe personnelle), service par
+    défaut ; le kubeconfig reste lu par le service."""
     if not isinstance(cluster, dict):
         return cluster
     kc = cluster.get("kubeconfig")
@@ -115,7 +117,7 @@ def materialize(cluster, purpose="tool"):
     if _is_ref(kc):
         out["kubeconfig"] = secret_store.path_of(kc, f"{purpose}-kubeconfig")
     if _is_ref(key):
-        out["ssh"] = dict(out["ssh"], key=secret_store.path_of(key, f"{purpose}-ssh"))
+        out["ssh"] = dict(out["ssh"], key=secret_store.path_of(key, f"{purpose}-ssh", identity=identity))
     return out
 
 

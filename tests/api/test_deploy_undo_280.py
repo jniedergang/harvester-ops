@@ -81,7 +81,7 @@ def test_order_import_before_cluster_and_gitops_first():
     assert by["rancher-import"]["depends_on"] == ["gitops:gitops-web/web/apps"]
     assert by["capi-cluster"]["depends_on"] == ["gitops:gitops-web/web/apps", "artefacts:chart-web/web/flux",
                                                 "rancher-import:rancher-import-web/web"]
-    assert du.ORDER == ("gitops", "artefacts", "rancher-import", "clusters", "registry", "terraform")
+    assert du.ORDER == ("gitops", "eso", "artefacts", "rancher-import", "clusters", "registry", "terraform")
 
 
 def test_entries_of_another_cluster_do_not_hold_this_one():
@@ -103,4 +103,4 @@ def test_phases_of_the_engine_go_to_their_end():
     steps = du.plan(du.collect(chain()))
     phases = du.phases(steps, lambda *a: None, lambda *a: False)
     assert [p.id for p in phases] == ["gitops", "artefacts", "rancher-import", "clusters"]
-    assert phases[2].after_failure_of == ("gitops", "artefacts")
+    assert phases[2].after_failure_of == ("gitops", "eso", "artefacts")

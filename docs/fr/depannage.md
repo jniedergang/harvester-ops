@@ -831,6 +831,66 @@ de noms, un montage, un périphérique d'audit, une politique de jeton). Le volu
 précédent est remis et rien n'a changé. Un instantané d'une autre console,
 ou modifié hors de harvops, est refusé exprès.
 
+### « openbao-person-no-token »
+La session n'a pas de jeton d'identité de Rancher : compte local ou
+connexion directe à Rancher qui tente les vérifications. Connectez-vous par
+la connexion unique de Rancher.
+
+### « openbao-person-login-failed: ... permission denied »
+Même message pour une méthode jwt absente d'OpenBao et pour une adresse de
+console hors du `token_bound_cidrs` du rôle : vérifiez `bao auth list` et le
+rôle, puis la plage de la console donnée à l'assistant.
+
+### « openbao-person-login-failed »
+OpenBao a refusé le jeton d'identité de la personne : mauvaise audience (le
+`bound_audiences` du rôle n'est pas le client OIDC de la console), émetteur
+inconnu, clé de signature inconnue (clés statiques après un changement de
+clé de Rancher : **Mettre à jour les clés**), ou adresse de la console hors
+du `token_bound_cidrs` du rôle (403). Pas de repli sur le service, par
+construction.
+
+### « openbao-denied » pour une personne
+La politique de la personne (`hops-person-<id>`, ou ses groupes quand
+**Lecture seulement par groupe** est allumé) ne permet pas ce chemin. Le
+refus rend HTTP 403 et n'est pas retenté avec l'identité de service.
+
+### « openbao-jwt-keys-changed » ou « openbao-jwt-keys-unreadable »
+Mode A avec clés statiques : le JWKS de Rancher a changé (mettre à jour,
+puis confirmer les clés) ou n'a pas pu être lu trois heures de suite
+(Rancher arrêté, CA).
+
+### « eso-openbao-unreachable »
+Un pod du réseau des VMs du cluster enfant n'a pas joint OpenBao en TLS. B1 :
+l'écouteur ESO est-il allumé, son adresse toujours sur l'hôte, et le port
+8212 ouvert au réseau des nœuds enfants dans le pare-feu de l'hôte ? Mode A :
+votre OpenBao est-il joignable depuis les nœuds enfants ?
+
+### « eso-listener-address-absent »
+L'adresse de l'écouteur ESO de B1 n'est plus sur l'hôte : OpenBao a démarré
+sur la boucle locale seule (la console fonctionne, ESO ne se synchronise
+plus). Remettez l'adresse (elle doit être statique) et redémarrez l'unité
+B1, ou déplacez l'écouteur (`harvester-secrets eso listener --addr`).
+
+### « eso-account-changed » ou « eso-namespace-gone »
+Un compte `hops-eso` ou un namespace activé a été recréé : le rôle est lié à
+l'ancien UID, OpenBao refuse le nouveau compte. Réactivez le namespace
+(onglet External Secrets), ou retirez-le de la liste.
+
+### « eso-foreign-objects »
+Des `ExternalSecret` des équipes restent dans le cluster enfant : retirer le
+chart emporterait leurs CRD. Retirez-les d'abord. Au Défaire d'un plan, le
+chart est gardé et l'élément le dit ; défaites de nouveau ensuite.
+
+### « eso-remove-stuck »
+Des `ExternalSecret` ont gardé leur finalizer après la demande de
+suppression : vérifiez les pods du contrôleur d'ESO, puis retirez de
+nouveau les secrets externes.
+
+### Retour arrière refusé avec « secrets-person-token-b1 »
+B1 porte encore une méthode `jwt` d'un Rancher, un groupe, l'écouteur ESO ou
+un cluster ESO : lancez `harvester-secrets person-token disable --remove` et
+`harvester-secrets eso remove --all`, puis revenez en arrière.
+
 ### Retour arrière refusé avec « secrets-in-openbao »
 Voir [secrets.md](secrets.md#désactiver-changer-de-mode-revenir-à-une-console-plus-ancienne) :
 ramenez les classes, remettez les états en clair, désactivez, puis revenez

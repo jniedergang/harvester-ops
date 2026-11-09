@@ -11,7 +11,7 @@ marque (« already present, adopted ») n'est jamais touchée. Jamais
 l'installation de Harvester, jamais la pile Cluster API (128).
 
 Ordre de retrait (point 211), l'inverse de l'application : entrées GitOps
-(2.8.0), artefacts (charts, puis manifestes, puis politiques), import dans
+(2.8.0), External Secrets (2.10.0, tant que son chart tourne), artefacts (charts, puis manifestes, puis politiques), import dans
 le Rancher de la session (2.8.0), clusters enfants, registre d'amorçage,
 contenu Terraform. L'import part AVANT son cluster : sinon Rancher garde un
 cluster mort (plan 2.8.0, tâche 5). Les artefacts d'un cluster enfant passent
@@ -33,13 +33,15 @@ Voir docs/design/2026-11-07-artefacts-complets-defaire-270-plan.md.
 
 import deploy_chain as dch
 
-KINDS_ORDER = ("gitops", "chart", "manifest", "policies", "rancher-import", "capi-cluster", "registry",
+KINDS_ORDER = ("gitops", "eso", "chart", "manifest", "policies", "rancher-import", "capi-cluster", "registry",
                "tf-declaration")
 # phase du défaire de chaque sorte (moteur de deploy_chain)
-PHASE_OF = {"gitops": "gitops", "chart": "artefacts", "manifest": "artefacts", "policies": "artefacts",
+PHASE_OF = {"gitops": "gitops", "eso": "eso", "chart": "artefacts", "manifest": "artefacts", "policies": "artefacts",
             "rancher-import": "rancher-import", "capi-cluster": "clusters", "registry": "registry",
             "tf-declaration": "terraform"}
-ORDER = ("gitops", "artefacts", "rancher-import", "clusters", "registry", "terraform")
+# 2.10.0 : External Secrets (`eso`, `<ns>/<c>`) retiré tant que son chart
+# tourne (point 300), donc avant les artefacts, après les entrées GitOps
+ORDER = ("gitops", "eso", "artefacts", "rancher-import", "clusters", "registry", "terraform")
 ARTEFACT_KINDS = ("chart", "manifest", "policies")
 # sortes portées par un cluster enfant : `<ns>/<c>/<élément>` (GitOps et
 # artefacts) ou `<ns>/<c>` (import, cluster)
@@ -87,7 +89,7 @@ def cluster_of(u):
     import ou d'un cluster, sinon None."""
     if u["kind"] in ITEM_KINDS:
         return u["ref"].rsplit("/", 1)[0]
-    if u["kind"] in ("capi-cluster", "rancher-import"):
+    if u["kind"] in ("capi-cluster", "rancher-import", "eso"):
         return u["ref"]
     return None
 
@@ -162,8 +164,10 @@ def plan(undos, include=None):
     clusters et du registre."""
     chosen = [u for u in undos if (u["default"] if include is None else u["id"] in include)]
     chosen.sort(key=lambda u: KINDS_ORDER.index(u["kind"]))
-    by_cluster, gitops_of, import_of = {}, {}, {}
+    by_cluster, gitops_of, import_of, eso_of = {}, {}, {}, {}
     for u in chosen:
+        if u["kind"] == "eso":
+            eso_of[u["ref"]] = u["id"]
         if u["kind"] in ARTEFACT_KINDS:
             by_cluster.setdefault(cluster_of(u), []).append(u["id"])
         elif u["kind"] == "gitops":
@@ -181,13 +185,19 @@ def plan(undos, include=None):
         deps = []
         if u["kind"] in ARTEFACT_KINDS:
             # 2.8.0 : le chart de Flux reste tant qu'une entrée GitOps du
-            # cluster n'est pas retirée
-            deps = [f"gitops:{i}" for i in gitops_of.get(cluster_of(u), [])]
+            # cluster n'est pas retirée ; 2.10.0 : le chart d'ESO tant que
+            # ses ExternalSecret ne sont pas partis (point 300)
+            deps = [f"gitops:{i}" for i in gitops_of.get(cluster_of(u), [])] \
+                + ([f"eso:{eso_of[cluster_of(u)]}"] if cluster_of(u) in eso_of else [])
+        elif u["kind"] == "eso":
+            # une entrée GitOps peut porter des ExternalSecret
+            deps = [f"gitops:{i}" for i in gitops_of.get(u["ref"], [])]
         elif u["kind"] == "rancher-import":
             # une entrée Fleet vit dans le Rancher de l'import
             deps = [f"gitops:{i}" for i in gitops_of.get(u["ref"], [])]
         elif u["kind"] == "capi-cluster":
             deps = [f"gitops:{i}" for i in gitops_of.get(u["ref"], [])] \
+                + ([f"eso:{eso_of[u['ref']]}"] if u["ref"] in eso_of else []) \
                 + [f"artefacts:{i}" for i in by_cluster.get(u["ref"], [])] \
                 + ([f"rancher-import:{import_of[u['ref']]}"] if u["ref"] in import_of else [])
         elif u["kind"] == "registry":

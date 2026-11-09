@@ -796,6 +796,62 @@ a namespace, a mount, an audit device, a token policy). The previous
 volume is back and nothing changed. A snapshot of another console, or one
 modified outside harvops, is refused on purpose.
 
+### "openbao-person-no-token"
+The session has no Rancher identity token: a local account or a direct
+Rancher sign-in trying the checks. Sign in through Rancher single sign-on.
+
+### "openbao-person-login-failed: ... permission denied"
+Same message for a jwt auth method missing on OpenBao and for a console
+address outside the role's `token_bound_cidrs`: check `bao auth list` and
+the role, then the console range given to the assistant.
+
+### "openbao-person-login-failed"
+OpenBao refused the identity token of the person: wrong audience (the
+role's `bound_audiences` is not the console's OIDC client), unknown issuer,
+unknown signing key (static keys after a Rancher key change: **Update the
+keys**), or the console address outside the role's `token_bound_cidrs`
+(403). There is no fallback on the service by design.
+
+### "openbao-denied" for a person
+The person's policy (`hops-person-<id>`, or their groups when **Reading only
+through groups** is on) does not allow that path. The refusal is HTTP 403
+and is not retried with the service identity.
+
+### "openbao-jwt-keys-changed" or "openbao-jwt-keys-unreadable"
+Mode A with static keys: Rancher's JWKS changed (update, then confirm the
+keys) or could not be read three hours in a row (Rancher down, CA).
+
+### "eso-openbao-unreachable"
+A pod on the VM network of the child cluster could not reach OpenBao in TLS.
+B1: is the ESO listener on, its address still on the host, and port 8212
+open to the child node network in the host firewall? Mode A: is your
+OpenBao reachable from the child nodes?
+
+### "eso-listener-address-absent"
+The address of the B1 ESO listener is no longer on the host: OpenBao
+started on the loopback only (the console works, ESO stops syncing). Put
+the address back (it must be static) and restart the B1 unit, or move the
+listener (`harvester-secrets eso listener --addr`).
+
+### "eso-account-changed" or "eso-namespace-gone"
+A `hops-eso` account or an enabled namespace was recreated: the role is
+bound to the old UID, OpenBao refuses the new account. Enable the namespace
+again (External Secrets tab), or remove it from the list.
+
+### "eso-foreign-objects"
+`ExternalSecret` objects of the teams remain in the child cluster: removing
+the chart would take their CRDs. Remove them first. On the undo of a plan,
+the chart is kept and the item says so; undo again afterwards.
+
+### "eso-remove-stuck"
+`ExternalSecret` objects kept their finalizer after ESO was asked to delete
+them: check the ESO controller pods, then remove External Secrets again.
+
+### Rollback refused with "secrets-person-token-b1"
+B1 still carries a Rancher `jwt` method, a group, the ESO listener or an ESO
+cluster: run `harvester-secrets person-token disable --remove` and
+`harvester-secrets eso remove --all`, then roll back.
+
 ### Rollback refused with "secrets-in-openbao"
 See [secrets.md](secrets.md#disabling-switching-mode-going-back-to-an-older-console):
 bring classes back, put states back in clear, disable, then roll back.
