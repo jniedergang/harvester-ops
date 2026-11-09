@@ -27911,8 +27911,18 @@ def _kvm_run_cli(run, cmd, prefix=""):
     posé que pendant le passage : entre deux, une annulation pose `_cancel`."""
     last_error = None
     out = tempfile.TemporaryFile()
+    secret_map = None
     try:
-        proc = _KVM_POPEN(cmd, stdout=out, stderr=subprocess.PIPE, text=True)
+        # 2.10.0 (essai R4) : comme `run_action_thread`, copies de travail
+        # remises par le service dans le fil (copies figées au déclenchement
+        # reprises) ; sans elles l'outil, lancé par la console, ne se connecte
+        # pas et échouait en SecretError sur une classe `ssh-kvm` migrée
+        with _late_reads(run):
+            secret_env, secret_map = _spawn_secret_env(
+                [run.cluster, *getattr(run, "secret_clusters", ())], (), getattr(run, "secret_files", None),
+                identity=_sst.SERVICE, skip=getattr(run, "secret_skip", ()))
+        proc = _KVM_POPEN(cmd, stdout=out, stderr=subprocess.PIPE, text=True,
+                          **({"env": {**os.environ, **secret_env}} if secret_env else {}))
         run.proc = proc
         for line in proc.stderr:
             line = line.strip()
@@ -27943,6 +27953,8 @@ def _kvm_run_cli(run, cmd, prefix=""):
     finally:
         run.proc = None
         out.close()
+        if secret_map:
+            secret_map.unlink(missing_ok=True)
 
 
 def _kvm_send_image(run, path, sha, size, hosts, pool, name, opts, url=None, hold=None):
@@ -28050,11 +28062,22 @@ def _kvm_image_run(host, label, hosts, pool, name, public):
     hôtes, ou si son pool s'arrête ou se supprime."""
     holds = [(h, "volume", f"{pool}/{name}", "x") for h in hosts] + \
             [(h, "pool", pool, "s") for h in hosts]
+    run = ActionRun(uuid.uuid4().hex[:12], label, f"kvm:{host}", public)
+    # 2.10.0 (essai R4) : l'outil d'envoi reçoit la clé de chaque hôte visé
+    # (`_kvm_run_cli`) ; une clé personnelle est lue ICI, avec la personne,
+    # hors du verrou des gestes (une lecture lente ne bloque pas les autres)
+    run.secret_clusters = tuple(f"kvm:{h}" for h in hosts)
+    try:
+        _freeze_person_secrets(run)
+    except _sst.SecretError as e:              # refus d'OpenBao : rien d'inscrit, l'appelant libère sa place
+        return None, _secret_store_refused(e)
     with _KVM_GESTURE_LOCK:
         busy = _kvm_holds_busy(holds)
         if busy:
+            if run.secret_lease is not None and _sst._STORE is not None:
+                with contextlib.suppress(Exception):
+                    _sst._STORE.release(run.secret_lease)
             return None, _busy_response(busy)
-        run = ActionRun(uuid.uuid4().hex[:12], label, f"kvm:{host}", public)
         run.cluster_user = (current_cluster_identity() or {}).get("user")
         run.author = current_user()
         run.required_role = required_role_for(request.path, request.method)
