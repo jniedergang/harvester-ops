@@ -253,3 +253,45 @@ def test_cli_invalid_cluster_template(tmp_path, capsys):
     code, out, err = run(capsys, "--state-dir", str(tmp_path), "capi-template", "save", "m", "--file", str(f))
     assert code == 2 and json.loads(out)["code"] == "invalid-cluster-template"
     assert ["spec.namespace", "set by the plan, not by the template"] in json.loads(out)["errors"]
+
+
+# ---------------------------------------------------------------------------
+# 2.10.0 (tâche 13, réel) : l'option External Secrets d'un modèle de cluster
+# est un objet {namespaces, chart} (fenêtre du modèle, capi-create.js) ; le
+# modèle la refusait, donc aucun plan ne pouvait poser ESO avec ses namespaces
+# ---------------------------------------------------------------------------
+ES = {"namespaces": ["team-a", "team-b"]}
+ES_CHART = {"namespaces": ["team-a"], "chart": {"registry": "amorcage", "package": "secrets", "version": "1.0.0"}}
+
+
+@pytest.mark.parametrize("es,want", [
+    (ES, {"namespaces": ["team-a", "team-b"]}),
+    (ES_CHART, {"namespaces": ["team-a"], "chart": {"registry": "amorcage", "package": "secrets",
+                                                    "version": "1.0.0", "item": "eso"}}),
+    (True, True),
+])
+def test_template_keeps_the_external_secrets_option(es, want):
+    t = dp.check_capi_template(body(external_secrets=es))
+    assert t["spec"]["external_secrets"] == want
+    spec = dp.render_capi_template(dict(t, name="m"), {"workers": "1", "image": "default/i"}, "c1")
+    assert spec["external_secrets"] == ({"namespaces": []} if want is True else want)
+
+
+@pytest.mark.parametrize("es,why", [
+    ({"namespaces": ["kube-system"]}, "external_secrets.namespaces"),
+    ({"namespaces": ["a"], "owner": "x"}, "external_secrets.owner: unknown key"),
+    ({"namespaces": ["a"], "chart": {"registry": "r"}}, "external_secrets.chart.package: required"),
+    ({"namespaces": ["a"], "chart": {"registry": "r", "package": "p", "version": "1", "item": "x"}},
+     "external_secrets.chart.item"),
+])
+def test_template_refuses_an_invalid_external_secrets_option(es, why):
+    with pytest.raises(dp.ProfileError) as e:
+        dp.check_capi_template(body(external_secrets=es))
+    assert any(w == "spec.external_secrets" and why in r for w, r in e.value.errors), e.value.errors
+
+
+def test_template_route_saves_the_external_secrets_option(env):
+    c = env["client"] if isinstance(env, dict) else env.client
+    r = c.put("/api/baremetal/capi-templates/rke2-eso", json=body(external_secrets=ES))
+    assert r.status_code in (200, 201), r.get_json()
+    assert r.get_json()["spec"]["external_secrets"] == ES
