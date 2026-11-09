@@ -40293,6 +40293,25 @@ def _undo_carriers_present(kc, refs):
     return out, None
 
 
+def _undo_eso_chart_kept(kc, ns, c, item, by_id):
+    """2.10.0 (point 300) : le chart `eso` d'un cluster enfant qui reste
+    n'est pas retiré tant que des `ExternalSecret` y existent (ceux des
+    équipes, laissés exprès par `eso-remove`) : il emporterait leurs CRD.
+    Rend le constat, ou None si le retrait peut se faire. Un cluster qui
+    part dans le même Défaire emporte tout : rien à garder."""
+    import child_eso as _ce
+    if item != _ce.SERVICE or any(x["kind"] == "capi-cluster" and x["ref"] == f"{ns}/{c}" for x in by_id.values()):
+        return None
+    st, _rc, err = _deploy_capi_json(kc, "eso-status", ["--name", f"{ns}/{c}", "--json"], timeout=120)
+    if err:
+        return f"eso-status-unreadable: chart kept, the ExternalSecrets of {ns}/{c} could not be read: {str(err)[:120]}"
+    left = sorted(f"{x.get('ns')}/{x.get('name')}" for x in (st or {}).get("externalsecrets") or [])
+    if not left:
+        return None
+    return (f"eso-foreign-objects: chart kept, {len(left)} ExternalSecret(s) of the teams ({', '.join(left[:10])}) "
+            "would lose their CRD with the chart: remove them first, then undo again")
+
+
 def _undo_details(kc, cluster, u, services):
     """Ce qui partira pour un élément (lectures seules, suppressions jugées
     par le serveur pour les objets d'un cluster enfant)."""
@@ -40460,6 +40479,9 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
         expect = ["--expect-run", run_id] if run_id else []
         if kind == "chart":
             ns, _c, it = ref.split("/")
+            kept = _undo_eso_chart_kept(kc, ns, _c, it, by_id)
+            if kept:
+                return _dch.ItemOutcome("error", kept, data=data)
             child, err = capi("service-remove", ["--name", f"{ns}/{it}", "--timeout", str(UNDO_CHART_TIMEOUT)]
                               + expect,
                               f"capi-service-remove:{ns}/{it}")
