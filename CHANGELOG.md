@@ -103,7 +103,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   bounded on the command line (0.0.0.0/0) nor in IPv6; the "keys changed"
   alert was cleared when the update was launched, not when it succeeded;
   the ESO state of a child cluster was readable by a viewer without any
-  right on it; two deploy tests raced under `-n 12`.
+  right on it; two deploy tests raced under `-n 12`; a KVM image upload or
+  fetch refused by OpenBao or busy (409) left the `actions_in_flight` gauge
+  raised and the personal secret copies of the action held.
 - Found by the reviews of the tasks: shared KVM views mixed persons (now
   read by the service, gestures keep the person token); a missing personal
   secret at launch gave a 500; the `groups` scope made the whole Rancher

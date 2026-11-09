@@ -2719,9 +2719,7 @@ def start_action(action, cluster, dry_run=False, interactive=False,
     try:
         _freeze_person_secrets(run)            # 2.10.0 : secrets personnels lus ICI, avec la personne
     except BaseException:                      # refus d'OpenBao, ou toute autre erreur : compteur rendu
-        run.status = "cancelled"               # jamais lancée : rien à persister
-        run._closed = True
-        metric_actions_in_flight.dec()
+        _discard_unstarted(run)                # jamais lancée : jauge et bail rendus, rien à persister
         raise
     with ACTIONS_LOCK:
         # Contrôle et inscription sous le même verrou : deux requêtes
@@ -18573,9 +18571,7 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     try:
         _freeze_person_secrets(run)            # 2.10.0 : secrets personnels lus ICI, avec la personne
     except BaseException:                      # refus d'OpenBao, ou toute autre erreur : rien ne reste
-        run.status = "cancelled"               # jamais lancée : rien à persister
-        run._closed = True
-        metric_actions_in_flight.dec()
+        _discard_unstarted(run)                # jamais lancée : jauge et bail rendus, rien à persister
         if spec_file:
             Path(spec_file).unlink(missing_ok=True)
         raise
@@ -18587,9 +18583,7 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
         pending = None if busy else _register_action(run, parent)
     _persist_parent(pending)
     if busy:
-        run.status = "cancelled"               # jamais lancée : rien à persister
-        run._closed = True
-        metric_actions_in_flight.dec()
+        _discard_unstarted(run)                # jamais lancée : jauge et bail rendus, rien à persister
         if spec_file:
             Path(spec_file).unlink(missing_ok=True)
         return None, _busy_response(busy)
@@ -28107,6 +28101,18 @@ def _kvm_cancel_asked(run):
     return bool(getattr(run, "_cancel", False) or getattr(run, "cancel_requested", False))
 
 
+def _discard_unstarted(run):
+    """Action jamais lancée ni inscrite (refus d'OpenBao, 409, erreur avant
+    l'inscription) : jauge `actions_in_flight` rendue et copies de travail
+    tenues par son bail rendues, sans rien persister (revue finale m-A)."""
+    run.status = "cancelled"
+    run._closed = True
+    metric_actions_in_flight.dec()
+    if run.secret_lease is not None and _sst._STORE is not None:
+        with contextlib.suppress(Exception):
+            _sst._STORE.release(run.secret_lease)
+
+
 def _kvm_image_run(host, label, hosts, pool, name, public):
     """Action suivie d'un envoi d'image, enregistrée sous le verrou des
     gestes : 409 si le même volume est déjà écrit ou supprimé sur l'un des
@@ -28121,13 +28127,15 @@ def _kvm_image_run(host, label, hosts, pool, name, public):
     try:
         _freeze_person_secrets(run)
     except _sst.SecretError as e:              # refus d'OpenBao : rien d'inscrit, l'appelant libère sa place
+        _discard_unstarted(run)
         return None, _secret_store_refused(e)
+    except BaseException:
+        _discard_unstarted(run)
+        raise
     with _KVM_GESTURE_LOCK:
         busy = _kvm_holds_busy(holds)
         if busy:
-            if run.secret_lease is not None and _sst._STORE is not None:
-                with contextlib.suppress(Exception):
-                    _sst._STORE.release(run.secret_lease)
+            _discard_unstarted(run)
             return None, _busy_response(busy)
         run.cluster_user = (current_cluster_identity() or {}).get("user")
         run.author = current_user()
