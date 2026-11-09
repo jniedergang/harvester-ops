@@ -567,7 +567,8 @@ def test_service_remove_of_eso_refuses_while_externalsecrets_remain(cli, world, 
     assert bool(got) is deleted
     if not deleted:
         err = capsys.readouterr().err
-        assert "eso-foreign-objects" in err and "team-a/aws" in err and "team-c/x" in err
+        assert "eso-foreign-objects" in err and f"{CL}:team-a/aws" in err and f"{CL}:team-c/x" in err
+        assert "of the teams" not in err and "ExternalSecret(s) left" in err
 
 
 def test_service_remove_of_eso_refuses_when_the_child_cannot_be_read(cli, world, capsys):

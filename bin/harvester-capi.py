@@ -1894,13 +1894,16 @@ def _eso_chart_blockers(kube, ns, hcp, label):
         except (KubeError, ca.ChildAccessError) as err:
             return (f"eso-status-unreadable: chart kept, the ExternalSecrets of {ns}/{c} could not be read: "
                     f"{str(err)[:160]}")
-        left += [f"{(x.get('metadata') or {}).get('namespace')}/{(x.get('metadata') or {}).get('name')}"
+        # revue finale m-C : le service vaut pour tout le namespace, le
+        # cluster est donc nommé avec chaque objet
+        left += [f"{c}:{(x.get('metadata') or {}).get('namespace')}/{(x.get('metadata') or {}).get('name')}"
                  for x in every]
     if not left:
         return None
     left.sort()
-    return (f"eso-foreign-objects: chart kept, {len(left)} ExternalSecret(s) of the teams ({', '.join(left[:10])}) "
-            "would lose their CRD with the chart: remove them first")
+    return (f"eso-foreign-objects: chart kept, {len(left)} ExternalSecret(s) left in {ns} "
+            f"(cluster:namespace/name: {', '.join(left[:10])}) would lose their CRD with the chart: "
+            "remove them first")
 
 
 def _release_namespace_down(kube, ns, hcp):
