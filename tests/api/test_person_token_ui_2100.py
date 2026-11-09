@@ -527,3 +527,22 @@ def test_rollback_below_2100_in_mode_a_warns(wapp, pt, monkeypatch, tmp_path):
     assert st == 202 and "mode A" in doc["warning"]
     run = wapp.ACTIONS[doc["action_id"]]
     assert any(e.get("step_id") == "person-token" for e in run.events)
+
+
+# ---------------------------------------------------------------------------
+# Revue 8-10 I-6 : adresse de l'écouteur ESO partie de l'hôte
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("present,warned", [(True, False), (False, True), (None, False)])
+def test_eso_listener_address_gone_is_warned(wapp, pt, present, warned):
+    pt.set(mode="b1")
+    d = pt.state / "secrets-agent"
+    d.mkdir(exist_ok=True)
+    (d / "health.json").write_text(json.dumps({"at": 1, "eso_listener": "172.16.1.11:8212",
+                                               "eso_listener_present": present}))
+    s = wapp._secrets_settings()
+    ws = [w for w in wapp._secrets_warnings(s, wapp._secrets_health(), {"state": "ok"})
+          if w["code"] == "eso-listener-address-absent"]
+    assert bool(ws) == warned
+    if warned:
+        assert ws[0]["level"] == "error" and ws[0]["address"] == "172.16.1.11:8212"
+    assert post(wapp, "/api/secrets/banner", method="get")[1]["eso_listener_absent"] is warned

@@ -28,7 +28,15 @@ ExecStartPre=-/usr/bin/podman rm -f harvester-ops-openbao
 # would drop root itself, and its default command is `server -dev`. No
 # capability and no privilege gain: OpenBao 2.7 runs without them (checked
 # on OpenBao 2.7.2 with --cap-drop=all --security-opt=no-new-privileges).
-ExecStart=/bin/sh -c 'prev=""; boot=""; \
+# 2.10.0 : the ESO listener (second listener on an address of the host) is
+# checked at every start; an address no longer on the host (DHCP,
+# renumbering, interface down) starts OpenBao on the loopback only with the
+# configuration the agent rendered without it, never no OpenBao at all.
+ExecStart=/bin/sh -c 'prev=""; boot=""; cfg=/etc/harvester-ops-openbao/openbao.hcl; \
+    eso=$$(cat /etc/harvester-ops-openbao/eso-listener.ip 2>/dev/null); \
+    if [ -n "$$eso" ] && [ -f /etc/harvester-ops-openbao/openbao-local.hcl ] && ! ip -o -4 addr show 2>/dev/null | grep -qF " $$eso/"; then \
+        echo "ESO listener address $$eso is not on this host: OpenBao starts without it" >&2; \
+        cfg=/etc/harvester-ops-openbao/openbao-local.hcl; fi; \
     [ "$${OPENBAO_PREV_KEY:-0}" = 1 ] && prev="--secret hops-openbao-unseal-prev,uid=$${OPENBAO_UID},gid=$${OPENBAO_GID:-0},mode=0400"; \
     [ -d /run/hops-openbao-boot ] && boot="-v /run/hops-openbao-boot:/run/hops-openbao-boot:ro,Z"; \
     exec /usr/bin/podman run --rm \
@@ -43,7 +51,7 @@ ExecStart=/bin/sh -c 'prev=""; boot=""; \
     --entrypoint /usr/bin/bao \
     -e SKIP_CHOWN=1 \
     --secret "hops-openbao-unseal,uid=$${OPENBAO_UID},gid=$${OPENBAO_GID:-0},mode=0400" $$prev \
-    -v /etc/harvester-ops-openbao/openbao.hcl:/openbao/config/openbao.hcl:ro,Z \
+    -v "$$cfg":/openbao/config/openbao.hcl:ro,Z \
     -v /etc/harvester-ops-openbao/tls:/openbao/tls:ro,Z \
     -v /var/lib/harvester-ops-openbao/data:/openbao/data:rw,Z \
     -v /var/lib/harvester-ops-openbao/audit:/openbao/audit:rw,Z \

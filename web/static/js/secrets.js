@@ -50,7 +50,7 @@ const Secrets = (() => {
     'snapshot-stale': () => tr('sx.w.snapStale'), 'snapshot-failed': () => tr('sx.w.snapFailed'),
     'audit-space-low': () => tr('sx.w.auditLow'), 'tf-entities-pending': () => tr('sx.w.entities'),
     'openbao-jwt-keys-changed': () => tr('sx.w.jwtKeysChanged'), 'openbao-jwt-keys-unreadable': () => tr('sx.w.jwtKeysUnreadable'),
-    'eso-keys-changed': () => tr('sx.w.esoKeysChanged'),
+    'eso-keys-changed': () => tr('sx.w.esoKeysChanged'), 'eso-listener-address-absent': () => tr('sx.w.esoListenerAbsent'),
   };
   const GATE = {
     'migrate-another-first': () => tr('sx.gate.another'), 'outage-test-first': () => tr('sx.gate.outage'),
@@ -291,6 +291,7 @@ const Secrets = (() => {
       if (w.last_ok_at) facts.push(tr('sx.f.lastOk', { when: when(w.last_ok_at) }));
       if (w.count) facts.push(String(w.count));
       if ((w.servers || []).length) facts.push(w.servers.join(', '));
+      if (w.address) facts.push(w.address);
       return `<div class="sto-finding ${sev}" data-sx-warning="${esc(w.code)}"><div class="sto-finding-title">${icon(w.level === 'info' ? 'info' : 'warn')} ${esc(text(WARN, w.code))}</div>
         ${facts.length ? `<div class="sto-finding-facts">${esc(facts.join(' · '))}</div>` : ''}</div>`;
     }).join('')}</div>`;
@@ -1340,6 +1341,7 @@ const Secrets = (() => {
     if (admin && b.jwt_keys_changed) out.push({ code: 'openbao-jwt-keys-changed', text: tr('sx.banner.jwtKeys'), tab: 'persons' });
     if (admin && b.jwt_keys_unreadable) out.push({ code: 'openbao-jwt-keys-unreadable', text: tr('sx.banner.jwtUnreadable'), tab: 'persons' });
     if (admin && b.eso_keys_changed) out.push({ code: 'eso-keys-changed', text: tr('sx.banner.esoKeys'), tab: 'status' });
+    if (admin && b.eso_listener_absent) out.push({ code: 'eso-listener-address-absent', text: tr('sx.banner.esoListenerAbsent'), tab: 'status' });
     return out;
   }
   function startBanner() {

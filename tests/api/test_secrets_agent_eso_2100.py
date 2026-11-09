@@ -478,3 +478,28 @@ def test_review_of_the_tf_token_role_binding(b1, cidrs, refused):
         return
     assert rc == 0, st
     assert b1["srv"].token_roles[pol.tf_role(CID)]["token_bound_cidrs"] == [pol.B1_CIDR]   # reposé
+
+
+# ---------------------------------------------------------------------------
+# Revue 8-10 I-6 : configuration de repli sans l'écouteur ESO, adresse relue
+# par l'unité à chaque démarrage, santé qui dit une adresse partie
+# ---------------------------------------------------------------------------
+def test_render_keeps_a_loopback_only_configuration_and_the_listener_address(b1):
+    p = b1["p"]
+    assert listener(b1)[0] == 0
+    local = (p.b1_etc / "openbao-local.hcl").read_text()
+    assert LISTEN in config_text(b1) and LISTEN not in local and "127.0.0.1:8210" in local
+    assert (p.b1_etc / "eso-listener.ip").read_text().strip() == LISTEN.rpartition(":")[0]
+    assert listener(b1, None)[0] == 0
+    assert not (p.b1_etc / "eso-listener.ip").exists()
+    assert (p.b1_etc / "openbao-local.hcl").read_text() == config_text(b1)
+
+
+def test_health_says_when_the_listener_address_left_the_host(b1):
+    assert listener(b1)[0] == 0
+    a = b1["agent"]()
+    h = a.health()
+    assert h["eso_listener"] == LISTEN and h["eso_listener_present"] is True
+    b1["host"].addrs = [x for x in b1["host"].addrs if x != LISTEN.rpartition(":")[0]]
+    h = b1["agent"]().health()
+    assert h["eso_listener_present"] is False

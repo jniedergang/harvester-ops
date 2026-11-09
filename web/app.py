@@ -35250,6 +35250,11 @@ def _secrets_warnings(s, health, store_st, now=None):
         # 2.10.0 tâche 7 : clé de signature de Rancher absente des clés
         # statiques ; « Mettre à jour les clés » (person-token keys --refresh)
         out.append({"code": "openbao-jwt-keys-changed", "level": "error", "servers": changed})
+    if s.get("mode") == "b1" and health.get("eso_listener_present") is False:
+        # revue 8-10 I-6 : l'adresse de l'écouteur ESO n'est plus sur l'hôte ;
+        # OpenBao a démarré sans lui, les clusters enfants ne le joignent plus
+        out.append({"code": "eso-listener-address-absent", "level": "error",
+                    "address": health.get("eso_listener")})
     unreadable = _person_keys_unreadable(s)
     if unreadable:
         out.append({"code": "openbao-jwt-keys-unreadable", "level": "warn", "servers": unreadable})
@@ -35371,6 +35376,7 @@ def _secrets_banner():
             "error": st.get("error"), "jwt_keys_changed": bool(_person_keys_changed(s)),
             "jwt_keys_unreadable": bool(_person_keys_unreadable(s)),
             "eso_keys_changed": bool(_eso_keys_changed(s)),
+            "eso_listener_absent": s.get("mode") == "b1" and _secrets_health().get("eso_listener_present") is False,
             # 2.10.0 tâche 11 : dernier refus personnel de CETTE session
             # (connexion personnelle refusée, reconnexion par Rancher demandée)
             "person": _person_notice()}

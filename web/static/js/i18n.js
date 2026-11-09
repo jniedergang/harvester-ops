@@ -9561,6 +9561,8 @@ const translations = {
     "eso.fd.eso-namespace-gone": "The enabled namespace {namespace} is gone from the child cluster: remove it here before anyone creates it again.",
     "eso.fd.eso-account-changed": "The hops-eso account of {namespace} was created again (new namespace or account): OpenBao refuses it until an administrator enables the namespace again.",
     "eso.fd.eso-account-missing": "The hops-eso account is missing in {namespace}.",
+    "sx.w.esoListenerAbsent": "The address of the ESO listener is no longer on this host: OpenBao started on the loopback only and the child clusters no longer reach it. Give the host back its address, or set another one.",
+    "sx.banner.esoListenerAbsent": "OpenBao started without its listener for the child clusters: its address left this host",
   },
 
   fr: {
@@ -19109,6 +19111,8 @@ const translations = {
     "eso.fd.eso-namespace-gone": "Le namespace activé {namespace} a disparu du cluster enfant : retirez-le ici avant que quelqu'un le recrée.",
     "eso.fd.eso-account-changed": "Le compte hops-eso de {namespace} a été recréé (nouveau namespace ou nouveau compte) : OpenBao le refuse tant qu'un administrateur n'a pas réactivé le namespace.",
     "eso.fd.eso-account-missing": "Le compte hops-eso manque dans {namespace}.",
+    "sx.w.esoListenerAbsent": "L'adresse de l'écouteur ESO n'est plus sur cet hôte : OpenBao a démarré sur la boucle locale seule et les clusters enfants ne le joignent plus. Rendez son adresse à l'hôte, ou réglez-en une autre.",
+    "sx.banner.esoListenerAbsent": "OpenBao a démarré sans son écouteur des clusters enfants : son adresse a quitté cet hôte",
   },
 
   it: {
@@ -28655,6 +28659,8 @@ const translations = {
     "eso.fd.eso-namespace-gone": "Il namespace attivato {namespace} è scomparso dal cluster figlio: rimuoverlo qui prima che qualcuno lo ricrei.",
     "eso.fd.eso-account-changed": "L'account hops-eso di {namespace} è stato ricreato (nuovo namespace o account): OpenBao lo rifiuta finché un amministratore non riattiva il namespace.",
     "eso.fd.eso-account-missing": "Manca l'account hops-eso in {namespace}.",
+    "sx.w.esoListenerAbsent": "L'indirizzo del listener ESO non è più su questo host: OpenBao è partito solo su loopback e i cluster figli non lo raggiungono più. Ridare l'indirizzo all'host o impostarne un altro.",
+    "sx.banner.esoListenerAbsent": "OpenBao è partito senza il suo listener per i cluster figli: il suo indirizzo ha lasciato questo host",
   },
 
   es: {
@@ -38201,6 +38207,8 @@ const translations = {
     "eso.fd.eso-namespace-gone": "El namespace activado {namespace} ha desaparecido del clúster hijo: quítelo aquí antes de que alguien lo vuelva a crear.",
     "eso.fd.eso-account-changed": "La cuenta hops-eso de {namespace} se volvió a crear (nuevo namespace o nueva cuenta): OpenBao la rechaza hasta que un administrador vuelva a activar el namespace.",
     "eso.fd.eso-account-missing": "Falta la cuenta hops-eso en {namespace}.",
+    "sx.w.esoListenerAbsent": "La dirección del listener ESO ya no está en este host: OpenBao arrancó solo en loopback y los clústeres hijos ya no lo alcanzan. Devuelva su dirección al host o configure otra.",
+    "sx.banner.esoListenerAbsent": "OpenBao arrancó sin su listener para los clústeres hijos: su dirección dejó este host",
   },
 
   de: {
@@ -47748,6 +47756,8 @@ const translations = {
     "eso.fd.eso-namespace-gone": "Der aktivierte Namespace {namespace} ist aus dem Kind-Cluster verschwunden: hier entfernen, bevor ihn jemand neu anlegt.",
     "eso.fd.eso-account-changed": "Das Konto hops-eso von {namespace} wurde neu angelegt (neuer Namespace oder neues Konto): OpenBao lehnt es ab, bis ein Administrator den Namespace erneut aktiviert.",
     "eso.fd.eso-account-missing": "Das Konto hops-eso fehlt in {namespace}.",
+    "sx.w.esoListenerAbsent": "Die Adresse des ESO-Listeners ist nicht mehr auf diesem Host: OpenBao lief nur auf Loopback an und die Kind-Cluster erreichen es nicht mehr. Dem Host seine Adresse zurückgeben oder eine andere setzen.",
+    "sx.banner.esoListenerAbsent": "OpenBao lief ohne seinen Listener für die Kind-Cluster an: seine Adresse hat diesen Host verlassen",
   },
 };
 

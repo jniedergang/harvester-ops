@@ -659,6 +659,8 @@ class Agent:
 
     def own(self, path, uid):
         self.host.chown(path, uid, self.account_gid())
+        if path == self.p.b1_etc / "openbao.hcl" and (self.p.b1_etc / "openbao-local.hcl").exists():
+            self.host.chown(self.p.b1_etc / "openbao-local.hcl", uid, self.account_gid())
 
     def unit_env(self, uid, image_ref, prev=False):
         _w(self.p.b1_etc / "unit.env",
@@ -683,6 +685,17 @@ class Agent:
     def render(self, st, template, prev=None, init=False):
         cfg = pol.b1_config(st["console_id"], st["current_key"], template, previous_key_id=prev, init=init,
                             mount=st.get("mount", pol.DEFAULT_MOUNT), eso_listener=st.get("eso_listener"))
+        # revue 8-10 I-6 : la même configuration sans l'écouteur ESO, et son
+        # adresse ; l'unité prend la première si l'adresse n'est plus sur
+        # l'hôte au démarrage (OpenBao sur la boucle locale plutôt que rien)
+        local = cfg if not st.get("eso_listener") else pol.b1_config(
+            st["console_id"], st["current_key"], template, previous_key_id=prev, init=init,
+            mount=st.get("mount", pol.DEFAULT_MOUNT), eso_listener=None)
+        _w(self.p.b1_etc / "openbao-local.hcl", local, 0o444)
+        if st.get("eso_listener"):
+            _w(self.p.b1_etc / "eso-listener.ip", st["eso_listener"].rpartition(":")[0] + "\n", 0o444)
+        else:
+            (self.p.b1_etc / "eso-listener.ip").unlink(missing_ok=True)
         _w(self.p.b1_etc / "openbao.hcl", cfg, 0o444)
 
     def staged_bundle(self, name):
@@ -2685,6 +2698,14 @@ class Agent:
         sid = self.p.etc / "secret-id"
         out = {"at": int(self.now()), "agent_version": _version(), "b1_installed": bool(st),
                "secret_id_age_s": int(self.now() - sid.stat().st_mtime) if sid.exists() else None}
+        if st and st.get("eso_listener"):
+            # revue 8-10 I-6 : adresse de l'écouteur ESO encore sur l'hôte ?
+            # sinon OpenBao a démarré sans lui (unité) : la console le dit
+            try:
+                present = st["eso_listener"].rpartition(":")[0] in self.host.addresses()
+            except (OSError, ValueError):
+                present = None
+            out.update(eso_listener=st["eso_listener"], eso_listener_present=present)
         if st:
             out.update(current_key=st.get("current_key"), version=st.get("version"),
                        keys=[{k: e.get(k) for k in ("id", "created", "retired")} for e in st.get("keys", [])],
