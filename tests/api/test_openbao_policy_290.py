@@ -490,12 +490,13 @@ def test_eso_cluster_commands_mode_a():
 @pytest.mark.parametrize("addr,ok", [
     ("172.16.1.11:8212", True), ("10.0.0.5:9000", True),
     ("127.0.0.1:8212", False), ("0.0.0.0:8212", False), ("172.16.1.11:8210", False), ("172.16.1.11:8211", False),
+    ("172.16.1.11:8209", False), ("172.16.1.11:65535", False), ("172.16.1.11:65534", True),
     ("172.16.1.11:80", False), ("224.0.0.1:8212", False), ("169.254.1.1:8212", False), ("host:8212", False),
     ("172.16.1.11:8212\nlistener", False),
 ])
 def test_check_eso_listen(addr, ok):
     if ok:
-        assert pol.check_eso_listen(addr)[1] in (8212, 9000)
+        assert pol.check_eso_listen(addr)[1] in (8212, 9000, 65534)
     else:
         with pytest.raises(ValueError):
             pol.check_eso_listen(addr)
@@ -508,14 +509,10 @@ def test_b1_config_eso_listener_only_at_its_line():
     on = pol.b1_config(CID, "hops-20261108-1", tpl, eso_listener="172.16.1.11:8212")
     assert on.count('listener "tcp"') == 2
     assert 'address       = "172.16.1.11:8212"' in on and pol.C_ESO_CERT in on and pol.C_ESO_KEY in on
-    # tâche 13 (réel) : sans `cluster_address`, OpenBao ouvre aussi un port de
-    # cluster sur <adresse>:<port+1> (172.16.1.11:8213 vu en banc) ; il reste
-    # sur la boucle locale
-    assert on.count("cluster_address") == 2
-    eso = on[on.index('address       = "172.16.1.11:8212"'):]
-    eso = eso[:eso.index("}")]
-    assert f'cluster_address = "{pol.ESO_CLUSTER_LISTEN}"' in eso and pol.ESO_CLUSTER_LISTEN.startswith("127.0.0.1:")
-    assert pol.ESO_CLUSTER_LISTEN != pol.B1_CLUSTER_LISTEN
+    # raft reste sur 127.0.0.1:8211 ; le port de grappe de l'écouteur ESO
+    # aussi sur la boucle locale (tâche 13, sinon 172.16.1.11:8213)
+    assert [x.split("=")[1].strip() for x in on.splitlines() if x.strip().startswith("cluster_address")] == \
+        ['"127.0.0.1:8211"', '"127.0.0.1:8213"']
     old = tpl.replace("__ESO_LISTENER__\n", "")
     assert pol.b1_config(CID, "hops-20261108-1", old).count('listener "tcp"') == 1
     with pytest.raises(ValueError, match="__ESO_LISTENER__"):

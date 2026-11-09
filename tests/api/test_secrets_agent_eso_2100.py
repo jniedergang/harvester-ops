@@ -448,6 +448,16 @@ def test_eso_listener_closes_the_unauthenticated_rekey_endpoints():
     assert "seuls les rôles `eso`" not in block                               # commentaire corrigé
 
 
+@pytest.mark.parametrize("listen,cluster", [("172.16.1.11:8212", "127.0.0.1:8213"),
+                                             ("10.0.0.5:9300", "127.0.0.1:9301")])
+def test_eso_listener_keeps_its_cluster_port_on_the_loopback(listen, cluster):
+    """Tâche 13 (hops-upd) : sans `cluster_address`, OpenBao 2.7.2 ouvre aussi
+    <adresse>:<port + 1> (port de grappe) sur le réseau des nœuds enfants."""
+    block = pol.eso_listener_block(listen)
+    assert f'cluster_address = "{cluster}"' in block
+    assert f'"{listen.split(":")[0]}:{int(listen.split(":")[1]) + 1}"' not in block
+
+
 def test_b1_policies_binds_the_tf_token_role_of_an_older_b1(b1):
     srv = b1["srv"]
     srv.token_roles[pol.tf_role(CID)] = pol.tf_token_role_params(CID)         # posé avant la 2.10.0

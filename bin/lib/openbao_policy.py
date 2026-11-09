@@ -55,9 +55,6 @@ WRAP_TTL = "15m"
 # Mode B1 (plan, « Mode B1 : OpenBao à côté de la console »)
 B1_LISTEN = "127.0.0.1:8210"
 B1_CLUSTER_LISTEN = "127.0.0.1:8211"
-# tâche 13 (réel) : port de cluster de l'écouteur ESO, sur la boucle locale
-# (sans lui, OpenBao l'ouvre sur <adresse de l'hôte>:<port+1>)
-ESO_CLUSTER_LISTEN = "127.0.0.1:8213"
 B1_ADDR = "https://127.0.0.1:8210"
 B1_CLUSTER_ADDR = "https://127.0.0.1:8211"
 B1_CIDR = "127.0.0.1/32"
@@ -685,16 +682,17 @@ def check_eso_listen(address):
     ip, port = ipaddress.IPv4Address(m.group(1)), int(m.group(2))
     if ip.is_loopback or ip.is_unspecified or ip.is_multicast or ip.is_link_local or str(ip).endswith(".255"):
         raise ValueError("listener: a unicast address of the host (not loopback, not 0.0.0.0)")
-    if not 1024 <= port <= 65535 or port in (8210, 8211):
-        raise ValueError("listener: a port from 1024 to 65535, not 8210 or 8211")
+    # port + 1 sert de port de grappe sur la boucle locale (eso_listener_block)
+    if not 1024 <= port <= 65534 or port in (8209, 8210, 8211):
+        raise ValueError("listener: a port from 1024 to 65534, not 8209 to 8211")
     return str(ip), port
 
 
 def eso_listener_block(address):
     """Strophe du second écouteur (point 298) : TLS par le certificat de
-    l'écouteur ESO. Son port de cluster est posé sur la boucle locale : sans
-    `cluster_address`, OpenBao 2.7.2 l'ouvre sur <adresse>:<port+1>, sur le
-    réseau des nœuds enfants (vu en banc, tâche 13)."""
+    l'écouteur ESO. Tâche 13 (hops-upd) : sans `cluster_address`, OpenBao
+    2.7.2 ouvre aussi <adresse>:<port + 1> (port de grappe) sur le réseau ;
+    il est posé sur la boucle locale (raft reste sur 127.0.0.1:8211)."""
     ip, port = check_eso_listen(address)
     # revue 8-10 I-5 : cet écouteur expose toute l'API sur le réseau des nœuds
     # enfants. Les rôles AppRole de la console et de l'agent, le rôle des
@@ -706,7 +704,7 @@ def eso_listener_block(address):
     return "\n".join(['# Écouteur ESO (2.10.0) : API joignable du réseau des nœuds enfants ; les rôles de la',
                       '# console, des personnes et les jetons d\'OpenTofu sont liés à 127.0.0.1/32',
                       'listener "tcp" {', f'  address       = "{ip}:{port}"',
-                      f'  cluster_address = "{ESO_CLUSTER_LISTEN}"',
+                      f'  cluster_address = "127.0.0.1:{port + 1}"',
                       f'  tls_cert_file = "{C_ESO_CERT}"', f'  tls_key_file  = "{C_ESO_KEY}"',
                       "  disable_unauthed_rekey_endpoints = true", "}"])
 
