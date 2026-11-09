@@ -308,7 +308,8 @@ def test_deploy_with_chart_installs_the_service_first(cli, world, capsys, monkey
 # ---------------------------------------------------------------------------
 def _es(ns, name, uid):
     return {"metadata": {"namespace": ns, "name": name, "uid": uid, "finalizers": [ce.FINALIZER]},
-            "spec": {"data": [{"remoteRef": {"key": WITNESS}}]}}
+            "spec": {"secretStoreRef": {"name": ce.STORE, "kind": "SecretStore"},
+                     "data": [{"remoteRef": {"key": WITNESS}}]}}
 
 
 def _sec(ns, name, owner_uid):
@@ -325,6 +326,7 @@ def removed(cli, monkeypatch):
 
 
 def test_remove_keeps_the_synced_secrets_then_removes_in_order(cli, world, capsys, removed):
+    _enabled(world)
     box = world["box"]
     box["child"] = Child(ess=[_es("team-a", "db", "u1")], secrets=[_sec("team-a", "db", "u1"),
                                                                   _sec("team-a", "other", "u-x")])
@@ -344,6 +346,7 @@ def test_remove_keep_chart(cli, world, capsys, removed):
 
 
 def test_remove_stuck_finalizers_are_taken_off(cli, world, capsys, removed):
+    _enabled(world)
     world["box"]["child"] = Child(ess=[_es("team-a", "db", "u1")], stuck="until-finalizers")
     assert world["run"](world_ok(), ["eso-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}"]) == 0
     assert ("externalsecrets.external-secrets.io", "team-a", "db",
@@ -351,6 +354,7 @@ def test_remove_stuck_finalizers_are_taken_off(cli, world, capsys, removed):
 
 
 def test_remove_stuck_for_good(cli, world, capsys, removed):
+    _enabled(world)
     world["box"]["child"] = Child(ess=[_es("team-a", "db", "u1")], stuck=True)
     assert world["run"](world_ok(), ["eso-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}"]) == 1
     assert "eso-remove-stuck" in capsys.readouterr().err and removed == []
@@ -395,3 +399,62 @@ def test_deleting_the_child_cluster_removes_its_eso_authentication(cli, world, c
     world["settings"](eso={"listener": LISTEN, "clusters": {}})
     assert world["run"](world_ok(), ["delete", "--kubeconfig", "/x", "--name", f"{NS}/{CL}"]) == 0
     assert world["box"]["events"] == []
+
+
+# ---------------------------------------------------------------------------
+# Revue 8-10 I-1 : le retrait ne touche que NOS ExternalSecret (magasin
+# hops-openbao, namespace activé, jamais livrés par Flux) et leurs Secrets
+# ---------------------------------------------------------------------------
+def _es_on(ns, name, uid, store=ce.STORE, kind="SecretStore", labels=None):
+    es = _es(ns, name, uid)
+    es["spec"]["secretStoreRef"] = {"name": store, **({"kind": kind} if kind else {})}
+    if labels:
+        es["metadata"]["labels"] = labels
+    return es
+
+
+def _enabled(world, namespaces=("team-a",)):
+    world["settings"](eso={"listener": LISTEN, "clusters": {KEY: {"mount": STORE["jwt_mount"],
+                                                                    "namespaces": list(namespaces)}}})
+
+
+@pytest.mark.parametrize("es,ours", [
+    (_es_on("team-a", "db", "u1"), True),
+    (_es_on("team-a", "db", "u1", kind=None), True),                         # sorte absente = SecretStore
+    (_es_on("team-a", "aws", "u2", store="aws-store"), False),                # autre magasin
+    (_es_on("team-a", "cl", "u3", kind="ClusterSecretStore"), False),
+    (_es_on("team-c", "db", "u4"), False),                                   # namespace non activé
+    (_es_on("team-a", "flux", "u5", labels={"kustomize.toolkit.fluxcd.io/name": "apps"}), False),
+    (_es_on("team-a", "helm", "u6", labels={"helm.toolkit.fluxcd.io/name": "r"}), False),
+])
+def test_ours_table(es, ours):
+    mine, foreign = ce.ours([es], ["team-a"])
+    assert (mine == [es], foreign == [es]) == (ours, not ours)
+
+
+def test_remove_leaves_foreign_externalsecrets_and_their_secrets(cli, world, capsys, removed):
+    _enabled(world)
+    box = world["box"]
+    mine = _es_on("team-a", "db", "u1")
+    other = _es_on("team-a", "aws", "u2", store="aws-store")
+    off = _es_on("team-c", "db", "u3")
+    box["child"] = Child(ess=[mine, other, off], secrets=[_sec("team-a", "db", "u1"), _sec("team-a", "aws", "u2"),
+                                                         _sec("team-c", "db", "u3")])
+    assert world["run"](world_ok(), ["eso-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}", "--keep-chart"]) == 0
+    child = box["child"]
+    assert [p[:3] for p in child.patches if p[0] == "secrets"] == [("secrets", "team-a", "db")]
+    assert child.deleted == [("externalsecrets.external-secrets.io", "team-a", "db")]
+    assert "2 ExternalSecret(s) of the teams left" in capsys.readouterr().err
+
+
+def test_remove_with_the_chart_blocks_on_foreign_externalsecrets(cli, world, capsys, removed):
+    """Le chart emporte les CRD : des objets ESO des équipes restants seraient
+    perdus ou bloqueraient la suppression. Refus avant tout geste."""
+    _enabled(world)
+    box = world["box"]
+    box["child"] = Child(ess=[_es_on("team-a", "db", "u1"), _es_on("team-c", "x", "u9")],
+                         secrets=[_sec("team-a", "db", "u1")])
+    assert world["run"](world_ok(), ["eso-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}"]) == 2
+    err = capsys.readouterr().err
+    assert "eso-foreign-objects" in err and "team-c/x" in err
+    assert box["child"].patches == [] and box["child"].deleted == [] and removed == [] and box["events"] == []

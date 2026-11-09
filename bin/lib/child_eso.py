@@ -284,6 +284,40 @@ def _is_es_owner(ref, uids):
     return ref.get("kind") == "ExternalSecret" and group == GROUP and ref.get("uid") in uids
 
 
+FLUX_LABEL_PREFIXES = ("kustomize.toolkit.fluxcd.io/", "helm.toolkit.fluxcd.io/")
+
+
+def _store_refs(es):
+    """Magasins visés par un `ExternalSecret` : `secretStoreRef`, et
+    `sourceRef.storeRef` de ses entrées `data` et `dataFrom`."""
+    spec = es.get("spec") or {}
+    refs = [spec.get("secretStoreRef") or {}]
+    for entry in list(spec.get("data") or []) + list(spec.get("dataFrom") or []):
+        sref = ((entry or {}).get("sourceRef") or {}).get("storeRef")
+        if sref:
+            refs.append(sref)
+    return refs
+
+
+def ours(externalsecrets, namespaces):
+    """Revue 8-10 I-1 : (nôtres, étrangers) parmi les `ExternalSecret` lus.
+    Nôtre = dans un namespace activé par la console, chaque magasin visé est
+    le `SecretStore` `hops-openbao` (sorte absente = SecretStore), et il
+    n'est pas livré par Flux (Flux le recréerait). Les autres appartiennent
+    aux équipes (point 299) : jamais touchés."""
+    enabled = set(namespaces or [])
+    mine, foreign = [], []
+    for es in externalsecrets or []:
+        md = es.get("metadata") or {}
+        labels = md.get("labels") or {}
+        refs = _store_refs(es)
+        good = md.get("namespace") in enabled \
+            and all(r.get("name") == STORE and (r.get("kind") or "SecretStore") == "SecretStore" for r in refs) \
+            and not any(str(k).startswith(FLUX_LABEL_PREFIXES) for k in labels)
+        (mine if good else foreign).append(es)
+    return mine, foreign
+
+
 def orphan_patches(secrets, externalsecrets):
     """[(namespace, nom, patch fusion)] : pour chaque Secret dont un
     propriétaire est un `ExternalSecret` lu, la liste `ownerReferences` sans

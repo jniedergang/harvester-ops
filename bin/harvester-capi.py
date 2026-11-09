@@ -4197,14 +4197,27 @@ def cmd_eso_remove(args):
         return EXIT_BLOCKED
     present = kube.get(cs.K_CLUSTER, ns, cluster) is not None
     if present:
+        _s, _active, e = _eso_settings()
+        enabled = ((e.get("clusters") or {}).get(ce.cluster_key(harvester, ns, cluster)) or {}).get("namespaces") or []
         with ca.session(kube, ns, cluster) as path:
             child = Kube(path)
             try:
-                ess = child.list(K_ES)
+                every = child.list(K_ES)
             except KubeError as err:
                 if not is_missing_type(err):
                     raise
-                ess = []
+                every = []
+            # revue 8-10 I-1 : seulement nos ExternalSecret ; ceux des équipes
+            # (autre magasin, namespace non activé, livrés par Flux) restent
+            ess, foreign = ce.ours(every, enabled)
+            names = sorted(f"{(x.get('metadata') or {}).get('namespace')}/{(x.get('metadata') or {}).get('name')}"
+                           for x in foreign)
+            if foreign and not args.keep_chart:
+                # le chart emporte les CRD : leurs objets seraient perdus ou bloqueraient
+                step("remove", "error", f"eso-foreign-objects: {len(foreign)} ExternalSecret(s) of the teams "
+                     f"({', '.join(names[:10])}) would lose their CRD with the chart: remove them first, "
+                     "or keep the chart (--keep-chart)")
+                return EXIT_BLOCKED
             secrets = []
             for n in sorted({(x.get("metadata") or {}).get("namespace") for x in ess} - {None}):
                 secrets += child.list("secrets", n)
@@ -4214,15 +4227,18 @@ def cmd_eso_remove(args):
             for x in ess:
                 md = x["metadata"]
                 child.delete(K_ES, md["namespace"], md["name"])
-            left = _eso_wait_gone(child, ESO_REMOVE_WAIT)
+            mine = {(x["metadata"]["namespace"], x["metadata"]["name"]) for x in ess}
+            left = _eso_wait_gone(child, ESO_REMOVE_WAIT, only=mine)
             if left:
                 for sns, sname, patch in ce.stuck_patches(left):
                     child.patch(K_ES, sns, sname, patch)
-                left = _eso_wait_gone(child, ESO_STUCK_WAIT)
+                left = _eso_wait_gone(child, ESO_STUCK_WAIT, only=mine)
             if left:
                 step("remove", "error", f"eso-remove-stuck: {len(left)} ExternalSecret(s) still there")
                 return EXIT_FAIL
-            step("remove", "running", f"{len(ess)} ExternalSecret(s) deleted")
+            step("remove", "running", f"{len(ess)} ExternalSecret(s) deleted"
+                 + (f"; {len(foreign)} ExternalSecret(s) of the teams left ({', '.join(names[:10])})"
+                    if foreign else ""))
     code = cmd_manifest_remove(argparse.Namespace(cluster=args.cluster, kubeconfig=args.kubeconfig,
                                                   name=f"{ns}/{cluster}/{ce.ITEM}",
                                                   expect_run=getattr(args, "expect_run", "") or None, dry_run=False))
@@ -4249,7 +4265,7 @@ def cmd_eso_remove(args):
     return EXIT_OK
 
 
-def _eso_wait_gone(child, timeout, sleep=None, now=None):
+def _eso_wait_gone(child, timeout, sleep=None, now=None, only=None):
     sleep, now = sleep or time.sleep, now or time.time
     deadline = now() + timeout
     while True:
@@ -4259,6 +4275,9 @@ def _eso_wait_gone(child, timeout, sleep=None, now=None):
             if is_missing_type(err):
                 return []
             raise
+        if only is not None:
+            left = [x for x in left if ((x.get("metadata") or {}).get("namespace"),
+                                        (x.get("metadata") or {}).get("name")) in only]
         if not left or now() > deadline:
             return left
         sleep(5)
