@@ -45,6 +45,10 @@ const CapiCreate = (() => {
     'rancher-import-conflict': (v) => tr('capi.new.fd.rancher-import-conflict', v),
     'rancher-session-needed': (v) => tr('capi.new.fd.rancher-session-needed', v),
     'oidc-invalid': (v) => tr('capi.new.fd.oidc-invalid', v),
+    // 2.10.0 : External Secrets demandé à la création
+    'eso-admin-only': (v) => tr('capi.new.fd.eso-admin-only', v),
+    'eso-needs-openbao': (v) => tr('capi.new.fd.eso-needs-openbao', v),
+    'eso-no-namespace': (v) => tr('capi.new.fd.eso-no-namespace', v),
     'oidc-issuer-invalid': (v) => tr('capi.new.fd.oidc-issuer-invalid', v),
     'oidc-audience-invalid': (v) => tr('capi.new.fd.oidc-audience-invalid', v),
     'oidc-claim-invalid': (v) => tr('capi.new.fd.oidc-claim-invalid', v),
@@ -152,6 +156,7 @@ const CapiCreate = (() => {
     'oidc-admin-group-invalid': 'access', 'oidc-version-too-old': 'access', 'oidc-with-rancher': 'access',
     'offline-needs-no-fallback': 'registries', 'offline-rke2-missing': 'registries',
     'offline-rke2-version-mismatch': 'registries',
+    'eso-admin-only': 'access', 'eso-needs-openbao': 'access', 'eso-no-namespace': 'access',
   };
   // Point 198 : registres d'origine des images système de RKE2. Couper le
   // repli vers Internet pour eux n'est proposé que si un registre qui les
@@ -464,7 +469,71 @@ const CapiCreate = (() => {
           <span class="tf-label">${esc(ACCESS_LABEL[m]())}</span></label>`).join('')}
         <p class="tf-desc" data-x-wrap="rancher-note" hidden></p>
       </fieldset>
-      <fieldset class="tf-block"><legend>${esc(tr('capi.oidc.title'))}</legend>${oidcHtml(false)}</fieldset>`;
+      <fieldset class="tf-block"><legend>${esc(tr('capi.oidc.title'))}</legend>${oidcHtml(false)}</fieldset>
+      ${esoHtml(T)}`;
+  }
+
+  // --- External Secrets à la création (2.10.0, tâche 10) ------------------
+  // Option `external_secrets` : namespaces d'équipe et, au besoin, le paquet
+  // qui porte le chart `eso`. Administrateur seulement, OpenBao actif ; le
+  // serveur refuse sinon (eso-admin-only, eso-needs-openbao).
+  function esoHtml(T) {
+    const admin = can('admin');
+    const tip = admin ? tr('capi.eso.t.on') : tr('capi.eso.t.adminOnly');
+    const field = (k, label, ph, t) => `<label class="tf-field"><span class="tf-label">${esc(label)}</span>
+      <input data-e="${k}" type="text" autocomplete="off" spellcheck="false" placeholder="${esc(ph)}" class="tip" data-tip="${esc(t)}"></label>`;
+    return `<fieldset class="tf-block capi-eso" data-e-box="1"><legend>${esc(tr('capi.eso.title'))}</legend>
+        <span class="tip" data-e-wrap="1" data-tip="${esc(tip)}"><label class="tf-field tf-type-bool"><input data-e-on="1" type="checkbox"
+          title="${esc(tip)}" aria-label="${esc(tr('capi.eso.on'))}"${admin ? '' : ' disabled'}><span class="tf-label">${esc(tr('capi.eso.on'))}</span></label></span>
+        <div class="tf-args" data-e-fields="1" hidden>
+          ${field('namespaces', tr('capi.eso.f.namespaces'), 'equipe-a, equipe-b', tr('capi.eso.t.namespaces'))}
+          ${field('registry', tr('capi.eso.f.registry'), 'amorcage', tr('capi.eso.t.registry'))}
+          ${field('package', tr('capi.eso.f.package'), 'secrets', tr('capi.eso.t.package'))}
+          ${field('version', tr('capi.eso.f.version'), '1.0.0', tr('capi.eso.t.version'))}
+        </div>
+        <p class="tf-desc">${esc(T ? tr('capi.eso.noteTemplate') : tr('capi.eso.note'))}</p>
+        <p class="tf-desc capi-eso-reason" data-e-reason="1" hidden></p>
+      </fieldset>`;
+  }
+
+  /** `external_secrets` lu dans le formulaire, ou null (option absente). */
+  function readEso(root) {
+    const on = root.querySelector('[data-e-on]');
+    if (!on || !on.checked) return null;
+    const v = (k) => ((root.querySelector(`[data-e="${k}"]`) || {}).value || '').trim();
+    const out = { namespaces: v('namespaces').split(',').map(x => x.trim()).filter(Boolean) };
+    if (v('package') || v('registry') || v('version')) out.chart = { registry: v('registry'), package: v('package'), version: v('version') };
+    return out;
+  }
+  function fillEso(root, es) {
+    const on = root.querySelector('[data-e-on]');
+    if (!on) return;
+    const o = es && typeof es === 'object' ? es : (es ? {} : null);
+    on.checked = !!o;
+    const set = (k, val) => { const el = root.querySelector(`[data-e="${k}"]`); if (el) el.value = val || ''; };
+    set('namespaces', ((o && o.namespaces) || []).join(', '));
+    const ch = (o && o.chart) || {};
+    ['registry', 'package', 'version'].forEach(k => set(k, ch[k]));
+    root.querySelector('[data-e-fields]').hidden = !on.checked;
+  }
+  /** Interrupteur : champs montrés une fois coché ; grisé, la raison dite,
+   *  pour qui n'est pas administrateur ou quand OpenBao n'est pas actif. */
+  function wireEso(root, onChange) {
+    const on = root.querySelector('[data-e-on]');
+    if (!on) return;
+    on.addEventListener('change', () => { root.querySelector('[data-e-fields]').hidden = !on.checked; onChange(); });
+    root.querySelectorAll('[data-e]').forEach(el => el.addEventListener('change', onChange));
+    if (!can('admin')) return;
+    fetch('/api/secrets/status').then(r => (r.ok ? r.json() : null)).catch(() => null).then(d => {
+      if (!root.isConnected || !d || d.active !== false) return;
+      const why = tr('capi.eso.t.noOpenbao');
+      if (!on.checked) on.disabled = true;
+      on.title = why;
+      root.querySelector('[data-e-wrap]').dataset.tip = why;
+      const p = root.querySelector('[data-e-reason]');
+      p.hidden = false;
+      p.textContent = why;
+    });
   }
 
   /** Erreurs de saisie OIDC vues avant le contrôle du serveur (préfixe vide
@@ -615,6 +684,7 @@ const CapiCreate = (() => {
     show('essentials');
     wireRegistries(root, inv, false, () => later());
     wireAccess(root, () => later());
+    wireEso(root, () => later());
     // Rancher externe : seulement avec une session Rancher (point 221) ;
     // grisé, la raison dans la bulle, tant que la réponse n'est pas venue
     paintAccessSession(root, undefined);
@@ -784,7 +854,7 @@ const CapiCreate = (() => {
         const r = await fetch(`/api/capi/${enc(cluster)}/cluster-create`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
         const d = await r.json();
-        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        if (!r.ok) throw new Error(d.code && FINDINGS[d.code] ? findingText({ code: d.code, facts: {} }) : (d.error || `HTTP ${r.status}`));
         fb.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('capi.new.started', { id: d.action_id }))}</span>`;
         state.running = true;
         follow(d.action_id, d.cluster);
@@ -869,6 +939,8 @@ const CapiCreate = (() => {
     }
     const oidc = readOidc(root);
     if (oidc) b.oidc = oidc;
+    const es = readEso(root);
+    if (es) b.external_secrets = es;
     if (!b.offline) { delete b.offline_artifacts; delete b.offline_packages; }
     return b;
   }
@@ -1092,6 +1164,8 @@ const CapiCreate = (() => {
       note.textContent = findingText({ code: 'rancher-import-conflict', facts: {} });
     }
     fillOidc(root, sp.oidc && typeof sp.oidc === 'object' ? sp.oidc : null);
+    fillEso(root, sp.external_secrets);
+    wireEso(root, () => {});
     const off = root.querySelector('[data-x="offline"]');
     if (off) off.dispatchEvent(new Event('change'));
     return { read: () => { const b = readBody(root); PLAN_FIELDS.forEach(k => delete b[k]); return b; } };

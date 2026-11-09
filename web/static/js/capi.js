@@ -859,10 +859,10 @@ const CAPI = (() => {
 
   // -------------------------------------------------------------------------
   // 2.2.0 : onglets de Cluster API (#automation/capi/<onglet>), dans l'ordre
-  // Clusters (défaut), Services, GitOps (2.8.0), Registres et Artefacts
+  // Clusters (défaut), Services, GitOps (2.8.0), Secrets externes (2.10.0), Registres et Artefacts
   // (2.6.0), Historique, Installation
   // -------------------------------------------------------------------------
-  const TABS = ['clusters', 'services', 'gitops', 'registries', 'artefacts', 'history', 'installation'];
+  const TABS = ['clusters', 'services', 'gitops', 'secrets', 'registries', 'artefacts', 'history', 'installation'];
   // Anciens noms internes (onglets d'avant la 2.2.0, et « Création de
   // clusters » de la v1.53.0, devenue une fenêtre de Clusters)
   const OLD_TABS = { k8s: 'clusters', install: 'installation' };
@@ -897,6 +897,7 @@ const CAPI = (() => {
     if (tab === 'clusters') { refreshK8sClustersPanel(); paintStackBanner(); }
     else if (tab === 'services') { if (window.CapiServices) CapiServices.start(); }
     else if (tab === 'gitops') { if (window.CapiGitops) CapiGitops.start(); }
+    else if (tab === 'secrets') { if (window.CapiEso) CapiEso.start(); }
     else if (tab === 'registries') { if (window.Registries) Registries.start(); }
     else if (tab === 'artefacts') { if (window.Artefacts) Artefacts.start(); }
     else if (tab === 'history') capiHistory.render();
@@ -926,6 +927,11 @@ const CAPI = (() => {
       case 'capi-rancher-unimport': return tr('capi.hist.kind.rancherUnimport');
       case 'capi-gitops': return tr('capi.hist.kind.gitops');
       case 'capi-gitops-remove': return tr('capi.hist.kind.gitopsRemove');
+      // 2.10.0 : External Secrets
+      case 'capi-eso': return tr('capi.hist.kind.eso');
+      case 'capi-eso-remove': return tr('capi.hist.kind.esoRemove');
+      case 'capi-eso-namespace': return tr('capi.hist.kind.esoNamespace');
+      case 'capi-eso-secret': return tr('capi.hist.kind.esoSecret');
       case 'capi-renew': return tr('capi.hist.kind.renew');
       case 'capi-renew-abandon': return tr('capi.hist.kind.renewAbandon');
       default: return verb;

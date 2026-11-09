@@ -96,6 +96,8 @@ SCREENS = [
      '#tab-automation .capi-tab-content[data-capi-tab="services"].active', ()),
     ("(new) Cluster API > GitOps", "#automation/capi/gitops", "automation",
      '#tab-automation .capi-tab-content[data-capi-tab="gitops"].active', ()),
+    ("(new) Cluster API > External Secrets", "#automation/capi/secrets", "automation",
+     '#tab-automation .capi-tab-content[data-capi-tab="secrets"].active', ()),
     ("(new) Cluster API > Registries", "#automation/capi/registries", "automation",
      '#tab-automation .capi-tab-content[data-capi-tab="registries"].active', ()),
     ("(new) Cluster API > Artefacts", "#automation/capi/artefacts", "automation",

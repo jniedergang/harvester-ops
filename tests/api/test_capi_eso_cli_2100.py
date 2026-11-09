@@ -1,0 +1,397 @@
+"""2.10.0 (tâche 10) : `harvester-capi eso-check`, `eso-deploy`,
+`eso-remove`, `eso-status`. Ordre de pose (sonde, chart, authentification
+dans OpenBao, objets du magasin, `Ready`), retrait sans perte des Secrets
+(point 300), état sans valeur."""
+
+import contextlib
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT / "bin" / "lib"))
+
+import capi_services as sv  # noqa: E402
+import capi_stack as cs  # noqa: E402
+import child_eso as ce  # noqa: E402
+
+NS, CL, H = "c210", "c210", "harvlab2"
+KEY = ce.cluster_key(H, NS, CL)
+CID = "abc123def456"
+LISTEN = "172.16.1.11:8212"
+WITNESS = "valeur-temoin-2100"
+JWKS = {"keys": [{"kty": "RSA", "kid": "k8s-1", "n": "AQAB", "e": "AQAB"}]}
+STORE = {"server": f"https://{LISTEN}", "ca_pem": "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----\n",
+         "kv_mount": "harvester-ops", "prefix": f"consoles/{CID}", "jwt_mount": f"jwt-hops-{CID}-eso-{KEY}",
+         "audience": f"hops-openbao-{CID}"}
+
+
+@pytest.fixture(scope="module")
+def cli():
+    s = importlib.util.spec_from_file_location("harvester_capi_eso", ROOT / "bin" / "harvester-capi.py")
+    mod = importlib.util.module_from_spec(s)
+    s.loader.exec_module(mod)
+    return mod
+
+
+def capi_cluster():
+    return {"metadata": {"namespace": NS, "name": CL, "labels": {}},
+            "spec": {"topology": {"variables": [{"name": "vmNetworks", "value": ["default/lab-net"]},
+                                                {"name": "gateway", "value": "172.16.2.1"},
+                                                {"name": "subnetMask", "value": "255.255.255.0"}]}}}
+
+
+def eso_hcp(locked=True):
+    values = ce.chart_values() if locked else {"processClusterStore": True}
+    return {"metadata": {"name": "eso", "namespace": NS}, "spec": {"valuesTemplate": yaml.safe_dump(values)}}
+
+
+RELEASE = {"metadata": {"namespace": NS, "ownerReferences": [{"kind": "HelmChartProxy", "name": "eso"}]},
+           "spec": {"clusterRef": {"name": CL}}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+
+
+class Mgmt:
+    def __init__(self, objs, releases=()):
+        self.objs = dict(objs)
+        self.releases = list(releases)
+        self.kubeconfig = "/nonexistent"
+
+    def get(self, kind, ns, name):
+        return self.objs.get((kind, ns, name))
+
+    def list(self, kind, ns=None, selector=None):
+        if kind == sv.K_HRP:
+            return self.releases
+        return [o for (k, s, _), o in self.objs.items() if k == kind and (ns is None or s == ns)]
+
+
+def world_ok(locked=True, chart=True):
+    objs = {(cs.K_CLUSTER, NS, CL): capi_cluster()}
+    if chart:
+        objs[(sv.K_HCP, NS, "eso")] = eso_hcp(locked)
+    return Mgmt(objs, [RELEASE] if chart else [])
+
+
+class Child:
+    def __init__(self, namespaces=("team-a", "team-b"), stores_ready=True, ess=(), secrets=(), stuck=False):
+        self.namespaces = {n: {"metadata": {"name": n, "labels": {}}} for n in namespaces}
+        self.stores_ready, self.ess, self.secrets, self.stuck = stores_ready, list(ess), list(secrets), stuck
+        self.patches, self.deleted, self.events = [], [], None
+
+    def get(self, kind, ns, name):
+        return self.namespaces.get(name) if kind == "Namespace" else None
+
+    def run(self, *a, **kw):
+        if a[-1].endswith("openid-configuration"):
+            return json.dumps({"issuer": "https://kubernetes.default.svc.cluster.local"})
+        return json.dumps(JWKS)
+
+    def list(self, kind, ns=None, selector=None):
+        if kind == "Namespace":
+            return [n for n in self.namespaces.values()
+                    if not selector or (n["metadata"]["labels"].get(ce.NS_LABEL) == "on")]
+        if kind == "secretstores.external-secrets.io":
+            return [{"metadata": {"namespace": n, "name": ce.STORE},
+                     "status": {"conditions": [{"type": "Ready", "status": "True" if self.stores_ready else "False",
+                                                "reason": "Valid" if self.stores_ready else "InvalidProviderConfig"}]}}
+                    for n in self.namespaces]
+        if kind == "externalsecrets.external-secrets.io":
+            return list(self.ess)
+        if kind == "secrets":
+            return [x for x in self.secrets if x["metadata"]["namespace"] == ns]
+        return []
+
+    def patch(self, kind, ns, name, patch):
+        self.patches.append((kind, ns, name, patch))
+        if kind == "Namespace":
+            self.namespaces[name]["metadata"]["labels"].update(patch["metadata"]["labels"])
+            self.namespaces[name]["metadata"]["labels"] = {k: v for k, v in
+                                                            self.namespaces[name]["metadata"]["labels"].items() if v}
+        if kind == "externalsecrets.external-secrets.io" and self.stuck == "until-finalizers":
+            self.ess = [e for e in self.ess if e["metadata"]["name"] != name]
+
+    def delete(self, kind, ns, name, **kw):
+        self.deleted.append((kind, ns, name))
+        if kind == "externalsecrets.external-secrets.io" and not self.stuck:
+            self.ess = [e for e in self.ess if e["metadata"]["name"] != name]
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch, cli):
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setenv("HARVESTER_OPS_STATE_DIR", str(state))
+    monkeypatch.setattr(cli.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cli, "_state", lambda: state)
+    monkeypatch.setattr(cli, "ESO_REMOVE_WAIT", 0)
+    monkeypatch.setattr(cli, "ESO_STUCK_WAIT", 0)
+    box = {"child": Child(), "events": [], "delivered": [], "probe": {"ok": True}, "secrets_out": None}
+
+    def settings(**kw):
+        doc = {"mode": "b1", "addr": "https://127.0.0.1:8210", "console_id": CID, "prefix": f"consoles/{CID}",
+               "eso": {"listener": LISTEN, "address": LISTEN, "clusters": {}}}
+        doc.update(kw)
+        (state / "secrets-settings.json").write_text(json.dumps(doc))
+    settings()
+
+    def secrets_tool(argv, private):
+        box["events"].append(("secrets", list(argv), dict(private or {})))
+        return box["secrets_out"] or (0, {"ok": True, "applied": True, "commands": None, "store": dict(STORE)})
+
+    def probe(state_, harvester, kube, network, endpoints, image):
+        box["events"].append(("probe", network, list(endpoints)))
+        if box["probe"] is None:
+            return {"status": "unchecked", "reason": "image-missing", "results": {}}
+        return {"status": "probed", "results": {endpoints[0]: dict(box["probe"], failed=None if box["probe"]["ok"]
+                                                                    else "tcp")}}
+
+    def run(mgmt, argv, spec=None):
+        if spec is not None:
+            p = tmp_path / "spec.json"
+            p.write_text(json.dumps(spec))
+            argv = argv + ["--spec", str(p)]
+        monkeypatch.setattr(cli, "kube_from", lambda a: (mgmt, "/x", None))
+
+        @contextlib.contextmanager
+        def session(k, ns, c):
+            yield "/nonexistent"
+        monkeypatch.setattr(cli.ca, "session", session)
+        monkeypatch.setattr(cli, "Kube", lambda path, **kw: box["child"])
+        monkeypatch.setattr(cli, "SECRETS_RUNNER", secrets_tool)
+        monkeypatch.setattr(cli, "VM_PROBE", probe)
+
+        def deliver(*a, **k):
+            box["events"].append(("deliver", a[3]))
+            box["delivered"].append((a, k))
+            return 0
+        monkeypatch.setattr(cli, "deliver", deliver)
+        return cli.main(argv + ["--harvester-name", H])
+    return {"run": run, "box": box, "settings": settings}
+
+
+def req(**over):
+    r = {"cluster": f"{NS}/{CL}", "namespaces": ["team-a", "team-b"], "by": "alice", "role": "admin"}
+    r.update(over)
+    return r
+
+
+# ---------------------------------------------------------------------------
+# Constats
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("mgmt,over,settings,code", [
+    (world_ok, {}, {"mode": "local"}, "eso-needs-openbao"),
+    (world_ok, {"role": "operator"}, {}, "eso-admin-only"),
+    (lambda: world_ok(chart=False), {}, {}, "eso-chart-missing"),
+    (lambda: world_ok(locked=False), {}, {}, "eso-chart-not-locked"),
+    (lambda: Mgmt({}), {}, {}, "eso-cluster-missing"),
+    (world_ok, {"namespaces": []}, {}, "eso-no-namespace"),
+    (world_ok, {}, {"eso": {"listener": None, "address": None, "clusters": {}}}, "eso-listener-needed"),
+    (world_ok, {}, {"mode": "a", "addr": "http://127.0.0.1:8200"}, "eso-openbao-not-https"),
+])
+def test_check_findings(cli, world, capsys, mgmt, over, settings, code):
+    world["settings"](**settings)
+    assert world["run"](mgmt(), ["eso-check", "--kubeconfig", "/x"], req(**over)) == 2
+    assert code in [f["code"] for f in json.loads(capsys.readouterr().out)["findings"]]
+
+
+def test_check_refuses_a_system_namespace(cli, world, capsys):
+    assert world["run"](world_ok(), ["eso-check", "--kubeconfig", "/x"], req(namespaces=["kube-system"])) == 2
+    assert "system namespace" in capsys.readouterr().err
+
+
+def test_check_probes_openbao_from_the_vm_network(cli, world, capsys):
+    """Mode A : la sonde juge l'adresse d'OpenBao depuis le réseau des VMs."""
+    world["settings"](mode="a", addr="https://bao.example:8200")
+    world["box"]["probe"] = {"ok": False}
+    assert world["run"](world_ok(), ["eso-check", "--kubeconfig", "/x"], req()) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert [f["code"] for f in out["findings"]] == ["eso-openbao-unreachable"]
+    assert world["box"]["events"] == [("probe", "default/lab-net", ["bao.example:8200"])]
+    world["box"]["probe"] = None
+    assert world["run"](world_ok(), ["eso-check", "--kubeconfig", "/x"], req()) == 0
+    assert [f["level"] for f in json.loads(capsys.readouterr().out)["findings"]] == ["warn"]
+
+
+def test_check_b1_listener_off_is_a_warning(cli, world, capsys):
+    world["settings"](eso={"listener": None, "address": LISTEN, "clusters": {}})
+    assert world["run"](world_ok(), ["eso-check", "--kubeconfig", "/x"], req()) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [(f["code"], f["level"]) for f in out["findings"]] == [("eso-openbao-unchecked", "warn")]
+    assert out["endpoint"] == f"https://{LISTEN}" and out["key"] == KEY
+
+
+# ---------------------------------------------------------------------------
+# Pose
+# ---------------------------------------------------------------------------
+def test_deploy_b1_in_order(cli, world, capsys):
+    box = world["box"]
+    assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x"], req()) == 0
+    kinds = [e[0] for e in box["events"]]
+    assert kinds == ["secrets", "probe", "deliver"]                # authentification, sonde, magasins
+    _s, argv, private = box["events"][0]
+    assert argv == ["eso", "add", "--cluster", f"{H}/{NS}/{CL}", "--namespace", "team-a", "--namespace", "team-b",
+                    "--node-cidr", "172.16.2.0/24"]
+    assert json.loads(private["eso_jwks"]) == JWKS and private["eso_issuer"].startswith("https://kubernetes")
+    assert box["events"][1] == ("probe", "default/lab-net", [LISTEN])
+    (args, _kw), = box["delivered"]
+    assert args[1:6] == (NS, CL, "eso", "harvester-ops", "eso")
+    assert args[6] == ce.store_objects(["team-a", "team-b"], STORE["server"], STORE["kv_mount"], STORE["jwt_mount"],
+                                       STORE["audience"], STORE["ca_pem"])
+    assert args[8] == "alice"
+    child = box["child"]
+    assert {n: d["metadata"]["labels"].get(ce.NS_LABEL) for n, d in child.namespaces.items()} == \
+        {"team-a": "on", "team-b": "on"}
+    assert "2 store(s) ready" in capsys.readouterr().err
+
+
+def test_deploy_unlabels_a_namespace_left_out(cli, world, capsys):
+    child = world["box"]["child"]
+    child.namespaces["team-b"]["metadata"]["labels"][ce.NS_LABEL] = "on"
+    assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x"], req(namespaces=["team-a"])) == 0
+    assert child.namespaces["team-b"]["metadata"]["labels"] == {}
+    assert child.namespaces["team-a"]["metadata"]["labels"] == {ce.NS_LABEL: "on"}
+
+
+def test_deploy_refuses_a_missing_namespace_before_openbao(cli, world, capsys):
+    world["box"]["child"] = Child(namespaces=("team-a",))
+    assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x"], req()) == 2
+    assert "eso-namespace-missing" in capsys.readouterr().err
+    assert world["box"]["events"] == []
+
+
+def test_deploy_b1_unreachable_listener_stops_before_the_stores(cli, world, capsys):
+    world["box"]["probe"] = {"ok": False}
+    assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x"], req()) == 2
+    assert [e[0] for e in world["box"]["events"]] == ["secrets", "probe"]
+    assert "eso-openbao-unreachable" in capsys.readouterr().err
+
+
+def test_deploy_mode_a_hands_the_commands_and_does_not_wait(cli, world, capsys):
+    world["settings"](mode="a", addr="https://bao.example:8200")
+    world["box"]["secrets_out"] = (0, {"ok": True, "applied": False, "commands": ["bao auth enable ..."],
+                                       "store": dict(STORE, server="https://bao.example:8200")})
+    world["box"]["child"] = Child(stores_ready=False)
+    assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x"], req()) == 0
+    o = capsys.readouterr()
+    assert json.loads(o.out.strip().splitlines()[-1])["commands"] == ["bao auth enable ..."]
+    assert "OpenBao administrator" in o.err
+    assert [e[0] for e in world["box"]["events"]] == ["probe", "secrets", "deliver"]
+
+
+def test_deploy_stores_not_ready_fail_with_the_reason(cli, world, capsys):
+    world["box"]["child"] = Child(stores_ready=False)
+    assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x", "--timeout", "1"], req()) == 1
+    assert "InvalidProviderConfig" in capsys.readouterr().err
+
+
+def test_deploy_openbao_refusal_stops(cli, world, capsys):
+    world["box"]["secrets_out"] = (2, {"ok": False, "code": "eso-listener-needed", "error": "no address"})
+    assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x"], req()) == 1
+    assert "eso-listener-needed" in capsys.readouterr().err and world["box"]["delivered"] == []
+
+
+def test_deploy_with_chart_installs_the_service_first(cli, world, capsys, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "cmd_service_deploy", lambda a: seen.append(json.loads(Path(a.spec).read_text())) or 0)
+    monkeypatch.setattr(cli, "service_source", lambda k, s, h, read_creds=False: (s, [], None))
+    chart = {"registry": "amorcage", "package": "eso-pack", "version": "2.14.0"}
+    assert world["run"](world_ok(chart=False), ["eso-deploy", "--kubeconfig", "/x"], req(chart=chart)) == 0
+    assert seen == [{"cluster": f"{NS}/{CL}", "name": "eso", "source": dict(chart, item="eso"), "by": "alice"}]
+
+
+# ---------------------------------------------------------------------------
+# Retrait (point 300)
+# ---------------------------------------------------------------------------
+def _es(ns, name, uid):
+    return {"metadata": {"namespace": ns, "name": name, "uid": uid, "finalizers": [ce.FINALIZER]},
+            "spec": {"data": [{"remoteRef": {"key": WITNESS}}]}}
+
+
+def _sec(ns, name, owner_uid):
+    return {"metadata": {"namespace": ns, "name": name, "ownerReferences": [
+        {"apiVersion": "external-secrets.io/v1", "kind": "ExternalSecret", "uid": owner_uid, "name": name}]}}
+
+
+@pytest.fixture
+def removed(cli, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "cmd_manifest_remove", lambda a: calls.append(("manifest", a.name, a.expect_run)) or 0)
+    monkeypatch.setattr(cli, "cmd_service_remove", lambda a: calls.append(("service", a.name)) or 0)
+    return calls
+
+
+def test_remove_keeps_the_synced_secrets_then_removes_in_order(cli, world, capsys, removed):
+    box = world["box"]
+    box["child"] = Child(ess=[_es("team-a", "db", "u1")], secrets=[_sec("team-a", "db", "u1"),
+                                                                  _sec("team-a", "other", "u-x")])
+    assert world["run"](world_ok(), ["eso-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}", "--by", "alice"]) == 0
+    child = box["child"]
+    assert child.patches[0] == ("secrets", "team-a", "db", {"metadata": {"ownerReferences": None}})
+    assert not [p for p in child.patches if p[2] == "other"]
+    assert child.deleted == [("externalsecrets.external-secrets.io", "team-a", "db")]
+    assert removed == [("manifest", f"{NS}/{CL}/eso", None), ("service", f"{NS}/eso")]
+    assert box["events"][-1] == ("secrets", ["eso", "remove", "--cluster", f"{H}/{NS}/{CL}"], {})
+    assert WITNESS not in capsys.readouterr().err
+
+
+def test_remove_keep_chart(cli, world, capsys, removed):
+    assert world["run"](world_ok(), ["eso-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}", "--keep-chart"]) == 0
+    assert removed == [("manifest", f"{NS}/{CL}/eso", None)]
+
+
+def test_remove_stuck_finalizers_are_taken_off(cli, world, capsys, removed):
+    world["box"]["child"] = Child(ess=[_es("team-a", "db", "u1")], stuck="until-finalizers")
+    assert world["run"](world_ok(), ["eso-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}"]) == 0
+    assert ("externalsecrets.external-secrets.io", "team-a", "db",
+            {"metadata": {"finalizers": None}}) in world["box"]["child"].patches
+
+
+def test_remove_stuck_for_good(cli, world, capsys, removed):
+    world["box"]["child"] = Child(ess=[_es("team-a", "db", "u1")], stuck=True)
+    assert world["run"](world_ok(), ["eso-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}"]) == 1
+    assert "eso-remove-stuck" in capsys.readouterr().err and removed == []
+
+
+def test_remove_is_for_administrators(cli, world, capsys, removed):
+    assert world["run"](world_ok(), ["eso-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}",
+                                     "--role", "operator"]) == 2
+    assert removed == [] and world["box"]["events"] == []
+
+
+# ---------------------------------------------------------------------------
+# État
+# ---------------------------------------------------------------------------
+def test_status_without_any_value(cli, world, capsys):
+    world["settings"](eso={"listener": LISTEN, "clusters": {KEY: {"mount": STORE["jwt_mount"], "keys_sha256": "ab",
+                                                                    "applied": True, "namespaces": ["team-a"]}}})
+    es = _es("team-a", "db", "u1")
+    es["status"] = {"refreshTime": "2026-11-08T10:00:00Z", "conditions": [{"type": "Ready", "status": "True",
+                                                                           "reason": "SecretSynced"}]}
+    es["data"] = {"password": WITNESS}
+    world["box"]["child"] = Child(ess=[es])
+    world["box"]["child"].namespaces["team-a"]["metadata"]["labels"][ce.NS_LABEL] = "on"
+    assert world["run"](world_ok(), ["eso-status", "--kubeconfig", "/x", "--name", f"{NS}/{CL}", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert WITNESS not in out
+    doc = json.loads(out)
+    assert doc["key"] == KEY and doc["chart"] == {"present": True, "ready": True, "locked": True}
+    assert doc["namespaces"] == ["team-a"] and doc["labelled"] == ["team-a"]
+    assert doc["externalsecrets"][0]["reason"] == "SecretSynced"
+    assert doc["example"]["spec"]["refreshInterval"] == "1h"
+    assert doc["endpoint"] == f"https://{LISTEN}"
+
+
+def test_deleting_the_child_cluster_removes_its_eso_authentication(cli, world, capsys, monkeypatch):
+    """Tâche 9 : « montage d'un cluster supprimé retiré »."""
+    world["settings"](eso={"listener": LISTEN, "clusters": {KEY: {"mount": STORE["jwt_mount"]}}})
+    monkeypatch.setattr(cli, "remove_cluster", lambda kube, ns, name, timeout: 0)
+    assert world["run"](world_ok(), ["delete", "--kubeconfig", "/x", "--name", f"{NS}/{CL}"]) == 0
+    assert world["box"]["events"] == [("secrets", ["eso", "remove", "--cluster", f"{H}/{NS}/{CL}"], {})]
+    world["box"]["events"].clear()
+    world["settings"](eso={"listener": LISTEN, "clusters": {}})
+    assert world["run"](world_ok(), ["delete", "--kubeconfig", "/x", "--name", f"{NS}/{CL}"]) == 0
+    assert world["box"]["events"] == []

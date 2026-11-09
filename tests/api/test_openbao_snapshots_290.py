@@ -560,7 +560,9 @@ def test_restore_reads_a_root_squashed_console_dir_under_the_console_account(env
     l'identité effective du compte de la console (jamais celui de l'agent)."""
     install(env)
     d = _console_dir(env, tmp_path)
-    f = _snap(d, "openbao-20261108T023000Z-hops-20261108-1.snap")
+    # clé de descellement du jour de l'installation (le nom figé échouait
+    # dès le lendemain de son écriture)
+    f = _snap(d, f"openbao-20261108T023000Z-{env['agent']().agent_state()['current_key']}.snap")
     real_open_rel = hsa.sf.SafeDir.open_rel
     state = {"console": False, "used": 0}
 

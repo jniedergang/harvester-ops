@@ -23202,6 +23202,244 @@ def api_capi_gitops_list(cluster):
     return jsonify(res[0])
 
 
+# ---------------------------------------------------------------------------
+# 2.10.0 (tâche 10) : External Secrets Operator dans un cluster enfant
+# (décision 139, points 293 à 307). Tout passe par harvester-capi (parité) ;
+# poser, activer un namespace, retirer : administrateur (point 293) et
+# droit sur le cluster enfant ; écrire une valeur : opérateur avec le droit
+# d'administrer le cluster enfant, avec le jeton de la personne (classe
+# `eso`), jamais relue ni réaffichée.
+# ---------------------------------------------------------------------------
+ESO_KEYS = {"namespaces", "chart", "dry_run"}
+ESO_SECRET_KEYS = {"namespace", "name", "fields"}
+
+
+def _eso_names_refusal(*names):
+    if not all(isinstance(x, str) and _K8S_NAME_RE.match(x) for x in names):
+        return _artefact_error("invalid name", 400)
+    return None
+
+
+def _eso_admin_refusal():
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["admin"]:
+        return _artefact_error("External Secrets are set by an administrator", 403, "eso-admin-only")
+    return None
+
+
+def _eso_status_of(cluster, namespace, name):
+    """État ESO d'un cluster enfant (outil, lecture seule) : (doc, None) ou
+    (None, réponse)."""
+    cmd, err = _capi_base(cluster, "eso-status")
+    if err:
+        return None, err
+    res, err = _capi_run_json(cmd + ["--name", f"{namespace}/{name}", "--json"], timeout=90)
+    if err:
+        return None, err
+    return res[0], None
+
+
+def _eso_launch(cluster, namespace, name, namespaces, chart=None, label=None):
+    spec = {"cluster": f"{namespace}/{name}", "namespaces": list(namespaces), "by": current_user() or "",
+            "role": current_role() or "viewer"}
+    if chart:
+        spec["chart"] = chart
+    cmd, err = _capi_child_base(cluster, "eso-deploy", namespace, name)
+    if err:
+        return err
+    run, err = _capi_action(cluster, label or f"capi-eso:{namespace}/{name}", cmd, spec=spec)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}", "namespaces": list(namespaces)}), 202
+
+
+@app.route("/api/capi/<cluster>/eso/<namespace>/<name>")
+@requires_auth
+def api_capi_eso_status(cluster, namespace, name):
+    """État ESO d'un cluster enfant, sans aucune valeur."""
+    bad = _eso_names_refusal(namespace, name)
+    if bad:
+        return bad
+    doc, err = _eso_status_of(cluster, namespace, name)
+    return err or jsonify(doc)
+
+
+@app.route("/api/capi/<cluster>/eso/<namespace>/<name>", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_eso_deploy(cluster, namespace, name):
+    """Pose ESO (chart s'il est demandé, authentification dans OpenBao,
+    magasins des namespaces activés) : action suivie `capi-eso:`.
+    `dry_run` : les constats de la fenêtre avant son bouton."""
+    import capi_cluster as _ccm
+    bad = _eso_names_refusal(namespace, name)
+    if bad:
+        return bad
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - ESO_KEYS):
+        return _artefact_error(f"{k}: unknown key", 400)
+    try:
+        es = _ccm.normalize_external_secrets({k: body[k] for k in ("namespaces", "chart") if k in body}) \
+            or {"namespaces": []}
+    except ValueError as e:
+        return _artefact_error(str(e).replace("external_secrets.", ""), 400)
+    if body.get("dry_run") is True:
+        cmd, err = _capi_base(cluster, "eso-check")
+        if err:
+            return err
+        spec = {"cluster": f"{namespace}/{name}", "namespaces": es["namespaces"], "by": current_user() or "",
+                "role": current_role() or "viewer"}
+        if es.get("chart"):
+            spec["chart"] = es["chart"]
+        res, err = _capi_run_json(cmd + ["--spec", "-"], spec=spec, timeout=150)
+        if err:
+            return err
+        out, rc = res
+        found = list(out.get("findings") or [])
+        ok, why = _child_admin_allowed(_kubectl_for_cluster(cluster), namespace, name)
+        if not ok and not any(f.get("code") == CHILD_ADMIN_REQUIRED for f in found):
+            found.append({"code": CHILD_ADMIN_REQUIRED if ok is False else "child-admin-unknown",
+                          "level": "block", "facts": {"cluster": f"{namespace}/{name}", "message": why}})
+        return jsonify(dict(out, findings=found, blocked=rc != 0 or bool(out.get("blocked")) or not ok))
+    refused = _eso_admin_refusal()
+    if refused:
+        return refused
+    if not es["namespaces"]:
+        return _artefact_error("at least one team namespace", 400, "eso-no-namespace")
+    return _eso_launch(cluster, namespace, name, es["namespaces"], es.get("chart"))
+
+
+@app.route("/api/capi/<cluster>/eso/<namespace>/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_capi_eso_remove(cluster, namespace, name):
+    """Retire ESO (point 300) : Secrets synchronisés gardés à leur dernière
+    valeur. `?keep_chart=1` laisse le chart `eso`."""
+    bad = _eso_names_refusal(namespace, name)
+    if bad:
+        return bad
+    refused = _eso_admin_refusal()
+    if refused:
+        return refused
+    cmd, err = _capi_child_base(cluster, "eso-remove", namespace, name)
+    if err:
+        return err
+    args = ["--name", f"{namespace}/{name}", "--role", current_role() or "viewer", "--by", current_user() or ""]
+    if request.args.get("keep_chart") in ("1", "true"):
+        args.append("--keep-chart")
+    run, err = _capi_action(cluster, f"capi-eso-remove:{namespace}/{name}", cmd + args)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{namespace}/{name}"}), 202
+
+
+@app.route("/api/capi/<cluster>/eso/<namespace>/<name>/namespaces/<team>", methods=["POST", "DELETE"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_eso_namespace(cluster, namespace, name, team):
+    """Active (POST) ou retire (DELETE) un namespace d'équipe : rôle `eso`
+    réécrit avec la liste des namespaces activés (décision 304 B), magasin
+    posé ou retiré. Action suivie `capi-eso-namespace:`."""
+    import child_eso as _ce
+    bad = _eso_names_refusal(namespace, name, team)
+    if bad:
+        return bad
+    refused = _eso_admin_refusal()
+    if refused:
+        return refused
+    found = _ce.check_namespace(team)
+    if found:
+        return _artefact_error(f"{team}: not a team namespace", 400, found[0]["code"])
+    doc, err = _eso_status_of(cluster, namespace, name)
+    if err:
+        return err
+    if not doc.get("auth"):
+        return _artefact_error("External Secrets are not set on this child cluster", 409, "eso-not-set")
+    have = list(doc.get("namespaces") or [])
+    if request.method == "POST":
+        want = sorted(set(have) | {team})
+    else:
+        want = [n for n in have if n != team]
+        if not want:
+            return _artefact_error("the last namespace: remove External Secrets instead", 409, "eso-last-namespace")
+    if want == sorted(have):
+        return jsonify({"unchanged": True, "namespaces": have}), 200
+    verb = "add" if request.method == "POST" else "remove"
+    return _eso_launch(cluster, namespace, name, want, label=f"capi-eso-namespace:{namespace}/{name}:{verb}:{team}")
+
+
+@app.route("/api/capi/<cluster>/eso/<namespace>/<name>/secrets", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_capi_eso_secret(cluster, namespace, name):
+    """Écrit une valeur lue par ESO (classe `eso`, `eso/<clé>/<ns>/<nom>`)
+    avec le jeton de la personne (décision 312 : sans lecture préalable,
+    auteur gardé dans les métadonnées). Champs remplacés ensemble ; jamais
+    relus, jamais rendus. Action suivie `capi-eso-secret:`."""
+    import child_eso as _ce
+    bad = _eso_names_refusal(namespace, name)
+    if bad:
+        return bad
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK["operator"]:
+        return jsonify({"error": "forbidden", "required": "operator"}), 403
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _artefact_error("a JSON object is expected", 400)
+    for k in sorted(set(body) - ESO_SECRET_KEYS):
+        return _artefact_error(f"{k}: unknown key", 400)
+    team, sname = body.get("namespace"), body.get("name")
+    try:
+        fields = _ce.check_fields(body.get("fields"))
+        path = _ce.value_path(_ce.cluster_key(cluster, namespace, name), team, sname)
+    except ValueError as e:
+        return _artefact_error(str(e), 400)
+    if not _sst.openbao_active(_secrets_settings()):
+        return _artefact_error("External Secrets need OpenBao", 409, "eso-needs-openbao")
+    key = _ce.cluster_key(cluster, namespace, name)
+    entry = (((_secrets_settings().get("eso") or {}).get("clusters") or {}).get(key)) or {}
+    if team not in (entry.get("namespaces") or []):
+        return _artefact_error(f"{team} is not an enabled namespace of {namespace}/{name}", 409,
+                               "eso-namespace-not-enabled")
+    refusal = _child_admin_refusal(_kubectl_for_cluster(cluster), namespace, name)
+    if refusal:
+        return refusal
+    identity = _secret_identity("eso")
+    label = f"capi-eso-secret:{namespace}/{name}:{team}/{sname}"
+    run = ActionRun(uuid.uuid4().hex[:12], label, cluster, ["console", "eso-secret"], dry_run=False)
+    run.result = {"by": current_user() or "console", "fields": sorted(fields)}
+    run.required_role = "operator"
+    run.secret_identity = identity.kind
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    code, status = None, 200
+    try:
+        version = _sst.store().put_write_only("eso", path, fields, identity=identity, action=run.id)
+        meta_err = getattr(_sst.store(), "last_metadata_error", None)
+        msg = f"{team}/{sname}: version {version}, field(s) {', '.join(sorted(fields))}" + (
+            f" (author not recorded: {meta_err})" if meta_err else "")
+        run.emit({"type": "step", "step_id": "write", "status": "done", "message": msg, "ts": time.time()})
+        run.status, run.exit_code = "done", 0
+    except _sst.SecretError as e:
+        code = e.code
+        status = 403 if e.code in ("openbao-denied", "openbao-person-login-failed", "openbao-person-no-token",
+                                   "openbao-person-expired") else 503
+        run.emit({"type": "step", "step_id": "write", "status": "error", "message": e.code, "ts": time.time()})
+        run.status, run.exit_code = "error", 1
+        version = None
+    finally:
+        fields = None
+        body = None
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code, "ts": time.time()})
+    run.close()
+    if code:
+        return jsonify({"error": "the value was not written", "code": code, "action_id": run.id}), status
+    return jsonify({"action_id": run.id, "version": version, "identity": identity.kind}), 200
+
+
 RENEW_KEYS = {"what", "registries", "oidc", "dry_run", "timeout", "mode"}
 RENEW_PREFIX = "capi-renew:"
 RENEW_ABANDON_PREFIX = "capi-renew-abandon:"
@@ -23381,6 +23619,14 @@ def api_capi_cluster_create(cluster):
     spec, err = _capi_spec_body()
     if err:
         return err
+    if spec.get("external_secrets"):
+        # 2.10.0 (point 293) : External Secrets posé par un administrateur
+        # seulement, avec OpenBao actif
+        refused = _eso_admin_refusal()
+        if refused:
+            return refused
+        if not _sst.openbao_active(_secrets_settings()):
+            return _artefact_error("External Secrets need OpenBao", 409, "eso-needs-openbao")
     errs = _cc.validate(spec)
     if errs:
         return jsonify({"error": "invalid request", "invalid": dict(errs)}), 400
@@ -34891,6 +35137,54 @@ def _person_keys_changed(s):
                   if rid in servers and sha != servers[rid].get("keys_sha256"))
 
 
+ESO_KEYS_CHECK_S = 3600
+_ESO_KEYS = {"at": 0.0, "seen": {}}            # <harvester>/<ns>/<c> -> changées ?
+
+
+def _eso_keys_tick(now=None, runner=None):
+    """Chaque heure (point « Clés du cluster enfant ») : empreinte du JWKS de
+    chaque cluster enfant qui a ESO relue par `harvester-secrets eso keys`
+    avec le kubeconfig de la console (lecture seule, aucune action) ;
+    changement : `eso-keys-changed` au bandeau et dans la carte."""
+    now = time.time() if now is None else now
+    if now - _ESO_KEYS["at"] < ESO_KEYS_CHECK_S:
+        return dict(_ESO_KEYS["seen"])
+    _ESO_KEYS["at"] = now
+    seen = {}
+    for _k, e in sorted(_oj.eso_settings_of(_secrets_settings())["clusters"].items()):
+        ref = f"{e.get('harvester')}/{e.get('namespace')}/{e.get('cluster')}"
+        if not ESO_CLUSTER_REF_RE.match(ref):
+            continue
+        kc = _deploy_console_kc(e["harvester"])
+        if not kc:
+            continue
+        argv = [sys.executable, str(BIN_DIR / SECRETS_TOOL), "--actor", "service", "eso", "keys", "--cluster", ref,
+                "--kubeconfig", kc]
+        try:
+            if runner is not None:
+                doc = runner(argv)
+            else:
+                p = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+                doc = json.loads(p.stdout or "{}")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as ex:
+            log.warning("ESO keys of %s not read (%s)", ref, type(ex).__name__)
+            continue
+        if isinstance(doc, dict) and doc.get("ok"):
+            seen[ref] = bool(doc.get("changed"))
+    _ESO_KEYS["seen"] = seen
+    return dict(seen)
+
+
+def _eso_keys_changed(s):
+    """Clés des clusters enfants dont l'empreinte a changé (clé ESO)."""
+    out = []
+    for k, e in _oj.eso_settings_of(s)["clusters"].items():
+        ref = f"{e.get('harvester')}/{e.get('namespace')}/{e.get('cluster')}"
+        if _ESO_KEYS["seen"].get(ref):
+            out.append(k)
+    return sorted(out)
+
+
 def _secrets_banner():
     """Pour le bandeau global (tout rôle) : mode, état, depuis quand, jusqu'à
     quand le cache tient. Aucune adresse, aucun nom."""
@@ -34898,7 +35192,8 @@ def _secrets_banner():
     st = _secrets_store_status(s)
     return {"active": _sst.openbao_active(s), "mode": s.get("mode"), "state": st.get("state"),
             "down_since": st.get("down_since"), "cache_until": st.get("cache_until"),
-            "error": st.get("error"), "jwt_keys_changed": bool(_person_keys_changed(s))}
+            "error": st.get("error"), "jwt_keys_changed": bool(_person_keys_changed(s)),
+            "eso_keys_changed": bool(_eso_keys_changed(s))}
 
 
 def _secrets_status(admin=False):
@@ -35148,6 +35443,10 @@ def _secrets_housekeeping_tick(now=None):
         _person_keys_tick(now)                 # 2.10.0 tâche 7 : lecture seule, aucune action
     except Exception as e:                     # noqa: BLE001 : la tâche de fond continue
         log.warning("Rancher keys check failed: %s", type(e).__name__)
+    try:
+        _eso_keys_tick(now)                    # 2.10.0 tâche 10 : lecture seule, aucune action
+    except Exception as e:                     # noqa: BLE001 : la tâche de fond continue
+        log.warning("ESO keys check failed: %s", type(e).__name__)
     snaps = s.get("snapshots") if isinstance(s.get("snapshots"), dict) else {}
     if s.get("mode") == "b1" and s.get("snapshot_dir"):
         slot = _snapshot_slot(s.get("snapshot_time"), now)
@@ -35626,6 +35925,66 @@ def api_secrets_settings():
     return _secrets_accepted(*_secrets_tool_action("secrets:settings", ["settings", *sets]))
 
 
+# 2.10.0 (tâche 10) : carte « External Secrets » de Paramètres > Secrets :
+# écouteur de B1 (adresse, état), clusters enfants, empreinte des clés.
+ESO_CLUSTER_REF_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]{0,62})/([a-z0-9][-a-z0-9]{0,62})/([a-z0-9][-a-z0-9]{0,62})$")
+
+
+@app.route("/api/secrets/eso", methods=["GET"])
+@requires_auth
+def api_secrets_eso():
+    """Réglage `eso` sans valeur (la CA de l'écouteur est publique mais pas
+    rendue ici) et clusters dont les clés ont changé (tâche de fond)."""
+    s = _secrets_settings()
+    e = _oj.eso_settings_of(s)
+    changed = set(_eso_keys_changed(s))
+    clusters = [dict({k: v.get(k) for k in ("harvester", "namespace", "cluster", "mount", "keys_sha256",
+                                            "namespaces", "node_cidr", "applied", "at", "by")},
+                     key=k, keys_changed=k in changed) for k, v in sorted(e["clusters"].items())]
+    return jsonify({"mode": s.get("mode"), "active": _sst.openbao_active(s), "listener": e["listener"],
+                    "address": e["address"], "port": _opol.ESO_PORT, "clusters": clusters})
+
+
+@app.route("/api/secrets/eso/listener", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_eso_listener():
+    """B1 : adresse de l'écouteur ESO (allumé avec le premier cluster
+    enfant), ou extinction. Action suivie `secrets:eso-listener`."""
+    data = _secrets_body()
+    if data.get("off") is True:
+        args = ["eso", "listener", "--off"]
+    else:
+        addr = str(data.get("address") or "")
+        try:
+            _opol.check_eso_listen(addr)
+        except ValueError as e:
+            return jsonify({"error": str(e), "code": "bad-input"}), 400
+        args = ["eso", "listener", "--addr", addr]
+    return _secrets_accepted(*_secrets_tool_action("secrets:eso-listener", args))
+
+
+@app.route("/api/secrets/eso/keys", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_secrets_eso_keys():
+    """« Mettre à jour les clés » d'un cluster enfant (`eso-keys-changed`) :
+    clés relues avec le kubeconfig du cluster Harvester de la personne, puis
+    authentification reposée. Action suivie `secrets:eso-keys:`."""
+    data = _secrets_body()
+    m = ESO_CLUSTER_REF_RE.match(str(data.get("cluster") or ""))
+    if not m:
+        return jsonify({"error": "cluster: <harvester>/<namespace>/<cluster>", "code": "bad-input"}), 400
+    kc = _kubectl_for_cluster(m.group(1))
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {m.group(1)}"}), 404
+    run, err = _secrets_tool_action(f"secrets:eso-keys:{m.group(0)}",
+                                    ["eso", "keys", "--cluster", m.group(0), "--refresh", "--kubeconfig", kc])
+    if run is not None:
+        _ESO_KEYS["seen"].pop(m.group(0), None)
+    return _secrets_accepted(run, err)
+
+
 @app.route("/api/secrets/tf-keys/delete", methods=["POST"])
 @requires_auth
 @_rate_limit("5/minute")
@@ -36031,6 +36390,9 @@ DEPLOY_FINDING_LEVELS = {
     "rancher-session-in-chain": "blocking",
     "gitops-package-not-published": "blocking", "gitops-taken": "blocking", "gitops-check-failed": "blocking",
     "gitops-var-missing": "blocking", "gitops-later": "info", "gitops-flux-in-plan": "info",
+    # 2.10.0 : External Secrets des clusters du plan
+    "eso-needs-openbao": "blocking", "eso-admin-only": "blocking", "eso-no-namespace": "blocking",
+    "eso-chart-not-in-plan": "warning",
 }
 # Constats de `harvester-capi check --many` repris dans la phase clusters :
 # niveau de l'outil -> niveau d'un lancement
@@ -36394,6 +36756,7 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
     arts = _deploy_artefacts_prepare(kc, plan, values, install, findings, capi["entries"], cluster, later)
     gops = _deploy_gitops_prepare(kc, plan, values, install, findings, capi["entries"], arts["rows"], cluster,
                                   later, gitops_secrets, role)
+    esos = _deploy_eso_prepare(plan, findings, capi["entries"], arts["rows"], role)
     if install:
         # revue finale 2.8.0 I-3 : une chaîne qui installe le cluster Harvester
         # n'a ni session Rancher (kubeconfig de la console) ni cluster connu
@@ -36412,14 +36775,16 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
                     f"{r['entry']} on {r['ref']}: Fleet needs a Harvester cluster known to your Rancher session, "
                     "not possible in a chain that installs it"))
     estimate = (1 if (phases.get("readiness") or {}).get("enabled") else 0) + 2 * len(decls) \
-        + (30 if install else 0) + reg["estimate"] + capi["estimate"] + arts["estimate"] + gops["estimate"]
+        + (30 if install else 0) + reg["estimate"] + capi["estimate"] + arts["estimate"] + gops["estimate"] \
+        + 3 * len(esos)
     summary = {"declarations": decls, "estimate_minutes": estimate, "capi": capi["capi"],
                "clusters": capi["summary"], "registries": reg["summary"], "publish": reg["publish"],
-               "artefacts": arts["summary"], "gitops": gops["summary"]}
+               "artefacts": arts["summary"], "gitops": gops["summary"],
+               "eso": [{"ref": r["ref"], "namespaces": r["namespaces"]} for r in esos]}
     ctx = {"plan": plan, "templates": templates, "values": values, "rendered": rendered, "install": install,
            "update_differing": bool(update_differing), "clusters": capi["entries"],
            "deferred": capi["deferred"],
-           "registries": reg["entries"], "artefacts": arts["rows"], "gitops": gops["rows"]}
+           "registries": reg["entries"], "artefacts": arts["rows"], "gitops": gops["rows"], "eso": esos}
     return findings, summary, ctx
 
 
@@ -38278,6 +38643,93 @@ def _deploy_gitops_phase(run, cluster, kc_ref, dctx, store=None):
                       item_key="id", item_step="", after_failure_of=("clusters", "artefacts"))
 
 
+# 2.10.0 (tâche 10) : External Secrets des clusters d'un plan (option
+# `external_secrets` d'une entrée de la phase Clusters), posé après la phase
+# Artefacts qui applique le chart `eso` (point 294).
+ESO_PHASE_TIMEOUT_S = 1800
+
+
+def _deploy_eso_prepare(plan, findings, cluster_entries, art_rows, role):
+    """Rangées de la phase ESO et constats du lancement (lecture seule)."""
+    import child_eso as _ce
+    rows = []
+    if not (plan["phases"].get("clusters") or {}).get("enabled"):
+        return rows
+    for e in cluster_entries or []:
+        es = (e.get("spec") or {}).get("external_secrets")
+        if not es:
+            continue
+        ref = f"{e['spec'].get('namespace') or e['name']}/{e['name']}"
+        rows.append({"id": f"eso-{ref}", "ref": ref, "namespaces": list(es.get("namespaces") or []),
+                     "depends_on": []})
+        if not es.get("namespaces"):
+            findings.append(_deploy_finding("eso-no-namespace", "eso", f"{ref}: at least one team namespace"))
+        if role is not None and role != "admin":
+            findings.append(_deploy_finding("eso-admin-only", "eso", f"{ref}: External Secrets are set by an "
+                                                                       "administrator"))
+        if not any(r.get("ref") == ref and (r.get("item") == _ce.SERVICE) for r in art_rows or []):
+            findings.append(_deploy_finding("eso-chart-not-in-plan", "eso",
+                                            f"{ref}: the Artefacts phase does not apply the chart item "
+                                            f"{_ce.SERVICE}; it must already be on the child cluster"))
+    if rows and not _sst.openbao_active(_secrets_settings()):
+        findings.append(_deploy_finding("eso-needs-openbao", "eso", "External Secrets need OpenBao (Settings > "
+                                                                    "Secrets)"))
+    return rows
+
+
+def _deploy_eso_ours(kc, ref, run_ids):
+    """(présent, exécution lue) des objets du magasin d'un cluster (CRS
+    `art-eso`, origine posée par `deliver`), ou (None, None)."""
+    out, _rc, err = _deploy_capi_json(kc, "manifest-verify", ["--name", f"{ref}/eso"], timeout=120)
+    if err:
+        return None, None
+    return bool((out or {}).get("present")), ((out or {}).get("origin") or {}).get("run")
+
+
+def _deploy_eso_phase(run, cluster, kc_ref, dctx):
+    """Un élément par cluster à External Secrets : `harvester-capi
+    eso-deploy` en action fille (authentification, magasins, `Ready`) ;
+    `created` et `undo` seulement pour ce que CETTE exécution a posé."""
+    plan = dctx["plan"]
+    rows = {r["id"]: r for r in dctx.get("eso") or []}
+    by = (run.result or {}).get("by") or ""
+
+    def run_item(ctx, state, item):
+        r = rows[item.id]
+        data = {"cluster": r["ref"], "namespaces": r["namespaces"], "created": False, "actions": []}
+        prev = next((it for it in ((state.get("previous") or {}).get("items") or []) if it.get("id") == item.id), {})
+        if prev.get("created"):
+            data.update({k: prev[k] for k in ("created", "undo") if k in prev})
+        if run.dry_run:
+            return _dch.ItemOutcome("done", "checked (dry run): would be set", data=data)
+        kc = kc_ref()
+        spec = {"cluster": r["ref"], "namespaces": r["namespaces"], "by": by,
+                "role": run.launch_role or "admin", "origin": {"plan": plan["name"], "run": run.id}}
+        child, err = _capi_launch(cluster, kc, "eso-deploy", ["--timeout", str(ESO_PHASE_TIMEOUT_S)], spec=spec,
+                                  parent=run.id, cluster_user=run.cluster_user, label=f"capi-eso:{r['ref']}")
+        if err:
+            return _dch.ItemOutcome("error", str(err.get("error") or "refused")[:120], data=data)
+        data["actions"].append(child.id)
+        status, _c = _deploy_wait_child(child.id)
+        present, origin_run = _deploy_eso_ours(kc, r["ref"], {run.id})
+        if present and origin_run == run.id:
+            data["created"] = True
+            data["undo"] = {"kind": "eso", "ref": r["ref"]}
+        if status == "done":
+            return _dch.ItemOutcome("done", "set", data=data)
+        return _dch.ItemOutcome("error", f"set failed (action {child.id})", data=data)
+
+    def verify_item(ctx, state, prev):
+        r = rows.get(prev.get("id"))
+        if r is None:
+            return False
+        present, _o = _deploy_eso_ours(kc_ref(), r["ref"], set())
+        return bool(present)
+    items = [_dch.Item(r["id"], tuple(r["depends_on"])) for r in rows.values()]
+    return _dch.Phase("eso", items=items, run_item=run_item, verify_item=verify_item, item_key="id",
+                      item_step="", after_failure_of=("clusters", "artefacts"))
+
+
 def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=None, store=None):
     """Phases du déroulé, branchées sur les mécanismes existants."""
     plan = dctx["plan"]
@@ -38309,6 +38761,10 @@ def _deploy_phases(run, cluster, kc, dctx, user, cluster_user, created, install=
             phases.append(_deploy_artefacts_phase(run, cluster, kc_ref, dctx))
         elif pid == "gitops":
             phases.append(_deploy_gitops_phase(run, cluster, kc_ref, dctx, store))
+    if dctx.get("eso"):
+        # 2.10.0 : tirée de l'option `external_secrets` des clusters du plan
+        # (deploy_chain.ORDER la place après les artefacts)
+        phases.append(_deploy_eso_phase(run, cluster, kc_ref, dctx))
     return phases
 
 
@@ -39288,6 +39744,12 @@ def _undo_target(kc, cluster, u, runs, services=None):
         if err:
             return None, None
         return judge(bool((out or {}).get("present")), (out or {}).get("origin"))
+    if kind == "eso":
+        # 2.10.0 : magasins posés par la chaîne (CRS `art-eso`, origine du plan)
+        out, _rc, err = _deploy_capi_json(kc, "manifest-verify", ["--name", f"{ref}/eso"], timeout=120)
+        if err:
+            return None, None
+        return judge(bool((out or {}).get("present")), (out or {}).get("origin"))
     if kind == "capi-cluster":
         out, _rc, err = _deploy_capi_json(kc, "state", ["--name", ref, "--json"], timeout=60)
         if err:
@@ -39365,6 +39827,14 @@ def _undo_details(kc, cluster, u, services):
             return {"error": err}
         return {"present": not out.get("absent"), "delete": out.get("delete") or [], "kept": out.get("kept") or [],
                 "refused": out.get("refused") or [], "cluster_present": out.get("cluster_present", True)}
+    if kind == "eso":
+        st, _rc, err = _deploy_capi_json(kc, "eso-status", ["--name", ref, "--json"], timeout=120)
+        if err:
+            return {"error": err}
+        return {"present": bool((st or {}).get("auth") or (st or {}).get("crs")),
+                "namespaces": (st or {}).get("namespaces") or [],
+                "externalsecrets": len((st or {}).get("externalsecrets") or []),
+                "note": "synced Secrets are kept at their last value; the eso chart is undone with the artefacts"}
     if kind == "capi-cluster":
         out, _rc, err = _deploy_capi_json(kc, "delete", ["--name", ref, "--dry-run"], timeout=120)
         return {"error": err} if err else out
@@ -39517,6 +39987,14 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
             child, err = capi("delete", ["--name", ref, "--timeout", str(UNDO_CLUSTER_TIMEOUT)] + expect,
                               f"capi-cluster-delete:{ref}")
             timeout = None
+        elif kind == "eso":
+            # 2.10.0 (point 300) : Secrets gardés, ExternalSecret supprimés tant
+            # qu'ESO tourne, magasins, authentification ; le chart part avec
+            # la phase Artefacts du défaire
+            child, err = capi("eso-remove", ["--name", ref, "--keep-chart", "--role", run.launch_role or "admin",
+                                             "--by", (run.result or {}).get("by") or ""] + expect,
+                              f"capi-eso-remove:{ref}")
+            timeout = UNDO_MANIFEST_TIMEOUT
         elif kind == "gitops":
             # 2.8.0 : Flux, comme un élément (Kustomization d'abord) ; Fleet,
             # l'objet de Rancher et ses Secrets

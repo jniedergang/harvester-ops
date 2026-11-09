@@ -30,7 +30,7 @@ const Secrets = (() => {
   const icon = (n, size = 13) => (window.Icons ? Icons.svg(n, { size }) : '');
   const tipAttr = (t) => `data-tip="${esc(t)}" title="${esc(t)}"`;
   const TABS = ['status', 'classes', 'versions', 'rotation', 'snapshots'];
-  const cur = { tab: 'status', status: null, classes: null, rotation: null, snaps: null, tfkeys: null,
+  const cur = { tab: 'status', status: null, eso: null, classes: null, rotation: null, snaps: null, tfkeys: null,
                 versionsClass: null, busy: false };
 
   // Textes par code (clés en toutes lettres : le contrôle de parité ne lit que des littéraux)
@@ -232,7 +232,11 @@ const Secrets = (() => {
     const r = await api('GET', '/api/secrets/status');
     if (!r.ok) { pane.innerHTML = `<p class="form-hint">${esc(tr('sx.loadError'))} ${errOf(r)}</p>`; return; }
     cur.status = r.d;
-    if (cur.tab === 'classes') {
+    if (cur.tab === 'status') {
+      // 2.10.0 : carte External Secrets (clusters enfants, écouteur de B1)
+      const e = r.d.active ? await api('GET', '/api/secrets/eso') : null;
+      cur.eso = e && e.ok ? e.d : null;
+    } else if (cur.tab === 'classes') {
       const c = await api('GET', '/api/secrets/classes');
       cur.classes = c.ok ? c.d : null;
     } else if (cur.tab === 'rotation') {
@@ -313,7 +317,7 @@ const Secrets = (() => {
       </div>${Object.keys(s.migrated || {}).length ? `<p class="form-hint">${esc(tr('sx.disableNeedsLocal'))}</p>` : ''}
       ${s.outage_test && s.outage_test.ok_at ? `<p class="form-hint">${esc(tr('sx.outageOk', { when: when(s.outage_test.ok_at), by: s.outage_test.by || '' }))} ${esc(tr('sx.outageScope'))}</p>` : `<p class="form-hint">${esc(tr('sx.outageScope'))}</p>`}`
       : `<div class="apply-bar sx-actions">${btn('data-sx="enable"', 'btn-primary', 'lock', tr('sx.enable'), tr('sx.t.enable'))}</div>`;
-    return `${head}${warningsHtml(s.warnings)}${facts}${actions}${offlineCopyHtml(s)}${vaultAckHtml(s)}${settingsHtml(s)}`;
+    return `${head}${warningsHtml(s.warnings)}${facts}${actions}${offlineCopyHtml(s)}${vaultAckHtml(s)}${esoHtml(cur.eso)}${settingsHtml(s)}`;
   }
 
   function offlineCopyHtml(s) {
@@ -340,6 +344,52 @@ const Secrets = (() => {
     return `<div class="sto-finding sev-action" data-sx-vault><div class="sto-finding-title">${icon('warn')} ${esc(tr('sx.vaultTitle', { version: v.version || '?' }))}</div>
       <div class="sto-finding-facts">${esc(tr('sx.vaultIntro'))}</div>
       ${btn('data-sx="vault-ack"', 'btn-secondary', 'ok', tr('sx.vaultAck'), tr('sx.t.vaultAck'))}</div>`;
+  }
+
+  /** 2.10.0 : carte « External Secrets » (mode, écouteur de B1, clusters
+   *  enfants, clés changées). Rien de secret : adresses et empreintes. */
+  function esoHtml(e) {
+    if (!e) return '';
+    const b1 = e.mode === 'b1';
+    const clusters = e.clusters || [];
+    const listener = b1 ? `
+        ${kv([
+          [tr('sx.eso.k.listener'), e.listener ? `<span class="badge ok" data-sx-eso-listener="on">${esc(tr('sx.eso.on'))}</span> <code>${esc(e.listener)}</code>`
+            : `<span class="badge dim" data-sx-eso-listener="off">${esc(tr('sx.eso.off'))}</span>`, tr('sx.eso.t.listener')],
+          e.address ? [tr('sx.eso.k.address'), `<code>${esc(e.address)}</code>`, tr('sx.eso.t.address')] : null,
+          [tr('sx.eso.k.port'), esc(e.port), tr('sx.eso.t.port')],
+        ])}
+        <div class="sx-inline-row">
+          <label class="login-field"><span>${esc(tr('sx.eso.addr'))}</span>
+            <input type="text" data-sx-eso-addr spellcheck="false" autocomplete="off" placeholder="${esc(`172.16.1.11:${e.port || 8212}`)}"
+                   value="${esc(e.listener || '')}" class="tip" ${tipAttr(tr('sx.eso.t.addr'))}></label>
+          ${btn('data-sx="eso-listener-save"', 'btn-primary', 'save', tr('sx.eso.save'), tr('sx.eso.t.save'))}
+          ${btn('data-sx="eso-listener-off"', 'btn-secondary', 'stop', tr('sx.eso.turnOff'),
+            clusters.length ? tr('sx.eso.t.turnOffBusy') : tr('sx.eso.t.turnOff'), clusters.length > 0 || !e.listener)}
+        </div>
+        <p class="form-hint sx-eso-firewall">${icon('warn')} ${esc(tr('sx.eso.firewall', { port: e.port || 8212 }))}</p>`
+      : `<p class="form-hint sx-eso-mode-a">${esc(tr('sx.eso.modeA'))}</p>`;
+    const rows = clusters.map((c) => {
+      const ref = `${c.harvester}/${c.namespace}/${c.cluster}`;
+      const fp = String(c.keys_sha256 || '');
+      return `<tr class="sx-eso-cluster" data-ref="${esc(ref)}"><td><code>${esc(ref)}</code>
+          ${c.keys_changed ? ` <span class="badge warn tip" data-sx-eso-changed ${tipAttr(tr('sx.eso.t.changed'))}>${esc(tr('sx.eso.changed'))}</span>` : ''}</td>
+        <td>${fp ? `<code class="tip" ${tipAttr(fp)}>${esc(fp.slice(0, 12))}</code>` : '–'}</td>
+        <td>${esc((c.namespaces || []).join(', ') || '–')}</td>
+        <td>${c.applied ? `<span class="badge ok">${esc(tr('sx.eso.applied'))}</span>` : `<span class="badge warn tip" ${tipAttr(tr('sx.eso.t.waiting'))}>${esc(tr('sx.eso.waiting'))}</span>`}</td>
+        <td>${esc(c.by || '–')}</td><td>${esc(when(c.at))}</td>
+        <td class="sx-row-actions">${btn(`data-sx-eso-keys="${esc(ref)}"`, c.keys_changed ? 'btn-primary' : 'btn-secondary', 'refresh',
+          tr('sx.eso.updateKeys'), tr('sx.eso.t.updateKeys'))}</td></tr>`;
+    }).join('');
+    return `<div class="card sx-card sx-eso" data-sx-eso="${esc(e.mode || '')}">
+        <h5>${icon('key')} ${esc(tr('sx.eso.title'))}</h5>
+        <p class="form-hint">${esc(tr('sx.eso.intro'))}</p>
+        ${listener}
+        ${rows ? `<div class="sx-scroll"><table class="data-table sx-eso-clusters"><thead><tr>
+          <th>${esc(tr('sx.eso.col.cluster'))}</th><th>${esc(tr('sx.eso.col.key'))}</th><th>${esc(tr('sx.eso.col.namespaces'))}</th>
+          <th>${esc(tr('sx.eso.col.applied'))}</th><th>${esc(tr('sx.eso.col.by'))}</th><th>${esc(tr('sx.eso.col.at'))}</th><th></th></tr></thead>
+          <tbody>${rows}</tbody></table></div>` : `<p class="form-hint">${esc(tr('sx.eso.none'))}</p>`}
+      </div>`;
   }
 
   function settingsHtml(s) {
@@ -734,6 +784,17 @@ const Secrets = (() => {
       gesture('PUT', '/api/secrets/settings', body, tr('sx.saved'));
       return;
     }
+    if (k === 'eso-listener-save') {
+      const v = (document.querySelector('[data-sx-eso-addr]') || {}).value || '';
+      gesture('POST', '/api/secrets/eso/listener', { address: v.trim() }, tr('sx.eso.saved'));
+      return;
+    }
+    if (k === 'eso-listener-off') {
+      if (confirm(tr('sx.eso.offConfirm'))) gesture('POST', '/api/secrets/eso/listener', { off: true }, tr('sx.eso.turnedOff'));
+      return;
+    }
+    const ek = e.target.closest('[data-sx-eso-keys]');
+    if (ek) { gesture('POST', '/api/secrets/eso/keys', { cluster: ek.dataset.sxEsoKeys }, tr('sx.eso.keysUpdated')); return; }
     if (k === 'snapshot') { gesture('POST', '/api/secrets/snapshot', {}, tr('sx.snapTaken')); return; }
     const mig = e.target.closest('[data-sx-migrate]');
     if (mig) {

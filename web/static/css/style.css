@@ -6128,3 +6128,37 @@ pre.sx-cmds { background: var(--bg); border: 1px solid var(--border); border-rad
 }
 .sx-tabs { overflow-x: auto; flex-wrap: nowrap; }
 .sx-tabs .sub-tab { flex: 0 0 auto; white-space: nowrap; }
+
+/* 2.10.0 : External Secrets (onglet de Cluster API, carte de Paramètres > Secrets) */
+.eso-picker { max-width: 360px; margin: 6px 0 10px; }
+.eso-picker select { width: 100%; }
+#capi-eso-state.is-checking { opacity: .6; }
+.eso-kv code { overflow-wrap: anywhere; }
+.eso-actions { justify-content: flex-start; flex-wrap: wrap; gap: 8px; margin: 4px 0 8px; }
+.eso-card h5 .btn { margin-left: auto; }
+.eso-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 8px; }
+.eso-ns .btn-close { font-size: 13px; line-height: 1; padding: 0 2px; margin-left: 2px; }
+.eso-inline, .sx-inline-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+.eso-inline input { flex: 1 1 200px; max-width: 320px; }
+.eso-scroll, .sx-scroll { overflow-x: auto; max-width: 100%; }
+.eso-table td, .sx-eso-clusters td { vertical-align: top; }
+.eso-table .eso-msg { min-width: 180px; overflow-wrap: anywhere; }
+.eso-fields { display: grid; gap: 6px; margin: 8px 0; }
+.eso-field-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto; gap: 6px; align-items: center; }
+.eso-field-row input { width: 100%; box-sizing: border-box; min-width: 0; }
+.eso-field-row input, .eso-inline input {
+  padding: 5px 8px; border: 1px solid var(--border); border-radius: 3px;
+  background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 12px;
+}
+.eso-field-row input:focus, .eso-inline input:focus { border-color: var(--accent); }
+.eso-write .tf-args, .eso-fields { max-width: 760px; }
+.eso-field-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) 34px; gap: 6px; max-width: 760px; margin-top: 8px; }
+pre.eso-yaml { white-space: pre; overflow-x: auto; }
+.eso-modal .modal { width: min(760px, 96vw); }
+.sx-eso-clusters td:nth-child(6) { white-space: nowrap; }
+@media (max-width: 600px) {
+  .eso-picker { max-width: none; }
+  .eso-inline input { max-width: none; }
+}
+.sx-eso-clusters td:first-child code { white-space: nowrap; }
+.capi-eso [data-e-fields][hidden], .capi-eso [data-e-reason][hidden] { display: none; }

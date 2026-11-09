@@ -706,6 +706,8 @@
                   data-tip-i18n="capi.tab.services.tip" data-i18n-title="capi.tab.services.tip" title="Deploy services (Helm charts) on the clusters created by Cluster API"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="capi.tab.services">Services</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="gitops"
                   data-tip-i18n="capi.tab.gitops.tip" data-i18n-title="capi.tab.gitops.tip" title="GitOps on the child clusters: Flux, or Fleet when the cluster is imported in Rancher; entries, sources and their state"><span class="tab-icon" data-icon="build"></span> <span data-i18n="capi.tab.gitops">GitOps</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="secrets"
+                  data-tip-i18n="capi.tab.secrets.tip" data-i18n-title="capi.tab.secrets.tip" title="External Secrets Operator on the child clusters: values kept in OpenBao synced into Secrets of team namespaces"><span class="tab-icon" data-icon="key"></span> <span data-i18n="capi.tab.secrets">External Secrets</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="registries"
                   data-tip-i18n="capi.tab.registries.tip" data-i18n-title="capi.tab.registries.tip" title="Registries the child clusters pull their images and charts from: bootstrap registry on Harvester, registries of your organisation"><span class="tab-icon" data-icon="containers"></span> <span data-i18n="capi.tab.registries">Registries</span></button>
           <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-capi-tab="artefacts"
@@ -790,6 +792,16 @@
               </div>
             </div>
             <div class="card-body" id="capi-gitops-body"></div>
+          </div>
+        </div>
+
+        <div class="capi-tab-content" data-capi-tab="secrets" role="tabpanel">
+          <div class="card">
+            <div class="card-header">
+              <h2><span data-icon="key" data-icon-size="18"></span> <span data-i18n="eso.title">External Secrets</span></h2>
+              <button class="btn btn-sm btn-secondary tip" id="btn-eso-refresh" data-i18n="overview.refresh" data-i18n-title="eso.t.refreshAll" data-tip-i18n="eso.t.refreshAll" title="Read the child clusters and the External Secrets state again">Refresh</button>
+            </div>
+            <div class="card-body" id="capi-eso-body"></div>
           </div>
         </div>
 
@@ -1449,6 +1461,7 @@
 <script src="/static/js/capi-create.js"></script>
 <script src="/static/js/capi.js"></script>
 <script src="/static/js/capi-gitops.js"></script>
+<script src="/static/js/capi-eso.js"></script>
 <script src="/static/js/tf-schema.js"></script>
 <script src="/static/js/tf-form.js"></script>
 <script src="/static/js/tf-declarations.js"></script>

@@ -437,6 +437,10 @@ CRAFTS = {
     # personne n'a que des alias jwt
     "group-member-extra": lambda s: next(iter(s.group_docs.values()))["member_entity_ids"].append(
         "99999999-2222-3333-4444-555555555555"),
+    "group-member-other-person": lambda s: (
+        s.entities.__setitem__("22222222-2222-3333-4444-555555555555", {
+            "name": "entity_22222222", "aliases": {(s.auth_mounts[MOUNT + "/"]["accessor"], "user-mallory")}}),
+        next(iter(s.group_docs.values()))["member_entity_ids"].append("22222222-2222-3333-4444-555555555555")),
     "group-member-console": lambda s: next(iter(s.group_docs.values()))["member_entity_ids"].extend(
         i for i, e in s.entities.items() if any(a[0] == s.auth_mounts["approle/"]["accessor"] for a in e["aliases"])),
     "entity-mixed-aliases": lambda s: s.entities[UUID_A]["aliases"].add((s.auth_mounts["token/"]["accessor"],
