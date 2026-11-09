@@ -37305,11 +37305,13 @@ def _deploy_prepare(cluster, plan_name, variables, kc=None, vip=None, install=Fa
     return findings, summary, ctx
 
 
-def _deploy_capi_json(kc, sub, args, spec=None, timeout=180):
+def _deploy_capi_json(kc, sub, args, spec=None, timeout=180, cluster=None):
     """Sous-commande en lecture de harvester-capi (même commande que les
     routes) : (sortie JSON, code, None) ou (None, None, message d'erreur).
-    Hors requête comme dans la requête."""
-    cmd = _capi_cmd(kc, sub)
+    Hors requête comme dans la requête. `cluster` : nom du cluster Harvester
+    dans la console, exigé par les lectures qui calculent la clé d'un
+    cluster enfant (`eso-status`)."""
+    cmd = _capi_cmd(kc, sub, cluster)
     if cmd is None:
         return None, None, f"{CAPI_SCRIPT} not deployed"
     with app.app_context():
@@ -40326,7 +40328,7 @@ def _undo_carriers_present(kc, refs):
     return out, None
 
 
-def _undo_eso_chart_kept(kc, ns, c, item):
+def _undo_eso_chart_kept(kc, cluster, ns, c, item):
     """2.10.0 (point 300) : le chart `eso` d'un cluster enfant qui reste
     n'est pas retiré tant que des `ExternalSecret` y existent (ceux des
     équipes, laissés exprès par `eso-remove`) : il emporterait leurs CRD.
@@ -40337,7 +40339,8 @@ def _undo_eso_chart_kept(kc, ns, c, item):
     import child_eso as _ce
     if item != _ce.SERVICE:
         return None
-    st, _rc, err = _deploy_capi_json(kc, "eso-status", ["--name", f"{ns}/{c}", "--json"], timeout=120)
+    st, _rc, err = _deploy_capi_json(kc, "eso-status", ["--name", f"{ns}/{c}", "--json"], timeout=120,
+                                     cluster=cluster)
     if err:
         return f"eso-status-unreadable: chart kept, the ExternalSecrets of {ns}/{c} could not be read: {str(err)[:120]}"
     left = sorted(f"{x.get('ns')}/{x.get('name')}" for x in (st or {}).get("externalsecrets") or [])
@@ -40366,7 +40369,7 @@ def _undo_details(kc, cluster, u, services):
         return {"present": not out.get("absent"), "delete": out.get("delete") or [], "kept": out.get("kept") or [],
                 "refused": out.get("refused") or [], "cluster_present": out.get("cluster_present", True)}
     if kind == "eso":
-        st, _rc, err = _deploy_capi_json(kc, "eso-status", ["--name", ref, "--json"], timeout=120)
+        st, _rc, err = _deploy_capi_json(kc, "eso-status", ["--name", ref, "--json"], timeout=120, cluster=cluster)
         if err:
             return {"error": err}
         return {"present": bool((st or {}).get("auth") or (st or {}).get("crs")),
@@ -40514,7 +40517,7 @@ def _undo_phases(run, cluster, kc, steps, delete_data, runs):
         expect = ["--expect-run", run_id] if run_id else []
         if kind == "chart":
             ns, _c, it = ref.split("/")
-            kept = _undo_eso_chart_kept(kc, ns, _c, it)
+            kept = _undo_eso_chart_kept(kc, cluster, ns, _c, it)
             if kept:
                 return _dch.ItemOutcome("error", kept, data=data)
             child, err = capi("service-remove", ["--name", f"{ns}/{it}", "--timeout", str(UNDO_CHART_TIMEOUT)]

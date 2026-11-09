@@ -35,7 +35,7 @@ def eso_undo(undo, monkeypatch):
     fake.team_es = [{"ns": "team-c", "name": "db", "ready": True, "store": "vault-team-c"}]
     base_json = fake.json
 
-    def json_(kc, sub, args, spec=None, timeout=180):
+    def json_(kc, sub, args, spec=None, timeout=180, cluster=None):
         if sub == "eso-status":
             fake.status_reads = getattr(fake, "status_reads", 0) + 1
             return {"externalsecrets": list(fake.team_es), "namespaces": [], "auth": None, "crs": None}, 0, None
@@ -89,7 +89,7 @@ def test_eso_chart_kept_when_the_child_cannot_be_read(eso_undo, monkeypatch):
     fake = eso_undo["undo"]
     base = fake.json
 
-    def broken(kc, sub, args, spec=None, timeout=180):
+    def broken(kc, sub, args, spec=None, timeout=180, cluster=None):
         if sub == "eso-status":
             return None, 1, "child unreachable"
         return base(kc, sub, args, spec, timeout)
