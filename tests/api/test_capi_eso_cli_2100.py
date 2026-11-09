@@ -81,8 +81,11 @@ class Child:
         self.namespaces = {n: {"metadata": {"name": n, "labels": {}}} for n in namespaces}
         self.stores_ready, self.ess, self.secrets, self.stuck = stores_ready, list(ess), list(secrets), stuck
         self.patches, self.deleted, self.events = [], [], None
+        self.accounts = {}          # namespace -> uid du compte hops-eso (posé par art-eso)
 
     def get(self, kind, ns, name):
+        if kind == "serviceaccounts" and name == ce.ACCOUNT and ns in self.accounts:
+            return {"metadata": {"namespace": ns, "name": name, "uid": self.accounts[ns]}}
         return self.namespaces.get(name) if kind == "Namespace" else None
 
     def run(self, *a, **kw):
@@ -129,6 +132,7 @@ def world(tmp_path, monkeypatch, cli):
     monkeypatch.setattr(cli, "_state", lambda: state)
     monkeypatch.setattr(cli, "ESO_REMOVE_WAIT", 0)
     monkeypatch.setattr(cli, "ESO_STUCK_WAIT", 0)
+    monkeypatch.setattr(cli, "ESO_ACCOUNT_WAIT", 0)
     box = {"child": Child(), "events": [], "delivered": [], "probe": {"ok": True}, "secrets_out": None}
 
     def settings(**kw):
@@ -167,6 +171,10 @@ def world(tmp_path, monkeypatch, cli):
         def deliver(*a, **k):
             box["events"].append(("deliver", a[3]))
             box["delivered"].append((a, k))
+            # le ClusterResourceSet pose le compte hops-eso de chaque namespace
+            ch = box["child"]
+            for i, n in enumerate(sorted(ch.namespaces) if not box.get("no_accounts") else []):
+                ch.accounts.setdefault(n, f"{i + 1:08x}-0000-4000-8000-000000000e50")
             return 0
         monkeypatch.setattr(cli, "deliver", deliver)
         return cli.main(argv + ["--harvester-name", H])
@@ -231,7 +239,8 @@ def test_deploy_b1_in_order(cli, world, capsys):
     box = world["box"]
     assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x"], req()) == 0
     kinds = [e[0] for e in box["events"]]
-    assert kinds == ["secrets", "probe", "deliver"]                # authentification, sonde, magasins
+    # authentification, sonde, magasins, puis rôle lié aux comptes hops-eso posés (revue 8-10 I-3)
+    assert kinds == ["secrets", "probe", "deliver", "secrets"]
     _s, argv, private = box["events"][0]
     assert argv == ["eso", "add", "--cluster", f"{H}/{NS}/{CL}", "--namespace", "team-a", "--namespace", "team-b",
                     "--node-cidr", "172.16.2.0/24"]
@@ -245,6 +254,10 @@ def test_deploy_b1_in_order(cli, world, capsys):
     child = box["child"]
     assert {n: d["metadata"]["labels"].get(ce.NS_LABEL) for n, d in child.namespaces.items()} == \
         {"team-a": "on", "team-b": "on"}
+    _s, argv2, private2 = box["events"][3]
+    assert argv2 == argv + ["--sa-uid", f"team-a={child.accounts['team-a']}",
+                            "--sa-uid", f"team-b={child.accounts['team-b']}"]
+    assert private2 == private
     assert "2 store(s) ready" in capsys.readouterr().err
 
 
@@ -279,7 +292,7 @@ def test_deploy_mode_a_hands_the_commands_and_does_not_wait(cli, world, capsys):
     o = capsys.readouterr()
     assert json.loads(o.out.strip().splitlines()[-1])["commands"] == ["bao auth enable ..."]
     assert "OpenBao administrator" in o.err
-    assert [e[0] for e in world["box"]["events"]] == ["probe", "secrets", "deliver"]
+    assert [e[0] for e in world["box"]["events"]] == ["probe", "secrets", "deliver", "secrets"]
 
 
 def test_deploy_stores_not_ready_fail_with_the_reason(cli, world, capsys):
@@ -485,3 +498,43 @@ def test_undo_checks_the_run_before_touching_anything(cli, world, capsys, remove
         return
     assert rc == 2 and "undo-not-ours" in capsys.readouterr().err
     assert box["child"].patches == [] and box["child"].deleted == [] and removed == [] and box["events"] == []
+
+
+
+# ---------------------------------------------------------------------------
+# Revue 8-10 I-3 : rôle lié aux UID des comptes hops-eso ; namespace disparu
+# ou recréé signalé
+# ---------------------------------------------------------------------------
+def test_redeploy_passes_the_known_accounts_at_once(cli, world, capsys):
+    """Réactivation : les comptes déjà posés sont liés dès le premier appel
+    (jamais de fenêtre liée au seul nom), et rien n'est rejoué s'ils n'ont
+    pas changé."""
+    box = world["box"]
+    box["child"].accounts = {"team-a": "00000001-0000-4000-8000-000000000e50",
+                             "team-b": "00000002-0000-4000-8000-000000000e50"}
+    assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x"], req()) == 0
+    secrets_calls = [e for e in box["events"] if e[0] == "secrets"]
+    assert len(secrets_calls) == 1
+    assert secrets_calls[0][1][-4:] == ["--sa-uid", "team-a=00000001-0000-4000-8000-000000000e50",
+                                        "--sa-uid", "team-b=00000002-0000-4000-8000-000000000e50"]
+
+
+def test_deploy_fails_when_an_account_never_comes(cli, world, capsys):
+    box = world["box"]
+    box["no_accounts"] = True                                       # ClusterResourceSet jamais appliqué
+    assert world["run"](world_ok(), ["eso-deploy", "--kubeconfig", "/x"], req()) == 1
+    assert "eso-account-missing" in capsys.readouterr().err
+    assert [e[0] for e in box["events"]] == ["secrets", "probe", "deliver"]
+
+
+@pytest.mark.parametrize("namespaces,accounts,bound,codes", [
+    (["team-a"], {"team-a": "u1"}, {"team-a": "u1"}, []),
+    (["team-a"], {"team-a": "u2"}, {"team-a": "u1"}, ["eso-account-changed"]),       # compte ou namespace recréé
+    (["team-a", "gone"], {"team-a": "u1"}, {"team-a": "u1", "gone": "u9"}, ["eso-namespace-gone"]),
+    (["team-a"], {}, {"team-a": "u1"}, ["eso-account-changed"]),                       # compte supprimé
+    (["team-a"], {"team-a": "u1"}, {}, []),                                            # mode d'avant : rien à comparer
+])
+def test_account_findings(cli, namespaces, accounts, bound, codes):
+    child = Child(namespaces=[n for n in namespaces if n != "gone"])
+    child.accounts = dict(accounts)
+    assert [f["code"] for f in cli._eso_account_findings(child, namespaces, bound)] == codes

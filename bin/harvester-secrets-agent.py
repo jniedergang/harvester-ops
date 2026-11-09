@@ -106,7 +106,8 @@ KEYS = {
     "b1-groups": {"name", "classes", "clusters", "members", "remove", "groups_only"},
     # 2.10.0 (tâche 9) : External Secrets Operator des clusters enfants
     "b1-eso-listener": {"address"},
-    "b1-eso-cluster": {"key", "harvester", "namespace", "cluster", "issuer", "pubkeys", "namespaces", "node_cidr"},
+    "b1-eso-cluster": {"key", "harvester", "namespace", "cluster", "issuer", "pubkeys", "namespaces", "node_cidr",
+                       "sa_uids"},
     "b1-eso-cluster-remove": {"key"},
     "status": set(),
 }
@@ -1803,7 +1804,9 @@ class Agent:
                     or any(not isinstance(k, str) or len(k) > PEM_MAX for k in pubkeys):
                 raise ValueError(f"pubkeys: 1 to {PUBKEYS_MAX} PEM public keys")
             config = oj.eso_mount_config(req.get("issuer"), pubkeys)
-            role = oj.eso_role_params(cid, key, req.get("namespaces"), req.get("node_cidr"))
+            if req.get("sa_uids") is not None and not isinstance(req.get("sa_uids"), dict):
+                raise ValueError("sa_uids: {namespace: uid}")
+            role = oj.eso_role_params(cid, key, req.get("namespaces"), req.get("node_cidr"), req.get("sa_uids"))
         except (ValueError, KeyError) as e:
             raise AgentError("bad-request", str(e)) from None
         if not oj.is_eso_mount(cid, mount) or oj.is_person_mount(cid, mount):
@@ -1824,7 +1827,8 @@ class Agent:
         wbc = want["bound_claims"]
         if set(bc) != set(wbc) or bc.get("/kubernetes.io/serviceaccount/name") != wbc[
                 "/kubernetes.io/serviceaccount/name"] or sorted(bc.get("/kubernetes.io/namespace") or []) != \
-                wbc["/kubernetes.io/namespace"]:
+                wbc["/kubernetes.io/namespace"] or sorted(bc.get(oj.SA_UID_CLAIM) or []) != \
+                sorted(wbc.get(oj.SA_UID_CLAIM) or []):
             bad.append("bound_claims")
         if dict(d.get("claim_mappings") or {}) != want["claim_mappings"]:
             bad.append("claim_mappings")
@@ -1918,6 +1922,7 @@ class Agent:
                  "pubkeys": config["jwt_validation_pubkeys"],
                  "namespaces": role["bound_claims"]["/kubernetes.io/namespace"],
                  "node_cidr": (role.get("token_bound_cidrs") or [None])[0],
+                 "sa_uids": oj.eso_sa_uids(req.get("sa_uids"), role["bound_claims"]["/kubernetes.io/namespace"]),
                  "at": self.now(), "by": self.status.get("requested_by")}
         st = self.agent_state()
         st["eso_clusters"] = dict(st.get("eso_clusters") or {}, **{key: entry})
@@ -2376,7 +2381,8 @@ class Agent:
         if roles != [oj.ESO_ROLE]:
             self._untrusted(f"roles of {m}: " + ", ".join(roles))
         try:
-            want_role = oj.eso_role_params(cid, entry.get("key"), entry.get("namespaces"), entry.get("node_cidr"))
+            want_role = oj.eso_role_params(cid, entry.get("key"), entry.get("namespaces"), entry.get("node_cidr"),
+                                           entry.get("sa_uids"))
             want_conf = oj.eso_mount_config(entry.get("issuer"), entry.get("pubkeys"))
             _, doc = a._call("GET", f"auth/{m}/role/{oj.ESO_ROLE}")
             bad = self._eso_role_diff(self._data(doc) or {}, want_role)

@@ -331,3 +331,24 @@ def test_eso_settings_of():
     got = oj.eso_settings_of({"eso": {"listener": "1.2.3.4:8212", "clusters": {"1d905023": {"mount": "m"},
                                                                                "bad": {"mount": "x"}}}})
     assert got["listener"] == "1.2.3.4:8212" and list(got["clusters"]) == ["1d905023"]
+
+
+# Revue 8-10 I-3 : rôle lié aussi aux UID des comptes hops-eso
+U1, U2 = "11111111-2222-3333-4444-555555555555", "66666666-7777-4888-9999-000000000000"
+
+
+@pytest.mark.parametrize("uids,bound", [
+    (None, None), ({}, None),
+    ({"team-a": U1}, [U1]),                                      # team-b attend la relecture de son compte
+    ({"team-b": U2, "team-a": U1}, sorted([U1, U2])),
+])
+def test_eso_role_bound_to_account_uids(uids, bound):
+    bc = oj.eso_role_params(CID, "1d905023", ["team-a", "team-b"], sa_uids=uids)["bound_claims"]
+    assert bc.get("/kubernetes.io/serviceaccount/uid") == bound
+    assert bc["/kubernetes.io/namespace"] == ["team-a", "team-b"]
+
+
+@pytest.mark.parametrize("uids", [{"team-c": U1}, {"team-a": "not-a-uid"}, {"team-a": "ABCDEF01-2222-3333-4444-555555555555"}, {"team-a": 3}])
+def test_eso_account_uids_refused(uids):
+    with pytest.raises(ValueError):
+        oj.eso_role_params(CID, "1d905023", ["team-a", "team-b"], sa_uids=uids)

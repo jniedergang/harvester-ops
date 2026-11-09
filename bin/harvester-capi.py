@@ -4129,6 +4129,7 @@ def cmd_eso_deploy(args):
         except (KubeError, ValueError) as err:
             step("keys", "error", f"eso-child-keys-unreadable: {str(err)[:200]}")
             return EXIT_FAIL
+        uids = _eso_account_uids(child, nss)          # comptes déjà posés (réactivation)
     step("keys", "done", f"service account issuer {issuer}, {len((jwks or {}).get('keys') or [])} key(s)")
     argv = ["eso", "add", "--cluster", f"{harvester}/{ns}/{cluster}"]
     for n in nss:
@@ -4136,7 +4137,8 @@ def cmd_eso_deploy(args):
     cidr = eso_node_cidr(cl)
     if cidr:
         argv += ["--node-cidr", cidr]
-    rc, out = _secrets_tool(argv, {"eso_jwks": json.dumps(jwks), "eso_issuer": issuer}, spec["by"])
+    keys_spec = {"eso_jwks": json.dumps(jwks), "eso_issuer": issuer}
+    rc, out = _secrets_tool(argv + _eso_uid_args(uids), keys_spec, spec["by"])
     if rc != 0 or not out.get("ok"):
         step("openbao", "error", f"{out.get('code') or 'eso-openbao-failed'}: {str(out.get('error') or '')[:200]}")
         return EXIT_FAIL
@@ -4171,6 +4173,24 @@ def cmd_eso_deploy(args):
         for n in nss:
             child.patch("Namespace", None, n, {"metadata": {"labels": {ce.NS_LABEL: "on"}}})
     step("store", "done", f"{ce.STORE} in {', '.join(nss)}")
+    # revue 8-10 I-3 : le rôle est lié aussi aux UID des comptes `hops-eso`
+    # posés par le ClusterResourceSet ; un namespace supprimé puis recréé (ou
+    # un compte recréé) n'hérite plus des secrets
+    with ca.session(kube, ns, cluster) as path:
+        now_uids = _eso_account_uids(Kube(path), nss, wait=min(args.timeout, ESO_ACCOUNT_WAIT))
+    if sorted(now_uids) != sorted(nss):
+        step("accounts", "error", "eso-account-missing: no hops-eso account yet in "
+             + ", ".join(sorted(set(nss) - set(now_uids))) + " (ClusterResourceSet art-eso not applied?)")
+        return EXIT_FAIL
+    if now_uids != uids:
+        rc, out2 = _secrets_tool(argv + _eso_uid_args(now_uids), keys_spec, spec["by"])
+        if rc != 0 or not out2.get("ok"):
+            step("accounts", "error", f"{out2.get('code') or 'eso-openbao-failed'}: "
+                 f"{str(out2.get('error') or '')[:200]}")
+            return EXIT_FAIL
+        if out2.get("commands"):
+            print(json.dumps({"commands": out2["commands"], "key": key}))
+    step("accounts", "done", f"role bound to the hops-eso account of {len(now_uids)} namespace(s)")
     if not out.get("applied"):
         step("ready", "done", "the stores become ready once the OpenBao administrator has run the commands")
         return EXIT_OK
@@ -4180,6 +4200,51 @@ def cmd_eso_deploy(args):
         return EXIT_FAIL
     step("ready", "done", f"{len(nss)} store(s) ready")
     return EXIT_OK
+
+
+ESO_ACCOUNT_WAIT = 120
+
+
+def _eso_account_uids(child, namespaces, wait=0, sleep=None, now=None):
+    """{namespace: uid} des comptes `hops-eso` présents ; `wait` : attend
+    qu'ils le soient tous (le ClusterResourceSet les pose en quelques
+    secondes), au plus `wait` s."""
+    sleep, now = sleep or time.sleep, now or time.time
+    deadline = now() + wait
+    while True:
+        out = {}
+        for n in namespaces:
+            sa = child.get("serviceaccounts", n, ce.ACCOUNT)
+            uid = ((sa or {}).get("metadata") or {}).get("uid")
+            if uid:
+                out[n] = uid
+        if len(out) == len(set(namespaces)) or now() >= deadline:
+            return out
+        sleep(3)
+
+
+def _eso_account_findings(child, namespaces, bound):
+    """Revue 8-10 I-3 : namespace activé absent du cluster enfant
+    (`eso-namespace-gone` : à retirer avant toute recréation), compte
+    `hops-eso` d'un autre UID que celui du rôle (`eso-account-changed` :
+    namespace ou compte recréé, refusé par OpenBao jusqu'à une nouvelle
+    activation par un administrateur)."""
+    out = []
+    for n in namespaces:
+        if child.get("Namespace", None, n) is None:
+            out.append({"code": "eso-namespace-gone", "level": "block", "facts": {"namespace": n}})
+            continue
+        uid = ((child.get("serviceaccounts", n, ce.ACCOUNT) or {}).get("metadata") or {}).get("uid")
+        if bound.get(n) and uid != bound[n]:
+            out.append({"code": "eso-account-changed", "level": "block", "facts": {"namespace": n}})
+    return out
+
+
+def _eso_uid_args(uids):
+    out = []
+    for n, u in sorted((uids or {}).items()):
+        out += ["--sa-uid", f"{n}={u}"]
+    return out
 
 
 def cmd_eso_remove(args):
@@ -4327,6 +4392,7 @@ def cmd_eso_status(args):
                         raise
                 out["labelled"] = sorted(n["metadata"]["name"]
                                          for n in child.list("Namespace", None, selector=f"{ce.NS_LABEL}=on"))
+                out["findings"] = _eso_account_findings(child, out["namespaces"], entry.get("sa_uids") or {})
         except ca.ChildAccessError as err:
             out["error"] = err.code
         except KubeError as err:

@@ -265,3 +265,18 @@ def test_status_without_values(env, capsys, agent, spec):
     rc, doc, _ = cli(["eso", "status"], capsys=capsys)
     assert rc == 0 and doc["listener"] == LISTEN and list(doc["clusters"]) == [KEY]
     assert "BEGIN" not in json.dumps(doc)
+
+
+def test_add_binds_the_role_to_the_account_uids(env, capsys, agent, spec):
+    """Revue 8-10 I-3 : `--sa-uid` passe à l'agent, est gardé dans les
+    réglages et repris par `eso keys --refresh`."""
+    b1(env)
+    u = "11111111-2222-3333-4444-555555555555"
+    rc, doc, _ = add(capsys, spec(), "--listen", LISTEN, "--sa-uid", f"team-a={u}")
+    assert rc == 0, doc
+    assert agent[-1]["sa_uids"] == {"team-a": u}
+    assert read_settings(env)["eso"]["clusters"][KEY]["sa_uids"] == {"team-a": u}
+    rc, doc, _ = add(capsys, spec(), "--sa-uid", "team-c=" + u)
+    assert rc == 2 and doc["code"] == "bad-input"
+    rc, doc, _ = add(capsys, spec(), "--sa-uid", "team-a")
+    assert rc == 2 and doc["code"] == "bad-input"

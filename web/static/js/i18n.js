@@ -9558,6 +9558,9 @@ const translations = {
     "activity.sid.serviceTip": "The secrets of this action were read with the service identity of the console",
     "activity.sid.late": "late service",
     "activity.sid.lateTip": "A personal secret this action needed on the way was read later with the service identity",
+    "eso.fd.eso-namespace-gone": "The enabled namespace {namespace} is gone from the child cluster: remove it here before anyone creates it again.",
+    "eso.fd.eso-account-changed": "The hops-eso account of {namespace} was created again (new namespace or account): OpenBao refuses it until an administrator enables the namespace again.",
+    "eso.fd.eso-account-missing": "The hops-eso account is missing in {namespace}.",
   },
 
   fr: {
@@ -19103,6 +19106,9 @@ const translations = {
     "activity.sid.serviceTip": "Les secrets de cette action ont été lus avec l'identité de service de la console",
     "activity.sid.late": "service tardif",
     "activity.sid.lateTip": "Un secret personnel dont l'action a eu besoin en route a été lu plus tard avec l'identité de service",
+    "eso.fd.eso-namespace-gone": "Le namespace activé {namespace} a disparu du cluster enfant : retirez-le ici avant que quelqu'un le recrée.",
+    "eso.fd.eso-account-changed": "Le compte hops-eso de {namespace} a été recréé (nouveau namespace ou nouveau compte) : OpenBao le refuse tant qu'un administrateur n'a pas réactivé le namespace.",
+    "eso.fd.eso-account-missing": "Le compte hops-eso manque dans {namespace}.",
   },
 
   it: {
@@ -28646,6 +28652,9 @@ const translations = {
     "activity.sid.serviceTip": "I segreti di questa azione sono stati letti con l'identità di servizio della console",
     "activity.sid.late": "servizio tardivo",
     "activity.sid.lateTip": "Un segreto personale necessario durante l'azione è stato letto più tardi con l'identità di servizio",
+    "eso.fd.eso-namespace-gone": "Il namespace attivato {namespace} è scomparso dal cluster figlio: rimuoverlo qui prima che qualcuno lo ricrei.",
+    "eso.fd.eso-account-changed": "L'account hops-eso di {namespace} è stato ricreato (nuovo namespace o account): OpenBao lo rifiuta finché un amministratore non riattiva il namespace.",
+    "eso.fd.eso-account-missing": "Manca l'account hops-eso in {namespace}.",
   },
 
   es: {
@@ -38189,6 +38198,9 @@ const translations = {
     "activity.sid.serviceTip": "Los secretos de esta acción se leyeron con la identidad de servicio de la consola",
     "activity.sid.late": "servicio tardío",
     "activity.sid.lateTip": "Un secreto personal que la acción necesitó por el camino se leyó más tarde con la identidad de servicio",
+    "eso.fd.eso-namespace-gone": "El namespace activado {namespace} ha desaparecido del clúster hijo: quítelo aquí antes de que alguien lo vuelva a crear.",
+    "eso.fd.eso-account-changed": "La cuenta hops-eso de {namespace} se volvió a crear (nuevo namespace o nueva cuenta): OpenBao la rechaza hasta que un administrador vuelva a activar el namespace.",
+    "eso.fd.eso-account-missing": "Falta la cuenta hops-eso en {namespace}.",
   },
 
   de: {
@@ -47733,6 +47745,9 @@ const translations = {
     "activity.sid.serviceTip": "Die Geheimnisse dieser Aktion wurden mit der Dienstidentität der Konsole gelesen",
     "activity.sid.late": "später Dienst",
     "activity.sid.lateTip": "Ein persönliches Geheimnis, das die Aktion unterwegs brauchte, wurde später mit der Dienstidentität gelesen",
+    "eso.fd.eso-namespace-gone": "Der aktivierte Namespace {namespace} ist aus dem Kind-Cluster verschwunden: hier entfernen, bevor ihn jemand neu anlegt.",
+    "eso.fd.eso-account-changed": "Das Konto hops-eso von {namespace} wurde neu angelegt (neuer Namespace oder neues Konto): OpenBao lehnt es ab, bis ein Administrator den Namespace erneut aktiviert.",
+    "eso.fd.eso-account-missing": "Das Konto hops-eso fehlt in {namespace}.",
   },
 };
 

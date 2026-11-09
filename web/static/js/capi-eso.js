@@ -44,6 +44,10 @@ const CapiEso = (() => {
     'eso-namespace-invalid': (v) => tr('eso.fd.eso-namespace-invalid', 'The namespace {namespace} is not a valid name (lower case RFC 1123).', v),
     'child-admin-required': (v) => tr('eso.fd.child-admin-required', 'You cannot read the kubeconfig Secret of {cluster}: only an administrator of the child cluster sets External Secrets on it.', v),
     'child-admin-unknown': (v) => tr('eso.fd.child-admin-unknown', 'Your right on {cluster} could not be checked: {message}', v),
+    // revue 8-10 I-3 : rôle lié aux comptes hops-eso relus après la pose
+    'eso-namespace-gone': (v) => tr('eso.fd.eso-namespace-gone', 'The enabled namespace {namespace} is gone from the child cluster: remove it here before anyone creates it again.', v),
+    'eso-account-changed': (v) => tr('eso.fd.eso-account-changed', 'The hops-eso account of {namespace} was created again (new namespace or account): OpenBao refuses it until an administrator enables the namespace again.', v),
+    'eso-account-missing': (v) => tr('eso.fd.eso-account-missing', 'The hops-eso account is missing in {namespace}.', v),
     // source du chart : constats partagés avec l'onglet Services
     'service-registry-unknown': (v) => tr('svc.fd.service-registry-unknown', 'The registry {registry} is not declared in the console.', v),
     'service-registry-no-charts': (v) => tr('svc.fd.service-registry-no-charts', 'The registry {registry} does not serve charts.', v),
@@ -239,6 +243,7 @@ const CapiEso = (() => {
     const warn = [];
     if (d.error) warn.push({ code: d.error, level: 'block', facts: { cluster: d.cluster } });
     if (!d.openbao) warn.push({ code: 'eso-needs-openbao', level: 'block', facts: {} });
+    (d.findings || []).forEach((f) => warn.push(f));
     const crs = d.crs ? (d.crs.applied
       ? `<span class="badge ok">${esc(tr('eso.crs.applied', 'applied'))}</span>`
       : `<span class="badge warn">${esc(tr('eso.crs.pending', 'pending'))}</span>`) + (d.crs.message && d.crs.message !== 'applied' ? ` <span class="form-hint">${esc(d.crs.message)}</span>` : '') : '–';

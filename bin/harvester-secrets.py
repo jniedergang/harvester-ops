@@ -2602,15 +2602,34 @@ def _eso_prepare(args):
     cid = s["console_id"]
     h, ns, c, key = _eso_ref(args)
     nss = _eso_namespaces(args)
+    try:
+        uids = oj.eso_sa_uids(_eso_sa_uids_arg(args), nss)
+    except ValueError as e:
+        raise CliError("bad-input", str(e), EXIT_REFUSED) from None
+    args.sa_uids_doc = uids
     issuer, jwks = _eso_child_keys(args, h, ns, c)
     try:
         pubkeys = oj.pubkeys_of(jwks)
         sha = oj.keys_sha256(jwks)
         oj.eso_mount_config(issuer, pubkeys)
-        oj.eso_role_params(cid, key, nss, args.node_cidr)
+        oj.eso_role_params(cid, key, nss, args.node_cidr, uids)
     except ValueError as e:
         raise CliError("eso-child-keys-unreadable", str(e)[:200], EXIT_FAIL) from None
     return s, cid, (h, ns, c, key), nss, issuer, pubkeys, sha
+
+
+def _eso_sa_uids_arg(args):
+    """`--sa-uid NAMESPACE=UID` (revue 8-10 I-3), ou le dict déjà rangé."""
+    raw = getattr(args, "sa_uid", None)
+    if isinstance(raw, dict):
+        return raw
+    out = {}
+    for item in raw or []:
+        n, sep, u = str(item).partition("=")
+        if not sep:
+            raise CliError("bad-input", "--sa-uid NAMESPACE=UID", EXIT_REFUSED)
+        out[n] = u
+    return out
 
 
 def _eso_assistant(args):
@@ -2618,7 +2637,8 @@ def _eso_assistant(args):
     en B1) et paramètres du magasin."""
     s, cid, (h, ns, c, key), nss, issuer, pubkeys, sha = _eso_prepare(args)
     addr, _ca, kv, prefix = _pt_target(s)
-    cmds = pol.eso_cluster_commands(addr, kv, prefix, cid, key, issuer, pubkeys, nss, args.node_cidr)
+    cmds = pol.eso_cluster_commands(addr, kv, prefix, cid, key, issuer, pubkeys, nss, args.node_cidr,
+                                    args.sa_uids_doc)
     out({"ok": True, "key": key, "mount": oj.eso_mount(cid, key), "keys_sha256": sha, "namespaces": nss,
          "commands": cmds if s["mode"] != "b1" else None,
          "store": _eso_store_params(s, _eso_doc(raw_settings()), cid, key)})
@@ -2646,15 +2666,18 @@ def _eso_add(args):
             e = _eso_listener_on(s, address)
         agent_ok(run_agent({"op": "b1-eso-cluster", "key": key, "harvester": h, "namespace": ns, "cluster": c,
                             "issuer": issuer, "pubkeys": pubkeys, "namespaces": nss,
-                            **({"node_cidr": args.node_cidr} if args.node_cidr else {})}))
+                            **({"node_cidr": args.node_cidr} if args.node_cidr else {}),
+                            **({"sa_uids": args.sa_uids_doc} if args.sa_uids_doc else {})}))
     else:
         addr, _ca, kv, prefix = _pt_target(s)
-        cmds = pol.eso_cluster_commands(addr, kv, prefix, cid, key, issuer, pubkeys, nss, args.node_cidr)
+        cmds = pol.eso_cluster_commands(addr, kv, prefix, cid, key, issuer, pubkeys, nss, args.node_cidr,
+                                        args.sa_uids_doc)
     doc = raw_settings()
     e = _eso_doc(doc)
     e["clusters"][key] = {"harvester": h, "namespace": ns, "cluster": c, "mount": oj.eso_mount(cid, key),
                           "issuer": issuer.rstrip("/"), "keys_sha256": sha, "namespaces": nss,
-                          "node_cidr": args.node_cidr, "applied": cmds is None, "at": time.time(),
+                          "node_cidr": args.node_cidr, "sa_uids": args.sa_uids_doc,
+                          "applied": cmds is None, "at": time.time(),
                           "by": ARGS.actor or os.environ.get("SUDO_USER") or os.environ.get("USER") or "cli"}
     save_settings(doc)
     step("eso", "done", "set by the agent" if cmds is None else "commands for the OpenBao administrator")
@@ -2684,6 +2707,7 @@ def _eso_keys(args):
         return EXIT_OK
     args.namespace = list(have.get("namespaces") or [])
     args.node_cidr = have.get("node_cidr")
+    args.sa_uid = dict(have.get("sa_uids") or {})
     args.listen = None
     return _eso_add(args)
 
@@ -2855,6 +2879,8 @@ def parser():
         x.add_argument("--kubeconfig", help="kubeconfig of the Harvester cluster (reads the child cluster)")
         x.add_argument("--node-cidr", help="node network of the child cluster (token_bound_cidrs)")
         x.add_argument("--listen", help="mode b1: listener address if it is not set yet")
+        x.add_argument("--sa-uid", action="append", metavar="NAMESPACE=UID",
+                       help="uid of the hops-eso service account of an enabled namespace (binds the role to it)")
         x.add_argument("--spec", help=argparse.SUPPRESS)
     x = es.add_parser("keys", help="service account keys of a child cluster: compare, --refresh")
     x.add_argument("--cluster")

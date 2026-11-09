@@ -369,7 +369,22 @@ def eso_mount_config(issuer, pubkeys):
             "default_role": ESO_ROLE}
 
 
-def eso_role_params(console_id, key, namespaces, node_cidr=None):
+SA_UID_CLAIM = "/kubernetes.io/serviceaccount/uid"
+UID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def eso_sa_uids(sa_uids, namespaces):
+    """Revue 8-10 I-3 : UID des comptes `hops-eso` relus dans le cluster
+    enfant, {namespace: uid}, seulement pour des namespaces activés."""
+    out = {}
+    for ns, uid in sorted((sa_uids or {}).items()):
+        if ns not in set(namespaces or []) or not isinstance(uid, str) or not UID_RE.match(uid):
+            raise ValueError("service account uids: {enabled namespace: uid}")
+        out[ns] = uid
+    return out
+
+
+def eso_role_params(console_id, key, namespaces, node_cidr=None, sa_uids=None):
     """Rôle `eso` (`auth/<montage>/role/eso`) : compte `hops-eso` seulement,
     namespaces activés seulement (décision 304 B : `bound_claims` en glob,
     réécrit à chaque activation ; un namespace non activé qui pose son
@@ -381,12 +396,19 @@ def eso_role_params(console_id, key, namespaces, node_cidr=None):
     nss = sorted(set(namespaces or []))
     if not nss or not all(isinstance(n, str) and NS_RE.match(n) for n in nss):
         raise ValueError("at least one enabled namespace (RFC 1123 names)")
+    uids = eso_sa_uids(sa_uids, nss)
+    bound = {"/kubernetes.io/serviceaccount/name": ESO_ACCOUNT, "/kubernetes.io/namespace": nss}
+    if uids:
+        # revue 8-10 I-3 : un namespace supprimé puis recréé (ou un compte
+        # `hops-eso` recréé) porte un autre UID : refusé par OpenBao. Un
+        # namespace dont le compte n'est pas encore relu attend la relecture
+        bound[SA_UID_CLAIM] = sorted(uids.values())
     out = {
         "role_type": "jwt",
         "user_claim": "sub",
         "bound_audiences": [eso_audience(console_id)],
         "bound_claims_type": "glob",
-        "bound_claims": {"/kubernetes.io/serviceaccount/name": ESO_ACCOUNT, "/kubernetes.io/namespace": nss},
+        "bound_claims": bound,
         "claim_mappings": {"/kubernetes.io/namespace": "namespace"},
         "token_policies": [eso_policy_name(console_id, key)],
         "token_type": "service",

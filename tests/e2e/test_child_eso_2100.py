@@ -242,6 +242,19 @@ def test_without_openbao_a_blocking_finding_is_shown(context, flask_server):
     expect(body.locator("[data-eso-example]")).to_have_count(0)
 
 
+
+def test_gone_namespace_and_recreated_account_are_shown(context, flask_server):
+    """Revue 8-10 I-3 : constats de l'état (namespace activé disparu, compte
+    hops-eso recréé), noms échappés."""
+    doc = state_doc(findings=[{"code": "eso-namespace-gone", "level": "block", "facts": {"namespace": "team-b"}},
+                              {"code": "eso-account-changed", "level": "block", "facts": {"namespace": HOSTILE}}])
+    page, _ = open_eso(context, flask_server, {}, doc=doc)
+    body = page.locator("#capi-eso-body")
+    expect(body.locator('[data-code="eso-namespace-gone"]')).to_contain_text("team-b")
+    expect(body.locator('[data-code="eso-account-changed"]')).to_contain_text(HOSTILE)
+    assert page.evaluate("window.__pwned") is None
+
+
 SHOTS = Path("/tmp/bmpost/shots-2100")
 
 

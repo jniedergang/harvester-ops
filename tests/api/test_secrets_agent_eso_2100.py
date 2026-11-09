@@ -321,3 +321,33 @@ def test_status_and_logs_carry_no_value(b1):
     blob = json.dumps(st)
     assert "BEGIN PRIVATE" not in blob and "BEGIN EC PRIVATE" not in blob
     no_secret_in(b1, st)
+
+
+# ---------------------------------------------------------------------------
+# Revue 8-10 I-3 : rôle lié aux UID des comptes hops-eso, relu et revu
+# ---------------------------------------------------------------------------
+UID_A = "11111111-2222-3333-4444-555555555555"
+
+
+def test_cluster_role_bound_to_account_uids(b1):
+    srv = b1["srv"]
+    assert listener(b1)[0] == 0
+    rc, st = cluster(b1, sa_uids={"team-a": UID_A})
+    assert rc == 0, st
+    role = srv.jwt_roles[MOUNT]["eso"]
+    assert role["bound_claims"]["/kubernetes.io/serviceaccount/uid"] == [UID_A]
+    assert b1["agent"]().agent_state()["eso_clusters"][KEY]["sa_uids"] == {"team-a": UID_A}
+    rc, st = cluster(b1, sa_uids={"team-z": UID_A})
+    assert rc != 0 and st["code"] == "bad-request"
+    rc, st = cluster(b1, sa_uids=["x"])
+    assert rc != 0 and st["code"] == "bad-request"
+
+
+def test_cluster_readback_sees_a_role_without_the_uid_binding(b1, monkeypatch):
+    assert listener(b1)[0] == 0
+    a = b1["agent"]()
+    want = oj.eso_role_params(CID, KEY, ["team-a", "team-b"], "172.16.2.0/24", {"team-a": UID_A})
+    got = dict(want, bound_claims={k: v for k, v in want["bound_claims"].items()
+                                   if k != "/kubernetes.io/serviceaccount/uid"})
+    assert "bound_claims" in a._eso_role_diff(got, want)
+    assert a._eso_role_diff(want, want) == []

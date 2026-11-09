@@ -615,7 +615,7 @@ def group_commands(addr, mount, prefix, cid, name, classes, clusters, members):
     ]
 
 
-def eso_cluster_commands(addr, mount, prefix, cid, key, issuer, pubkeys, namespaces, node_cidr=None):
+def eso_cluster_commands(addr, mount, prefix, cid, key, issuer, pubkeys, namespaces, node_cidr=None, sa_uids=None):
     """Mode A (tâche 9) : commandes `bao` d'un cluster enfant pour ESO :
     montage `jwt` (s'il manque), configuration (clés publiques des comptes
     de service, lues par la console), rôle `eso` (namespaces activés,
@@ -626,7 +626,7 @@ def eso_cluster_commands(addr, mount, prefix, cid, key, issuer, pubkeys, namespa
     jm = oj.eso_mount(_check(ID_RE, cid, "console id"), key)
     prefix = prefix or f"consoles/{cid}"
     config = oj.eso_mount_config(issuer, pubkeys)
-    role = oj.eso_role_params(cid, key, namespaces, node_cidr)
+    role = oj.eso_role_params(cid, key, namespaces, node_cidr, sa_uids)
     policy = eso_policy(mount, prefix, cid, key, "$ACCESSOR")
     return [
         _addr_line(addr),
@@ -640,11 +640,11 @@ def eso_cluster_commands(addr, mount, prefix, cid, key, issuer, pubkeys, namespa
     ]
 
 
-def eso_role_commands(addr, cid, key, namespaces, node_cidr=None):
+def eso_role_commands(addr, cid, key, namespaces, node_cidr=None, sa_uids=None):
     """Mode A : le rôle seul (namespace activé ou retiré, décision 304 B)."""
     jm = oj.eso_mount(_check(ID_RE, cid, "console id"), key)
     return [_addr_line(addr), _heredoc_json(f"bao write auth/{jm}/role/{oj.ESO_ROLE}",
-                                            oj.eso_role_params(cid, key, namespaces, node_cidr))]
+                                            oj.eso_role_params(cid, key, namespaces, node_cidr, sa_uids))]
 
 
 def eso_keys_commands(addr, cid, key, issuer, pubkeys):
