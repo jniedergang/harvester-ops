@@ -87,7 +87,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   with `SecretError` once `ssh-kvm` was in OpenBao (the tool got no copy of
   the host key; present since 2.9.0); the ESO listener also opened
   OpenBao's cluster port on the host address (`<address>:<port + 1>`), now
-  on `127.0.0.1`, ports 8209 and 65535 refused; a cluster template refused
+  on `127.0.0.1`, ports 8209 to 8211 and 65535 refused; a cluster template refused
   `external_secrets: {namespaces, chart}`, the form its window writes; the
   undo read the ESO state without the Harvester name (error in the
   destruction plan, chart always kept); in mode A the commands for the
@@ -209,35 +209,21 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   kept.
 
 ### Not verified for real
-NOT- Personal tokens in mode A on OpenBao 2.7.2 (Application Collection
-  image) and on Vault 1.14.2, with the real code flow of Rancher 2.14.1 and
-  a dedicated OIDC client: each check failed once (method absent, wrong
-  audience, local account, too wide policy, foreign and too wide address
-  range) then activation; a KVM gesture on node2 by the Rancher
-  administrator named in the audit (entity, `name`), Activity "personal
-  token"; a local Rancher account refused by group with no service read
-  after; a 17-minute KVM action outliving the person token; refresh every
-  ~7.5 minutes with the old token revoked and entities stable, console and
-  Rancher sign-out; static keys changed (simulated), banner, update without
-  cutting sessions.
-- B1 on the client VM: update 2.9.1 to 2.10.0 by hand (`b1-policies` run by
-  `install.sh`), `b1-jwt` without restarting OpenBao, five checks and
-  activation with a real identity token, real refresh cycle for 22 minutes,
-  ESO listener with its own CA, unit fallback when its address was gone at
-  reboot, snapshot and restore after activation, restore of a snapshot taken
-  before activation (settings settled), rollback refused three times with
-  `secrets-person-token-b1`, then allowed after `person-token disable
-  --remove` and `eso remove --all`; under 2.9.1, `rotate unseal-key`
-  rendered a valid configuration.
-- External Secrets in mode A on a harvlab2 child created by a plan
-  (template option, chart 2.14.0 from a client registry, ready in 48 s): two
-  namespaces each reading its value, one refused on the other's path (403),
-  rotation followed in 16 s, the ESO token carries the account UID (a
-  recreated account refused until rebound), listener CA dedicated, firewall
-  opened to the child node network only; removal refused with a team
-  ExternalSecret, undo keeping the chart with `eso-foreign-objects`, direct
-  `service-remove` refused, clean undo removing the chart with the Secrets
-  kept.
+- Per-person tokens: groups fed by a `groups` claim of Rancher (no Rancher
+  with a group provider on the bench, only internal groups were verified;
+  decision 279); a Rancher behind Active Directory or SAML; the real
+  rotation of Rancher's signing key (simulated with static keys);
+  per-person tokens on Vault other than 1.14.2.
+- A Terraform KVM declaration running longer than the person token (R4):
+  the mechanism was verified with a 17-minute KVM image fetch to node2
+  (secrets read at launch with the person token, token revoked meanwhile,
+  action done), not the Terraform path.
+- External Secrets in B1 end to end with a real child cluster: ESO was
+  verified in mode A on a harvlab2 child; the B1 listener, its CA, the unit
+  fallback and the rollback guard on a client VM without a child cluster.
+- A child cluster of a Harvester with several nodes.
+- The window that shows the mode A commands, replayed live (the same
+  commands were taken from the assistant during the check).
 
 ## [2.9.1] - 2026-11-08 - B1 cleanup commands fixed and split by console outcome
 
