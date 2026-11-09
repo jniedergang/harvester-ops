@@ -23380,8 +23380,9 @@ def _eso_admin_refusal():
 
 def _eso_status_of(cluster, namespace, name):
     """État ESO d'un cluster enfant (outil, lecture seule) : (doc, None) ou
-    (None, réponse)."""
-    cmd, err = _capi_base(cluster, "eso-status")
+    (None, réponse). Revue 8-10 M-5 : droit sur le cluster enfant exigé
+    (l'outil y lit noms et messages de tous les namespaces)."""
+    cmd, err = _capi_child_base(cluster, "eso-status", namespace, name)
     if err:
         return None, err
     res, err = _capi_run_json(cmd + ["--name", f"{namespace}/{name}", "--json"], timeout=90)

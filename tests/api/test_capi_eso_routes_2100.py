@@ -163,6 +163,21 @@ def test_status(env):
     assert calls(env)[-1]["argv"][:3] == ["eso-status", "--name", "web/web"] or "eso-status" in calls(env)[-1]["argv"]
 
 
+@pytest.mark.parametrize("answer,status", [("no", 403), ("yes", 200)])
+def test_status_needs_the_right_on_the_child_cluster(env, answer, status):
+    """Revue 8-10 M-5 (revue finale) : l'état lit noms et messages des
+    ExternalSecret de tous les namespaces avec le kubeconfig de la console ;
+    il demande le droit sur le cluster enfant, comme les gestes."""
+    status_doc(env)
+    env.right["answer"] = answer
+    n = len(calls(env))
+    r = env.client.get(BASE)
+    assert r.status_code == status
+    if status == 403:
+        assert r.get_json()["code"] == wapp.CHILD_ADMIN_REQUIRED and len(calls(env)) == n
+    assert env.right["asked"][-1][-4:] == ["get", "secrets/web-kubeconfig", "-n", "web"]
+
+
 # ---------------------------------------------------------------------------
 # Namespaces (décision 304 B)
 # ---------------------------------------------------------------------------
