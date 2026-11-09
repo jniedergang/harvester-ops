@@ -1724,8 +1724,44 @@ def cmd_restore(args):
         out({"ok": True, "dry_run": True, "would": f"restore {args.file} in a fresh instance (agent)"})
         return EXIT_OK
     st = agent_ok(run_agent({"op": "restore-snapshot", "file": args.file}))
-    out({"ok": True, "restored": args.file, "message": st.get("message")})
+    gone = _reconcile_after_restore(st.get("info"))
+    out({"ok": True, "restored": args.file, "message": st.get("message"), "settings_pruned": gone})
     return EXIT_OK
+
+
+def _reconcile_after_restore(info):
+    """Revue 8-10 M-3 : un instantané plus ancien qu'une méthode jwt, qu'un
+    groupe ou qu'un cluster ESO ne les porte pas ; l'agent a rangé son état
+    sur l'instantané et le dit (`info`), les réglages de la console suivent
+    (sinon une personne serait renvoyée vers un montage absent, sans repli,
+    et l'onglet montrerait ESO posé). Rend ce qui a été retiré."""
+    if not isinstance(info, dict) or "person_jwt" not in info:
+        return []                                 # agent d'avant la 2.10.0 : rien à ranger
+    doc = raw_settings()
+    pt, eso = _pt_doc(doc), _eso_doc(doc)
+    keep_jwt, keep_groups = set(info.get("person_jwt") or []), set(info.get("person_groups") or [])
+    keep_eso = set(info.get("eso_clusters") or [])
+    gone = []
+    for k in ("servers", "pending"):
+        for r in sorted(set(pt[k]) - keep_jwt):
+            pt[k].pop(r, None)
+            gone.append(f"jwt {r}")
+    for g in sorted(set(pt["groups"]) - keep_groups):
+        pt["groups"].pop(g, None)
+        gone.append(f"group {g}")
+    for c in sorted(set(eso["clusters"]) - keep_eso):
+        eso["clusters"].pop(c, None)
+        gone.append(f"eso {c}")
+    if eso["listener"] and not info.get("eso_listener"):
+        eso["listener"] = None
+        gone.append("eso listener")
+    if pt["enabled"] and not pt["servers"]:
+        pt["enabled"] = False
+        gone.append("person tokens off")
+    if gone:
+        save_settings(doc)
+        step("settings", "done", "absent from the snapshot: " + ", ".join(gone))
+    return gone
 
 
 def _cosign_runner(key, registry, user, password):

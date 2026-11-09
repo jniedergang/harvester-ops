@@ -280,3 +280,31 @@ def test_add_binds_the_role_to_the_account_uids(env, capsys, agent, spec):
     assert rc == 2 and doc["code"] == "bad-input"
     rc, doc, _ = add(capsys, spec(), "--sa-uid", "team-a")
     assert rc == 2 and doc["code"] == "bad-input"
+
+
+# ---------------------------------------------------------------------------
+# Revue 8-10 M-3 : après une restauration, les réglages suivent ce que
+# l'instantané porte (l'agent le dit)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("info,left", [
+    ({"person_jwt": ["rmgr"], "person_groups": ["ops"], "eso_clusters": [KEY], "eso_listener": LISTEN},
+     {"servers": ["rmgr"], "pending": [], "groups": ["ops"], "eso": [KEY], "listener": LISTEN, "enabled": True}),
+    ({"person_jwt": [], "person_groups": [], "eso_clusters": [], "eso_listener": None},
+     {"servers": [], "pending": [], "groups": [], "eso": [], "listener": None, "enabled": False}),
+    (None, {"servers": ["rmgr"], "pending": ["lab"], "groups": ["ops"], "eso": [KEY], "listener": LISTEN,
+            "enabled": True}),                                                   # agent d'avant : rien rangé
+])
+def test_restore_reconciles_the_settings(env, capsys, monkeypatch, info, left):
+    settings(env, mode="b1", person_token={"enabled": True, "servers": {"rmgr": {"mount": "m"}},
+                                           "pending": {"lab": {"mount": "m2"}}, "groups": {"ops": {}}},
+             eso={"listener": LISTEN, "clusters": {KEY: {"namespaces": ["team-a"]}}})
+    monkeypatch.setattr(hsc, "run_agent", lambda req, timeout=None: {"state": "done", "message": "restored",
+                                                                     **({"info": info} if info else {})})
+    rc, doc, _ = cli(["restore", "openbao-20261108T020000Z.snap"], capsys=capsys)
+    assert rc == 0, doc
+    s = read_settings(env)
+    pt, e = s["person_token"], s["eso"]
+    got = {"servers": sorted(pt["servers"]), "pending": sorted(pt.get("pending") or {}),
+           "groups": sorted(pt.get("groups") or {}), "eso": sorted(e["clusters"]), "listener": e["listener"],
+           "enabled": pt["enabled"]}
+    assert got == left

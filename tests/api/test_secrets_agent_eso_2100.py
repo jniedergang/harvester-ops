@@ -503,3 +503,34 @@ def test_health_says_when_the_listener_address_left_the_host(b1):
     b1["host"].addrs = [x for x in b1["host"].addrs if x != LISTEN.rpartition(":")[0]]
     h = b1["agent"]().health()
     assert h["eso_listener_present"] is False
+
+
+# ---------------------------------------------------------------------------
+# Revue 8-10 M-3 (point 4 des tâches 8-10) : instantané plus ancien que le
+# dernier cluster ESO : l'écouteur est éteint, la console sait quoi ranger
+# ---------------------------------------------------------------------------
+def _older_without_eso(s):
+    s.auth_mounts.pop(MOUNT + "/")
+    s.jwt_config.pop(MOUNT, None)
+    s.jwt_roles.pop(MOUNT, None)
+    s.policies.pop(pol.eso_policy_name(CID, KEY), None)
+    s.entities.pop("e5000000-0000-0000-0000-000000000000", None)
+
+
+def test_restore_older_than_the_last_eso_cluster_turns_the_listener_off(b1):
+    _configured(b1)
+    p = b1["p"]
+    rc, st = _restore_with(b1, _older_without_eso)
+    assert rc == 0, st
+    a = b1["agent"]().agent_state()
+    assert a["eso_clusters"] == {} and a.get("eso_listener") is None
+    assert LISTEN not in config_text(b1) and not (p.b1_etc / "eso-listener.ip").exists()
+    assert st["info"] == {"person_jwt": [], "person_groups": [], "eso_clusters": [], "eso_listener": None}
+
+
+def test_restore_keeping_the_eso_cluster_keeps_the_listener(b1):
+    _configured(b1)
+    rc, st = _restore_with(b1, lambda s: None)
+    assert rc == 0, st
+    assert b1["agent"]().agent_state()["eso_listener"] == LISTEN and LISTEN in config_text(b1)
+    assert st["info"]["eso_clusters"] == [KEY] and st["info"]["eso_listener"] == LISTEN

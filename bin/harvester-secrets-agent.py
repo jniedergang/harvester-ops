@@ -2607,10 +2607,36 @@ class Agent:
             c.kv_list(st["mount"], f"consoles/{st['console_id']}")
         c.revoke_self()
         self.step("witness", "done")
+        self._eso_listener_after_restore(tpl, uid)
+        st_end = self.agent_state()
+        # la console range ses réglages sur ce que l'instantané porte
+        self.status["info"] = {"person_jwt": sorted(st_end.get("person_jwt") or {}),
+                               "person_groups": sorted(st_end.get("person_groups") or {}),
+                               "eso_clusters": sorted(st_end.get("eso_clusters") or {}),
+                               "eso_listener": st_end.get("eso_listener")}
         self.undo = [u for u in self.undo if u[0] == "console started"]
         self.rollback()                              # relance la console
         shutil.rmtree(self.p.work, ignore_errors=True)
         return f"snapshot {req['file']} restored; previous volume kept {OLD_VOLUME_DAYS} days"
+
+    def _eso_listener_after_restore(self, tpl, uid):
+        """Revue 8-10 M-3 : un instantané plus ancien que le premier cluster
+        ESO ne porte plus aucun montage ESO ; l'écouteur des clusters enfants
+        n'a plus d'usage et est éteint (configuration rendue sans lui,
+        OpenBao redémarré), comme au retrait du dernier cluster."""
+        st = self.agent_state()
+        if not st.get("eso_listener") or st.get("eso_clusters"):
+            return False
+        self.step("eso-listener", "running", "no child cluster left in the snapshot")
+        new = dict(st, eso_listener=None)
+        self.render(new, tpl)
+        self.own(self.p.b1_etc / "openbao.hcl", uid)
+        self.restart()
+        self.wait_unsealed(self.b1_ca(), "OpenBao without the ESO listener")
+        self._drop_eso_tls()
+        self.save_agent_state(new)
+        self.step("eso-listener", "done", "ESO listener removed")
+        return True
 
     def _prune_person_state(self, present):
         """2.10.0 : un instantané plus ancien qu'un montage `jwt` ou qu'un
