@@ -4195,6 +4195,16 @@ def cmd_eso_remove(args):
     if args.role != "admin":
         step("remove", "error", "eso-admin-only: removing ESO is for administrators")
         return EXIT_BLOCKED
+    expect_run = getattr(args, "expect_run", "") or None
+    if expect_run:
+        # revue 8-10 I-2 : le Défaire d'une exécution relit sa marque AVANT de
+        # toucher aux ExternalSecret (un autre déroulé ou l'onglet a pu
+        # réécrire les objets du magasin depuis)
+        crs = kube.get(mf.K_CRS, ns, mf.name_of(ce.ITEM)) or kube.get("configmaps", ns, mf.name_of(ce.ITEM))
+        refused = cc.run_mismatch(crs, expect_run) if crs is not None else None
+        if refused:
+            step("remove", "error", refused)
+            return EXIT_BLOCKED
     present = kube.get(cs.K_CLUSTER, ns, cluster) is not None
     if present:
         _s, _active, e = _eso_settings()

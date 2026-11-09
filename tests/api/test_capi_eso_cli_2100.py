@@ -458,3 +458,30 @@ def test_remove_with_the_chart_blocks_on_foreign_externalsecrets(cli, world, cap
     err = capsys.readouterr().err
     assert "eso-foreign-objects" in err and "team-c/x" in err
     assert box["child"].patches == [] and box["child"].deleted == [] and removed == [] and box["events"] == []
+
+
+# ---------------------------------------------------------------------------
+# Revue 8-10 I-2 : le Défaire relit la marque de l'exécution AVANT tout geste
+# ---------------------------------------------------------------------------
+def _crs(run):
+    import capi_manifests as mf
+    return {"metadata": {"namespace": NS, "name": mf.name_of(ce.ITEM),
+                         "labels": {mf.L_CLUSTER: CL, mf.L_ITEM: ce.ITEM},
+                         "annotations": {"harvester-ops.io/plan-run": run}}}
+
+
+@pytest.mark.parametrize("on_crs,expect,ok", [("run-new", "run-old", False), ("run-old", "run-old", True)])
+def test_undo_checks_the_run_before_touching_anything(cli, world, capsys, removed, on_crs, expect, ok):
+    import capi_manifests as mf
+    _enabled(world)
+    box = world["box"]
+    box["child"] = Child(ess=[_es("team-a", "db", "u1")], secrets=[_sec("team-a", "db", "u1")])
+    mgmt = world_ok()
+    mgmt.objs[(mf.K_CRS, NS, mf.name_of(ce.ITEM))] = _crs(on_crs)
+    rc = world["run"](mgmt, ["eso-remove", "--kubeconfig", "/x", "--name", f"{NS}/{CL}", "--keep-chart",
+                             "--expect-run", expect])
+    if ok:
+        assert rc == 0 and box["child"].deleted
+        return
+    assert rc == 2 and "undo-not-ours" in capsys.readouterr().err
+    assert box["child"].patches == [] and box["child"].deleted == [] and removed == [] and box["events"] == []
