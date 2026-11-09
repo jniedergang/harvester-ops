@@ -4,6 +4,241 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.10.0] - 2026-11-09 - Per-person OpenBao token and External Secrets Operator
+
+### Added
+- **Per-person OpenBao token** (decisions 279 to 314). With the setting on,
+  a person signed in through Rancher single sign-on reads and writes the
+  personal classes (`ssh-cluster`, `ssh-kvm`, `tf-kvm`, write-only `eso`)
+  with an OpenBao token of their own: OpenBao judges each request and its
+  audit log names the person (entity, `sub`, metadata `name` and
+  `provider`). One OpenBao `jwt` auth method per Rancher
+  (`jwt-hops-<id>-p-<rancher>`) trusting Rancher's OIDC provider; the
+  console presents Rancher's identity token, never the access token; role
+  `person` with tokens of 15 minutes bound to the console address,
+  reconnected at each Rancher refresh and revoked at sign-out. Local
+  accounts, direct sign-in, background tasks, the command line and the
+  worker threads of actions keep the service identity; a refused person is
+  never served by the service (HTTP 403). Doc: `docs/en/secrets.md`.
+- **Settings > Secret store > Personal tokens**: set up a Rancher (agent in
+  B1, `bao` commands and exact policy text in mode A), five checks with a
+  real login of the administrator (discovery, login, token, capabilities,
+  revocation), activate, turn off, remove one Rancher or everything;
+  internal OpenBao groups `hops-<id>-<name>` (classes and clusters, members
+  picked among the entities seen), **Reading only through groups**; Rancher
+  signing keys watched every hour, update and confirm for static keys (mode
+  A only; B1 uses discovery, issuer, client and CA pinned in root's state).
+  CLI `harvester-secrets person-token`.
+- **Activity mark** on every action that read a secret: personal token,
+  service, or late service; writes carry `hops_identity`.
+- **External Secrets Operator in child clusters** (decision 139): option of
+  the RKE2 child clusters created by the console (creation window, External
+  Secrets tab of Cluster API, `external_secrets` of a deployment plan
+  cluster), administrators, OpenBao active. The official chart from an
+  artefact package (checked with chart 2.14.0, appVersion v2.14.0, API
+  `external-secrets.io/v1`, 25 CRDs, one image), installed by CAAPH with
+  values imposed by the console; per enabled team namespace a `hops-eso`
+  account without rights and a `SecretStore` `hops-openbao` delivered by
+  the ClusterResourceSet `art-eso`; in OpenBao one `jwt` auth method per
+  child cluster with the keys of its service account JWKS, role `eso` bound
+  to the account name, the enabled namespaces and each account UID, and one
+  templated policy so a namespace reads only `eso/<key>/<namespace>/*`.
+  Values written from the tab with the person's own token, never shown
+  again. Removal keeps the synced Secrets at their last value. CLI
+  `harvester-capi eso-deploy | eso-status | eso-remove`, `harvester-secrets
+  eso`.
+- **B1 ESO listener**: second TLS listener with its own CA on a static
+  address of the host (8212 by default), off while no child cluster uses
+  ESO; the unit falls back to the loopback when the address is gone at
+  start and the console says so within an hour.
+- **Deployment plans**: phase `eso` after the artefacts, undone before them.
+
+### Changed
+- **B1 template**: the full 2.10 template lives in
+  `/etc/harvester-ops-openbao/openbao-eso.hcl.tpl`; `openbao.hcl.tpl` keeps
+  the same text without the listener line, so a 2.9.x agent after a
+  rollback still renders a valid configuration.
+- **`install.sh --upgrade` with B1 posed** queues `b1-policies`, which widens
+  the agent policy (the console's jwt methods, person, group and ESO
+  policies, its groups) without restarting OpenBao, and binds the OpenTofu
+  token role to `127.0.0.1/32`; unauthenticated rekey endpoints are disabled
+  on every listener.
+- **Rolling back below 2.10.0** is refused in B1 while a Rancher jwt
+  method, a group, the ESO listener or an ESO cluster remains
+  (`secrets-person-token-b1`, steps `person-token disable --remove` and
+  `eso remove --all`); allowed with a warning in mode A.
+- **Restore review**: the allowlist also accepts exactly what the console
+  renders for per-person tokens and ESO; after a restore the settings are
+  put in line with the snapshot and the listener is turned off when no ESO
+  cluster is left.
+- **Removing the `eso` chart** (undo of a plan, Services, Artefacts) is
+  refused while any ExternalSecret remains in the child cluster
+  (`eso-foreign-objects`, listed): the chart would take their CRDs.
+- **The ESO state of a child cluster** needs the right on that cluster
+  (read access to its `<cluster>-kubeconfig` Secret), like the gestures.
+- **The Rancher sign-in keeps the identity token** in the session (memory
+  only) and the `groups` scope is never requested (Rancher 2.14.1 refuses it
+  and the whole sign-in fails). Behaviour change, setting on or off: **an
+  identity token found invalid at a Rancher refresh closes the console
+  session** (2.9.1 kept the session going).
+
+### Fixed (found by the reviews and the real checks of this release)
+- Found by the real checks: image upload and fetch to a KVM host failed
+  with `SecretError` once `ssh-kvm` was in OpenBao (the tool got no copy of
+  the host key; present since 2.9.0); the ESO listener also opened
+  OpenBao's cluster port on the host address (`<address>:<port + 1>`), now
+  on `127.0.0.1`, ports 8209 and 65535 refused; a cluster template refused
+  `external_secrets: {namespaces, chart}`, the form its window writes; the
+  undo read the ESO state without the Harvester name (error in the
+  destruction plan, chart always kept); in mode A the commands for the
+  OpenBao administrator never reached the ESO tab (stdout discarded), now
+  shown in a window with copy; a restore launched from the console left the
+  settings unpruned (the tool died with the console), now settled by the
+  restarted console (`harvester-secrets restore-settle`).
+- Found by the final review: the eso chart could be removed while team
+  ExternalSecrets remained (undo, tab with the chart kept, Artefacts); a
+  2.9.x agent after a rollback rendered an invalid B1 configuration from a
+  2.10 template; the ESO listener could be turned on before the OpenTofu
+  token role was bound to the loopback; the console range of mode A was not
+  bounded on the command line (0.0.0.0/0) nor in IPv6; the "keys changed"
+  alert was cleared when the update was launched, not when it succeeded;
+  the ESO state of a child cluster was readable by a viewer without any
+  right on it; two deploy tests raced under `-n 12`.
+- Found by the reviews of the tasks: shared KVM views mixed persons (now
+  read by the service, gestures keep the person token); a missing personal
+  secret at launch gave a 500; the `groups` scope made the whole Rancher
+  sign-in fail; reconnection on the Rancher renewal thread; late service
+  reads of plan runs launched by a person were not marked; persons could
+  not write `ssh-kvm` nor the attribution metadata; person and ESO mounts
+  could collide by name; Rancher trust anchor now pinned in root's state
+  (discovery only in B1); restored snapshots with group members or
+  mixed-alias entities are reviewed; `eso-remove` touched ExternalSecrets of
+  the teams; the undo now checks the plan run before touching
+  ExternalSecrets; ESO access bound to the UID of each `hops-eso` account;
+  a B1 bundle without the listener line is refused while the listener is
+  on; OpenTofu child tokens bound to the loopback in B1; OpenBao starts on
+  the loopback when the ESO address is gone; listener and settings
+  reconciled after a restore; a package delivering ESO objects before the
+  chart is reported.
+
+### Upgrade notes
+- Nothing changes until an administrator turns personal tokens or External
+  Secrets on.
+- For ESO in B1: a static host address reachable from the child node
+  networks, port 8212 opened in the host firewall to those networks only
+  (the console never touches the firewall), and a B1 bundle built with
+  2.10.0.
+- Before rolling back below 2.10.0 in B1: `harvester-secrets person-token
+  disable --remove` and `harvester-secrets eso remove --all`.
+
+### Known limits
+- Groups are internal OpenBao groups only: Rancher 2.14.1 emits no
+  `groups` claim and refuses the scope (decision 303 A).
+- Every 2.10.0 single sign-on session keeps its identity token: a session
+  opened before activation uses the person token at once (the plan expected
+  a reconnection).
+- A Rancher-side sign-out is seen at the next refresh (about 10 minutes);
+  person tokens of a console process that stopped expire with their TTL
+  (15 minutes at most, bound to the console address).
+- A person who writes a class can rewrite the `custom_metadata` and
+  `max_versions` of its secrets: the OpenBao audit is the reference, not the
+  attribution shown by the console. The login line of a person and the
+  reads at the launch of an action carry `service` / `bg-console` headers.
+- B1 pins the issuer, client and CA of a Rancher at the first set-up (trust
+  on first use); the keys of a child cluster are trusted at the first ESO
+  set-up.
+- The rollback guard reads the console settings, not root's state.
+- A B1 bundle built by 2.10.0 cannot be installed by a 2.9.x console
+  ("a storage backend must be specified"): build the bundle with the
+  console's version.
+- The ESO listener certificate is valid 730 days and is not renewed by
+  itself; each turn-on makes a new CA.
+- Mode A: the ESO tab keeps saying "waiting for the OpenBao administrator"
+  once the stores are ready; on a re-run of the commands, skip `bao auth
+  enable`; the OpenTofu child token role is not bound to an address in mode
+  A.
+- A deleted `hops-eso` account is reported as `eso-account-changed`; a
+  revoked service account token is accepted by OpenBao until it expires
+  (10 minutes); ESO logs in at each reconciliation.
+- A restore settle does nothing if another agent operation ran before the
+  console came back; a secret lost by a restore makes the cluster SSH test
+  answer 500.
+
+### Tests
+- API: jwt client and person registry, identity of reads, frozen identity
+  of actions, policies, agent operations (`b1-jwt`, `b1-groups`, ESO
+  listener and clusters) on fake servers that apply the agent policy,
+  restore review with crafted snapshots, ESO objects and removal, plan phase
+  and undo (team ExternalSecrets keep the chart), routes and roles, the B1
+  template rendered by a frozen copy of the 2.9.1 renderer, console range
+  bounds, keys alert on success only; mutations replayed for the review
+  fixes. E2E: Personal tokens tab, assistant, groups, Activity mark, ESO tab
+  and creation option, mode A commands window.
+- Full suites before the version commit: API 15433 passed, 9 skipped; E2E
+  1412 passed.
+
+### Verified for real
+- Personal tokens in mode A on OpenBao 2.7.2 (Application Collection
+  image) and on Vault 1.14.2, with the real code flow of Rancher 2.14.1 and
+  a dedicated OIDC client: each check failed once (method absent, wrong
+  audience, local account, too wide policy, foreign and too wide address
+  range) then activation; a KVM gesture on node2 by the Rancher
+  administrator named in the audit (entity, `name`), Activity "personal
+  token"; a local Rancher account refused by group with no service read
+  after; a 17-minute KVM action outliving the person token; refresh every
+  ~7.5 minutes with the old token revoked and entities stable, console and
+  Rancher sign-out; static keys changed (simulated), banner, update without
+  cutting sessions.
+- B1 on the client VM: update 2.9.1 to 2.10.0 by hand (`b1-policies` run by
+  `install.sh`), `b1-jwt` without restarting OpenBao, five checks and
+  activation with a real identity token, real refresh cycle for 22 minutes,
+  ESO listener with its own CA, unit fallback when its address was gone at
+  reboot, snapshot and restore after activation, restore of a snapshot taken
+  before activation (settings settled), rollback refused three times with
+  `secrets-person-token-b1`, then allowed after `person-token disable
+  --remove` and `eso remove --all`; under 2.9.1, `rotate unseal-key`
+  rendered a valid configuration.
+- External Secrets in mode A on a harvlab2 child created by a plan
+  (template option, chart 2.14.0 from a client registry, ready in 48 s): two
+  namespaces each reading its value, one refused on the other's path (403),
+  rotation followed in 16 s, the ESO token carries the account UID (a
+  recreated account refused until rebound), listener CA dedicated, firewall
+  opened to the child node network only; removal refused with a team
+  ExternalSecret, undo keeping the chart with `eso-foreign-objects`, direct
+  `service-remove` refused, clean undo removing the chart with the Secrets
+  kept.
+
+### Not verified for real
+NOT- Personal tokens in mode A on OpenBao 2.7.2 (Application Collection
+  image) and on Vault 1.14.2, with the real code flow of Rancher 2.14.1 and
+  a dedicated OIDC client: each check failed once (method absent, wrong
+  audience, local account, too wide policy, foreign and too wide address
+  range) then activation; a KVM gesture on node2 by the Rancher
+  administrator named in the audit (entity, `name`), Activity "personal
+  token"; a local Rancher account refused by group with no service read
+  after; a 17-minute KVM action outliving the person token; refresh every
+  ~7.5 minutes with the old token revoked and entities stable, console and
+  Rancher sign-out; static keys changed (simulated), banner, update without
+  cutting sessions.
+- B1 on the client VM: update 2.9.1 to 2.10.0 by hand (`b1-policies` run by
+  `install.sh`), `b1-jwt` without restarting OpenBao, five checks and
+  activation with a real identity token, real refresh cycle for 22 minutes,
+  ESO listener with its own CA, unit fallback when its address was gone at
+  reboot, snapshot and restore after activation, restore of a snapshot taken
+  before activation (settings settled), rollback refused three times with
+  `secrets-person-token-b1`, then allowed after `person-token disable
+  --remove` and `eso remove --all`; under 2.9.1, `rotate unseal-key`
+  rendered a valid configuration.
+- External Secrets in mode A on a harvlab2 child created by a plan
+  (template option, chart 2.14.0 from a client registry, ready in 48 s): two
+  namespaces each reading its value, one refused on the other's path (403),
+  rotation followed in 16 s, the ESO token carries the account UID (a
+  recreated account refused until rebound), listener CA dedicated, firewall
+  opened to the child node network only; removal refused with a team
+  ExternalSecret, undo keeping the chart with `eso-foreign-objects`, direct
+  `service-remove` refused, clean undo removing the chart with the Secrets
+  kept.
+
 ## [2.9.1] - 2026-11-08 - B1 cleanup commands fixed and split by console outcome
 
 ### Fixed
