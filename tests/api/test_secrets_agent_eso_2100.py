@@ -595,6 +595,35 @@ def test_a_210_template_found_under_the_old_name_is_split(b1):
     assert _left_for_291(b1) == [] and (p.b1_etc / hsa.TEMPLATE_2100).read_text() == full
 
 
+
+def test_a_stale_210_template_left_by_a_rollback_is_not_taken(b1):
+    """Revue finale m-B : 2.10 avec écouteur, puis retour en 2.9.x qui ne
+    réécrit que `openbao.hcl.tpl`, puis nouvelle montée en 2.10.x. L'ancien
+    `openbao-eso.hcl.tpl` n'est plus le pendant de `openbao.hcl.tpl` : il ne
+    passe pas devant le modèle d'install.sh (/opt), qui le remplace."""
+    p = b1["p"]
+    tpl = (p.b1_etc / hsa.TEMPLATE_2100).read_text()
+    (p.b1_etc / hsa.TEMPLATE_2100).write_text(tpl + "# stale 2.10 template\n")      # resté d'avant le retour
+    (p.b1_etc / "openbao.hcl.tpl").write_text(tpl.replace("__ESO_LISTENER__\n", ""))   # réécrit par la 2.9.x
+    newer = tpl + "# template of the newer package\n"
+    (p.unit_src.parent / "openbao.hcl.tpl").write_text(newer)
+    rc, st = listener(b1)
+    assert rc == 0, st
+    assert (p.b1_etc / hsa.TEMPLATE_2100).read_text() == newer
+    assert "# template of the newer package" in config_text(b1)
+    assert "# stale" not in config_text(b1)
+
+
+def test_a_matching_210_template_is_kept(b1):
+    """Le pendant exact reste le modèle posé (aucun recours à /opt)."""
+    p = b1["p"]
+    tpl = (p.b1_etc / hsa.TEMPLATE_2100).read_text()
+    (p.unit_src.parent / "openbao.hcl.tpl").write_text(tpl + "# not taken\n")
+    rc, st = listener(b1)
+    assert rc == 0, st
+    assert (p.b1_etc / hsa.TEMPLATE_2100).read_text() == tpl
+    assert "# not taken" not in config_text(b1)
+
 # ---------------------------------------------------------------------------
 # Revue finale m-1 : l'écouteur ESO ne s'allume jamais avant que le rôle des
 # jetons d'OpenTofu soit lié à 127.0.0.1/32 (B1 d'avant 2.10.0 dont la demande

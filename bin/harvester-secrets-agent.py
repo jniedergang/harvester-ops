@@ -1751,12 +1751,24 @@ class Agent:
 
     def _stored_template(self):
         """Le modèle posé, rangé sous les deux noms au passage s'il a été
-        écrit sous l'ancien nom avec la ligne de l'écouteur."""
+        écrit sous l'ancien nom avec la ligne de l'écouteur. Revue finale
+        m-B : `TEMPLATE_2100` ne vaut que s'il est encore le pendant de
+        `TEMPLATE_29` ; laissé par une 2.10 puis survécu à un passage en 2.9.x
+        (qui ne réécrit que `TEMPLATE_29`), il est périmé et retiré."""
         try:
-            return (self.p.b1_etc / TEMPLATE_2100).read_text()
+            full = (self.p.b1_etc / TEMPLATE_2100).read_text()
         except OSError:
-            pass
-        cur = (self.p.b1_etc / TEMPLATE_29).read_text()
+            full = None
+        try:
+            cur = (self.p.b1_etc / TEMPLATE_29).read_text()
+        except OSError:
+            if full is None:
+                raise
+            return full
+        if full is not None:
+            if pol.template_without_eso(full) == cur:
+                return full
+            (self.p.b1_etc / TEMPLATE_2100).unlink(missing_ok=True)
         if re.search(r"^__ESO_LISTENER__$", cur, re.M):
             self._store_template(cur)
         return cur
