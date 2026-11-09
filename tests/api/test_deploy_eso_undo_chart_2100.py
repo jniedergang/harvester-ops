@@ -2,8 +2,10 @@
 `eso` tant que des `ExternalSecret` des équipes (laissés exprès par
 `eso-remove`, revue 8-10 I-1) existent dans le cluster enfant qui reste : le
 chart emporterait leurs CRD. Le chart est gardé, l'élément le dit
-(`eso-foreign-objects`) ; aucun retrait lancé. Quand le cluster enfant part
-dans le même Défaire, le chart part comme avant (le cluster emporte tout)."""
+(`eso-foreign-objects`) ; aucun retrait lancé. Même règle quand le cluster
+enfant part dans le même Défaire ; décocher le chart laisse le cluster tout
+emporter. Le refus lui-même est porté par `service-remove` (revue finale I-1,
+tests de `test_capi_eso_cli_2100.py`)."""
 
 import sys
 from pathlib import Path
@@ -62,12 +64,24 @@ def test_eso_chart_removed_when_no_externalsecret_is_left(eso_undo):
     assert ("service-remove", "web/eso") in fake.removals
 
 
-def test_eso_chart_removed_with_its_cluster_in_the_same_undo(eso_undo):
+def test_eso_chart_kept_with_its_cluster_in_the_same_undo(eso_undo):
+    """Le retrait du chart avant le cluster bloquerait aussi (CRD en
+    suppression, release « uninstalling ») : refus ; le cluster attend son
+    chart, donc reste. Décocher le chart laisse le cluster tout emporter."""
     fake = eso_undo["undo"]
     run = tu.finish(tu.launch(eso_undo, include=["chart-web/web/eso", "chart-web/web/podinfo",
                                                  "manifest-web/web/regles", "capi-cluster-web/web"]))
-    assert tu.items_of(run)["chart-web/web/eso"]["status"] == "done", run.result
-    assert ("service-remove", "web/eso") in fake.removals
+    items = tu.items_of(run)
+    assert items["chart-web/web/eso"]["status"] == "error" and "eso-foreign-objects" in items["chart-web/web/eso"]["message"]
+    assert ("service-remove", "web/eso") not in fake.removals
+    assert ("delete", "web/web") not in fake.removals
+
+
+def test_cluster_removed_when_the_eso_chart_is_left_out(eso_undo):
+    fake = eso_undo["undo"]
+    run = tu.finish(tu.launch(eso_undo, include=["chart-web/web/podinfo", "manifest-web/web/regles",
+                                                 "capi-cluster-web/web"]))
+    assert tu.items_of(run)["capi-cluster-web/web"]["status"] == "done", run.result
     assert getattr(fake, "status_reads", 0) == 0
 
 

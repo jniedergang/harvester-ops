@@ -1835,6 +1835,11 @@ def cmd_service_remove(args):
         step("remove", "error", refused)
         return EXIT_BLOCKED
     label = sv.label_of(name)
+    if name == ce.SERVICE:
+        refused = _eso_chart_blockers(kube, ns, hcp, label)
+        if refused:
+            step("remove", "error", refused)
+            return EXIT_BLOCKED
     kube.delete(sv.K_HCP, ns, name)
     step("remove", "running", f"service {ns}/{name} deleted, releases being uninstalled")
     # 2.6.0 : identifiants et CA posés pour ce service, s'il était le dernier
@@ -1860,6 +1865,42 @@ def cmd_service_remove(args):
     _release_namespace_down(kube, ns, hcp)
     step("remove", "done", f"service {ns}/{name} removed")
     return EXIT_OK
+
+
+def _eso_chart_blockers(kube, ns, hcp, label):
+    """Revue finale 2.10.0 I-1 (point 300) : le chart `eso` emporte les CRD ;
+    tant qu'un ExternalSecret existe dans un cluster enfant visé (ceux des
+    équipes, laissés exprès par `eso-remove`), leurs finalizers ne seraient
+    plus retirés et leurs Secrets partiraient ensuite au ramasse-miettes.
+    Rend le refus (avant tout geste) ou None. Couvre le Défaire, l'onglet et
+    les Artefacts, qui passent tous par ce retrait."""
+    art = mf.artefact_of(hcp) or {}
+    names = {c["metadata"]["name"] for c in kube.list(cs.K_CLUSTER, ns)
+             if (c["metadata"].get("labels") or {}).get(label)}
+    if art.get("cluster"):
+        names.add(art["cluster"])
+    left = []
+    for c in sorted(names):
+        if kube.get(cs.K_CLUSTER, ns, c) is None:
+            continue                            # parti : rien à garder
+        try:
+            with ca.session(kube, ns, c) as path:
+                try:
+                    every = Kube(path).list(K_ES)
+                except KubeError as err:
+                    if not is_missing_type(err):
+                        raise
+                    every = []
+        except (KubeError, ca.ChildAccessError) as err:
+            return (f"eso-status-unreadable: chart kept, the ExternalSecrets of {ns}/{c} could not be read: "
+                    f"{str(err)[:160]}")
+        left += [f"{(x.get('metadata') or {}).get('namespace')}/{(x.get('metadata') or {}).get('name')}"
+                 for x in every]
+    if not left:
+        return None
+    left.sort()
+    return (f"eso-foreign-objects: chart kept, {len(left)} ExternalSecret(s) of the teams ({', '.join(left[:10])}) "
+            "would lose their CRD with the chart: remove them first")
 
 
 def _release_namespace_down(kube, ns, hcp):

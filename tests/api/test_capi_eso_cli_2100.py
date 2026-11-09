@@ -538,3 +538,60 @@ def test_account_findings(cli, namespaces, accounts, bound, codes):
     child = Child(namespaces=[n for n in namespaces if n != "gone"])
     child.accounts = dict(accounts)
     assert [f["code"] for f in cli._eso_account_findings(child, namespaces, bound)] == codes
+
+
+# ---------------------------------------------------------------------------
+# Revue finale I-1 : le retrait du chart `eso` lui-même (Défaire, onglet avec
+# ?keep_chart=1 puis Artefacts, `service-remove`) est refusé tant qu'un
+# ExternalSecret existe dans un cluster enfant visé : le chart emporterait
+# les CRD (finalizers orphelins, Secrets des équipes ramassés ensuite)
+# ---------------------------------------------------------------------------
+def _labelled_world():
+    mgmt = world_ok()
+    mgmt.patch = lambda *a, **kw: None
+    mgmt.objs[(cs.K_CLUSTER, NS, CL)]["metadata"]["labels"][sv.label_of(ce.SERVICE)] = "true"
+    return mgmt
+
+
+@pytest.mark.parametrize("ess,rc,deleted", [
+    ([_es_on("team-c", "x", "u9"), _es_on("team-a", "aws", "u2", store="aws-store")], 2, False),
+    ([], 0, True),
+])
+def test_service_remove_of_eso_refuses_while_externalsecrets_remain(cli, world, capsys, ess, rc, deleted):
+    world["box"]["child"] = Child(ess=ess)
+    mgmt = _labelled_world()
+    got = []
+    mgmt.delete = lambda kind, ns, name, **kw: got.append((kind, ns, name))
+    assert world["run"](mgmt, ["service-remove", "--kubeconfig", "/x", "--name", f"{NS}/eso",
+                               "--timeout", "0"]) == rc
+    assert bool(got) is deleted
+    if not deleted:
+        err = capsys.readouterr().err
+        assert "eso-foreign-objects" in err and "team-a/aws" in err and "team-c/x" in err
+
+
+def test_service_remove_of_eso_refuses_when_the_child_cannot_be_read(cli, world, capsys):
+    class Broken(Child):
+        def list(self, kind, ns=None, selector=None):
+            if kind == "externalsecrets.external-secrets.io":
+                raise cli.KubeError("connection refused")
+            return super().list(kind, ns, selector)
+    world["box"]["child"] = Broken()
+    mgmt = _labelled_world()
+    got = []
+    mgmt.delete = lambda kind, ns, name, **kw: got.append((kind, ns, name))
+    assert world["run"](mgmt, ["service-remove", "--kubeconfig", "/x", "--name", f"{NS}/eso",
+                               "--timeout", "0"]) == 2
+    assert got == [] and "eso-status-unreadable" in capsys.readouterr().err
+
+
+def test_service_remove_of_another_chart_does_not_read_the_child(cli, world, capsys):
+    class NoRead(Child):
+        def list(self, kind, ns=None, selector=None):
+            raise AssertionError("child read")
+    world["box"]["child"] = NoRead()
+    mgmt = world_ok()
+    mgmt.objs[(sv.K_HCP, NS, "podinfo")] = {"metadata": {"name": "podinfo", "namespace": NS}, "spec": {}}
+    mgmt.delete = lambda kind, ns, name, **kw: None
+    assert world["run"](mgmt, ["service-remove", "--kubeconfig", "/x", "--name", f"{NS}/podinfo",
+                               "--timeout", "0"]) == 0
