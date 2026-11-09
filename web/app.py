@@ -10453,6 +10453,49 @@ def _update_outcome_watch(timeout=1200, step=5):
 if not IS_READ_WORKER:
     threading.Thread(target=_update_outcome_watch, daemon=True, name="update-outcome").start()
 
+
+def _secrets_agent_status():
+    """`status.json` de l'agent des secrets (root, sans valeur), {} sinon."""
+    try:
+        st = json.loads((_secrets_agent_dir() / "status.json").read_text())
+        return st if isinstance(st, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+# 2.10.0 (tâche 13, vu sur un poste client) : une restauration lancée depuis
+# la console arrête la console, et l'outil qui l'a lancée avec elle, avant
+# qu'il range les réglages sur ce que porte l'instantané (méthodes jwt,
+# groupes, clusters ESO, écouteur). Relancée, la console attend l'état final
+# de l'agent et range une fois par restauration (`restore-settle`).
+def _secrets_restore_settle_watch(timeout=1800, step=5):
+    deadline = time.time() + timeout
+    while True:
+        st = _secrets_agent_status()
+        if st.get("op") != "restore-snapshot":
+            return
+        if st.get("state") not in (None, "running"):
+            break
+        if time.time() >= deadline:
+            return
+        time.sleep(step)
+    info = st.get("info")
+    if st.get("state") != "done" or not isinstance(info, dict) or "person_jwt" not in info:
+        return
+    if _secrets_raw().get("restore_settled") == st.get("started"):
+        return
+    with app.app_context():
+        _secrets_tool_action("secrets:restore-settle", ["restore-settle"], actor="console", clear_cache=True,
+                             after_fn=_person_tokens_sweep)
+
+
+
+def _start_secrets_restore_settle():
+    """Lancé depuis le point d'entrée, jamais à l'import : le fil appelle des
+    fonctions définies plus bas dans ce module (vu en réel : NameError quand
+    il partait pendant l'import)."""
+    threading.Thread(target=_secrets_restore_settle_watch, daemon=True, name="secrets-restore-settle").start()
+
 # Kick off watchers at import — the threads are daemons so Flask shutdown
 # cleans them up.
 try:
@@ -41815,6 +41858,7 @@ if __name__ == "__main__":
     try:
         _start_secret_originals_sweeper()        # 2.9.0 : délai de garde des originaux migrés
         _start_secrets_background()              # 2.9.0 : sonde, instantanés, clés transit, orphelins
+        _start_secrets_restore_settle()          # 2.10.0 : réglages rangés après une restauration
         _start_plan_secrets_sweeper()            # 2.9.0 : secrets des déroulés finis ou expirés
     except Exception as _e:                      # noqa: BLE001
         log.warning("secret originals sweeper startup failed: %s", _e)

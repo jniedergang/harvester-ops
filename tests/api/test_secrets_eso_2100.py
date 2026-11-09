@@ -308,3 +308,67 @@ def test_restore_reconciles_the_settings(env, capsys, monkeypatch, info, left):
            "groups": sorted(pt.get("groups") or {}), "eso": sorted(e["clusters"]), "listener": e["listener"],
            "enabled": pt["enabled"]}
     assert got == left
+
+
+# ---------------------------------------------------------------------------
+# Tâche 13 (hops-upd) : une restauration lancée depuis la console arrête la
+# console, donc l'outil qui l'a lancée, avant qu'il range les réglages.
+# `restore-settle` les range d'après l'état final de l'agent (status.json),
+# une seule fois par restauration (marque `restore_settled`).
+# ---------------------------------------------------------------------------
+def _agent_status(op="restore-snapshot", state="done", started=1794195841.5, info=None):
+    d = hsc.state() / "secrets-agent"
+    d.mkdir(parents=True, exist_ok=True)
+    doc = {"op": op, "state": state, "started": started}
+    if info is not None:
+        doc["info"] = info
+    (d / "status.json").write_text(json.dumps(doc))
+
+
+EMPTY = {"person_jwt": [], "person_groups": [], "eso_clusters": [], "eso_listener": None}
+
+
+def _seed_restored(env):
+    settings(env, mode="b1", person_token={"enabled": True, "servers": {"rmgr": {"mount": "m"}}, "pending": {},
+                                           "groups": {}}, eso={"listener": LISTEN, "clusters": {KEY: {}}})
+
+
+@pytest.mark.parametrize("status,pruned", [
+    ({"info": EMPTY}, True),
+    ({"info": EMPTY, "state": "running"}, False),
+    ({"info": EMPTY, "state": "failed"}, False),
+    ({"info": EMPTY, "op": "b1-eso-listener"}, False),
+    ({}, False),                                                              # agent d'avant : pas d'info
+])
+def test_restore_settle_prunes_from_the_final_agent_status(env, capsys, status, pruned):
+    _seed_restored(env)
+    _agent_status(**status)
+    rc, doc, _ = cli(["restore-settle"], capsys=capsys)
+    assert rc == 0, doc
+    s = read_settings(env)
+    assert (s["person_token"]["servers"] == {} and s["eso"]["clusters"] == {} and s["eso"]["listener"] is None
+            and s["person_token"]["enabled"] is False) is pruned
+    assert bool(doc.get("settings_pruned")) is pruned
+    assert (s.get("restore_settled") == 1794195841.5) is pruned
+
+
+def test_restore_settle_runs_once_per_restore(env, capsys):
+    _seed_restored(env)
+    _agent_status(info=EMPTY)
+    assert cli(["restore-settle"], capsys=capsys)[0] == 0
+    _seed_restored(env)                                                        # posé de nouveau depuis
+    s = read_settings(env)
+    s["restore_settled"] = 1794195841.5
+    (hsc.state() / "secrets-settings.json").write_text(json.dumps(s))
+    rc, doc, _ = cli(["restore-settle"], capsys=capsys)
+    assert rc == 0 and not doc.get("settings_pruned")
+    assert read_settings(env)["person_token"]["servers"] == {"rmgr": {"mount": "m"}}
+
+
+def test_restore_by_the_tool_records_its_settle_mark(env, capsys, monkeypatch):
+    _seed_restored(env)
+    monkeypatch.setattr(hsc, "run_agent", lambda req, timeout=None: {"state": "done", "started": 42.0,
+                                                                     "info": EMPTY})
+    rc, doc, _ = cli(["restore", "openbao-20261108T020000Z.snap"], capsys=capsys)
+    assert rc == 0 and doc["settings_pruned"]
+    assert read_settings(env)["restore_settled"] == 42.0

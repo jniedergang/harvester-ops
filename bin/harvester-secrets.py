@@ -21,6 +21,7 @@
     harvester-secrets settings [--set KEY=VALUE ...]
     harvester-secrets sweep-orphans [--class C ...] [--min-age-days N] [--dry-run]
     harvester-secrets restore FILE [--dry-run]
+    harvester-secrets restore-settle
     harvester-secrets bundle --registry R --user U --password-stdin [--repository P] [--tag T]
                              [--cosign-key FILE] -o DIR|FILE
     harvester-secrets file REF
@@ -1725,7 +1726,37 @@ def cmd_restore(args):
         return EXIT_OK
     st = agent_ok(run_agent({"op": "restore-snapshot", "file": args.file}))
     gone = _reconcile_after_restore(st.get("info"))
+    _restore_settled(st)
     out({"ok": True, "restored": args.file, "message": st.get("message"), "settings_pruned": gone})
+    return EXIT_OK
+
+
+def _restore_settled(st):
+    """Marque la restauration `st` (état final de l'agent) comme rangée."""
+    if isinstance(st.get("info"), dict) and "person_jwt" in st["info"]:
+        doc = raw_settings()
+        doc["restore_settled"] = st.get("started")
+        save_settings(doc)
+
+
+def cmd_restore_settle(args):
+    """Tâche 13 (vu sur un poste client) : une restauration lancée depuis la
+    console arrête la console, et l'outil qui l'a lancée avec elle, avant
+    qu'il range les réglages. La console relancée appelle ceci : réglages
+    rangés d'après l'état final de l'agent (`status.json`), une seule fois
+    par restauration (marque `restore_settled` = son heure de début)."""
+    try:
+        st = json.loads((state() / "secrets-agent" / "status.json").read_text())
+    except (OSError, ValueError):
+        st = {}
+    info = st.get("info") if isinstance(st, dict) else None
+    if not (st.get("op") == "restore-snapshot" and st.get("state") == "done" and isinstance(info, dict)
+            and "person_jwt" in info) or raw_settings().get("restore_settled") == st.get("started"):
+        out({"ok": True, "settings_pruned": []})
+        return EXIT_OK
+    gone = _reconcile_after_restore(info)
+    _restore_settled(st)
+    out({"ok": True, "settings_pruned": gone})
     return EXIT_OK
 
 
@@ -2868,6 +2899,7 @@ def parser():
     s = sub.add_parser("restore")
     s.add_argument("file")
     s.add_argument("--dry-run", action="store_true")
+    sub.add_parser("restore-settle", help="settings pruned to the last restored snapshot (console restart)")
     s = sub.add_parser("bundle")
     s.add_argument("--registry", default=ob.DEFAULT_REGISTRY)
     s.add_argument("--repository", default=ob.DEFAULT_REPOSITORY)
@@ -2948,7 +2980,7 @@ def parser():
 COMMANDS = {"status": cmd_status, "assistant": cmd_assistant, "check": cmd_check, "enable": cmd_enable,
             "upgrade-b1": cmd_upgrade_b1,
             "disable": cmd_disable, "migrate": cmd_migrate, "confirm": cmd_confirm, "versions": cmd_versions,
-            "rollback": cmd_rollback, "outage-test": cmd_outage_test, "rotate": cmd_rotate, "snapshot": cmd_snapshot, "restore": cmd_restore,
+            "rollback": cmd_rollback, "outage-test": cmd_outage_test, "rotate": cmd_rotate, "snapshot": cmd_snapshot, "restore": cmd_restore, "restore-settle": cmd_restore_settle,
             "bundle": cmd_bundle, "file": cmd_file, "offline-copy": cmd_offline_copy,
             "tf-encryption": cmd_tf_encryption, "tf-entity-remove": cmd_tf_entity_remove,
             "tf-keys": cmd_tf_keys, "snapshots": cmd_snapshots, "settings": cmd_settings,
