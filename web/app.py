@@ -18479,7 +18479,7 @@ _UNSET = object()
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
                 capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
                 setup=None, parent=None, cluster_user=_UNSET, sink=None, busy_match=None,
-                secret_clusters=(), secret_refs=(), secret_files=None):
+                secret_clusters=(), secret_refs=(), secret_files=None, after_run=None):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
@@ -18561,6 +18561,12 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
                 Path(spec_file).unlink(missing_ok=True)
             if after:
                 after()
+            if after_run:
+                # 2.10.0 (revue finale m-3) : rappel qui lit l'issue de l'action
+                try:
+                    after_run(run)
+                except Exception as e:          # noqa: BLE001 : jamais l'issue de l'action
+                    log_actions.warning("after %s: %s", run.id, type(e).__name__)
     threading.Thread(target=work, daemon=True).start()
     return run, None
 
@@ -34957,7 +34963,7 @@ _OFFLINE_LOCK = threading.Lock()
 
 
 def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=(), clear_cache=False,
-                         after_fn=None):
+                         after_fn=None, after_ok=None):
     """Action suivie `harvester-secrets ...`. `private` : valeurs tapées
     (jeton d'enveloppe, CA) remises à l'outil par un fichier 0600 sur tmpfs
     (`--spec`), effacé à la fin de l'action ; jamais en argument.
@@ -34989,9 +34995,11 @@ def _secrets_tool_action(label, args, private=None, actor=None, secret_clusters=
                 log.warning("after the secret store action: %s", type(e).__name__)
     after = _after if (spec or clear_cache or after_fn is not None) else None
     who = actor or (current_user() if _has_request() else None) or "console"
+    extra = {"after_run": lambda r: after_ok() if (r.status, r.exit_code) == ("done", 0) else None} \
+        if after_ok is not None else {}
     run, err = _cli_action("", label, [sys.executable, str(script), "--actor", who, *args, *cmd_tail],
                            "harvester-secrets", check_busy=False, capture=True, cluster_user=None, after=after,
-                           secret_clusters=secret_clusters, id_arg=True)
+                           secret_clusters=secret_clusters, id_arg=True, **extra)
     if run is None and after:
         after()
     return run, err
@@ -36460,12 +36468,14 @@ def api_secrets_person_token_keys():
     if not PERSON_RANCHER_RE.match(key):
         return jsonify({"error": "rancher: the key of a Rancher", "code": "bad-input"}), 400
     what = "--confirm" if data.get("confirm") is True else "--refresh"
-    run, err = _secrets_tool_action(f"secrets:person-token-keys:{key}",
-                                    ["person-token", "keys", "--rancher", key, what])
-    if run is not None:
+    def cleared():
+        # revue finale m-3 : l'alerte part quand les clés sont à jour, pas au
+        # lancement (une action en échec la ferait disparaître une heure)
         _PERSON_KEYS["seen"].pop(key, None)
         (_PERSON_KEYS.get("fails") or {}).pop(key, None)
-    return _secrets_accepted(run, err)
+    return _secrets_accepted(*_secrets_tool_action(f"secrets:person-token-keys:{key}",
+                                                   ["person-token", "keys", "--rancher", key, what],
+                                                   after_ok=cleared))
 
 
 @app.route("/api/secrets/tf-keys/delete", methods=["POST"])

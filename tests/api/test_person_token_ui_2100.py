@@ -339,12 +339,30 @@ def test_group_limits(wapp, pt):
     assert st == 202                                                    # un groupe existant se modifie
 
 
-def test_keys_argv(wapp, pt):
+@pytest.mark.parametrize("status,exit_code,cleared", [("done", 0, True), ("error", 1, False)])
+def test_keys_alert_cleared_only_when_the_action_succeeds(wapp, pt, monkeypatch, status, exit_code, cleared):
+    """Revue finale m-3 (m-4 de la revue) : une mise à jour des clés qui échoue
+    ne fait pas disparaître le bandeau « clés changées »."""
+    base = wapp._cli_action
+
+    def ends(cluster, label, cmd, tool, after=None, **kw):
+        run, err = base(cluster, label, cmd, tool, after=after, **kw)
+        run.status, run.exit_code = status, exit_code
+        assert "config" in wapp._PERSON_KEYS["seen"]                      # rien d'effacé au lancement
+        if kw.get("after_run"):
+            kw["after_run"](run)
+        return run, err
+    monkeypatch.setattr(wapp, "_cli_action", ends)
     wapp._PERSON_KEYS["seen"]["config"] = "x"
     wapp._PERSON_KEYS["fails"]["config"] = 5
     assert post(wapp, "/api/secrets/person-token/keys", {"rancher": "config"})[0] == 202
+    assert ("config" not in wapp._PERSON_KEYS["seen"]) is cleared
+    assert ("config" not in wapp._PERSON_KEYS["fails"]) is cleared
+
+
+def test_keys_argv(wapp, pt):
+    assert post(wapp, "/api/secrets/person-token/keys", {"rancher": "config"})[0] == 202
     assert last(pt)["argv"][2:] == ["person-token", "keys", "--rancher", "config", "--refresh"]
-    assert "config" not in wapp._PERSON_KEYS["seen"] and "config" not in wapp._PERSON_KEYS["fails"]
     assert post(wapp, "/api/secrets/person-token/keys", {"rancher": "config", "confirm": True})[0] == 202
     assert last(pt)["argv"][-1] == "--confirm"
     assert post(wapp, "/api/secrets/person-token/keys", {"rancher": "x/y"})[0] == 400
