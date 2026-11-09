@@ -1105,6 +1105,14 @@ class Agent:
             # tag) ne remplace pas la version en place
             raise AgentError("bundle-downgrade", f"OpenBao {info['version']} is older than the installed "
                                                  f"{st.get('version')}: refused")
+        if st.get("eso_listener") and not re.search(r"^__ESO_LISTENER__$", info.get("template") or "", re.M):
+            # revue 8-10 I-4 : un paquet construit avant la 2.10.0 porte un
+            # modèle sans écouteur ESO ; posé, il ferait échouer le prochain
+            # rendu (rotation, restauration) ou perdrait l'écouteur
+            raise AgentError("eso-listener-template", "this OpenBao bundle was built before 2.10.0 and has no "
+                             "ESO listener in its template while the listener is on: build the bundle with "
+                             "harvester-ops 2.10.0 or later (harvester-secrets bundle), or remove External "
+                             "Secrets first (harvester-secrets eso remove --all)")
         self.step("bundle", "done", f"OpenBao {info['version']} ({info['tag']})")
         # décision 277 A : pas de retour à une version plus ancienne ; le
         # chemin de retour après une mise à jour est cet instantané, pris
@@ -1726,6 +1734,24 @@ class Agent:
         _w(self.p.b1_etc / "openbao.hcl.tpl", new, 0o644)
         return new
 
+    def _config_template(self, st):
+        """Revue 8-10 I-4 : modèle d'un rendu. Écouteur ESO allumé : jamais un
+        modèle qui le perdrait (`_template()`, qui prend celui d'install.sh
+        ou refuse) ; sinon le modèle posé."""
+        if st.get("eso_listener"):
+            return self._template()
+        return (self.p.b1_etc / "openbao.hcl.tpl").read_text()
+
+    @staticmethod
+    def _trial_render(st, tpl, prev=None, init=False):
+        """Rendu d'essai, avant le premier geste d'une opération : un modèle
+        qui ne se rend pas refuse l'opération sans rien changer."""
+        try:
+            pol.b1_config(st["console_id"], st["current_key"], tpl, previous_key_id=prev, init=init,
+                          mount=st.get("mount", pol.DEFAULT_MOUNT), eso_listener=st.get("eso_listener"))
+        except ValueError as e:
+            raise AgentError("b1-template", f"the OpenBao configuration cannot be rendered: {e}") from None
+
     def op_b1_eso_listener(self, req):
         """Point 298 : second écouteur TLS sur `<adresse de l'hôte>:<port>`
         (8212 par défaut), éteint tant qu'aucun cluster n'a ESO. Le rôle
@@ -1986,19 +2012,20 @@ class Agent:
         st = self.agent_state()
         if not st:
             raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
-        tpl = (self.p.b1_etc / "openbao.hcl.tpl").read_text()
+        tpl = self._config_template(st)
         uid = self.host.uid_of(ACCOUNT)
         old = st["current_key"]
         keys = self.p.b1_etc / "keys"
         new = self.new_key_id({k["id"] for k in st["keys"]})
+        st2 = dict(st, current_key=new)
+        # revue 8-10 I-4 : les trois rendus de l'opération essayés avant de
+        # toucher aux secrets podman (un échec après la bascule laissait B1
+        # non descellable au redémarrage suivant)
+        self._trial_render(st2, tpl, prev=old)
+        self._trial_render(st2, tpl)
+        self._trial_render(st, tpl)
         self.step("new-key", "running")
         _w(keys / f"{new}.key", secrets.token_bytes(32), 0o400, binary=True)
-        self.podman_secret(SECRET_PREV, keys / f"{old}.key")
-        self.podman_secret(SECRET, keys / f"{new}.key")
-        st2 = dict(st, current_key=new)
-        self.render(st2, tpl, prev=old)
-        self.own(self.p.b1_etc / "openbao.hcl", uid)
-        self.unit_env(uid, f"{IMAGE}:current", prev=True)
 
         def back():
             self.podman_secret(SECRET, keys / f"{old}.key")
@@ -2009,6 +2036,11 @@ class Agent:
             (keys / f"{new}.key").unlink(missing_ok=True)
             self.restart()
         self.undo.append(("previous unseal key restored", back))
+        self.podman_secret(SECRET_PREV, keys / f"{old}.key")
+        self.podman_secret(SECRET, keys / f"{new}.key")
+        self.render(st2, tpl, prev=old)
+        self.own(self.p.b1_etc / "openbao.hcl", uid)
+        self.unit_env(uid, f"{IMAGE}:current", prev=True)
         self.step("new-key", "done", f"{new} (previous {old})")
         self.step("restart", "running", "both keys")
         self.restart()
@@ -2455,7 +2487,11 @@ class Agent:
         if not (keys / f"{key}.key").exists():
             raise AgentError("snapshot-key-unknown", f"the key {key} of this snapshot is no longer kept")
         prev = key if key != st["current_key"] else None
-        tpl = (self.p.b1_etc / "openbao.hcl.tpl").read_text()
+        tpl = self._config_template(st)
+        # revue 8-10 I-4 : rendus essayés avant tout arrêt (un échec après
+        # l'arrêt laissait B1 arrêté, le retour arrière rendant à son tour)
+        self._trial_render(st, tpl, prev=prev, init=True)
+        self._trial_render(st, tpl)
         uid = self.host.uid_of(ACCOUNT)
         stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime(self.now()))
         old_vol = self.p.b1_data.with_name(f"{self.p.b1_data.name}.old-{stamp}")

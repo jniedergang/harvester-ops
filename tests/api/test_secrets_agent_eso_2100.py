@@ -351,3 +351,79 @@ def test_cluster_readback_sees_a_role_without_the_uid_binding(b1, monkeypatch):
                                    if k != "/kubernetes.io/serviceaccount/uid"})
     assert "bound_claims" in a._eso_role_diff(got, want)
     assert a._eso_role_diff(want, want) == []
+
+
+# ---------------------------------------------------------------------------
+# Revue 8-10 I-4 (et point 3 des tâches 8-10) : jamais un modèle qui perd
+# l'écouteur ESO ; rendu d'essai avant le premier geste
+# ---------------------------------------------------------------------------
+def _old_template(b1, keep_opt=False):
+    """Le modèle posé est d'avant 2.10.0 (sans `__ESO_LISTENER__`) ; celui
+    d'install.sh (/opt) aussi, sauf `keep_opt`."""
+    p = b1["p"]
+    tpl = (p.b1_etc / "openbao.hcl.tpl").read_text()
+    old = tpl.replace("__ESO_LISTENER__\n", "")
+    (p.b1_etc / "openbao.hcl.tpl").write_text(old)
+    (p.unit_src.parent / "openbao.hcl.tpl").write_text(tpl if keep_opt else old)
+    return tpl, old
+
+
+def test_upgrade_refuses_an_old_template_while_the_listener_is_on(b1, monkeypatch):
+    assert listener(b1)[0] == 0
+    real = hsa.Agent.staged_bundle
+
+    def old_bundle(self, name):
+        info = real(self, name)
+        return dict(info, template=info["template"].replace("__ESO_LISTENER__\n", ""))
+    monkeypatch.setattr(hsa.Agent, "staged_bundle", old_bundle)
+    before = (b1["p"].b1_etc / "openbao.hcl.tpl").read_text()
+    rc, st = request(b1, op="b1-upgrade", bundle=b1["bundle"].name)
+    assert rc == 1 and st["code"] == "eso-listener-template", st
+    assert "eso remove --all" in st["message"]
+    assert (b1["p"].b1_etc / "openbao.hcl.tpl").read_text() == before
+    assert not b1["host"].ran("podman", "tag", f"{hsa.IMAGE}:current", f"{hsa.IMAGE}:previous")
+
+
+def test_upgrade_with_an_old_template_is_fine_without_the_listener(b1, monkeypatch):
+    real = hsa.Agent.staged_bundle
+    monkeypatch.setattr(hsa.Agent, "staged_bundle", lambda self, name: dict(
+        real(self, name), template=real(self, name)["template"].replace("__ESO_LISTENER__\n", "")))
+    rc, st = request(b1, op="b1-upgrade", bundle=b1["bundle"].name)
+    assert rc == 0, st
+
+
+def test_rotation_with_an_old_template_refused_before_switching_the_secrets(b1):
+    assert listener(b1)[0] == 0
+    _old_template(b1)
+    host, p = b1["host"], b1["p"]
+    secrets_before = dict(host.secrets)
+    keys_before = sorted(x.name for x in (p.b1_etc / "keys").iterdir())
+    cfg_before = config_text(b1)
+    rc, st = request(b1, op="rotate-unseal-key")
+    assert rc == 1 and st["code"] == "eso-listener-template", st
+    assert host.secrets == secrets_before
+    assert sorted(x.name for x in (p.b1_etc / "keys").iterdir()) == keys_before
+    assert config_text(b1) == cfg_before and LISTEN in cfg_before
+
+
+def test_rotation_takes_the_template_of_install_and_keeps_the_listener(b1):
+    assert listener(b1)[0] == 0
+    _old_template(b1, keep_opt=True)
+    b1["clock"]["t"] += 86400
+    rc, st = request(b1, op="rotate-unseal-key")
+    assert rc == 0, st
+    assert LISTEN in config_text(b1)
+    assert "__ESO_LISTENER__" in (b1["p"].b1_etc / "openbao.hcl.tpl").read_text()
+
+
+def test_restore_with_an_old_template_refused_before_stopping_anything(b1):
+    import test_secrets_agent_jwt_2100 as tj
+    assert listener(b1)[0] == 0
+    name = tj._snap(b1).name
+    _old_template(b1)
+    host = b1["host"]
+    n = len(host.cmds)
+    rc, st = request(b1, op="restore-snapshot", file=name)
+    assert rc == 1 and st["code"] == "eso-listener-template", st
+    assert not any(c[:2] == ["systemctl", "stop"] for c in host.cmds[n:])
+    assert LISTEN in config_text(b1)

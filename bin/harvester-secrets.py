@@ -806,6 +806,13 @@ def cmd_upgrade_b1(args):
         except ob.BundleError as e:
             return refuse(e.code, str(e))
         step("bundle", "done", f"OpenBao {info['version']} ({info['tag']}, {info['index_digest'][:19]})")
+        if _eso_doc(raw_settings())["listener"] and not re.search(r"^__ESO_LISTENER__$", info.get("template") or "",
+                                                                   re.M):
+            # revue 8-10 I-4 : l'agent refuse aussi ; dit ici avant de déposer le paquet
+            return refuse("eso-listener-template", "this OpenBao bundle was built before 2.10.0: its template has "
+                          "no ESO listener while the listener is on. Build the bundle with harvester-ops 2.10.0 "
+                          "or later (harvester-secrets bundle), or remove External Secrets first "
+                          "(harvester-secrets eso remove --all)")
         if args.dry_run:
             out({"ok": True, "dry_run": True, "version": info["version"], "tag": info["tag"],
                  "would": ["stage the bundle", "pre-upgrade snapshot, new image, restart (agent)"]})
