@@ -19,7 +19,10 @@ listener "tcp" {
 }
 
 # 2.10.0 : second écouteur pour External Secrets Operator (point 298),
-# posé par l'agent tant qu'un cluster enfant a ESO ; ligne vide sinon.
+# posé par l'agent tant qu'un cluster enfant a ESO ; ligne vide sinon. Il
+# expose l'API sur le réseau des nœuds enfants : rôles de la console, des
+# personnes et jetons d'OpenTofu liés à 127.0.0.1/32 ; pare-feu ouvert aux
+# seuls réseaux des nœuds enfants.
 __ESO_LISTENER__
 
 # Raft (nœud unique) : le moteur `file` a été retiré en 2.7.0 et

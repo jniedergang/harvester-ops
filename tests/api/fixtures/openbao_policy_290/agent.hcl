@@ -19,6 +19,7 @@ path "auth/approle/role/hops-agent-abc123def456/secret-id" { capabilities = ["li
 path "auth/approle/role/hops-agent-abc123def456/secret-id/lookup" { capabilities = ["update"] }
 path "auth/token/roles" { capabilities = ["list"] }
 path "auth/token/roles/*" { capabilities = ["read"] }
+path "auth/token/roles/hops-tf-abc123def456" { capabilities = ["read", "update"] }
 path "identity/group/id" { capabilities = ["list"] }
 path "identity/entity/id" { capabilities = ["list"] }
 path "sys/namespaces" { capabilities = ["list"] }

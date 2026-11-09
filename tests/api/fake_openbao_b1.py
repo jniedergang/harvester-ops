@@ -148,7 +148,7 @@ class FakeB1(FakeOpenBao):
                                                         **pol.console_role_params(pol.B1_CIDR)),
                             pol.agent_role(cid): dict(token_policies=[pol.agent_role(cid)],
                                                       **pol.agent_role_params())}
-        self.token_roles = {pol.tf_role(cid): pol.tf_token_role_params(cid)}
+        self.token_roles = {pol.tf_role(cid): pol.tf_token_role_params(cid, [pol.B1_CIDR])}
         self.events.append(("initialized", None))
 
     def role_of(self, name):
@@ -346,6 +346,10 @@ class FakeB1(FakeOpenBao):
         if tok and m == "GET" and path.startswith("auth/token/roles/"):
             r = self.token_roles.get(parts[3])
             return h._send(200, {"data": dict(r, name=parts[3])}) if r else h._err(404)
+        if tok and m in ("POST", "PUT") and path.startswith("auth/token/roles/") and len(parts) == 4:
+            # une écriture de rôle de jeton fusionne avec le rôle existant (OpenBao)
+            self.token_roles[parts[3]] = dict(self.token_roles.get(parts[3]) or {}, **body)
+            return h._send(204, None)
         person = bool(tok) and (self.tokens.get(tok) or {}).get("kind") == "person"
         if tok and path == "auth/token/lookup-self" and tok in self.tokens and not person:
             info = self.tokens[tok]

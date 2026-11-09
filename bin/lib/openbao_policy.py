@@ -406,6 +406,9 @@ def agent_rules(cid, mount=DEFAULT_MOUNT):
         (f"auth/approle/role/{agent_role(cid)}/secret-id/lookup", ["update"]),
         ("auth/token/roles", ["list"]),
         ("auth/token/roles/*", ["read"]),
+        # revue 8-10 I-5 : rôle des jetons enfants d'OpenTofu lié à
+        # 127.0.0.1/32, reposé par b1-policies sur une B1 d'avant la 2.10.0
+        (f"auth/token/roles/{tf_role(cid)}", ["read", "update"]),
         ("identity/group/id", ["list"]),
         # relecture des corrections finales IMP-1 : les entités d'identité
         # (leurs politiques s'appliquent à tout jeton émis après la
@@ -481,9 +484,16 @@ def agent_role_params():
             "secret_id_bound_cidrs": [B1_CIDR], "token_bound_cidrs": [B1_CIDR]}
 
 
-def tf_token_role_params(cid):
-    return {"allowed_policies": [tf_role(cid)], "allowed_entity_aliases": ["tf-*"],
-            "orphan": False, "renewable": False}
+def tf_token_role_params(cid, bound_cidrs=None):
+    """Rôle de jeton des jetons enfants d'OpenTofu. Revue 8-10 I-5 : en B1,
+    liés à 127.0.0.1/32 comme les rôles AppRole (l'écouteur ESO expose l'API
+    sur le réseau ; un jeton enfant passe par l'environnement d'OpenTofu et
+    de ses fournisseurs)."""
+    out = {"allowed_policies": [tf_role(cid)], "allowed_entity_aliases": ["tf-*"],
+           "orphan": False, "renewable": False}
+    if bound_cidrs:
+        out["token_bound_cidrs"] = list(bound_cidrs)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -681,9 +691,18 @@ def eso_listener_block(address):
     """Strophe du second écouteur (point 298) : TLS par le certificat de
     l'écouteur ESO, sans adresse de cluster (raft reste sur 127.0.0.1)."""
     ip, port = check_eso_listen(address)
-    return "\n".join(['# Écouteur ESO (2.10.0) : seuls les rôles `eso` des clusters enfants l\'acceptent',
+    # revue 8-10 I-5 : cet écouteur expose toute l'API sur le réseau des nœuds
+    # enfants. Les rôles AppRole de la console et de l'agent, le rôle des
+    # personnes et les jetons enfants d'OpenTofu sont liés à 127.0.0.1/32 :
+    # seuls les rôles `eso` y aboutissent. Les points non authentifiés de
+    # rekey sont fermés (option acceptée par OpenBao 2.7.2, qui y répond
+    # déjà 405 ; une version qui ne la connaît pas l'ignore). Pare-feu de
+    # l'hôte : n'ouvrir le port qu'aux réseaux des nœuds enfants.
+    return "\n".join(['# Écouteur ESO (2.10.0) : API joignable du réseau des nœuds enfants ; les rôles de la',
+                      '# console, des personnes et les jetons d\'OpenTofu sont liés à 127.0.0.1/32',
                       'listener "tcp" {', f'  address       = "{ip}:{port}"',
-                      f'  tls_cert_file = "{C_ESO_CERT}"', f'  tls_key_file  = "{C_ESO_KEY}"', "}"])
+                      f'  tls_cert_file = "{C_ESO_CERT}"', f'  tls_key_file  = "{C_ESO_KEY}"',
+                      "  disable_unauthed_rekey_endpoints = true", "}"])
 
 
 def group_remove_commands(addr, cid, name):
@@ -736,7 +755,7 @@ def initialize_requests(cid, mount=DEFAULT_MOUNT):
          {"secret_id": _file_source("console-secret-id")}, False),
         ("secret-id-agent", "update", f"auth/approle/role/{agent}/custom-secret-id",
          {"secret_id": _file_source("agent-secret-id")}, False),
-        ("token-role-tf", "update", f"auth/token/roles/{tf}", tf_token_role_params(cid), False),
+        ("token-role-tf", "update", f"auth/token/roles/{tf}", tf_token_role_params(cid, [B1_CIDR]), False),
     ]
     reqs += [(f"audit-header-{h.lower()}", "update", f"sys/config/auditing/request-headers/{h}", {"hmac": False},
               False) for h in AUDIT_HEADERS]

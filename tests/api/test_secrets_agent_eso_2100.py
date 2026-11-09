@@ -427,3 +427,54 @@ def test_restore_with_an_old_template_refused_before_stopping_anything(b1):
     assert rc == 1 and st["code"] == "eso-listener-template", st
     assert not any(c[:2] == ["systemctl", "stop"] for c in host.cmds[n:])
     assert LISTEN in config_text(b1)
+
+
+# ---------------------------------------------------------------------------
+# Revue 8-10 I-5 : l'écouteur ESO expose l'API ; jetons d'OpenTofu liés à
+# 127.0.0.1/32, points de rekey non authentifiés fermés
+# ---------------------------------------------------------------------------
+def test_tf_token_role_bound_to_the_loopback_in_b1():
+    reqs = {name: data for name, _op, _path, data, _a in pol.initialize_requests(CID)}
+    assert reqs["token-role-tf"]["token_bound_cidrs"] == [pol.B1_CIDR]
+    assert "token_bound_cidrs" not in pol.tf_token_role_params(CID)          # mode A : inchangé
+
+
+def test_eso_listener_closes_the_unauthenticated_rekey_endpoints():
+    block = pol.eso_listener_block(LISTEN)
+    assert "disable_unauthed_rekey_endpoints = true" in block
+    assert "seuls les rôles `eso`" not in block                               # commentaire corrigé
+
+
+def test_b1_policies_binds_the_tf_token_role_of_an_older_b1(b1):
+    srv = b1["srv"]
+    srv.token_roles[pol.tf_role(CID)] = pol.tf_token_role_params(CID)         # posé avant la 2.10.0
+    rc, st = request(b1, op="b1-policies")
+    assert rc == 0, st
+    assert srv.token_roles[pol.tf_role(CID)]["token_bound_cidrs"] == [pol.B1_CIDR]
+    assert srv.agent_denied == []
+
+
+@pytest.mark.parametrize("path,cap,ok", [
+    (f"auth/token/roles/{pol.tf_role(CID)}", "update", True),
+    ("auth/token/roles/other", "update", False),
+    ("auth/token/roles/other", "read", True),
+])
+def test_agent_rules_token_roles(path, cap, ok):
+    from fake_openbao_b1 import acl_allows
+    assert acl_allows(pol.agent_policy(CID), path, cap) is ok
+
+
+@pytest.mark.parametrize("cidrs,refused", [(None, False), ([pol.B1_CIDR], False), (["0.0.0.0/0"], True),
+                                           (["172.16.1.11/32"], True)])
+def test_review_of_the_tf_token_role_binding(b1, cidrs, refused):
+    def craft(srv):
+        r = dict(pol.tf_token_role_params(CID))
+        if cidrs:
+            r["token_bound_cidrs"] = cidrs
+        srv.token_roles[pol.tf_role(CID)] = r
+    rc, st = _restore_with(b1, craft)
+    if refused:
+        assert rc == 1 and st["code"] == "snapshot-untrusted", st
+        return
+    assert rc == 0, st
+    assert b1["srv"].token_roles[pol.tf_role(CID)]["token_bound_cidrs"] == [pol.B1_CIDR]   # reposé

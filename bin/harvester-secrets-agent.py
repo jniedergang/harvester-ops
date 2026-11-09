@@ -1244,6 +1244,12 @@ class Agent:
             a._call("POST", f"sys/policies/acl/{pol.tf_role(cid)}", {"policy": pol.tf_child_policy(cid, acc)})
             a._call("POST", f"sys/policies/acl/{pol.agent_role(cid)}",
                     {"policy": pol.agent_policy(cid, st.get("mount") or pol.DEFAULT_MOUNT)})
+            # revue 8-10 I-5 : jetons enfants d'OpenTofu liés à 127.0.0.1/32
+            # (B1 posée avant la 2.10.0 ; la nouvelle politique de l'agent vaut
+            # sur le jeton déjà ouvert, essai 6)
+            if not review:
+                a._call("POST", f"auth/token/roles/{pol.tf_role(cid)}",
+                        pol.tf_token_role_params(cid, [pol.B1_CIDR]))
             # relecture finale I3 : empreinte de la politique `default` relevée
             # sur l'instance en service (jamais pendant la revue d'un
             # instantané restauré, qui la compare)
@@ -1754,10 +1760,13 @@ class Agent:
 
     def op_b1_eso_listener(self, req):
         """Point 298 : second écouteur TLS sur `<adresse de l'hôte>:<port>`
-        (8212 par défaut), éteint tant qu'aucun cluster n'a ESO. Le rôle
-        AppRole de la console reste lié à 127.0.0.1/32, celui des personnes
-        aussi : l'écouteur n'ouvre que les rôles `eso`. Le pare-feu de
-        l'hôte n'est pas touché. `address` null : écouteur retiré."""
+        (8212 par défaut), éteint tant qu'aucun cluster n'a ESO. Il expose
+        l'API sur le réseau (revue 8-10 I-5) : les rôles AppRole de la console
+        et de l'agent, celui des personnes et les jetons enfants d'OpenTofu
+        sont liés à 127.0.0.1/32, les points de rekey non authentifiés
+        fermés ; seuls les rôles `eso` y aboutissent. Le pare-feu de l'hôte
+        n'est pas touché (à ouvrir aux seuls réseaux des nœuds enfants).
+        `address` null : écouteur retiré."""
         st = self.agent_state()
         if not st:
             raise AgentError("b1-not-installed", "OpenBao B1 is not installed")
@@ -2321,9 +2330,12 @@ class Agent:
             _, doc = a._call("GET", f"auth/token/roles/{pol.tf_role(cid)}")
             d = self._data(doc) or {}
             tp = pol.tf_token_role_params(cid)
+            # revue 8-10 I-5 : lié à 127.0.0.1 (ou, instantané d'avant la
+            # 2.10.0, sans liaison : reposée après la restauration)
             if list(d.get("allowed_policies") or []) != tp["allowed_policies"] \
                     or list(d.get("allowed_entity_aliases") or []) != tp["allowed_entity_aliases"] \
-                    or d.get("allowed_policies_glob") or d.get("orphan") or d.get("renewable"):
+                    or d.get("allowed_policies_glob") or d.get("orphan") or d.get("renewable") \
+                    or _networks(d.get("token_bound_cidrs")) not in (set(), _networks([pol.B1_CIDR])):
                 self._untrusted("token role of the OpenTofu tokens")
             # groupes d'identité : seulement les groupes internes `hops-<id>-*`
             # de l'état de l'agent, chacun avec sa seule politique (2.10.0) ;
@@ -2568,6 +2580,10 @@ class Agent:
         # groupe » compris) et celles des groupes reprennent le texte de
         # l'état de l'agent ; la revue en acceptait deux
         st_now = self.agent_state()
+        # revue 8-10 I-5 : un instantané d'avant la 2.10.0 rend le rôle des
+        # jetons d'OpenTofu sans liaison à 127.0.0.1/32 : reposé
+        self._with_agent(lambda a: a._call("POST", f"auth/token/roles/{pol.tf_role(st_now['console_id'])}",
+                                           pol.tf_token_role_params(st_now["console_id"], [pol.B1_CIDR])))
         if st_now.get("person_jwt") or st_now.get("person_groups") or st_now.get("eso_clusters"):
             done = self._with_agent(lambda a: self._person_policies_refresh(a, st_now))
             if done:
