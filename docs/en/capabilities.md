@@ -763,6 +763,11 @@ travel, and an older Harvester version on the target.
   over HTTP, on port 8094 by default: open it, or set `transfer:
   serve_address: host:port` in `config.yaml`.
 
+Portworx-backed block disks are read directly by a temporary pod using the
+source cluster's CDI controller image. The source VM stays stopped until the
+disk transfer and reader cleanup finish. No source Longhorn volume is needed.
+Portworx filesystem volumes are not supported.
+
 **Final states, chosen by the operator.** The source is left running (a
 copy, with new MAC addresses), stopped and annotated as moved, or deleted
 with its volumes; the target is started or left stopped. The target is

@@ -832,6 +832,12 @@ tête ; « Lancer » reste grisé tant qu'il en reste un. Il vérifie :
   la console, en HTTP, sur le port 8094 par défaut : l'ouvrir, ou régler
   `transfer: serve_address: hôte:port` dans `config.yaml`.
 
+Les disques Portworx en mode bloc sont lus directement par un pod temporaire
+utilisant l'image du contrôleur CDI du cluster source. La VM source reste arrêtée
+jusqu'à la fin du transfert et du nettoyage du pod. Aucun volume Longhorn n'est
+nécessaire sur la source. Les volumes Portworx en mode système de fichiers ne
+sont pas pris en charge.
+
 **États finaux, choisis par l'opérateur.**
 
 - **Source :** laissée en marche (une copie, avec de nouvelles adresses

@@ -198,7 +198,7 @@ def vm_inventory(vm, pvcs, used=None):
             "size": parse_quantity(((ps.get("resources") or {}).get("requests") or {}).get("storage")),
             "storage_class": ps.get("storageClassName"),
             "access_modes": list(ps.get("accessModes") or ["ReadWriteMany"]),
-            "volume_mode": ps.get("volumeMode") or "Block",
+            "volume_mode": ps.get("volumeMode") or "Filesystem",
             "image": ann.get("harvesterhci.io/imageId") or None,
             "used": (used or {}).get(claim),
         })
@@ -394,6 +394,20 @@ def export_image_manifest(namespace, pvc, image_name, transfer_id, target_sc):
                      "retry": 3}}
 
 
+def disk_reader_manifest(namespace, name, claim, image, transfer_id):
+    return {"apiVersion": "v1", "kind": "Pod",
+            "metadata": _meta(name, namespace, transfer_id),
+            "spec": {"restartPolicy": "Never", "automountServiceAccountToken": False,
+                     "containers": [{"name": "reader", "image": image,
+                                     "command": ["/bin/sh", "-c", "exec sleep infinity"],
+                                     "securityContext": {"runAsUser": 0, "allowPrivilegeEscalation": False,
+                                                         "readOnlyRootFilesystem": True,
+                                                         "capabilities": {"drop": ["ALL"]}},
+                                     "volumeDevices": [{"name": "disk", "devicePath": "/dev/transfer-disk"}]}],
+                     "volumes": [{"name": "disk", "persistentVolumeClaim": {"claimName": claim,
+                                                                            "readOnly": True}}]}}
+
+
 def datavolume_manifest(namespace, name, url, disk, storage_class, transfer_id):
     return {"apiVersion": "cdi.kubevirt.io/v1beta1", "kind": "DataVolume",
             "metadata": _meta(name, namespace, transfer_id, {
@@ -449,6 +463,8 @@ def choose_engine(src, dst, req):
         return "file", "file-requested"
     if req.get("engine") == "file":
         return "file", "forced"
+    if any(d.get("provisioner") == "pxd.portworx.com" for d in src["inventory"]["disks"]):
+        return "file", "portworx"
     s, d = src.get("backup_target"), (dst or {}).get("backup_target")
     if not s or not src.get("backup_target_ok"):
         return "file", "source-no-target"
@@ -585,10 +601,16 @@ def check(src, dst, req):
         if kind in ("migrate", "import") and not dst.get("cdi"):
             out.append(_finding("cdi-missing", "block", cluster=dst.get("cluster")))
         if kind in ("migrate", "export"):
-            total = sum(d["size"] for d in inv["disks"])
+            total = sum(d["size"] for d in inv["disks"] if d.get("provisioner") != "pxd.portworx.com")
             if total > int(src.get("room_one") or 0):
                 out.append(_finding("source-room-short", "block", needed=total,
                                     allocatable=int(src.get("room_one") or 0)))
+            portworx = [d for d in inv["disks"] if d.get("provisioner") == "pxd.portworx.com"]
+            for disk in portworx:
+                if disk.get("volume_mode") != "Block":
+                    out.append(_finding("source-staging-unsupported", "block", volume=disk["volume"]))
+            if portworx and not src.get("reader_image"):
+                out.append(_finding("source-reader-unavailable", "block"))
 
     if kind == "export":
         if req.get("store_free") is not None:

@@ -26,6 +26,7 @@ départ. En fin de transfert réussi, l'étiquette est retirée de ce qui reste
 """
 
 import time
+import zlib
 
 import vm_transfer as vt
 import vm_transfer_progress as vp
@@ -42,6 +43,9 @@ K_SECRET = "secrets"
 K_NS = "namespaces"
 K_LH_TARGET = "backuptargets.longhorn.io"
 K_LH_SETTING = "settings.longhorn.io"
+K_STORAGE_CLASS = "storageclasses"
+K_DEPLOYMENT = "deployments.apps"
+K_POD = "pods"
 
 # Profil « maximal » : concurrence de Longhorn relevée le temps du transfert
 # (2 par défaut, relevé sur harv1), puis rétablie.
@@ -510,11 +514,31 @@ def _read_source(ctx):
     return vm, running, inv, secrets
 
 
+def reader_image(kube):
+    deployment = kube.get(K_DEPLOYMENT, "harvester-system", "cdi-deployment") or {}
+    containers = (((deployment.get("spec") or {}).get("template") or {}).get("spec") or {}).get("containers") or []
+    return next((container.get("image") for container in containers if container.get("image")), None)
+
+
 def export_images(ctx, inv, running, export_class):
     """Arrête la source, fige chaque disque dans une image temporaire, et
     rallume la source aussitôt si elle doit rester en marche."""
     req = ctx.req
     ns = req["vm_ns"]
+    provisioners = {}
+    for disk in inv["disks"]:
+        name = disk.get("storage_class")
+        storage_class = ctx.src.get(K_STORAGE_CLASS, None, name) if name else None
+        provisioner = (storage_class or {}).get("provisioner")
+        if not provisioner:
+            raise TransferError("export", f"storage class {name or '(missing)'} for {disk['volume']} not found")
+        if provisioner == "pxd.portworx.com" and disk.get("volume_mode") != "Block":
+            raise TransferError("export", f"Portworx disk {disk['volume']} must use block volume mode")
+        provisioners[disk["claim"]] = provisioner
+    has_portworx = "pxd.portworx.com" in provisioners.values()
+    image = reader_image(ctx.src) if has_portworx else None
+    if has_portworx and not image:
+        raise TransferError("export", "Portworx export requires the CDI controller image")
     if running:
         # toujours arrêtée ici, même en copie : un disque en cours d'écriture
         # ne se fige pas proprement ; elle repart dès l'image prête
@@ -523,8 +547,18 @@ def export_images(ctx, inv, running, export_class):
     exported = []
     for d in inv["disks"]:
         img = _short(f"xfer-{ctx.tid}-{d['volume']}")
+        if provisioners[d["claim"]] == "pxd.portworx.com":
+            pod = _short(f"{img}-reader")
+            if ctx.src.get(K_POD, ns, pod):
+                raise TransferError("export", f"reader pod {ns}/{pod} already exists")
+            ctx.emit("export", "running", f"preparing direct read of {d['volume']}")
+            ctx.src.create(vt.disk_reader_manifest(ns, pod, d["claim"], image, ctx.tid))
+            ctx.record("src", K_POD, ns, pod)
+            exported.append((d, ("pod", pod)))
+            continue
         ctx.emit("export", "running", f"freezing {d['volume']} into {img}")
-        ctx.src.create(vt.export_image_manifest(ns, d["claim"], img, ctx.tid, export_class))
+        target_class = d["storage_class"] if has_portworx and provisioners[d["claim"]] == "driver.longhorn.io" else export_class
+        ctx.src.create(vt.export_image_manifest(ns, d["claim"], img, ctx.tid, target_class))
         ctx.record("src", K_IMAGE, ns, img)
         exported.append((d, img))
     # tous les disques se figent en même temps (Longhorn copie chaque
@@ -534,8 +568,20 @@ def export_images(ctx, inv, running, export_class):
     def all_imported():
         done, ready = 0, 0
         for d, img in exported:
+            if isinstance(img, tuple):
+                pod = ctx.src.get(K_POD, ns, img[1]) or {}
+                status = pod.get("status") or {}
+                if status.get("phase") == "Failed":
+                    return Fail(f"reader for {d['volume']}: {status.get('message') or 'pod failed'}")
+                if (_cond(pod, "Ready") or {}).get("status") == "True":
+                    ready += 1
+                    continue
+                return f"reader for {d['volume']}: {status.get('phase') or 'pending'}"
             obj = ctx.src.get(K_IMAGE, ns, img) or {}
             st = obj.get("status") or {}
+            failed = _cond(obj, "RetryLimitExceeded")
+            if failed and failed.get("status") == "True":
+                return Fail(f"export of {img}: {failed.get('message') or failed.get('reason')}")
             c = _cond(obj, "Imported")
             if c and c.get("status") == "True":
                 done += d["size"]
@@ -549,7 +595,7 @@ def export_images(ctx, inv, running, export_class):
 
     wait_for(ctx, "export", "disks frozen", all_imported, ctx.timeouts["export"], every=2)
     _close(ctx, "export", prog)
-    if running and req.get("source") == "running" and ctx.source_stopped:
+    if not has_portworx and running and req.get("source") == "running" and ctx.source_stopped:
         start_vm(ctx, ctx.src, ns, req["vm_name"], ctx.source_initial, sid="restart-source")
         ctx.source_stopped = False
     return exported
@@ -579,11 +625,50 @@ def image_stream(ctx, ns, img, attempts=5):
         return
 
 
+def disk_stream(ctx, ns, pod, size):
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    total = 0
+    pending = None
+    stream = ctx.src.exec_stream(ns, pod, ["gzip", "-c", "/dev/transfer-disk"])
+    try:
+        for chunk in stream:
+            data = chunk
+            while data:
+                out = decoder.decompress(data, 4 * 1024 * 1024)
+                total += len(out)
+                data = decoder.unconsumed_tail
+                if decoder.eof and (data or decoder.unused_data):
+                    raise TransferError("download", "unexpected data after disk stream")
+            if pending is not None:
+                yield pending
+            pending = chunk
+        if not decoder.eof or total != size:
+            raise TransferError("download", f"incomplete disk stream: {total} of {size} bytes")
+        if pending is not None:
+            yield pending
+    finally:
+        close = getattr(stream, "close", None)
+        if close:
+            close()
+
+
 def delete_export_images(ctx, exported):
     ns = ctx.req["vm_ns"]
     for _d, img in exported:
-        if delete_quiet(ctx.src, K_IMAGE, ns, img):
+        if isinstance(img, tuple):
+            if not _undo_delete(ctx, ctx.src, K_POD, ns, img[1]):
+                raise TransferError("cleanup", f"could not remove reader pod {ns}/{img[1]}")
+            wait_for(ctx, "cleanup", "reader pod removed", lambda: ctx.src.get(K_POD, ns, img[1]) is None,
+                     ctx.timeouts["delete"])
+            ctx.forget("src", K_POD, ns, img[1])
+        elif delete_quiet(ctx.src, K_IMAGE, ns, img):
             ctx.forget("src", K_IMAGE, ns, img)
+
+
+def export_stream(ctx, disk, img):
+    if isinstance(img, tuple):
+        return disk_stream(ctx, ctx.req["vm_ns"], img[1], disk["size"])
+    return image_stream(ctx, ctx.req["vm_ns"], img)
 
 
 def write_archive(ctx, writer, vm, inv, secrets, exported, source_version=""):
@@ -611,7 +696,7 @@ def write_archive(ctx, writer, vm, inv, secrets, exported, source_version=""):
             pos, before = writer.f.tell(), (prog.done, prog.wire)
             try:
                 writer.add_stream(f"disks/{d['volume']}.raw.gz",
-                                  _counted(image_stream(ctx, req["vm_ns"], img), prog))
+                                  _counted(export_stream(ctx, d, img), prog))
                 break
             except Exception as e:              # noqa: BLE001
                 if attempt == 3 or not transient(e):
@@ -792,6 +877,10 @@ def run_export(ctx, writer, export_class, source_version=""):
         write_archive(ctx, writer, vm, inv, secrets, exported, source_version)
     finally:
         delete_export_images(ctx, exported)
+    if ctx.req.get("source") == "running" and ctx.source_stopped:
+        start_vm(ctx, ctx.src, ctx.req["vm_ns"], ctx.req["vm_name"],
+                 ctx.source_initial or "Always", sid="restart-source")
+        ctx.source_stopped = False
     return exported
 
 
@@ -801,7 +890,7 @@ def run_direct(ctx, export_class):
     vm, running, inv, secrets = _read_source(ctx)
     exported = export_images(ctx, inv, running, export_class)
     try:
-        sources = {d["volume"]: ((lambda img=img: image_stream(ctx, ctx.req["vm_ns"], img)), None)
+        sources = {d["volume"]: ((lambda d=d, img=img: export_stream(ctx, d, img)), None)
                    for d, img in exported}
         manifest = {"vm": vt.sanitize_vm(vm), "inventory": inv, "secrets": secrets}
         if ctx.req.get("create_namespace"):
@@ -957,8 +1046,17 @@ def rollback(ctx):
             if pvc:
                 _undo_delete(ctx, ctx.dst, K_PVC, ns, pvc)
     left = []
+    readers_left = False
     for side, kind, ns, name in reversed(list(ctx.created)):
-        if not _undo_delete(ctx, ctx.kube(side), kind, ns, name):
+        removed = _undo_delete(ctx, ctx.kube(side), kind, ns, name)
+        if removed and side == "src" and kind == K_POD:
+            try:
+                wait_for(ctx, "rollback", "reader pod removed",
+                         lambda: ctx.src.get(K_POD, ns, name) is None, ctx.timeouts["delete"])
+            except TransferError:
+                removed = False
+        if not removed:
+            readers_left = readers_left or (side == "src" and kind == K_POD)
             cluster = ctx.source_cluster if side == "src" else ctx.target_cluster
             left.append(f"{kind} {ns + '/' if ns else ''}{name} ({cluster or side})")
     ctx.created.clear()
@@ -966,11 +1064,14 @@ def rollback(ctx):
         # dire exactement ce qui reste : tout porte l'étiquette du transfert
         ctx.emit("rollback", "error", "could not undo, remove by hand (label "
                  f"{vt.TRANSFER_LABEL}={ctx.tid}): " + "; ".join(left))
-    if ctx.source_stopped:
+    if ctx.source_stopped and readers_left:
+        ctx.emit("rollback", "error", "source left stopped because a disk reader could not be removed")
+    elif ctx.source_stopped:
         try:
             start_vm(ctx, ctx.src, ctx.req["vm_ns"], ctx.req["vm_name"],
                      ctx.source_initial or "Always", sid="rollback")
             ctx.source_stopped = False
         except TransferError as e:
             ctx.emit("rollback", "error", f"source not restarted: {e}")
-    ctx.emit("rollback", "done", "transfer undone, source in its initial state")
+    if not readers_left:
+        ctx.emit("rollback", "done", "transfer undone, source in its initial state")
