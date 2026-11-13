@@ -55,6 +55,8 @@ const VMTransfer = (() => {
     'image-missing-source': (v) => tr('transfer.finding.image-missing-source', v),
     'image-sync-unsupported': (v) => tr('transfer.finding.image-sync-unsupported', v),
     'cdi-missing': (v) => tr('transfer.finding.cdi-missing', v),
+    'source-reader-unavailable': (v) => tr('transfer.finding.source-reader-unavailable', v),
+    'source-staging-unsupported': (v) => tr('transfer.finding.source-staging-unsupported', v),
     'source-room-short': (v) => tr('transfer.finding.source-room-short', v),
     'store-room-short': (v) => tr('transfer.finding.store-room-short', v),
     'short-mode-needs-backup': (v) => tr('transfer.finding.short-mode-needs-backup', v),
@@ -70,6 +72,7 @@ const VMTransfer = (() => {
     'forced': () => tr('transfer.reason.forced'),
     'network-renamed': () => tr('transfer.reason.network-renamed'),
     'class-missing': () => tr('transfer.reason.class-missing'),
+    'portworx': () => tr('transfer.reason.portworx'),
     'file-requested': () => tr('transfer.reason.file-requested'),
     'shared-target': () => tr('transfer.reason.shared-target'),
   };

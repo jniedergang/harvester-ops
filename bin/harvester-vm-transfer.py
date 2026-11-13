@@ -119,6 +119,8 @@ def collect_source(kube, ns, name, cluster=""):
     vmi = kube.get(run.K_VMI, ns, name)
     if vmi is not None:
         vm.setdefault("status", {})["printableStatus"] = (vmi.get("status") or {}).get("phase")
+    scs = kube.list("storageclasses")
+    classes = {(sc.get("metadata") or {}).get("name"): sc for sc in scs}
     tspec = ((vm.get("spec") or {}).get("template") or {}).get("spec") or {}
     pvcs, used = {}, {}
     for vol in tspec.get("volumes") or []:
@@ -128,7 +130,8 @@ def collect_source(kube, ns, name, cluster=""):
         p = kube.get(run.K_PVC, ns, claim) or {}
         pvcs[claim] = p
         pv = (p.get("spec") or {}).get("volumeName")
-        if pv:
+        provisioner = (classes.get((p.get("spec") or {}).get("storageClassName")) or {}).get("provisioner")
+        if pv and provisioner != "pxd.portworx.com":
             lv = kube.get("volumes.longhorn.io", "longhorn-system", pv) or {}
             size = (lv.get("status") or {}).get("actualSize")
             if size:
@@ -136,18 +139,23 @@ def collect_source(kube, ns, name, cluster=""):
     inv = vt.vm_inventory(vm, pvcs, used)
     version, _ = _setting(kube, "server-version")
     bt_raw, bt = _setting(kube, "backup-target")
-    nodes, over, minimal = _longhorn_numbers(kube)
-    one = {"metadata": {"name": "_one"}, "provisioner": "driver.longhorn.io",
-           "parameters": {"numberOfReplicas": "1"}}
-    room = longhorn_room.storage_room(nodes, [one], over, minimal)
-    scs = kube.list("storageclasses")
+    for disk in inv["disks"]:
+        disk["provisioner"] = (classes.get(disk["storage_class"]) or {}).get("provisioner")
+    portworx = [disk for disk in inv["disks"] if disk.get("provisioner") == "pxd.portworx.com"]
+    room_one = 0
+    if len(portworx) != len(inv["disks"]):
+        nodes, over, minimal = _longhorn_numbers(kube)
+        one = {"metadata": {"name": "_one"}, "provisioner": "driver.longhorn.io",
+               "parameters": {"numberOfReplicas": "1"}}
+        room_one = longhorn_room.storage_room(nodes, [one], over, minimal)["classes"]["_one"]["allocatable"]
+    reader_image = run.reader_image(kube) if portworx else None
     images = _images(kube)
     wanted = {d["image"] for d in inv["disks"] if d.get("image")}
     return {"cluster": cluster, "version": version, "vm": vm, "inventory": inv,
             "backup_target": vt.normalize_backup_target(bt_raw), "backup_target_ok": _target_ok(bt),
             "images": {k: v for k, v in images.items() if k in wanted},
-            "room_one": room["classes"]["_one"]["allocatable"],
-            "default_storage_class": _default_class(scs)}
+            "room_one": room_one,
+            "default_storage_class": _default_class(scs), "reader_image": reader_image}
 
 
 # Une lecture d'un seul élément : authentifiée et servie par un proxy Rancher

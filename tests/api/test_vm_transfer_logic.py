@@ -319,6 +319,18 @@ def test_export_image_manifest_matches_what_worked_on_harv1():
     assert m["metadata"]["labels"][vt.TRANSFER_LABEL] == "t1"
 
 
+def test_disk_reader_mounts_only_the_source_claim_read_only():
+    manifest = vt.disk_reader_manifest("default", "reader", "source-disk", "cdi-controller:1", "t1")
+    spec = manifest["spec"]
+    assert manifest["metadata"]["labels"][vt.TRANSFER_LABEL] == "t1"
+    assert spec["automountServiceAccountToken"] is False
+    assert spec["volumes"][0]["persistentVolumeClaim"] == {"claimName": "source-disk", "readOnly": True}
+    container = spec["containers"][0]
+    assert container["image"] == "cdi-controller:1"
+    assert container["volumeDevices"] == [{"name": "disk", "devicePath": "/dev/transfer-disk"}]
+    assert container["securityContext"]["allowPrivilegeEscalation"] is False
+
+
 def test_datavolume_manifest_matches_what_worked_on_harv1():
     disk = inventory()["disks"][0]
     m = vt.datavolume_manifest("lab", "leap156-b-disk-0", "http://10.0.0.1:8123/tok.raw.gz",
@@ -530,6 +542,18 @@ def test_file_engine_needs_cdi():
 def test_file_engine_needs_room_on_the_source_for_the_export():
     f = vt.check(src_facts(backup_target=None, room_one=GIB), dst_facts(), req())
     assert "source-room-short" in codes(f, "block")
+
+
+def test_portworx_uses_file_engine_without_source_longhorn():
+    src = src_facts(room_one=0)
+    src["inventory"]["disks"][0]["provisioner"] = "pxd.portworx.com"
+    src["reader_image"] = "cdi-controller:1"
+    assert vt.choose_engine(src, dst_facts(), req()) == ("file", "portworx")
+    assert not vt.blocking(vt.check(src, dst_facts(), req()))
+    src["reader_image"] = None
+    assert "source-reader-unavailable" in codes(vt.check(src, dst_facts(), req()), "block")
+    src["inventory"]["disks"][0]["volume_mode"] = "Filesystem"
+    assert "source-staging-unsupported" in codes(vt.check(src, dst_facts(), req()), "block")
 
 
 def test_export_needs_room_in_the_store():

@@ -197,6 +197,30 @@ def test_check_json_nominal(sandbox):
     assert "STEP_EVENT|check|done|engine: backup" in r.stderr
 
 
+def test_check_portworx_selects_file_and_checks_reader_image(sandbox):
+    state = source_state()
+    objects = state["objects"]
+    objects["persistentvolumeclaims"]["default/leap156-disk-0-gfcec"]["spec"]["storageClassName"] = "portworx"
+    objects["storageclasses"]["portworx"] = {"metadata": {"name": "portworx"},
+                                                "provisioner": "pxd.portworx.com"}
+    objects["deployments.apps"] = {"harvester-system/cdi-deployment": {
+        "spec": {"template": {"spec": {"containers": [{"image": "cdi-controller:1"}]}}}}}
+    source = sandbox.write("source-portworx", state)
+    target = sandbox.write("target-portworx", target_state())
+    args = ("check", "--from-kubeconfig", str(source), "--vm", "default/leap156",
+            "--to-kubeconfig", str(target), "--name", "leap156", "--json")
+    result = sandbox.call(*args)
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert (output["engine"], output["reason"]) == ("file", "portworx")
+    assert output["inventory"]["disks"][0]["provisioner"] == "pxd.portworx.com"
+    objects["deployments.apps"] = {}
+    sandbox.write("source-portworx", state)
+    result = sandbox.call(*args)
+    assert result.returncode == 2
+    assert any(f["code"] == "source-reader-unavailable" for f in json.loads(result.stdout)["findings"])
+
+
 def test_check_refuses_with_code_2(sandbox):
     s = sandbox.write("harvlab", source_state())
     d = sandbox.write("harvlab2", target_state(networks=("default/other",)))

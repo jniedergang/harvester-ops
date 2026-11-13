@@ -152,7 +152,13 @@ class Kube:
         self.run(*args)
 
     def raw_stream(self, path):
-        p = subprocess.Popen(self._base() + ["get", "--raw", path], stdout=subprocess.PIPE,
+        return self._stream(["get", "--raw", path])
+
+    def exec_stream(self, ns, pod, command):
+        return self._stream(["exec", "-n", ns, pod, "-c", "reader", "--", *command])
+
+    def _stream(self, args):
+        p = subprocess.Popen(self._base() + args, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE)
         try:
             while True:
@@ -166,6 +172,7 @@ class Kube:
         finally:
             if p.poll() is None:
                 p.kill()
+                p.wait()
             p.stdout.close()
             p.stderr.close()
 

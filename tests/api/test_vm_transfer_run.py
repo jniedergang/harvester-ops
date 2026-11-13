@@ -37,6 +37,7 @@ KINDS = {
     ("", "Secret"): run.K_SECRET,
     ("", "Namespace"): run.K_NS,
     ("", "PersistentVolumeClaim"): run.K_PVC,
+    ("", "Pod"): run.K_POD,
 }
 
 
@@ -326,6 +327,10 @@ def leap156(run_strategy="Always"):
 
 def seed_source(c, running=True):
     c.put(run.K_VM, leap156("Always" if running else "Halted"))
+    c.put(run.K_STORAGE_CLASS, {"metadata": {"name": "longhorn-opensuse-leap-cloud"},
+                                "provisioner": "driver.longhorn.io"})
+    c.put(run.K_STORAGE_CLASS, {"metadata": {"name": "harvester-longhorn"},
+                                "provisioner": "driver.longhorn.io"})
     if running:
         c.put(run.K_VMI, {"metadata": {"name": "leap156", "namespace": "default"},
                           "status": {"phase": "Running"}})
@@ -406,6 +411,108 @@ def env():
 # ---------------------------------------------------------------------------
 # Moteur « sauvegarde »
 # ---------------------------------------------------------------------------
+
+def test_export_fails_when_image_retry_limit_is_exceeded(env):
+    e = env(running=False)
+    ctx = e.ctx(request())
+    vm, running, inv, _ = run._read_source(ctx)
+    e.src._on_virtualmachineimages = lambda obj: obj.update(status={"conditions": [{
+        "type": "RetryLimitExceeded", "status": "True", "message": "volume not found"}]})
+    with pytest.raises(run.TransferError, match="volume not found"):
+        run.export_images(ctx, inv, running, "harvester-longhorn")
+
+
+def test_missing_source_storage_class_does_not_stop_vm(env):
+    e = env()
+    e.src.objs.pop((run.K_STORAGE_CLASS, None, "longhorn-opensuse-leap-cloud"))
+    ctx = e.ctx(request())
+    _vm, running, inv, _secrets = run._read_source(ctx)
+    with pytest.raises(run.TransferError, match="storage class .* not found"):
+        run.export_images(ctx, inv, running, "harvester-longhorn")
+    assert not e.calls(e.src, "patch", run.K_VM)
+
+
+def test_portworx_disk_is_read_directly_without_longhorn(env):
+    e = env()
+    pvc = e.src.objs[(run.K_PVC, "default", "leap156-disk-0-gfcec")]
+    pvc["spec"]["storageClassName"] = "portworx"
+    e.src.put(run.K_STORAGE_CLASS, {"metadata": {"name": "portworx"}, "provisioner": "pxd.portworx.com"})
+    e.src.put(run.K_DEPLOYMENT, {"metadata": {"namespace": "harvester-system", "name": "cdi-deployment"},
+                                  "spec": {"template": {"spec": {"containers": [{"image": "cdi:1"}]}}}})
+    e.src._on_pods = lambda obj: obj.update(status={"phase": "Running", "conditions": [
+        {"type": "Ready", "status": "True"}]})
+    ctx = e.ctx(request(source="running"))
+    _vm, running, inv, _secrets = run._read_source(ctx)
+    exported = run.export_images(ctx, inv, running, "portworx")
+    assert exported[0][1] == ("pod", "xfer-t1-disk-0-reader")
+    pod = e.src.get(run.K_POD, "default", exported[0][1][1])
+    assert pod["spec"]["volumes"][0]["persistentVolumeClaim"]["claimName"] == pvc["metadata"]["name"]
+    assert not e.calls(e.src, "create", run.K_IMAGE)
+    assert not e.calls(e.src, "create", run.K_DV)
+    assert e.src.get(run.K_VMI, "default", "leap156") is None
+    run.delete_export_images(ctx, exported)
+    assert e.src.get(run.K_POD, "default", exported[0][1][1]) is None
+
+
+def test_mixed_portworx_and_longhorn_uses_longhorn_class_for_image(env):
+    e = env()
+    e.src.put(run.K_STORAGE_CLASS, {"metadata": {"name": "portworx"}, "provisioner": "pxd.portworx.com"})
+    e.src.put(run.K_DEPLOYMENT, {"metadata": {"namespace": "harvester-system", "name": "cdi-deployment"},
+                                  "spec": {"template": {"spec": {"containers": [{"image": "cdi:1"}]}}}})
+    e.src._on_pods = lambda obj: obj.update(status={"phase": "Running", "conditions": [
+        {"type": "Ready", "status": "True"}]})
+    ctx = e.ctx(request())
+    _vm, running, inv, _secrets = run._read_source(ctx)
+    inv["disks"].append(dict(inv["disks"][0], volume="disk-1", claim="portworx-claim",
+                             storage_class="portworx"))
+    exported = run.export_images(ctx, inv, running, "portworx")
+    image = e.src.get(run.K_IMAGE, "default", "xfer-t1-disk-0")
+    assert image["spec"]["targetStorageClassName"] == inv["disks"][0]["storage_class"]
+    run.delete_export_images(ctx, exported)
+
+
+def test_portworx_stream_withholds_footer_until_size_is_verified(env):
+    e = env()
+    compressed = gzip.compress(b"short disk")
+    e.src.exec_stream = lambda *args: iter([compressed[:-8], compressed[-8:]])
+    stream = run.disk_stream(e.ctx(request()), "default", "reader", 100)
+    assert next(stream) == compressed[:-8]
+    with pytest.raises(run.TransferError, match="incomplete disk stream"):
+        next(stream)
+
+
+def test_portworx_reader_failure_rolls_back_and_restarts_source(env):
+    e = env()
+    e.src.objs[(run.K_PVC, "default", "leap156-disk-0-gfcec")]["spec"]["storageClassName"] = "portworx"
+    e.src.put(run.K_STORAGE_CLASS, {"metadata": {"name": "portworx"}, "provisioner": "pxd.portworx.com"})
+    e.src.put(run.K_DEPLOYMENT, {"metadata": {"namespace": "harvester-system", "name": "cdi-deployment"},
+                                  "spec": {"template": {"spec": {"containers": [{"image": "cdi:1"}]}}}})
+
+    def failed(obj):
+        obj["status"] = {"phase": "Failed", "message": "reader failed"}
+    e.src._on_pods = failed
+    ctx = e.ctx(request())
+    _vm, running, inv, _secrets = run._read_source(ctx)
+    with pytest.raises(run.TransferError, match="reader failed"):
+        run.export_images(ctx, inv, running, "harvester-longhorn")
+    run.rollback(ctx)
+    assert e.src.labelled() == []
+    assert e.src.get(run.K_VMI, "default", "leap156") is not None
+
+
+def test_rollback_does_not_restart_source_if_reader_cannot_be_removed(env):
+    e = env()
+    ctx = e.ctx(request())
+    ctx.source_stopped = True
+    ctx.source_initial = "Always"
+    e.src.objs.pop((run.K_VMI, "default", "leap156"))
+    e.src.put(run.K_POD, {"metadata": {"name": "reader", "namespace": "default"}})
+    ctx.record("src", run.K_POD, "default", "reader")
+    e.src.delete = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("forbidden"))
+    run.rollback(ctx)
+    assert e.src.get(run.K_VMI, "default", "leap156") is None
+    assert any("source left stopped" in event[2] for event in e.events)
+
 
 def test_backup_engine_stop_mode(env):
     e = env()
@@ -620,6 +727,41 @@ def test_direct_transfer_streams_each_disk_to_cdi(env):
     # images temporaires supprimées, rien d'étiqueté ne reste
     assert not [k for k in e.src.objs if k[0] == run.K_IMAGE]
     assert e.src.labelled() == [] and e.dst.labelled() == []
+
+
+def test_direct_transfer_streams_portworx_without_longhorn(env):
+    e = env(shared=False)
+    content = b"portworx-data" * 1000
+    pvc = e.src.objs[(run.K_PVC, "default", "leap156-disk-0-gfcec")]
+    pvc["spec"]["storageClassName"] = "portworx"
+    pvc["spec"]["resources"]["requests"]["storage"] = str(len(content))
+    e.src.put(run.K_STORAGE_CLASS, {"metadata": {"name": "portworx"}, "provisioner": "pxd.portworx.com"})
+    e.src.put(run.K_DEPLOYMENT, {"metadata": {"namespace": "harvester-system", "name": "cdi-deployment"},
+                                  "spec": {"template": {"spec": {"containers": [{"image": "cdi:1"}]}}}})
+    e.src._on_pods = lambda obj: obj.update(status={"phase": "Running", "conditions": [
+        {"type": "Ready", "status": "True"}]})
+
+    def read_disk(ns, pod, command):
+        assert e.src.get(run.K_VMI, "default", "leap156") is None
+        assert command == ["gzip", "-c", "/dev/transfer-disk"]
+        yield gzip.compress(content)
+    e.src.exec_stream = read_disk
+    ctx = e.ctx(request(source="running", name="leap156-copy",
+                        storage_classes={"portworx": "harvester-longhorn"}), serve=True)
+    run.run_direct(ctx, "portworx")
+    run.finalize(ctx)
+    assert e.dst.objs[(run.K_PVC, "default", "leap156-copy-disk-0-t1")]["data"] == content
+    assert not e.calls(e.src, "create", run.K_IMAGE)
+    assert e.src.get(run.K_POD, "default", "xfer-t1-disk-0-reader") is None
+    assert e.src.get(run.K_VMI, "default", "leap156")["status"]["phase"] == "Running"
+
+
+@pytest.mark.parametrize("data,size", [(gzip.compress(b"disk")[:-2], 4), (gzip.compress(b"disk"), 5)])
+def test_portworx_stream_rejects_truncated_or_wrong_size(env, data, size):
+    e = env()
+    e.src.exec_stream = lambda *args: iter([data])
+    with pytest.raises(run.TransferError, match="incomplete disk stream"):
+        list(run.disk_stream(e.ctx(request()), "default", "reader", size))
 
 
 def test_export_restarts_the_source_before_the_download(env, tmp_path):
