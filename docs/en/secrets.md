@@ -463,6 +463,41 @@ once sessions use the new one. A JWKS unreadable three hours in a row raises
 `openbao-jwt-keys-unreadable`. With discovery, OpenBao follows the keys
 itself.
 
+**A real rotation (2.10.1, Rancher v2.14.1, 27/11/2026).** Rancher keeps its
+key pair in the Secret `cattle-system/oidc-signing-key` (`<name>.pem` and
+`<name>.pub`, one private key at a time). Rotation without disruption, as
+Rancher documents it: replace `key.pem` by a new `key2.pem`, keep `key.pub`
+and add `key2.pub`; Rancher signs with the new key at once and its JWKS
+serves both public keys; later remove `key.pub`. No Rancher restart is
+needed. What the bench showed:
+
+- **The private key must be PKCS#1** (`-----BEGIN RSA PRIVATE KEY-----`,
+  `openssl genrsa -traditional`, or `openssl rsa -traditional` on a key made
+  by OpenSSL 3). With a PKCS#8 key (`BEGIN PRIVATE KEY`, the OpenSSL 3
+  default) Rancher refuses every token exchange (`failed to get signing key:
+  failed to decode PEM block`): every single sign-on to Rancher's OIDC
+  clients failed for 71 seconds until the key was rewritten in PKCS#1.
+- **Discovery**: no break. After the new key and after the old one was
+  removed, new sign-ins and person reads worked, and the checks of the
+  method stayed green.
+- **Static keys**: from the moment Rancher signs with the new key, every new
+  sign-in and every Rancher refresh of an open session gives an identity
+  token OpenBao refuses: person reads answer 403 `openbao-person-login-failed`
+  (no fallback to the service), console sessions stay open. The banner
+  `openbao-jwt-keys-changed` comes at the next hourly check (the first one
+  90 seconds after the console starts); **Update the keys** rendered one
+  command, and once it ran the same session read again without signing in.
+  After the old key was removed, the banner came back and **Confirm the
+  keys** left the new key only. In static mode the outage lasts from the
+  rotation to the update: up to an hour plus the time of the OpenBao
+  administrator. Prefer discovery with Rancher. Publishing `key2.pub` alone
+  first, updating the keys, then swapping the private key would avoid the
+  outage; that order was not tried.
+- Sessions opened before the rotation hold refresh tokens signed with the
+  old key: they end at their next refresh once the old public key is
+  removed. Remove it after the refresh tokens of the open sessions have
+  turned over.
+
 ### Limits of per-person tokens
 
 - In B1, the issuer, client and CA of a Rancher are pinned in root's state
@@ -591,9 +626,12 @@ stores use, so it must be reachable from the child nodes (the console's own
 AppRole range is then the host address, not `127.0.0.1`). The set-up,
 namespace and removal actions end with the commands for your OpenBao
 administrator (auth method, role, policy of the cluster), shown in a window
-with copy; the stores stay `InvalidProviderConfig` until they are run. On a
-re-run, skip the first line (`bao auth enable`) when the method already
-exists.
+with copy; the stores stay `InvalidProviderConfig` until they are run. Since
+2.10.1 they replay as they are: each `bao auth enable` (and, in the mode A
+assistant, each `bao secrets enable`) is guarded by a read of the mount
+list, so a second run ends without error (checked on OpenBao 2.7.2 and
+Vault 1.14.2). The tab says **ready** once every store of the enabled
+namespaces is `Ready`, **waiting for the OpenBao administrator** before.
 
 ### Removing ESO (decision 300)
 
@@ -786,15 +824,26 @@ at start (`<state>/console-paths.json`), unless
   mode A server (clone, restore): both sweep each other's keys and orphans.
 - 2.10.0, per-person tokens: groups fed by a `groups` claim of Rancher (no
   Rancher with a group provider on the bench: only internal groups were
-  verified); a Rancher behind Active Directory or SAML; the real rotation of
-  Rancher's signing key (simulated with static keys); a Terraform KVM
-  declaration running longer than the person token (the mechanism was
-  verified with a 17-minute KVM image fetch to node2: secrets read at
-  launch with the person token, token revoked meanwhile, action done);
-  per-person tokens on Vault other than 1.14.2.
-- 2.10.0, External Secrets: ESO in B1 end to end with a real child cluster
-  (ESO was verified in mode A on a harvlab2 child; the B1 listener, its CA,
-  the unit fallback and the rollback guard on a client VM without a child
-  cluster); a child cluster of a Harvester with several nodes; the window
-  that shows the mode A commands (the same commands were taken from the
-  assistant during the check).
+  verified); a Rancher behind Active Directory or SAML; per-person tokens on
+  Vault other than 1.14.2. Verified in 2.10.1: a Terraform KVM declaration
+  (apply, destroy, `decrypt-state`) launched by a person whose OpenBao token
+  was revoked a few seconds after the launch, and whose Rancher session was
+  signed out during `destroy` and `decrypt-state`: the actions ended, the
+  OpenBao audit shows one read of `ssh-kvm` by the person at the launch and
+  none after (the apply itself lasts about 15 s: no KVM declaration can be
+  made to outlast the 15-minute token, the base image comes from the host
+  catalogue); the real rotation of Rancher's signing key (above).
+- 2.10.0, External Secrets: a child cluster of a Harvester with several
+  nodes; the **Défaire** of a deployment plan with External Secrets.
+  Verified in 2.10.1: ESO in B1 end to end on the client VM hops-upd
+  (listener on its static address, chart from a bootstrap registry, two
+  namespaces, a namespace refused the other's path, a rotation reached the
+  synced Secret within 10 s, removal kept the Secrets and turned the
+  listener off); ESO in mode A with the commands of the window run twice as
+  they are, stores `Ready`, a value written from the tab synced.
+- External Secrets set at cluster creation (the window's option) cannot
+  find team namespaces on a new cluster: the chart is installed, then the
+  action ends with `eso-namespace-missing` and asks to set ESO from the tab
+  once the namespaces exist (policies base, or the teams). A deployment plan
+  whose Artefacts phase creates the team namespaces first does not have the
+  problem.

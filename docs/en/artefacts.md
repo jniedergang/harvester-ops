@@ -696,8 +696,17 @@ namespace, label `harvester-ops.io/team: "true"`):
 - `NetworkPolicy`: `hops-default-deny` (all pods, in and out),
   `hops-allow-same-namespace`, `hops-allow-dns` (to `kube-dns` in
   `kube-system`, UDP and TCP 53), `hops-allow-ingress` (from the RKE2
-  ingress controller, `kube-system`, pods
-  `app.kubernetes.io/name: rke2-ingress-nginx`).
+  ingress controllers in `kube-system`: ingress-nginx pods
+  `app.kubernetes.io/name: rke2-ingress-nginx` and, since 2.10.1, Traefik
+  pods `app.kubernetes.io/name: rke2-traefik` with
+  `app.kubernetes.io/instance: rke2-traefik-kube-system`, the default
+  controller of a new RKE2 v1.36 cluster; labels read on a v1.36.4 child).
+
+A policy laid before 2.10.1 admits ingress-nginx only. The console does not
+rewrite it silently: the Services view shows **ingress policy outdated**
+(`child-ingress-policy-stale`) next to the policies of that child, and
+applying the policies of the child again (plan phase Artefacts, or
+`harvester-capi manifest-deploy`) updates it.
 
 A team namespace that already exists without the labels of the console
 blocks (`team-namespace-taken`); the base never writes into `default` nor

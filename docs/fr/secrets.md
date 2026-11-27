@@ -495,6 +495,46 @@ nouvelle. Un JWKS illisible trois heures de suite lève
 `openbao-jwt-keys-unreadable`. Avec la découverte, OpenBao suit les clés
 lui-même.
 
+**Une vraie rotation (2.10.1, Rancher v2.14.1, 27/11/2026).** Rancher garde
+sa paire de clés dans le Secret `cattle-system/oidc-signing-key`
+(`<nom>.pem` et `<nom>.pub`, une seule clé privée à la fois). Rotation sans
+coupure, comme Rancher la documente : remplacer `key.pem` par un nouveau
+`key2.pem`, garder `key.pub` et ajouter `key2.pub` ; Rancher signe aussitôt
+avec la nouvelle clé et son JWKS sert les deux clés publiques ; retirer
+`key.pub` plus tard. Aucun redémarrage de Rancher n'est nécessaire. Ce que
+le banc a montré :
+
+- **La clé privée doit être en PKCS#1** (`-----BEGIN RSA PRIVATE KEY-----`,
+  `openssl genrsa -traditional`, ou `openssl rsa -traditional` sur une clé
+  faite par OpenSSL 3). Avec une clé PKCS#8 (`BEGIN PRIVATE KEY`, le défaut
+  d'OpenSSL 3), Rancher refuse tout échange de jeton (`failed to get signing
+  key: failed to decode PEM block`) : toute connexion unique par les clients
+  OIDC de Rancher a échoué pendant 71 secondes, jusqu'à la réécriture de la
+  clé en PKCS#1.
+- **Découverte** : aucune coupure. Après la nouvelle clé puis après le
+  retrait de l'ancienne, les nouvelles connexions et les lectures
+  personnelles ont marché, et les vérifications de la méthode sont restées
+  vertes.
+- **Clés statiques** : dès que Rancher signe avec la nouvelle clé, toute
+  nouvelle connexion et tout rafraîchissement Rancher d'une session ouverte
+  donnent un jeton d'identité qu'OpenBao refuse : les lectures personnelles
+  répondent 403 `openbao-person-login-failed` (aucun repli sur le service),
+  les sessions de la console restent ouvertes. Le bandeau
+  `openbao-jwt-keys-changed` arrive au contrôle horaire suivant (le premier
+  90 secondes après le démarrage de la console) ; **Mettre à jour les clés**
+  a rendu une commande, et une fois passée la même session a relu sans se
+  reconnecter. Après le retrait de l'ancienne clé, le bandeau est revenu et
+  **Confirmer** n'a gardé que la nouvelle. En clés statiques, la coupure dure
+  de la rotation à la mise à jour : jusqu'à une heure, plus le délai de
+  l'administrateur d'OpenBao. Préférer la découverte avec Rancher. Publier
+  d'abord `key2.pub` seule, mettre à jour les clés, puis remplacer la clé
+  privée éviterait la coupure ; cet ordre n'a pas été essayé.
+- Les sessions ouvertes avant la rotation tiennent des jetons de
+  rafraîchissement signés par l'ancienne clé : elles se terminent à leur
+  rafraîchissement suivant une fois l'ancienne clé publique retirée. La
+  retirer après le renouvellement des jetons de rafraîchissement des
+  sessions ouvertes.
+
 ### Limites des jetons personnels
 
 - En B1, l'émetteur, le client et la CA d'un Rancher sont épinglés dans
@@ -632,8 +672,12 @@ enfants (la plage AppRole de la console est alors l'adresse de l'hôte, pas
 terminent par les commandes pour l'administrateur de votre OpenBao (méthode,
 rôle, politique du cluster), montrées dans une fenêtre avec copie ; les
 magasins restent `InvalidProviderConfig` tant qu'elles ne sont pas passées.
-Pour les rejouer, sautez la première ligne (`bao auth enable`) quand la
-méthode existe déjà.
+Depuis la 2.10.1, elles se rejouent telles quelles : chaque `bao auth enable`
+(et, dans l'assistant du mode A, chaque `bao secrets enable`) est gardé par
+une lecture de la liste des montages, une seconde exécution finit donc sans
+erreur (vérifié sur OpenBao 2.7.2 et Vault 1.14.2). L'onglet dit **prêt**
+dès que chaque magasin des namespaces activés est `Ready`, **en attente de
+l'administrateur d'OpenBao** avant.
 
 ### Retirer ESO (décision 300)
 
@@ -836,15 +880,28 @@ a notée au démarrage (`<state>/console-paths.json`), sauf si
 - 2.10.0, jetons personnels : des groupes nourris par un claim `groups` de
   Rancher (aucun Rancher avec fournisseur de groupes au banc : seuls les
   groupes internes ont été vérifiés) ; un Rancher derrière Active Directory
-  ou SAML ; la rotation réelle de la clé de signature de Rancher (simulée
-  avec des clés statiques) ; une déclaration Terraform KVM plus longue que
-  le jeton de la personne (le mécanisme a été vérifié par un téléchargement
-  d'image KVM de 17 minutes vers node2 : secrets lus au déclenchement avec
-  le jeton de la personne, jeton révoqué entre-temps, action terminée) ;
-  les jetons personnels sur un Vault autre que 1.14.2.
-- 2.10.0, External Secrets : ESO en B1 de bout en bout avec un vrai cluster
-  enfant (ESO vérifié en mode A sur un cluster enfant de harvlab2 ;
-  l'écouteur de B1, sa CA, le repli de l'unité et la garde de retour sur une
-  VM client sans cluster enfant) ; un cluster enfant d'un Harvester à
-  plusieurs nœuds ; la fenêtre qui montre les commandes du mode A (les mêmes
-  commandes ont été prises dans l'assistant pendant l'essai).
+  ou SAML ; les jetons personnels sur un Vault autre que 1.14.2. Vérifié en
+  2.10.1 : une déclaration Terraform KVM (apply, destroy, `decrypt-state`)
+  lancée par une personne dont le jeton OpenBao était révoqué quelques
+  secondes après le lancement, et dont la session Rancher était déconnectée
+  pendant `destroy` et `decrypt-state` : les actions ont fini, l'audit
+  d'OpenBao montre une lecture de `ssh-kvm` par la personne au lancement et
+  aucune ensuite (l'apply dure environ 15 s : aucune déclaration KVM ne peut
+  durer plus que le jeton de 15 minutes, l'image de base vient du catalogue
+  de l'hôte) ; la rotation réelle de la clé de signature de Rancher
+  (ci-dessus).
+- 2.10.0, External Secrets : un cluster enfant d'un Harvester à plusieurs
+  nœuds ; le **Défaire** d'un plan de déploiement avec External Secrets.
+  Vérifié en 2.10.1 : ESO en B1 de bout en bout sur la VM client hops-upd
+  (écouteur sur son adresse statique, chart depuis un registre d'amorçage,
+  deux namespaces, un namespace refusé sur le chemin de l'autre, une rotation
+  arrivée au Secret synchronisé en 10 s, retrait qui garde les Secrets et
+  éteint l'écouteur) ; ESO en mode A avec les commandes de la fenêtre passées
+  deux fois telles quelles, magasins `Ready`, une valeur écrite depuis
+  l'onglet synchronisée.
+- External Secrets posé à la création du cluster (option de la fenêtre) ne
+  trouve pas les namespaces d'équipe sur un cluster neuf : le chart est
+  installé, puis l'action finit sur `eso-namespace-missing` et demande de
+  poser ESO depuis l'onglet une fois les namespaces présents (socle de
+  politiques, ou les équipes). Un plan de déploiement dont la phase Artefacts
+  crée d'abord les namespaces d'équipe n'a pas ce problème.

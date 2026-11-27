@@ -1,8 +1,8 @@
 # Parity with the Harvester UI
 
-Status on 2026-11-09, console **v2.10.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
+Status on 2026-11-27, console **v2.10.1**, compared with the **Harvester v1.9.1** UI (menus taken from the harvester-ui-extension v1.9.1 source and the v1.9 documentation).
 
-Of 136 functions of the Harvester UI: **133 done**, **3 partial**, **0 missing**; 1 out of scope. A missing function shows the version it is planned for.
+Of 139 functions of the Harvester UI: **134 done**, **4 partial**, **1 missing**; 1 out of scope. A missing function shows the version it is planned for, or "not yet".
 
 Statuses: Done, Partial (what is missing is said), Missing (planned version), Console only (what Harvester does not have), Out of scope.
 
@@ -101,6 +101,7 @@ Harvester menu: *Create / Edit VM*
 | Install guest agent | Done | 1.60 |  |
 | Windows unattend and sysprep | Done | 1.62 | answer file at creation, sysprep drive |
 | TPM, EFI, Secure Boot, USB tablet | Done | 1.12 |  |
+| Disk and VM performance options (cache, I/O mode, I/O threads, high-performance profile, v1.9.1) | Missing | not yet | DiskPerformanceOptions and VMPerformanceOptions of harvester-ui-extension v1.9.1 (highPerformanceStorage flag), harvesterhci.io/disk-cache-mode annotations |
 
 ## Volumes
 
@@ -212,13 +213,16 @@ Harvester menu: *Advanced*
 | SSH keys (create, read from file, edit, delete) | Done | 1.64 |  |
 | Cloud configuration templates (user / network data) | Done | 1.64 |  |
 | Storage classes (Longhorn v1, encryption, topologies, LVM, default, delete) | Partial | 1.74 | LVM verified for real in 1.74 (experimental add-on, spare disk); Longhorn v2 offered but not verified (absent from the benches) |
+| LVM type dm-thin only from v1.9.1 | Done | 2.10.1 | as the lvmDmThinOnly flag of harvester-ui-extension v1.9.1: dm-thin by default, striped refused from v1.9.1 (version read), said deprecated before; not verified on harvlab yet |
 | PCI devices | Done | 1.68 | enable or disable passthrough, by selection; IOMMU group and the VMs using them said |
 | SR-IOV network devices (VF count) | Done | 1.68 | emulated igb card on the bench |
 | SR-IOV GPU, vGPU, MIG configurations | Partial | 1.92 | read-only: GPU tab (whole GPUs, vGPUs, MIG instances, container GPUs, free or used). Verified against Harvester's object shapes, not on vGPU or MIG hardware (none on the benches). Enabling a vGPU or configuring MIG: not shipped |
 | USB devices (passthrough) | Done | 1.68 |  |
 | Add-ons: enable, disable, configure | Done | 1.57 |  |
+| rancher-k3k add-on (v1.9.1) and its enable window | Partial | 1.57 | enabled and configured as any add-on; the HarvesterEnableK3k window (Rancher host name) is not reproduced |
 | Secrets (Opaque, TLS, Basic, Registry, SSH, encryption: create, new values, delete) | Done | 1.64 |  |
 | Harvester settings (all 40: NTP, proxy, CA, TLS, overcommit…) | Done | 1.67 | typed forms, checked beforehand as the webhook would, applied state, masked secrets, warning on settings that can cut an access |
+| TLS settings said to have no effect according to the ingress controller of the cluster | Console only | 2.10.1 | ssl-parameters under Traefik, traefik-default-tls-options under ingress-nginx, read on the cluster (RKE2 chart and service); Harvester does not say it |
 
 ## Harvester upgrade
 
@@ -228,6 +232,8 @@ Harvester menu: *Upgrade*
 |---|---|---|---|
 | Upgrade (version, notes, per-node progress, logs) | Done | 1.69 | eligibility said before the ISO download, follow that survives the API outage, abort while Harvester accepts it |
 | Air-gapped upgrade (uploaded image) | Done | 1.69 | ISO from the console's store, SHA-512 checked, served by the console's counter |
+| shutdownVMOnMigrationFailure choice at upgrade (v1.9.1) | Console only | 2.10.1 | box of the window, unchecked as in Harvester, written in upgrade-config then set back; absent from the Harvester v1.9.1 UI |
+| Checks of an upgrade to v1.9.1 | Console only | 2.10.1 | LVM volumes that predate the GA (blocking, can be forced), striped volumes, deprecated rancher-vcluster add-on, nginx Ingresses moved to Traefik |
 
 ## Support
 

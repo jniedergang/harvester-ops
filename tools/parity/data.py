@@ -96,7 +96,7 @@ r("ok", "1.60", "Clés SSH à la création", "SSH keys at creation")
 r("ok", "1.60", "Installer l'agent invité", "Install guest agent")
 r("ok", "1.62", "Windows : unattend et sysprep", "Windows unattend and sysprep", "fichier de réponses à la création, lecteur sysprep", "answer file at creation, sysprep drive")
 r("ok", "1.12", "TPM, EFI, Secure Boot, tablette USB", "TPM, EFI, Secure Boot, USB tablet")
-r("todo", "2.11", "Options de performance des disques et de la VM (cache, E/S, fils d'E/S, profil haute performance, v1.9.1)",
+r("todo", "", "Options de performance des disques et de la VM (cache, E/S, fils d'E/S, profil haute performance, v1.9.1)",
   "Disk and VM performance options (cache, I/O mode, I/O threads, high-performance profile, v1.9.1)",
   "DiskPerformanceOptions et VMPerformanceOptions de harvester-ui-extension v1.9.1 (drapeau highPerformanceStorage), annotations harvesterhci.io/disk-cache-mode",
   "DiskPerformanceOptions and VMPerformanceOptions of harvester-ui-extension v1.9.1 (highPerformanceStorage flag), harvesterhci.io/disk-cache-mode annotations")

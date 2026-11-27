@@ -721,9 +721,19 @@ namespace système, étiquette `harvester-ops.io/team: "true"`) :
   au-dessus de son défaut, ou un défaut au-dessus du maximum, est refusé) ;
 - `NetworkPolicy` : `hops-default-deny` (tous les pods, entrée et sortie),
   `hops-allow-same-namespace`, `hops-allow-dns` (vers `kube-dns` de
-  `kube-system`, UDP et TCP 53), `hops-allow-ingress` (depuis le contrôleur
-  d'ingress de RKE2, `kube-system`, pods
-  `app.kubernetes.io/name: rke2-ingress-nginx`).
+  `kube-system`, UDP et TCP 53), `hops-allow-ingress` (depuis les
+  contrôleurs d'ingress de RKE2 dans `kube-system` : pods ingress-nginx
+  `app.kubernetes.io/name: rke2-ingress-nginx` et, depuis la 2.10.1, pods
+  Traefik `app.kubernetes.io/name: rke2-traefik` avec
+  `app.kubernetes.io/instance: rke2-traefik-kube-system`, le contrôleur par
+  défaut d'un cluster RKE2 v1.36 neuf ; étiquettes relevées sur un enfant
+  v1.36.4).
+
+Une politique posée avant la 2.10.1 n'admet qu'ingress-nginx. La console ne
+la réécrit pas en silence : la vue Services affiche **politique d'ingress
+périmée** (`child-ingress-policy-stale`) à côté des politiques de cet
+enfant, et réappliquer les politiques de l'enfant (phase Artefacts d'un
+plan, ou `harvester-capi manifest-deploy`) la met à jour.
 
 Un namespace d'équipe déjà présent sans les étiquettes de la console bloque
 (`team-namespace-taken`) ; le socle n'écrit jamais dans `default` ni dans un

@@ -343,7 +343,55 @@ l'installation la retire : Turtles réapplique le fournisseur sans ôter une
 Harvester v1.9 n'a plus le Service `kube-system/ingress-expose` où CAPHV
 v0.10.1 lit la VIP. L'installation crée un remplaçant étiqueté
 `harvester-ops.io/shim=caphv-ingress-expose` ; l'onglet Installation dit
-s'il est présent. Relancer l'installation pour le recréer.
+s'il est présent.
+
+**Il revient après chaque redémarrage de Harvester.** Sur un cluster qui
+tourne sous Traefik (toute installation neuve de 1.9, et un cluster mis à
+jour en 1.9.1), le contrôleur de Harvester supprime `ingress-expose` à
+chacun de ses démarrages (`pkg/controller/master/rancher/register.go`,
+`registerExposeService`, même code en v1.9.0 et v1.9.1). Vu sur harv1 (1.9.1)
+le 27/11/2026 : le remplaçant a été supprimé par
+`system:serviceaccount:harvester-system:harvester` cinq minutes après sa
+pose, au redémarrage du pod de Harvester qui suivait un démarrage à froid.
+L'onglet Installation, le bandeau Clusters et la disponibilité des plans
+disent alors `ingress-expose-missing` et nomment les clusters Cluster API
+qui ne reçoivent plus de nouvelles machines. **Réparer l'adresse pour
+CAPHV** (administrateurs, action suivie `capi-repair-shim`, ou
+`harvester-capi repair-shim --cluster H`) recrée le remplaçant. Il ne fait
+que créer : il ne reprend jamais un Service qui existe déjà, refuse pendant
+une mise à jour de Harvester (`upgrade-running`) et laisse un Service
+qu'un autre gestionnaire possède (`ingress-expose-foreign`). Les écritures
+qui ne posent que des annotations (kube-ovn-controller, kube-vip) ne
+comptent pas comme un autre gestionnaire.
+
+La fenêtre de mise à jour avertit avant toute mise à jour quand le
+remplaçant existe (`console-ingress-expose-present`) : le réparer une fois
+la mise à jour finie. Le remplaçant disparaît pour de bon avec une version
+de CAPHV qui lit `rke2-traefik` (pull request #276).
+
+### Machines Cluster API refusées sur Harvester 1.9.1 : « is not authorized to access image »
+
+Harvester v1.9.1 vérifie que le créateur d'une VM peut lire (`get`) l'image
+de chaque volumeClaimTemplate
+(`pkg/webhook/resources/virtualmachine/validator.go`, nouveau en v1.9.1).
+L'identité CAPHV restreinte d'un cluster créé par la 2.10.0 ou avant n'a que
+`list` sur les images : en 1.9.1, toute nouvelle machine de ce cluster
+(ajout, mise à jour progressive, remédiation) est refusée, les machines en
+place continuent. Le journal de CAPHV dit `user
+"system:serviceaccount:<ns>:caphv-identity" is not authorized to access
+image <ns-image>/<image>`. Les clusters créés par la 2.10.1 ont ce droit.
+Pour un cluster plus ancien, l'ajouter au Role d'identité du namespace de
+l'image (`caphv-identity-<namespace du cluster>`, ou `caphv-identity` quand
+l'image est dans `<namespace du cluster>-vms`) :
+
+```bash
+kubectl -n <ns-image> patch role caphv-identity-<ns-cluster> --type json -p \
+  '[{"op":"add","path":"/rules/-","value":{"apiGroups":["harvesterhci.io"],
+     "resources":["virtualmachineimages"],"verbs":["get"],"resourceNames":["<image>"]}}]'
+```
+
+Vérifié sur harv1 (1.9.1) : règle retirée, un nouveau worker était refusé ;
+règle ajoutée, la VM du worker était créée dix secondes plus tard.
 
 ### « spec.template.metadata in body should have at least 1 properties »
 
@@ -367,7 +415,11 @@ après des suppressions de clusters (24 libres sur 16 vu sur un cluster
 d'essai). La console compte plutôt d'après la table des adresses
 allouées.
 
-### ingress-nginx reste en ContainerCreating : « iptables: executable file not found »
+### Le contrôleur d'ingress reste en ContainerCreating : « iptables: executable file not found »
+
+Concerne le contrôleur d'ingress de RKE2 de l'enfant, ingress-nginx ou
+Traefik (le défaut d'un cluster RKE2 v1.36 neuf) : les deux publient des
+ports d'hôte.
 
 L'image des nœuds n'a pas `iptables` : cloud-init l'installe au premier
 démarrage, et sur une image SLES non enregistrée (aucun dépôt) l'installation

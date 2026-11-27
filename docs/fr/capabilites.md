@@ -1607,9 +1607,18 @@ Support de Harvester.
   certificat et options TLS ; interface externe) demandent de cocher « Je
   comprends le risque ». Les réglages de réseau de stockage, de migration et
   RWX ouvrent Réseau > Cluster Networks, où sont leurs contrôles ;
-  `server-version` est en lecture seule ; `ssl-parameters` est signalé sans
-  effet en Harvester 1.9 (remplacé par `traefik-default-tls-options`, qui est
-  montré).
+  `server-version` est en lecture seule. Depuis la 2.10.1, les réglages TLS
+  suivent le contrôleur d'ingress lu sur le cluster (HelmCharts et services
+  de `kube-system`), plus la version : sous Traefik, `ssl-parameters` est
+  signalé sans effet et `traefik-default-tls-options` est celui appliqué ;
+  sous ingress-nginx, l'inverse ; avec les deux ou un cluster illisible,
+  aucune marque. Relevé en réel le 27/11/2026 : harv1 et harvlab (1.9.1)
+  tournent sous Traefik ; un `traefik-default-tls-options` posé sur harvlab
+  a changé la TLSOption `kube-system/default` en 20 s (annotation de hash et
+  condition `configured` mises à jour), un `ssl-parameters` ne l'a pas
+  touchée. Attention : le Traefik de Harvester 1.9.1 refuse toute poignée de main TLS
+  1.2 avec son certificat ECDSA (options par défaut comprises, vu sur harv1
+  et harvlab) : poser `maxVersion` à `VersionTLS12` rend la VIP injoignable.
 - **Les secrets n'arrivent jamais dans la page** : clé privée TLS, clés S3,
   mots de passe de registre, identifiants de proxy et jeton de l'URL d'import
   Rancher (il donne les identifiants de l'agent du cluster) s'affichent en `•••`.
@@ -2017,8 +2026,53 @@ jour** de l'hôte, où mène le bouton de la Vue d'ensemble.
   Harvester l'accepte, avant qu'elle ne touche aux hôtes (Harvester nettoie
   alors, journaux et image ISO compris).
 
+**Cible v1.9.1 ou plus (2.10.1).** Les contrôles ci-dessous sont jugés sur
+la version lue de la cible (nom de la `Version`, `harvester-release.yaml`
+d'un ISO), jamais sur un nom de fichier, et seulement pour une cible v1.9.1
+ou plus :
+
+| Code | Niveau | Quand |
+|---|---|---|
+| `lvm-pre-ga-volumes` | bloquant, forçable | volumes LVM créés avant le passage en GA du pilote LVM (les notes de version disent qu'ils ne se récupèrent pas après la mise à jour) |
+| `lvm-striped-volumes` | avertissement | volumes d'une classe `type: striped` (dépréciée en 1.9.1) |
+| `rancher-vcluster-deprecated` | avertissement | add-on `rancher-vcluster` activé (retiré en v1.10.0, remplacé par rancher-k3k) |
+| `ingress-nginx-objects` | avertissement | vos Ingress de classe nginx ou à annotations `nginx.ingress.kubernetes.io/*` sur un cluster encore sous ingress-nginx ; celles de Harvester et de Rancher (`cattle-*`, `harvester-system`, `longhorn-system`, `kube-system`) sont migrées par la mise à jour et ne comptent pas |
+| `vm-migration-failure-policy` | information | le choix ci-dessous |
+
+Pour toute cible, `console-ingress-expose-present` (avertissement) dit que
+le remplaçant `ingress-expose` de la console pour CAPHV v0.10.1 existe :
+Harvester le supprime au redémarrage de son contrôleur sous Traefik, le
+réparer après la mise à jour (Dépannage).
+
+**Arrêter les VMs dont la migration échoue** (`shutdownVMOnMigrationFailure`
+de `upgrade-config`, nouveau en Harvester 1.9.1 et absent de son
+interface) : la case part de la valeur en place. Cochée, la mise à jour
+arrête une VM qu'elle ne peut pas migrer au lieu de l'attendre ; décochée
+sur une valeur `true`, la console écrit `false`. L'action de démarrage
+écrit la valeur, garde l'`upgrade-config` d'avant sur l'objet `Upgrade`
+(annotation `harvester-ops.io/upgrade-config-before`) et la rend quand la
+mise à jour est finie : à la fin de l'action, ou, quand cette action a été
+annulée, a dépassé son délai, a perdu l'API du cluster ou que la console a
+redémarré, à la fin d'un **Suivre** de la mise à jour en cours ou à son
+**Classer** une fois finie. La fenêtre dit quand une mise à
+jour finie a encore une valeur à rendre. Harvester 1.9.0 accepte la clé
+(dry-run serveur sur harvlab2).
+
+Harvester 1.9.1 pose aussi Kube-OVN v1.16.2, dont l'add-on sonde `1.1.1.1`
+et résout `google.com` chaque minute (`pingerExternalAddress`,
+`pingerExternalDomain`, relus sur harvlab) : ce trafic apparaît dans une
+capture de sortie ; sur un site isolé, changer les valeurs de l'add-on. Une
+mise à jour propre depuis 1.8 n'est pas rejouée par la console en 2.10.1 :
+sur harvlab2 (1.8.2 mis à jour en 1.9.0 en septembre), la mise à jour 1.9.0
+a laissé RKE2 basculé sur Traefik avec le chart `rke2-traefik` jamais
+installé (`chart-content-rke2-traefik` absent, problème Harvester #11741,
+corrigé en 1.9.1) : aucun contrôleur d'ingress ne tourne et la VIP ne
+répond pas en HTTPS, alors que l'API Kubernetes (donc la console) marche.
+
 Réservé aux administrateurs. En ligne de commande : `harvester-resources
-upgrade version-add|version-delete|start|follow|logs|dismiss|abort|resume-node`.
+upgrade version-add|version-delete|start|follow|logs|dismiss|abort|resume-node`
+(`start --shutdown-vm-on-migration-failure` ou
+`--no-shutdown-vm-on-migration-failure`, `--force-lvm-pre-ga`).
 
 ### Surveillance et journaux (1.70.0)
 
@@ -2635,6 +2689,7 @@ v0.10.1, relevés appel par appel dans sa source à l'étiquette (commit
 | namespace des VMs | persistentvolumeclaims | list, delete |
 | namespace des VMs | loadbalancers | get, create, delete |
 | namespace de l'image | virtualmachineimages | list |
+| namespace de l'image | virtualmachineimages (l'image du cluster seulement, 2.10.1) | get : pas un appel de CAPHV, le webhook des VMs de Harvester v1.9.1 l'exige (`validator.go`, volumeClaimTemplates) ; un cluster créé par la 2.10.0 doit le recevoir en 1.9.1, voir Dépannage |
 | namespace de la clé | keypairs (la clé seulement) | get |
 | harvester-system | deployments (`harvester`) | get |
 | kube-system | services (`ingress-expose`) | get |
