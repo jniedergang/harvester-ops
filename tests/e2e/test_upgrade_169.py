@@ -146,3 +146,98 @@ def test_a_finished_upgrade_can_be_dismissed(ui):
     w.locator('[data-upg="dismiss"]').click()
     page.wait_for_timeout(500)
     assert sent[-1] == ("api/upgrade/harv-fake/do/dismiss", {"name": "hvst-upgrade-abcde"})
+
+
+def test_target_191_checks_the_lvm_block_and_the_migration_box(ui):
+    """2.10.1 : contrôles de la cible v1.9.1 (version lue), blocage LVM
+    forçable, case shutdownVMOnMigrationFailure décochée par défaut."""
+    import copy
+    page, sent, state = ui
+    d = copy.deepcopy(IDLE)
+    d["current"] = "v1.9.0"
+    d["versions"].insert(0, dict(d["versions"][0], name="v1.9.1", checks=[
+        {"key": "lvm-pre-ga-volumes", "ok": False, "level": "block", "forcible": True, "text": "default/<b>data</b>"},
+        {"key": "rancher-vcluster-deprecated", "ok": False, "level": "warn", "forcible": False, "text": "x/rancher-vcluster"},
+        {"key": "vm-migration-failure-policy", "ok": True, "level": "info", "forcible": False, "text": ""}]))
+    state["data"] = d
+    page.locator("#btn-upgrade").click()
+    f = page.locator('#tab-hupgrade .upg-win [data-upg="form"]')
+    expect(f).to_be_visible(timeout=8000)
+    box = f.locator('[data-upg="checks191"]')
+    f.locator('[name="version"]').select_option("v1.9.0")
+    expect(box.locator("li")).to_have_count(0)                          # cible 1.9.0 : rien de propre à 1.9.1
+    expect(f.locator('[name="shutdown_vm"]')).to_be_hidden()
+    f.locator('[name="version"]').select_option("v1.9.1")
+    expect(box.locator('[data-check="lvm-pre-ga-volumes"]')).to_contain_text("default/<b>data</b>")
+    expect(box.locator('[data-check="rancher-vcluster-deprecated"]')).to_contain_text("rancher-k3k")
+    expect(f.locator('[name="shutdown_vm"]')).not_to_be_checked()
+    f.locator('[name="read"]').check()
+    start = f.locator('[data-upg="start"]')
+    expect(start).to_be_disabled()                                       # bloquant tant qu'il n'est pas forcé
+    assert f.locator('[data-upg="force-wrap"]').get_attribute("data-tip")
+    f.locator('[name="force_lvm"]').check()
+    expect(start).to_be_enabled()
+    f.locator('[name="shutdown_vm"]').check()
+    start.click()
+    page.wait_for_timeout(500)
+    assert sent[-1] == ("api/upgrade/harv-fake/do/start", {"log": True, "skip_single_replica": False, "version": "v1.9.1",
+                                                           "shutdown_vm_on_migration_failure": True,
+                                                           "force_lvm_pre_ga": True})
+    assert page.evaluate("() => window.__pwned") is None
+
+
+@pytest.mark.parametrize("policy,uncheck,sent_value", [
+    (True, True, False),        # relecture I-4 : décochée sur une valeur vraie -> false envoyé
+    (True, False, True),
+    (False, False, None),       # valeur fausse, case laissée : rien n'est touché
+])
+def test_migration_box_starts_from_the_value_in_place(ui, policy, uncheck, sent_value):
+    import copy
+    page, sent, state = ui
+    d = copy.deepcopy(IDLE)
+    d["current"] = "v1.9.0"
+    d["migration_policy"] = policy
+    d["migration_policy_pending"] = "hvst-<b>old</b>" if policy else None
+    d["versions"].insert(0, dict(d["versions"][0], name="v1.9.1", checks=[
+        {"key": "vm-migration-failure-policy", "ok": True, "level": "info", "forcible": False, "text": ""}]))
+    state["data"] = d
+    page.locator("#btn-upgrade").click()
+    f = page.locator('#tab-hupgrade .upg-win [data-upg="form"]')
+    expect(f).to_be_visible(timeout=8000)
+    f.locator('[name="version"]').select_option("v1.9.1")
+    box = f.locator('[name="shutdown_vm"]')
+    (expect(box).to_be_checked() if policy else expect(box).not_to_be_checked())
+    if policy:
+        expect(f.locator('[data-upg="policy-pending"]')).to_contain_text("hvst-<b>old</b>")
+    if uncheck:
+        box.uncheck()
+    f.locator('[name="read"]').check()
+    f.locator('[data-upg="start"]').click()
+    page.wait_for_timeout(500)
+    got = sent[-1][1]
+    assert got.get("shutdown_vm_on_migration_failure") == sent_value, got
+    assert ("shutdown_vm_on_migration_failure" in got) is (sent_value is not None)
+
+
+def test_migration_box_only_for_a_target_that_reads_it(ui):
+    """Relecture finale m1 : l'avertissement du service de la console vaut
+    pour toute cible ; il ne fait pas paraître la case d'une cible avant
+    1.9.1, où Harvester ignore la clé, et rien de la case n'est envoyé."""
+    import copy
+    page, sent, state = ui
+    d = copy.deepcopy(IDLE)
+    d["migration_policy"] = True
+    shim = {"key": "console-ingress-expose-present", "ok": False, "level": "warn", "forcible": False,
+            "text": "kube-system/ingress-expose"}
+    d["versions"][0]["checks"] = [shim]
+    state["data"] = d
+    page.evaluate("Upgrade.open('harv-fake')")
+    f = win(page).locator('[data-upg="form"]')
+    expect(f).to_be_visible(timeout=8000)
+    f.locator('[name="version"]').select_option("v1.9.0")
+    expect(f.locator('[data-upg="checks191"] [data-check="console-ingress-expose-present"]')).to_be_visible()
+    expect(f.locator('[name="shutdown_vm"]')).to_be_hidden()
+    f.locator('[name="read"]').check()
+    f.locator('[data-upg="start"]').click()
+    page.wait_for_timeout(500)
+    assert "shutdown_vm_on_migration_failure" not in sent[-1][1], sent[-1]

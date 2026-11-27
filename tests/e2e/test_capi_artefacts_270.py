@@ -99,6 +99,20 @@ def test_the_services_table_has_a_kind_column_and_the_binding_state(ui):
     assert host.locator("img").count() == 0
 
 
+def test_outdated_ingress_policy_is_said(ui):
+    """2.10.1 (point 322 A) : hops-allow-ingress posée avant Traefik."""
+    import copy
+    applied = copy.deepcopy(APPLIED)
+    applied["manifests"][2]["stale_ingress"] = ["equipe-a", HOSTILE]
+    page, _ = ui("#automation/capi/services", applied=applied)
+    row = page.locator('#capi-services-body tr[data-svc-art="web/web/hops-policies"]')
+    badge = row.locator('[data-code="child-ingress-policy-stale"]')
+    expect(badge).to_contain_text("ingress policy outdated", timeout=8000)
+    assert "equipe-a" in badge.get_attribute("data-tip") and HOSTILE in badge.get_attribute("data-tip")
+    expect(page.locator('#capi-services-body [data-code="child-ingress-policy-stale"]')).to_have_count(1)
+    assert page.evaluate("() => window.__pwned") is None
+
+
 @pytest.mark.parametrize("ref,kind", [("web/web/essai", "manifest"), ("web/web/hops-policies", "policies")])
 def test_removing_a_manifest_sends_its_kind(ui, ref, kind):
     page, calls = ui("#automation/capi/services")

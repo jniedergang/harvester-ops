@@ -49,8 +49,11 @@ META = {
     "vm-migration-network": {"group": "network", "kind": "json", "sync": True, "elsewhere": "network"},
     "rwx-network": {"group": "network", "kind": "json", "sync": True, "elsewhere": "network"},
     "ssl-certificates": {"group": "security", "kind": "json", "sync": True, "danger": "tls"},
-    "ssl-parameters": {"group": "security", "kind": "json", "sync": True, "inert": True},
-    "traefik-default-tls-options": {"group": "security", "kind": "json", "sync": True, "danger": "tls"},
+    # 2.10.1 : sans effet selon le contrôleur d'ingress de Harvester, lu sur
+    # le cluster (ingress_kind) ; plus de règle fixe par version
+    "ssl-parameters": {"group": "security", "kind": "json", "sync": True, "inert_under": "traefik"},
+    "traefik-default-tls-options": {"group": "security", "kind": "json", "sync": True, "danger": "tls",
+                                    "inert_under": "nginx"},
     "additional-ca": {"group": "security", "kind": "pem", "sync": True},
     "cluster-pod-security-standard": {"group": "security", "kind": "json", "sync": True},
     "auto-rotate-rke2-certs": {"group": "security", "kind": "json", "sync": True, "danger": "rke2"},
@@ -203,7 +206,29 @@ def applied_state(obj):
     return "ok", ""
 
 
-def rows(settings, show_hidden=False):
+# Contrôleurs d'ingress de RKE2 dans kube-system : HelmChart du chart embarqué
+# et service qu'il publie (rke2-ingress-nginx-controller, rke2-traefik).
+# Hypothèse 2.10.1 à relire sur harvlab en 1.9.1 : la migration vers Traefik
+# retire le chart et le service d'ingress-nginx.
+INGRESS_OBJECTS = {"nginx": ({"rke2-ingress-nginx"}, {"rke2-ingress-nginx-controller"}),
+                   "traefik": ({"rke2-traefik"}, {"rke2-traefik"})}
+
+
+def ingress_kind(charts, services):
+    """Contrôleur d'ingress de Harvester : "nginx", "traefik", "both" ou
+    "unknown". `charts` : HelmChart de kube-system ; `services` : services
+    de kube-system ; None pour une lecture en échec."""
+    names = lambda objs: {_meta(o).get("name") for o in objs or []}  # noqa: E731
+    got_charts, got_services = names(charts), names(services)
+    found = {k for k, (c, sv) in INGRESS_OBJECTS.items() if c & got_charts or sv & got_services}
+    if found == {"nginx", "traefik"}:
+        return "both"
+    return found.pop() if found else "unknown"
+
+
+def rows(settings, show_hidden=False, ingress=None):
+    """`ingress` (2.10.1) : contrôleur lu par ingress_kind ; un réglage n'est
+    dit sans effet que sous le contrôleur qui l'ignore (None : jamais)."""
     out = []
     for s in sorted(settings or [], key=lambda x: _meta(x).get("name")):
         name = _meta(s).get("name")
@@ -217,7 +242,8 @@ def rows(settings, show_hidden=False):
                     "value": redact(name, value), "default": redact(name, default),
                     "modified": bool(value) and value != default, "applied": state, "message": msg,
                     "danger": m.get("danger") or "", "readonly": bool(m.get("readonly")),
-                    "elsewhere": m.get("elsewhere") or "", "inert": bool(m.get("inert")),
+                    "elsewhere": m.get("elsewhere") or "",
+                    "inert": bool(m.get("inert_under")) and m.get("inert_under") == ingress,
                     "min": m.get("min"), "max": m.get("max")})
     return out
 

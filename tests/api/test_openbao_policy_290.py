@@ -400,7 +400,8 @@ def _pt_cmds(keys=None, ca=None):
 def test_person_token_commands_exact_and_without_value():
     c = _pt_cmds()
     assert c[0] == "export BAO_ADDR=https://bao.example:8200"
-    assert f"bao auth enable -path=jwt-hops-{CID}-p-rmgr jwt" in c
+    # 2.10.1 : ligne gardée par `bao auth list` (rejouable)
+    assert any(x.endswith(f"|| bao auth enable -path=jwt-hops-{CID}-p-rmgr jwt") for x in c)
     assert f"bao policy write hops-person-{CID} - <<'EOF'\n{pol.person_policy('harvester-ops', PREFIX, CID)}EOF" in c
     import json as _j
     import openbao_jwt as oj
@@ -474,7 +475,7 @@ def test_eso_cluster_commands_mode_a():
                                  "172.16.2.0/24")
     m = f"jwt-hops-{CID}-eso-1d905023"
     assert c[0] == "export BAO_ADDR=https://bao.example:8200"
-    assert f"bao auth enable -path={m} jwt" in c
+    assert any(x.endswith(f"|| bao auth enable -path={m} jwt") for x in c)          # 2.10.1 : gardée
     assert f"ACCESSOR=$(bao read -field=accessor sys/auth/{m})" in c
     p = next(x for x in c if x.startswith(f"bao policy write hops-eso-{CID}-1d905023 - <<EOF\n"))
     assert "{{identity.entity.aliases.$ACCESSOR.metadata.namespace}}" in p          # développé par le shell

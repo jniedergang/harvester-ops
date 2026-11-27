@@ -83,7 +83,20 @@ const CAPI = (() => {
         <td class="form-hint">${esc(tr('capi.stack.optional'))}</td>
       </tr>`).join('');
     const shim = st.shim || {};
-    const shimLine = shim.present && shim.ours
+    // 2.10.1 (point 321 B) : contournement devenu nécessaire après
+    // l'installation (mise à jour en 1.9.1), ou service repris par Harvester
+    const drift = st.shim_drift || {};
+    const admin = !!(window.App && App.role && App.role() === 'admin');
+    const atRisk = (drift.clusters_at_risk || []).join(', ') || '-';
+    const driftBox = drift.foreign ? `
+      <div class="sto-finding sev-watch" style="margin-top:10px;" data-capi-shim="foreign"><div class="sto-finding-title">
+        ${esc(tr('capi.stack.shimForeign', { managers: (drift.managers || []).join(', ') }))}</div></div>`
+      : (drift.needed && !drift.present ? `
+      <div class="sto-finding sev-critical" style="margin-top:10px;" data-capi-shim="missing"><div class="sto-finding-title">
+        ${esc(tr('capi.stack.shimDrift', { clusters: atRisk }))}
+        <span class="tip" data-tip="${esc(!admin ? tr('capi.stack.t.repairAdmin') : drift.repair ? tr('capi.stack.t.repairShim') : tr('capi.stack.t.repairNoVip'))}"><button type="button" class="btn btn-primary btn-sm" id="btn-capi-repair-shim" ${admin && drift.repair ? '' : 'disabled'}>${Icons.svg('build')} ${esc(tr('capi.stack.repairShim'))}</button></span>
+      </div></div>` : '');
+    const shimLine = driftBox ? driftBox : shim.present && shim.ours
       ? `<p class="form-hint">${Icons.svg('info', { size: 12 })} ${esc(tr('capi.stack.shim'))}</p>`
       : (shim.needed ? `<p class="form-hint">${Icons.svg('warn', { size: 12 })} ${esc(tr('capi.stack.shimMissing'))}</p>` : '');
     const legacy = st.legacy ? `
@@ -140,6 +153,9 @@ const CAPI = (() => {
     out.querySelector('#btn-capi-turtles-install')?.addEventListener('click', () =>
       post(`/api/capi/${encodeURIComponent(cluster)}/install`, { dry_run: false },
            tr('capi.stack.confirmInstall', { cluster })));
+    out.querySelector('#btn-capi-repair-shim')?.addEventListener('click', () =>
+      post(`/api/capi/${encodeURIComponent(cluster)}/repair-shim`, {},
+           tr('capi.stack.confirmRepairShim', { cluster })));
     out.querySelector('#btn-capi-legacy')?.addEventListener('click', () =>
       post(`/api/capi/${encodeURIComponent(cluster)}/cleanup-legacy`, { dry_run: false },
            tr('capi.stack.confirmLegacy', { cluster })));
@@ -916,6 +932,7 @@ const CAPI = (() => {
       case 'capi-install': return tr('capi.hist.kind.install');
       case 'capi-uninstall': return tr('capi.hist.kind.uninstall');
       case 'capi-cleanup-legacy': return tr('capi.hist.kind.cleanup');
+      case 'capi-repair-shim': return tr('capi.hist.kind.repairShim');
       case 'capi-bundle-build': return tr('capi.hist.kind.bundle');
       case 'capi-cluster-create': return tr('capi.hist.kind.create');
       case 'capi-cluster-scale': return tr('capi.hist.kind.scale');
@@ -956,11 +973,14 @@ const CAPI = (() => {
     // là (jamais de seconde lecture sur l'ancien cluster)
     const stale = () => mine !== bannerRev || tab !== 'clusters' || mgmtCluster() !== cluster;
     let missing = null;
+    let atRisk = [];
     try {
       const st = await fetch(`/api/capi/${enc(cluster)}/stack`).then(r => (r.ok ? r.json() : null));
       if (stale()) return;
       if (st && st.turtles && st.core) {
         missing = st.ready ? [] : (st.missing || []);
+        // 2.10.1 : clusters dont CAPHV ne trouve plus l'adresse de Harvester
+        atRisk = ((st.shim_drift || {}).clusters_at_risk || []);
       } else {
         // Harvester sans Turtles : l'ancienne installation (diagnostic)
         const d = await fetch(`/api/capi/${enc(cluster)}/diag`).then(r => (r.ok ? r.json() : null));
@@ -972,7 +992,8 @@ const CAPI = (() => {
     if (stale()) return;
     box.innerHTML = missing && missing.length
       ? `<div class="ct-banner auto-banner-warn capi-stack-missing" role="status">${Icons.svg('warn', { size: 14 })}
-           <span>${esc(tr('capi.banner.missing', { cluster, missing: missing.join(', ') }))}</span>
+           <span>${esc(tr('capi.banner.missing', { cluster, missing: missing.join(', ') }))}${atRisk.length
+             ? ` <span data-capi-at-risk>${esc(tr('capi.banner.atRisk', { clusters: atRisk.join(', ') }))}</span>` : ''}</span>
            <a href="#automation/capi/installation" class="btn btn-sm btn-secondary tip" data-capi-goto="installation"
               data-tip="${esc(tr('capi.banner.openTip'))}">${esc(tr('capi.banner.open'))}</a></div>`
       : '';

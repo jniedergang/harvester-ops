@@ -21,14 +21,15 @@ bundle_metadata:
   kubernetes_versions:
     - {version: "v1.34.11", tested: true}   # harv1, Harvester v1.9.0, 25/09/2026
     - {version: "v1.35.8", tested: false}
-    - {version: "v1.36.4", tested: false}
+    - {version: "v1.36.4", tested: true}    # harv1, Harvester v1.9.1, 27/11/2026 (Traefik default)
     - {version: "v1.31.14", tested: true}
   default_kubernetes_version: "v1.34.11"
   # Free-form notes shown in the bundle inspect overlay
   notes: |
     Harvester v1.9.x: RKE2 providers v0.25.2 and CAPHV v0.10.1 declared to
     Rancher Turtles (Cluster API core v1.13.3); clusters created for real
-    with Kubernetes v1.34.11 on openSUSE Leap 15.6 and SLES 15 SP7.
+    with Kubernetes v1.34.11 on openSUSE Leap 15.6 and SLES 15 SP7, and
+    v1.34.11 and v1.36.4 on Harvester v1.9.1 (27/11/2026).
     Harvester v1.7.x / v1.8.x: legacy install (K8s v1.31, RKE2 v1.31).
     Other Harvester majors are likely to require a different
     CAPHV / RKE2 providers combination.
@@ -136,7 +137,10 @@ turtles-caphv:
     type: infrastructure
     namespace: caphv-system
     # CAPHV <= v0.10.1 reads the Harvester VIP from kube-system/ingress-expose,
-    # which Harvester 1.9 removed: the console recreates it (labelled).
+    # absent from a fresh 1.9 install and removed by the upgrade to 1.9.1;
+    # Harvester 1.9.x also deletes it each time its controller starts with
+    # rke2-traefik present (pkg/controller/master/rancher/register.go): the
+    # console recreates it (labelled), and says when it is gone again.
     workarounds: [ingress-expose]
     patches:
       # CAPHV <= v0.10.1 sets HarvesterMachine status.ready but not

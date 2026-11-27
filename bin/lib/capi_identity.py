@@ -72,7 +72,7 @@ KINDS = (
 #   <nom>     un namespace fixe (harvester-system, kube-system)
 #   cluster   objets de portée cluster
 # `names` : None (tous), une liste fixe, ou un jeton résolu par la demande
-# (namespace, pools, generated-pool, cloud-provider, keypair).
+# (namespace, pools, generated-pool, cloud-provider, keypair, image).
 # ---------------------------------------------------------------------------
 
 RULES = {
@@ -109,6 +109,15 @@ RULES = {
         {"scope": "image", "group": "harvesterhci.io", "resource": "virtualmachineimages",
          "verbs": ["list"], "names": None,
          "src": ["harvestermachine_controller.go:843"]},
+        # 2.10.1 : pas un appel de CAPHV, une règle du webhook de Harvester
+        # v1.9.1 : la VM créée par l'identité doit pouvoir lire (`get`) l'image
+        # de son volumeClaimTemplate (harvester v1.9.1
+        # pkg/webhook/resources/virtualmachine/validator.go:536,
+        # checkVolumeClaimTemplateEntry, absent de v1.9.0) ; vu sur harv1 en
+        # 1.9.1 le 27/11/2026 : « is not authorized to access image »
+        {"scope": "image", "group": "harvesterhci.io", "resource": "virtualmachineimages",
+         "verbs": ["get"], "names": "image",
+         "src": ["harvester v1.9.1 pkg/webhook/resources/virtualmachine/validator.go:536"]},
         {"scope": "keypair", "group": "harvesterhci.io", "resource": "keypairs",
          "verbs": ["get"], "names": "keypair",
          "src": ["harvestermachine_controller.go:874"]},
@@ -225,6 +234,7 @@ def _resolve(rule, spec):
             "generated-pool": [generated_pool(spec)],
             "cloud-provider": [spec["name"]],
             "keypair": [str(spec.get("ssh_keypair") or "").partition("/")[2]],
+            "image": [str(spec.get("image") or "").partition("/")[2]],
         }[names]
     if not out or not all(out):
         raise ValueError(f"no name for the {rule['resource']} rule ({names}): "

@@ -145,7 +145,8 @@ const CapiServices = (() => {
             <td>${kindBadge(m.kind || 'manifest')}</td>
             <td><code>${esc(m.package || '')} ${esc(m.version || '')}</code><div class="form-hint">${esc(tr('svc.art.objects', '{n} object(s)', { n: m.objects == null ? '?' : m.objects }))}</div></td>
             <td><code>-</code></td>
-            <td>${bindingBadge(m.state)}</td>
+            <td>${bindingBadge(m.state)}${(m.stale_ingress || []).length ? ` <span class="badge warn tip" data-code="child-ingress-policy-stale"
+                  data-tip="${esc(tr('svc.art.t.ingressStale', 'The ingress policy of {namespaces} admits only ingress-nginx: Traefik, the default controller of RKE2 v1.36, is left out. Apply the policies of the child cluster again (plan phase Artefacts, or harvester-capi manifest-deploy) to update it.', { namespaces: m.stale_ingress.join(', ') }))}">${Icons.svg('warn', { size: 12 })} ${esc(tr('svc.art.ingressStale', 'ingress policy outdated'))}</span>` : ''}</td>
             <td><span class="tip" data-tip="${esc(tip)}"><button type="button" class="btn btn-sm btn-danger" data-svc-art-remove="${esc(ref)}" data-kind="${esc(m.kind || 'manifest')}"
                         ${off ? 'disabled' : ''} title="${esc(tip)}" aria-label="${esc(tip)}">${Icons.svg('delete', { size: 13 })} ${esc(tr('svc.remove', 'Remove'))}</button></span></td>
           </tr>`;

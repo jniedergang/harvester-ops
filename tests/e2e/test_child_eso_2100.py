@@ -243,6 +243,18 @@ def test_without_openbao_a_blocking_finding_is_shown(context, flask_server):
 
 
 
+def test_mode_a_badge_ready_once_the_stores_are_ready(context, flask_server):
+    """2.10.1 : mode A, magasins de chaque namespace activé Ready (lu par la
+    console) : badge « prêt » au lieu de « en attente de l'administrateur »."""
+    d = state_doc()
+    d["auth"] = dict(d["auth"], stores_ready=True)
+    page, _ = open_eso(context, flask_server, {}, doc=d)
+    body = page.locator("#capi-eso-body")
+    expect(body.locator('[data-eso-auth="ready"]')).to_have_text("ready")
+    expect(body.locator('[data-eso-auth="waiting"]')).to_have_count(0)
+    assert body.locator('[data-eso-auth="ready"]').get_attribute("data-tip")
+
+
 def test_gone_namespace_and_recreated_account_are_shown(context, flask_server):
     """Revue 8-10 I-3 : constats de l'état (namespace activé disparu, compte
     hops-eso recréé), noms échappés."""

@@ -1,8 +1,8 @@
 # Parité avec l'interface de Harvester
 
-État au 2026-11-09, console **v2.10.0**, comparée à l'interface de **Harvester v1.9** (menus relevés dans le code de harvester-ui-extension v1.9.0 et la documentation v1.9).
+État au 2026-11-27, console **v2.10.1**, comparée à l'interface de **Harvester v1.9.1** (menus relevés dans le code de harvester-ui-extension v1.9.1 et la documentation v1.9).
 
-Sur 136 fonctions de l'interface de Harvester : **133 faites**, **3 partielles**, **0 manquantes** ; 1 hors périmètre. Une fonction manquante porte la version où elle est prévue.
+Sur 139 fonctions de l'interface de Harvester : **134 faites**, **4 partielles**, **1 manquante** ; 1 hors périmètre. Une fonction manquante porte la version où elle est prévue, ou « pas encore ».
 
 Statuts : Fait, Partiel (ce qui manque est dit), Manquant (version prévue), Console seulement (ce que Harvester n'a pas), Hors périmètre.
 
@@ -101,6 +101,7 @@ Menu Harvester : *Create / Edit VM*
 | Installer l'agent invité | Fait | 1.60 |  |
 | Windows : unattend et sysprep | Fait | 1.62 | fichier de réponses à la création, lecteur sysprep |
 | TPM, EFI, Secure Boot, tablette USB | Fait | 1.12 |  |
+| Options de performance des disques et de la VM (cache, E/S, fils d'E/S, profil haute performance, v1.9.1) | Manquant | pas encore | DiskPerformanceOptions et VMPerformanceOptions de harvester-ui-extension v1.9.1 (drapeau highPerformanceStorage), annotations harvesterhci.io/disk-cache-mode |
 
 ## Volumes
 
@@ -212,13 +213,16 @@ Menu Harvester : *Advanced*
 | Clés SSH (créer, lire depuis un fichier, modifier, supprimer) | Fait | 1.64 |  |
 | Modèles de configuration cloud (user / network data) | Fait | 1.64 |  |
 | Classes de stockage (Longhorn v1, chiffrement, topologies, LVM, par défaut, supprimer) | Partiel | 1.74 | LVM vérifié en réel en 1.74 (add-on expérimental, disque de réserve) ; Longhorn v2 proposé mais pas vérifié (absent des bancs) |
+| Type LVM dm-thin seul à partir de v1.9.1 | Fait | 2.10.1 | comme le drapeau lvmDmThinOnly de harvester-ui-extension v1.9.1 : dm-thin par défaut, striped refusé à partir de v1.9.1 (version lue), dit déprécié avant ; pas encore vérifié sur harvlab |
 | Périphériques PCI | Fait | 1.68 | activer ou désactiver le passthrough, par sélection ; groupe IOMMU et VMs qui s'en servent dits |
 | SR-IOV réseau (nombre de VF) | Fait | 1.68 | carte igb émulée sur le banc |
 | GPU SR-IOV, vGPU, configurations MIG | Partiel | 1.92 | lecture seule : onglet GPU (GPU entiers, vGPU, instances MIG, GPU des conteneurs, libres ou utilisés). Vérifié sur les formes des objets de Harvester, pas sur du matériel vGPU ou MIG (aucun sur les bancs). Activer un vGPU ou configurer MIG : non livré |
 | Périphériques USB (passthrough) | Fait | 1.68 |  |
 | Add-ons : activer, désactiver, configurer | Fait | 1.57 |  |
+| Add-on rancher-k3k (v1.9.1) et sa fenêtre d'activation | Partiel | 1.57 | activé et configuré comme tout add-on ; la fenêtre HarvesterEnableK3k (nom d'hôte de Rancher) n'est pas reprise |
 | Secrets (Opaque, TLS, Basic, Registry, SSH, chiffrement : créer, nouvelles valeurs, supprimer) | Fait | 1.64 |  |
 | Réglages de Harvester (les 40 : NTP, proxy, CA, TLS, overcommit…) | Fait | 1.67 | formulaires typés, contrôlés d'avance comme le webhook, état appliqué, secrets masqués, avertissement des réglages qui coupent un accès |
+| Réglages TLS dits sans effet selon le contrôleur d'ingress du cluster | Console seulement | 2.10.1 | ssl-parameters sous Traefik, traefik-default-tls-options sous ingress-nginx, lu sur le cluster (chart et service de RKE2) ; Harvester ne le dit pas |
 
 ## Mise à jour de Harvester
 
@@ -228,6 +232,8 @@ Menu Harvester : *Upgrade*
 |---|---|---|---|
 | Mettre à jour (version, notes, suivi par nœud, journaux) | Fait | 1.69 | éligibilité dite avant le téléchargement de l'ISO, suivi qui tient à la coupure de l'API, abandon tant que Harvester l'accepte |
 | Mise à jour airgap (image envoyée) | Fait | 1.69 | ISO du magasin de la console, SHA-512 vérifié, servi par le guichet de la console |
+| Choix shutdownVMOnMigrationFailure à la mise à jour (v1.9.1) | Console seulement | 2.10.1 | case de la fenêtre, décochée comme Harvester, écrite dans upgrade-config puis rendue ; absent de l'interface de Harvester v1.9.1 |
+| Contrôles d'une mise à jour vers v1.9.1 | Console seulement | 2.10.1 | volumes LVM d'avant la GA (bloquant, forçable), volumes striped, add-on rancher-vcluster déprécié, Ingress nginx migrées vers Traefik |
 
 ## Support
 

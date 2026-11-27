@@ -1279,8 +1279,11 @@ def _tf_store():
     try:
         import tf_store
     except ImportError:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "web"))
-        import tf_store
+        # 2.10.1 : disposition du conteneur livré (web/ hors de bin/)
+        import web_loader
+        tf_store = web_loader.load("tf_store")
+        if tf_store is None:
+            raise
     return tf_store
 
 

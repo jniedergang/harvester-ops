@@ -34,7 +34,7 @@ class FakeKube:
     def __init__(self, turtles=True, traefik_ip="172.16.3.100", ingress_expose=None):
         self.objs = {}
         self.turtles = turtles
-        self.applied, self.deleted = [], []
+        self.applied, self.deleted, self.created = [], [], []
         self.put("settings.harvesterhci.io", None, "server-version", {"value": "v1.9.0"})
         if turtles:
             self.put(cs.K_CAPIPROVIDER, "cattle-capi-system", "cluster-api", {
@@ -57,11 +57,16 @@ class FakeKube:
             md["namespace"] = ns
         self.objs[(kind, ns, name)] = body
 
-    def get(self, kind, ns, name):
+    def get(self, kind, ns, name, managed_fields=False):
         if kind == cs.K_CAPIPROVIDER and not self.turtles:
             raise KubeError("the server doesn't have a resource type \"capiproviders\"")
         o = self.objs.get((kind, ns, name))
-        return json.loads(json.dumps(o)) if o is not None else None
+        o = json.loads(json.dumps(o)) if o is not None else None
+        # comme kubectl >= 1.21 : managedFields seulement avec --show-managed-fields
+        # (vu sur harv1 le 27/11/2026)
+        if o is not None and not managed_fields:
+            o.get("metadata", {}).pop("managedFields", None)
+        return o
 
     def list(self, kind, ns=None, selector=None):
         if kind == cs.K_CAPIPROVIDER and not self.turtles:
@@ -82,6 +87,17 @@ class FakeKube:
                 self.put("deployments", ns, "manager", {"spec": {"replicas": 1},
                                                         "status": {"availableReplicas": 1}})
         return ""
+
+    def create(self, obj, dry_run=False, field_manager=None):
+        """Création seule (2.10.1, relecture I-3) : refus si l'objet existe,
+        comme `kubectl create`."""
+        kind = KEYS[obj["kind"]]
+        ns, name = obj["metadata"].get("namespace"), obj["metadata"]["name"]
+        if (kind, ns, name) in self.objs:
+            raise KubeError(f'services "{name}" already exists (AlreadyExists)')
+        self.created.append((obj["kind"], ns, name, field_manager))
+        self.put(kind, ns, name, obj)
+        return obj
 
     def patch(self, kind, ns, name, patch):
         o = self.objs[(kind, ns, name)]

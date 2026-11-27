@@ -333,7 +333,64 @@ label that is already there.
 Harvester v1.9 no longer has the `kube-system/ingress-expose` Service that
 CAPHV v0.10.1 reads the VIP from. The install creates a stand-in labelled
 `harvester-ops.io/shim=caphv-ingress-expose`; the Installation tab says
-whether it is there. Run the install again to recreate it.
+whether it is there.
+
+**It comes back after every Harvester reboot.** On a cluster that runs
+Traefik (any fresh 1.9 install, and a cluster upgraded to 1.9.1), the
+Harvester controller deletes `ingress-expose` each time it starts
+(`pkg/controller/master/rancher/register.go`, `registerExposeService`, same
+code in v1.9.0 and v1.9.1). Seen on harv1 (1.9.1) on 27/11/2026: the
+stand-in was deleted by `system:serviceaccount:harvester-system:harvester`
+five minutes after it was posed, when the Harvester pod restarted after a
+cold boot. The Installation tab, the Clusters banner and the plan readiness
+then say `ingress-expose-missing` and name the Cluster API clusters that no
+longer get new machines. **Repair the address for CAPHV** (administrators,
+tracked action `capi-repair-shim`, or `harvester-capi repair-shim --cluster
+H`) creates the stand-in again. It only creates: it never takes over a
+Service that already exists, refuses while a Harvester upgrade runs
+(`upgrade-running`), and leaves a Service another manager owns alone
+(`ingress-expose-foreign`). Writers that only add annotations
+(kube-ovn-controller, kube-vip) do not count as another manager.
+
+The upgrade window warns before any upgrade when the stand-in exists
+(`console-ingress-expose-present`): repair it once the upgrade is over. The
+stand-in disappears for good with a CAPHV release that reads
+`rke2-traefik` (pull request #276).
+
+### Cluster API machines refused on Harvester 1.9.1: "is not authorized to access image"
+
+Harvester v1.9.1 checks that whoever creates a VM may `get` the image of
+each volume claim template
+(`pkg/webhook/resources/virtualmachine/validator.go`, new in v1.9.1). The
+restricted CAPHV identity of a cluster created by 2.10.0 or earlier has
+`list` on images only: on 1.9.1 every new machine of that cluster (scale,
+rolling update, remediation) is refused, the existing ones keep running.
+The CAPHV log says `user "system:serviceaccount:<ns>:caphv-identity" is not
+authorized to access image <image-ns>/<image>`. Clusters created by 2.10.1
+have the right. For an older cluster, add it to the identity Role of the
+image namespace. That Role is `caphv-identity` when the image is in the
+cluster namespace, and `caphv-identity-<cluster namespace>` in any other
+namespace (`<cluster namespace>-vms` included). The commands below find it
+by its labels, so they work in both cases. `<image>` is the object name
+(`image-xxxxx`, the one in the error message), never the display name:
+
+```bash
+ROLE=$(kubectl -n <image-ns> get role -o name \
+  -l harvester-ops.io/caphv-cluster=<cluster>,harvester-ops.io/caphv-namespace=<cluster-ns>)
+if [ "$(printf '%s\n' "$ROLE" | grep -c .)" = 1 ]; then
+  kubectl -n <image-ns> patch "$ROLE" --type json -p \
+    '[{"op":"add","path":"/rules/-","value":{"apiGroups":["harvesterhci.io"],
+       "resources":["virtualmachineimages"],"verbs":["get"],"resourceNames":["<image>"]}}]'
+else echo "expected one Role, got: $ROLE"; fi
+```
+
+A request that names the image by its display name (`namespace/display
+name`, in a script, a template or a plan) is brought back to the object
+name before the identity is written; a display name shared by several
+images is refused (`image-ambiguous`).
+
+Checked on harv1 (1.9.1): with the rule removed a new worker was refused,
+with the rule added the worker VM was created ten seconds later.
 
 ### "spec.template.metadata in body should have at least 1 properties"
 
@@ -356,7 +413,10 @@ Harvester's `available` counter on an IP pool drifts upwards after
 clusters are deleted (24 free out of 16 seen on a test cluster). The
 console counts from the table of allocated addresses instead.
 
-### ingress-nginx stays in ContainerCreating: "iptables: executable file not found"
+### The ingress controller stays in ContainerCreating: "iptables: executable file not found"
+
+Concerns the RKE2 ingress controller of the child, ingress-nginx or Traefik
+(the default of a new RKE2 v1.36 cluster): both publish host ports.
 
 The node image has no `iptables`: cloud-init installs it at first boot, and
 on an unregistered SLES image (no repository) the installation fails

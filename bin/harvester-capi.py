@@ -249,14 +249,33 @@ def _image_rank(i):
 def _image_facts(images):
     """Une demande peut nommer l'image par son objet (ce que propose la
     console) ou par son nom affiché (ce qu'écrit un script à la main)."""
-    out = {}
+    out, shown = {}, {}
     for i in images:
-        info = {"ready": i["ready"], "iso": i["iso"], "os": i.get("os"),
+        info = {"ready": i["ready"], "iso": i["iso"], "os": i.get("os"), "ref": i["ref"],
                 "storage_class": i.get("storage_class"), "virtual_size": i.get("virtual_size")}
         ns = i["ref"].split("/", 1)[0]
-        out.setdefault(f"{ns}/{i['display_name']}", info)
+        shown.setdefault(f"{ns}/{i['display_name']}", []).append(info)
         out[i["ref"]] = info
+    # relecture finale 2.10.1 (I-2) : un nom affiché porté par plusieurs
+    # images ne désigne aucune d'elles (`ambiguous`, refusé par le contrôle)
+    for key, infos in shown.items():
+        if key not in out:
+            out[key] = infos[0] if len(infos) == 1 else dict(infos[0], ambiguous=sorted(x["ref"] for x in infos))
     return out
+
+
+def resolve_image(spec, images):
+    """Relecture finale 2.10.1 (I-2) : ramène `spec["image"]` donné par son
+    nom affiché à la référence de l'objet (`<ns>/image-xxxxx`). Le webhook
+    de Harvester v1.9.1 vérifie `get` sur l'objet du volumeClaimTemplate
+    (pkg/webhook/resources/virtualmachine/validator.go), donc la règle de
+    l'identité, ses revues d'accès et le rendu nomment l'objet. Une image
+    absente ou ambiguë reste telle quelle : le contrôle la refuse
+    (`image-missing`, `image-ambiguous`)."""
+    img = (images or {}).get(spec.get("image"))
+    if img and img.get("ref") and not img.get("ambiguous"):
+        spec["image"] = img["ref"]
+    return spec
 
 
 SSH_USERS = {"sles": "sles", "opensuse": "opensuse", "rocky": "rocky", "rhel": "cloud-user",
@@ -517,6 +536,14 @@ def cmd_status(args):
         print("ready" if st["ready"] else "missing: " + ", ".join(st["missing"]))
         if st["legacy"]:
             print("legacy installation: " + ", ".join(st["legacy_namespaces"]))
+        drift = st.get("shim_drift") or {}
+        if drift.get("foreign"):
+            print("ingress-expose-foreign: kube-system/ingress-expose is also managed by "
+                  + ", ".join(drift.get("managers") or []))
+        elif drift.get("needed") and not drift.get("present"):
+            print("ingress-expose missing for CAPHV" + (": run repair-shim" if drift.get("repair") else "")
+                  + (" (clusters at risk: " + ", ".join(drift["clusters_at_risk"]) + ")"
+                     if drift.get("clusters_at_risk") else ""))
     return EXIT_OK if st["ready"] else EXIT_FAIL
 
 
@@ -533,6 +560,25 @@ def cmd_install(args):
         cs.install(kube, desc, step, wait=not args.no_wait, timeout=args.timeout, pushed=args.push_images)
     except (RuntimeError, KubeError) as e:
         step("providers", "error", str(e)[:300])
+        return EXIT_FAIL
+    return EXIT_OK
+
+
+def cmd_repair_shim(args):
+    """2.10.1 (point 321 B) : repose `kube-system/ingress-expose` pour le
+    CAPHV installé quand Harvester l'a retiré après l'installation (mise à
+    jour en 1.9.1 d'un cluster venu de 1.8). Action suivie, jamais une tâche
+    de fond ; refus si le service porte un autre gestionnaire."""
+    if _refuse_during_uninstall(args, "providers"):
+        return EXIT_BLOCKED
+    kube, _, _ = kube_from(args)
+    desc = components_from(args.components)
+    if desc is None:
+        raise SystemExit("--components is required")
+    try:
+        cs.repair_shim(kube, desc.get("providers") or [], step)
+    except (RuntimeError, KubeError) as e:
+        step("compatibility", "error", str(e)[:300])
         return EXIT_FAIL
     return EXIT_OK
 
@@ -869,8 +915,10 @@ def _check(kube, spec, desc, identity="console", harvester=None):
     if inv.get("unreachable"):
         findings = [cc.finding("cluster-unreachable", "block")]
         return {"findings": findings, "blocked": True, "amount": amount(spec), "spec": spec}
-    findings = cc.check(spec, facts_from(inv)) + registry_findings(kube, spec, harvester) + \
+    facts = facts_from(inv)
+    findings = cc.check(spec, facts) + registry_findings(kube, spec, harvester) + \
         _session_findings(kube, spec) + offline_findings(spec)
+    resolve_image(spec, facts["images"])
     version = ci.caphv_version(inv.get("stack"), desc)
     if identity == "restricted":
         findings += ci.findings(spec, version, identity, _cloud_provider_bindings(kube, spec["name"]),
@@ -2469,6 +2517,9 @@ def cmd_manifests(args):
                                 "role": roles.get((o["metadata"].get("namespace"),
                                                    "hops-sa-" + str(o["metadata"].get("name"))))}
                                for o in objs if o.get("kind") == "ServiceAccount" and o.get("metadata")]
+            # 2.10.1 : hops-allow-ingress posée avant Traefik (constat
+            # child-ingress-policy-stale ; jamais réécrite en silence)
+            row["stale_ingress"] = cp.stale_ingress(objs)
         out.append(row)
     print(json.dumps(out) if args.json else json.dumps(out, indent=1))
     return EXIT_OK
@@ -4449,7 +4500,13 @@ def cmd_eso_status(args):
             with ca.session(kube, ns, cluster) as path:
                 child = Kube(path)
                 try:
-                    out["stores"] = ce.store_status(child.list(K_SS))
+                    stores = child.list(K_SS)
+                    out["stores"] = ce.store_status(stores)
+                    if out["auth"] is not None:
+                        # 2.10.1 : magasins de chaque namespace activé Ready (même
+                        # lecture que le mode B1) ; le badge du mode A en dépend
+                        ok, _ = ce.stores_ready(stores, out["namespaces"])
+                        out["auth"]["stores_ready"] = bool(ok and out["namespaces"])
                     out["externalsecrets"] = ce.status(child.list(K_ES))
                 except KubeError as err:
                     if not is_missing_type(err):
@@ -4493,6 +4550,7 @@ def main(argv=None):
     for name, fn, extra in (
             ("status", cmd_status, ("components", "json")),
             ("install", cmd_install, ("components", "install")),
+            ("repair-shim", cmd_repair_shim, ("components",)),
             ("cleanup-legacy", cmd_cleanup, ("dry",)),
             ("uninstall", cmd_uninstall, ("dry", "json", "uninstall")),
             ("inventory", cmd_inventory, ("components", "json")),

@@ -209,3 +209,22 @@ def test_support_bundles_and_kubeconfigs(ui):
     body.locator('tr[data-kc="ci"] [data-adv="revoke-kc"]').click()
     page.wait_for_timeout(500)
     assert sent[-1] == ("api/hv-support/harv-fake/do/kc-revoke", {"name": "ci"})
+
+
+@pytest.mark.parametrize("name,tip", [
+    ("ssl-parameters", "is Traefik"),                       # Harvester sous Traefik
+    ("traefik-default-tls-options", "is ingress-nginx"),    # 2.10.1 : 1.9.0 venu de 1.8
+])
+def test_inert_tls_setting_says_which_controller(ui, name, tip):
+    import copy
+    page, _ = ui
+    doc = copy.deepcopy(SETTINGS)
+    doc["items"].append(dict(doc["items"][0], name=name, group="security", kind="json", choices=[], value="",
+                             default="", modified=False, applied="", inert=True))
+    page.unroute("**/api/hv-settings/harv-fake")
+    page.route("**/api/hv-settings/harv-fake", lambda r, q: fulfill(r, doc))
+    page.evaluate("Sections.open('advanced', 'settings')")
+    body = page.locator('#tab-advanced .section-pane[data-pane="settings"] [data-adv="body"]')
+    badge = body.locator(f'tr[data-setting="{name}"] .badge.warn')
+    expect(badge).to_contain_text("no effect", timeout=8000)
+    assert tip in (badge.get_attribute("data-tip") or badge.get_attribute("title") or "")

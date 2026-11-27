@@ -38,6 +38,7 @@ const CapiCreate = (() => {
     'namespace-exists': (v) => tr('capi.new.fd.namespace-exists', v),
     'namespace-has-cluster': (v) => tr('capi.new.fd.namespace-has-cluster', v),
     'image-missing': (v) => tr('capi.new.fd.image-missing', v),
+    'image-ambiguous': (v) => tr('capi.new.fd.image-ambiguous', v),
     'image-iso': (v) => tr('capi.new.fd.image-iso', v),
     'image-not-ready': (v) => tr('capi.new.fd.image-not-ready', v),
     'disk-smaller-than-image': (v) => tr('capi.new.fd.disk-smaller-than-image', v),

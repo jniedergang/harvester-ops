@@ -1450,9 +1450,19 @@ Advanced and Support menus.
   removal deletes the Rancher agent; TLS certificate and options; external
   UI source) ask to tick "I understand the risk" first. The storage,
   migration and RWX network settings open Network > Cluster Networks, where
-  their checks live; `server-version` is read-only; `ssl-parameters` is
-  marked as having no effect in Harvester 1.9 (replaced by
-  `traefik-default-tls-options`, which is shown).
+  their checks live; `server-version` is read-only. Since 2.10.1 the TLS
+  settings follow the ingress controller read on the cluster (HelmCharts
+  and services of `kube-system`), not the version: under Traefik
+  `ssl-parameters` is marked as having no effect and
+  `traefik-default-tls-options` is the one applied; under ingress-nginx
+  the reverse; with both or an unreadable cluster, no mark. Read for real
+  on 27/11/2026: harv1 and harvlab (1.9.1) run Traefik; a
+  `traefik-default-tls-options` written on harvlab changed the
+  `kube-system/default` TLSOption within 20 s (hash annotation and
+  `configured` condition updated), an `ssl-parameters` left it untouched.
+  Note: Harvester 1.9.1's Traefik refuses every TLS 1.2 handshake with its
+  ECDSA certificate (default options included, seen on harv1 and harvlab):
+  setting `maxVersion` to `VersionTLS12` makes the VIP unreachable.
 - **Secrets never reach the page**: the TLS private key, S3 keys, registry
   passwords, proxy credentials and the token of the Rancher import URL (it
   gives the cluster agent's credentials) are shown as `•••`. Left as they are, the
@@ -1829,8 +1839,57 @@ there.
   upgrade while Harvester still accepts it, before its hosts are touched
   (Harvester then cleans up, its logs and ISO image included).
 
+**Target v1.9.1 or later (2.10.1).** The checks below are judged on the
+version read from the target (name of the `Version`, `harvester-release.yaml`
+of an ISO), never on a file name, and only for a target of v1.9.1 or later:
+
+| Code | Level | When |
+|---|---|---|
+| `lvm-pre-ga-volumes` | blocking, can be forced | LVM volumes made before the LVM driver went GA (the release notes say they cannot be recovered after the upgrade) |
+| `lvm-striped-volumes` | warning | volumes of a class `type: striped` (deprecated in 1.9.1) |
+| `rancher-vcluster-deprecated` | warning | add-on `rancher-vcluster` enabled (removed in v1.10.0, replaced by rancher-k3k) |
+| `ingress-nginx-objects` | warning | your Ingresses of class nginx or with `nginx.ingress.kubernetes.io/*` annotations on a cluster still under ingress-nginx; Harvester's and Rancher's own Ingresses (`cattle-*`, `harvester-system`, `longhorn-system`, `kube-system`) are migrated by the upgrade and not counted |
+| `vm-migration-failure-policy` | information | the choice below |
+
+For every target, `console-ingress-expose-present` (warning) says the
+console's `ingress-expose` stand-in for CAPHV v0.10.1 exists: Harvester
+deletes it when its controller restarts under Traefik, repair it after the
+upgrade (Troubleshooting).
+
+**Shut down VMs whose migration fails** (`shutdownVMOnMigrationFailure` of
+`upgrade-config`, new in Harvester 1.9.1 and not offered by its interface):
+the box starts from the value in place. Ticked, the upgrade shuts down a VM
+it cannot migrate instead of waiting for it; unticked on a value `true`,
+the console writes `false`. The start action writes the value, keeps the
+previous `upgrade-config` on the `Upgrade` object (annotation
+`harvester-ops.io/upgrade-config-before`) and sets it back when the upgrade
+is over: at the end of the start action, or, when that action was
+cancelled, timed out, lost the cluster API or the console restarted, at the
+end of a **Follow** of the running upgrade or at its **Dismiss** once it is
+over. **Abort** sets the value back before it deletes the `Upgrade` (the
+annotation goes with the object), and the start action sets back the value
+it kept when the `Upgrade` was deleted elsewhere (Harvester's interface).
+A new upgrade first sets back a value left by a finished one, so that value
+never becomes the "previous" one. The window says when a finished upgrade
+still has a value to set back, and shows the box only for a target that
+reads the key (1.9.1 or later). Harvester 1.9.0 accepts the key (server dry-run on
+harvlab2).
+
+Harvester 1.9.1 also installs Kube-OVN v1.16.2, whose add-on pings
+`1.1.1.1` and resolves `google.com` every minute
+(`pingerExternalAddress`, `pingerExternalDomain`, read on harvlab): expect
+that traffic in an egress capture, and change the add-on values for an
+air-gapped site. A clean upgrade from 1.8 is not replayed by the console in
+2.10.1: on harvlab2 (1.8.2 upgraded to 1.9.0 in September) the 1.9.0
+upgrade left RKE2 switched to Traefik with the `rke2-traefik` chart never
+installed (`chart-content-rke2-traefik` missing, Harvester issue #11741,
+fixed in 1.9.1): no ingress controller runs and the VIP does not answer
+HTTPS, while the Kubernetes API (and so the console) works.
+
 Administrators only. On the command line: `harvester-resources upgrade
-version-add|version-delete|start|follow|logs|dismiss|abort|resume-node`.
+version-add|version-delete|start|follow|logs|dismiss|abort|resume-node`
+(`start --shutdown-vm-on-migration-failure` or
+`--no-shutdown-vm-on-migration-failure`, `--force-lvm-pre-ga`).
 
 ### Monitoring and logging (1.70.0)
 
@@ -2403,6 +2462,7 @@ in `bin/lib/capi_identity.py`:
 | VM namespace | persistentvolumeclaims | list, delete |
 | VM namespace | loadbalancers | get, create, delete |
 | image namespace | virtualmachineimages | list |
+| image namespace | virtualmachineimages (the cluster image only, 2.10.1) | get: not a CAPHV call, the VM webhook of Harvester v1.9.1 requires it (`validator.go`, volume claim templates); a cluster made by 2.10.0 needs it added on 1.9.1, see Troubleshooting |
 | key namespace | keypairs (the key only) | get |
 | harvester-system | deployments (`harvester`) | get |
 | kube-system | services (`ingress-expose`) | get |

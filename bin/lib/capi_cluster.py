@@ -834,6 +834,9 @@ def check(spec, facts):
     img = (facts.get("images") or {}).get(spec.get("image"))
     if spec.get("image") and img is None:
         out.append(finding("image-missing", "block", image=spec.get("image")))
+    elif img and img.get("ambiguous"):
+        # relecture finale 2.10.1 (I-2) : nom affiché porté par plusieurs images
+        out.append(finding("image-ambiguous", "block", image=spec.get("image"), refs=", ".join(img["ambiguous"])))
     elif img and img.get("iso"):
         out.append(finding("image-iso", "block", image=spec.get("image")))
     elif img and not img.get("ready"):
@@ -863,7 +866,8 @@ def check(spec, facts):
         # 2.7.0 (m-17) : rendu aussi avec disk-smaller-than-image (un `elif`
         # le cachait). Vu sur harv1 : une image SLES non enregistrée n'a aucun dépôt,
         # cloud-init n'installe ni iptables ni qemu-guest-agent, et les pods
-        # à port d'hôte (ingress-nginx) restent en ContainerCreating.
+        # à port d'hôte (contrôleur d'ingress de RKE2 : ingress-nginx, ou
+        # Traefik à partir de v1.36) restent en ContainerCreating.
         # 2.8.1 : pas en `skip` sans Internet, offline-node-packages le dit
         # déjà (et le conseil d'une image Leap n'y vaudrait rien).
         out.append(finding("image-sles-repos", "warn", image=spec.get("image")))

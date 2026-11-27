@@ -1292,6 +1292,8 @@ ADMIN_ONLY_PREFIXES = (
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
+                       # 2.10.1 : reposer le service de compatibilité de CAPHV
+                       "/repair-shim",
                        # 2.9.0 : remettre l'état chiffré d'une déclaration en clair
                        "/decrypt-state",
                        # 2.9.0 : oublier les secrets gardés d'un déroulé arrêté
@@ -1731,6 +1733,20 @@ def _secret_store_refused(e):
     if status == 403:
         _person_refusal_note(e.code)
     return jsonify({"error": str(e)[:300], "code": e.code}), status
+
+
+@app.errorhandler(_sst.SecretMissing)
+def _secret_store_missing(e):
+    """2.10.1 : un secret référencé absent du magasin (restauration qui l'a
+    perdu, par exemple sur le test SSH d'un cluster) est un 409 qui nomme la
+    classe et la référence, jamais une valeur, au lieu d'une erreur 500."""
+    ref = getattr(e, "ref", "")
+    try:
+        cls = _sst.parse_ref(ref)[0]
+    except ValueError:
+        cls = None
+    return jsonify({"error": f"secret not found: {ref}"[:300], "code": "secret-missing", "class": cls,
+                    "reference": ref, "hint": "store the secret again (Settings, Secrets) or restore it"}), 409
 
 
 def _secret_error_status(e):
@@ -21159,9 +21175,21 @@ def api_hv_settings(cluster):
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
     if _cluster_reachable(kc) is False:
         return jsonify(_unreachable_payload(cluster, kc)), 200
-    got = _kubectl_json(kc, "get", _hset.K_SETTING, timeout=30, cluster=cluster) or {}
-    return jsonify({"cluster": cluster, "groups": list(_hset.GROUPS),
-                    "items": _hset.rows(got.get("items") or [], show_hidden=request.args.get("hidden") == "1")})
+    from concurrent.futures import ThreadPoolExecutor
+
+    def items(*args):
+        d = _kubectl_json(kc, "get", *args, timeout=30, cluster=cluster)
+        return None if d is None else (d.get("items") or [])
+    # 2.10.1 : contrôleur d'ingress de Harvester (chart et service de RKE2),
+    # pour dire quel réglage TLS est sans effet
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_set = pool.submit(items, _hset.K_SETTING)
+        f_chart = pool.submit(items, "helmcharts.helm.cattle.io", "-n", "kube-system")
+        f_svc = pool.submit(items, "services", "-n", "kube-system")
+        got, charts, services = f_set.result() or [], f_chart.result(), f_svc.result()
+    ingress = _hset.ingress_kind(charts, services)
+    return jsonify({"cluster": cluster, "groups": list(_hset.GROUPS), "ingress": ingress,
+                    "items": _hset.rows(got, show_hidden=request.args.get("hidden") == "1", ingress=ingress)})
 
 
 def _private_file(files, text, prefix):
@@ -21487,12 +21515,28 @@ def api_upgrade(cluster):
              "nodes": ("nodes",), "volumes": ("volumes.longhorn.io", "-n", "longhorn-system"),
              "backups": ("virtualmachinebackups.harvesterhci.io", "-A"), "schedules": ("schedulevmbackups.harvesterhci.io", "-A"),
              "addons": ("addons.harvesterhci.io", "-A"), "charts": ("managedcharts.management.cattle.io", "-n", "fleet-local"),
-             "images": (_hup.K_IMAGE, "-n", _hup.NS)}
+             "images": (_hup.K_IMAGE, "-n", _hup.NS),
+             # 2.10.1 : contrôles d'une cible v1.9.1 ou plus
+             "scs": ("storageclasses",), "pvs": ("persistentvolumes",), "ingresses": ("ingresses", "-A"),
+             "hcharts": ("helmcharts.helm.cattle.io", "-n", "kube-system"), "ksvc": ("services", "-n", "kube-system"),
+             "ucfg": ("settings.harvesterhci.io", "upgrade-config")}
     with ThreadPoolExecutor(max_workers=len(reads)) as pool:
         futs = {k: pool.submit(_kubectl_json, kc, "get", *a, timeout=30, cluster=cluster) for k, a in reads.items()}
         got = {k: f.result() for k, f in futs.items()}
     items = lambda k: (got[k] or {}).get("items") or []  # noqa: E731
     current = (got["sv"] or {}).get("value") or ""
+    lvm = _hadv.lvm_volumes(items("scs"), items("pvs"))
+    ingress = _hset.ingress_kind(None if got["hcharts"] is None else items("hcharts"),
+                                 None if got["ksvc"] is None else items("ksvc"))
+
+    # relecture I-3 : service de remplacement de la console pour CAPHV v0.10.1
+    console_shim = any((s.get("metadata") or {}).get("name") == "ingress-expose"
+                       and ((s.get("metadata") or {}).get("labels") or {}).get("harvester-ops.io/shim")
+                       == "caphv-ingress-expose" for s in items("ksvc"))
+
+    def checks(target):
+        return _hup.target_checks(current, target, lvm, items("addons"), items("ingresses"), ingress,
+                                  console_shim=console_shim)
     ups = items("upgrades")
     lat = _hup.latest(ups)
     img = None
@@ -21506,18 +21550,30 @@ def api_upgrade(cluster):
             continue
         ok, why = _hup.eligible(current, rel["harvester"], rel["min_upgradable"])
         isos.append({"name": p.name, "size": p.stat().st_size, "release": rel, "eligible": ok, "reason": why,
-                     "sha512": _iso_sha512(p.name)})
+                     "sha512": _iso_sha512(p.name), "checks": checks(rel["harvester"])})
     os_images = [{"name": (i.get("metadata") or {}).get("name"), "display": (i.get("spec") or {}).get("displayName"),
                   "progress": (i.get("status") or {}).get("progress")}
                  for i in items("images") if ((i.get("metadata") or {}).get("annotations") or {}).get(_hup.A_OS_IMAGE) == "True"]
     return jsonify({"cluster": cluster, "current": current,
                     "checker": ((got["checker"] or {}).get("value") or (got["checker"] or {}).get("default") or "true") == "true",
-                    "versions": _hup.version_rows(items("versions"), current),
+                    "versions": [dict(v, checks=checks(v["name"])) for v in _hup.version_rows(items("versions"), current)],
+                    "migration_policy": _upgrade_migration_policy(got["ucfg"]),
+                    "migration_policy_pending": _hup.policy_pending(ups),
                     "upgrade": _hup.upgrade_view(lat, img, items("nodes")) if lat else None,
                     "running": _hup.running(ups), "history": len(ups),
                     "isos": isos, "os_images": os_images,
                     "prechecks": _hup.prechecks(items("nodes"), items("volumes"), items("backups"), items("schedules"),
                                                 items("addons"), items("charts"), ups)})
+
+
+def _upgrade_migration_policy(setting):
+    """Valeur courante de shutdownVMOnMigrationFailure dans upgrade-config
+    (2.10.1), None si le réglage ne la porte pas ou est illisible."""
+    try:
+        doc = json.loads((setting or {}).get("value") or (setting or {}).get("default") or "{}")
+    except ValueError:
+        return None
+    return doc.get(_hup.MIGRATION_POLICY_KEY) if isinstance(doc, dict) else None
 
 
 @app.route("/api/upgrade/<cluster>/do/<action>", methods=["POST"])
@@ -21570,6 +21626,14 @@ def api_upgrade_do(cluster, action):
                 args.append("--no-log")
             if b.get("skip_single_replica"):
                 args.append("--skip-single-replica")
+            # 2.10.1 : point 325 A et contrôle lvm-pre-ga-volumes forcé
+            if b.get("shutdown_vm_on_migration_failure") is True:
+                args.append("--shutdown-vm-on-migration-failure")
+            elif b.get("shutdown_vm_on_migration_failure") is False:
+                # relecture I-4 : case décochée sur une valeur vraie
+                args.append("--no-shutdown-vm-on-migration-failure")
+            if b.get("force_lvm_pre_ga") is True:
+                args.append("--force-lvm-pre-ga")
         elif action == "logs":
             name = _hup.check_name(b.get("name"), "upgrade")
             _kc_sweep()
@@ -22567,7 +22631,8 @@ def api_storage_options(cluster):
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
     from concurrent.futures import ThreadPoolExecutor
     reads = {"csi": ("csidrivers",), "v2": ("settings.longhorn.io", "v2-data-engine", "-n", "longhorn-system"),
-             "vgs": ("lvmvolumegroups.harvesterhci.io", "-A"), "secrets": ("secrets", "-A")}
+             "vgs": ("lvmvolumegroups.harvesterhci.io", "-A"), "secrets": ("secrets", "-A"),
+             "version": ("settings.harvesterhci.io", "server-version")}
     with ThreadPoolExecutor(max_workers=len(reads)) as pool:
         futs = {k: pool.submit(_kubectl_json, kc, "get", *a, cluster=cluster) for k, a in reads.items()}
         got = {k: f.result() for k, f in futs.items()}
@@ -22577,7 +22642,9 @@ def api_storage_options(cluster):
     secrets = [f"{(s.get('metadata') or {}).get('namespace')}/{(s.get('metadata') or {}).get('name')}"
                for s in (got["secrets"] or {}).get("items") or [] if _hadv.crypto_secret_ok(s)]
     return jsonify({"longhorn_v2": str((got["v2"] or {}).get("value")) == "true",
-                    "lvm": _hadv.LVM in drivers, "lvm_groups": vgs, "crypto_secrets": sorted(secrets)})
+                    "lvm": _hadv.LVM in drivers, "lvm_groups": vgs, "crypto_secrets": sorted(secrets),
+                    # 2.10.1 : dm-thin par défaut, striped refusé à partir de 1.9.1
+                    "lvm_types": _hadv.lvm_type_policy((got["version"] or {}).get("value"))})
 
 
 @app.route("/api/storageclass/<cluster>", methods=["POST"])
@@ -23879,6 +23946,27 @@ def api_capi_cleanup_legacy(cluster):
     if err:
         return err
     return jsonify({"action_id": run.id, "dry_run": dry}), 201
+
+
+@app.route("/api/capi/<cluster>/repair-shim", methods=["POST"])
+@requires_auth
+@_rate_limit("6 per minute")
+def api_capi_repair_shim(cluster):
+    """2.10.1 (point 321 B) : repose kube-system/ingress-expose pour le
+    CAPHV installé quand Harvester l'a retiré après l'installation (mise à
+    jour en 1.9.1). Action suivie `capi-repair-shim:` ; administrateur
+    (suffixe dans ADMIN_ONLY_SUFFIXES)."""
+    comp = _capi_components_dir()
+    if comp is None:
+        return jsonify({"error": "the active bundle has no Turtles providers",
+                        "hint": "build or activate a bundle (harvester-ops 1.48 or later)"}), 412
+    cmd, err = _capi_base(cluster, "repair-shim")
+    if err:
+        return err
+    run, err = _capi_action(cluster, f"capi-repair-shim:{cluster}", cmd + ["--components", str(comp)])
+    if err:
+        return err
+    return jsonify({"action_id": run.id}), 201
 
 
 @app.route("/api/capi/<cluster>/cluster/<namespace>/<name>/scale", methods=["POST"])
@@ -37886,8 +37974,9 @@ def _deploy_read_capi(kc, cluster):
 
     def ingress_expose():
         # cluster mis à jour depuis 1.8 : l'adresse est là, pas sur rke2-traefik
-        return _kubectl_json(kc, "get", "services", "-n", "kube-system", "ingress-expose", timeout=20,
-                             cluster=cluster)
+        # --show-managed-fields : la règle ingress-expose-foreign les lit (2.10.1)
+        return _kubectl_json(kc, "get", "services", "-n", "kube-system", "ingress-expose",
+                             "--show-managed-fields", timeout=20, cluster=cluster)
 
     def providers():
         d = _kubectl_json(kc, "get", "capiproviders.turtles-capi.cattle.io", "-A", timeout=30, cluster=cluster)
@@ -37992,6 +38081,8 @@ def _deploy_readiness_phase(cluster, kc_ref, plan, expected=None):
         reads = _deploy_read_cluster(kc, cluster)
         if capi_on:
             reads.update(_deploy_read_capi(kc, cluster))
+            # 2.10.1 : contournements du paquet actif (ingress-expose-missing)
+            reads["capi_wanted"] = _capi_bundle_providers()
         return _drd.evaluate(reads, expected_nodes=expected, phases=capi_on)
 
     def execute(ctx, state):

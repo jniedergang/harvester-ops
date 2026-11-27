@@ -52,7 +52,11 @@ def test_the_base_with_defaults_has_the_exact_values():
     assert nps["hops-allow-ingress"]["ingress"] == [{"from": [{
         "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
         "podSelector": {"matchLabels": {"app.kubernetes.io/name": "rke2-ingress-nginx",
-                                        "app.kubernetes.io/component": "controller"}}}]}]
+                                        "app.kubernetes.io/component": "controller"}}}, {
+        # 2.10.1 : Traefik de RKE2 (défaut d'un cluster neuf à partir de v1.36)
+        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+        "podSelector": {"matchLabels": {"app.kubernetes.io/name": "rke2-traefik",
+                                        "app.kubernetes.io/instance": "rke2-traefik-kube-system"}}}]}]
     assert all(o["metadata"].get("namespace") == "equipe-a" for o in objs[1:])
     assert mf.check(objs, "c") == []                        # livrable tel quel par capi_manifests
 

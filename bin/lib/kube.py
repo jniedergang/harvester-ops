@@ -59,9 +59,11 @@ class Kube:
     def _ns(ns):
         return ["-n", ns] if ns else []
 
-    def get(self, kind, ns, name):
+    def get(self, kind, ns, name, managed_fields=False):
+        # kubectl >= 1.21 omet metadata.managedFields sans --show-managed-fields
+        extra = ["--show-managed-fields"] if managed_fields else []
         try:
-            return json.loads(self.run("get", kind, name, *self._ns(ns), "-o", "json"))
+            return json.loads(self.run("get", kind, name, *self._ns(ns), "-o", "json", *extra))
         except KubeError as e:
             if "NotFound" in str(e) or "not found" in str(e):
                 return None
@@ -91,10 +93,13 @@ class Kube:
             args += [f"--verbs={verbs}", "-o", "name"]
         return self.run(*args)
 
-    def create(self, obj, dry_run=False):
+    def create(self, obj, dry_run=False, field_manager=None):
         """`dry_run` : validation par le serveur (webhooks compris), rien
-        n'est écrit (`--dry-run=server`)."""
+        n'est écrit (`--dry-run=server`). `field_manager` : gestionnaire
+        inscrit dans managedFields (sinon `kubectl-create`)."""
         extra = ["--dry-run=server"] if dry_run else []
+        if field_manager:
+            extra.append(f"--field-manager={field_manager}")
         return json.loads(self.run("create", "-f", "-", "-o", "json", *extra, input=json.dumps(obj)))
 
     def create_many(self, objs):

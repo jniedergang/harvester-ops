@@ -190,7 +190,8 @@ const Advanced = (() => {
     if (s.applied === 'ok') out.push(badge('ok', tr('adv.applied'), tr('adv.t.applied')));
     else if (s.applied === 'pending') out.push(badge('info', tr('na.pending'), tr('adv.t.pending')));
     else if (s.applied === 'error') out.push(badge('fail', tr('na.failed'), s.message));
-    if (s.inert) out.push(badge('warn', tr('adv.inert'), tr('adv.t.inert')));
+    // 2.10.1 : sans effet selon le contrôleur d'ingress lu sur le cluster
+    if (s.inert) out.push(badge('warn', tr('adv.inert'), s.name === 'traefik-default-tls-options' ? tr('adv.t.inertNginx') : tr('adv.t.inert')));
     if (s.danger) out.push(badge('warn', tr('adv.careful'), DANGER()[s.danger]));
     return out.join(' ');
   }
