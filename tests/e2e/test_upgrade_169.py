@@ -217,3 +217,27 @@ def test_migration_box_starts_from_the_value_in_place(ui, policy, uncheck, sent_
     got = sent[-1][1]
     assert got.get("shutdown_vm_on_migration_failure") == sent_value, got
     assert ("shutdown_vm_on_migration_failure" in got) is (sent_value is not None)
+
+
+def test_migration_box_only_for_a_target_that_reads_it(ui):
+    """Relecture finale m1 : l'avertissement du service de la console vaut
+    pour toute cible ; il ne fait pas paraître la case d'une cible avant
+    1.9.1, où Harvester ignore la clé, et rien de la case n'est envoyé."""
+    import copy
+    page, sent, state = ui
+    d = copy.deepcopy(IDLE)
+    d["migration_policy"] = True
+    shim = {"key": "console-ingress-expose-present", "ok": False, "level": "warn", "forcible": False,
+            "text": "kube-system/ingress-expose"}
+    d["versions"][0]["checks"] = [shim]
+    state["data"] = d
+    page.evaluate("Upgrade.open('harv-fake')")
+    f = win(page).locator('[data-upg="form"]')
+    expect(f).to_be_visible(timeout=8000)
+    f.locator('[name="version"]').select_option("v1.9.0")
+    expect(f.locator('[data-upg="checks191"] [data-check="console-ingress-expose-present"]')).to_be_visible()
+    expect(f.locator('[name="shutdown_vm"]')).to_be_hidden()
+    f.locator('[name="read"]').check()
+    f.locator('[data-upg="start"]').click()
+    page.wait_for_timeout(500)
+    assert "shutdown_vm_on_migration_failure" not in sent[-1][1], sent[-1]

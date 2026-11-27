@@ -2968,15 +2968,18 @@ def _settle_migration_policy(kube, u):
 
 def _restore_migration_policy(kube, uname, orig):
     """Valeur d'origine rendue quand la mise à jour est finie (réussie ou
-    échouée) ou n'a pas été créée ; laissée tant qu'elle tourne (gardée sur
-    l'Upgrade, follow et dismiss la rendent). Jamais d'exception : appelée
-    dans un finally, elle ne doit pas masquer le code de retour."""
+    échouée), n'a pas été créée ou a été supprimée (Arrêter, suppression
+    depuis Harvester : l'annotation part avec l'objet, le processus garde la
+    valeur) ; laissée tant qu'elle tourne (gardée sur l'Upgrade, follow et
+    dismiss la rendent). Jamais d'exception : appelée dans un finally, elle
+    ne doit pas masquer le code de retour."""
     try:
-        if not uname:
+        u = kube.get(hup.K_UPGRADE, hup.NS, uname) if uname else None
+        if u is None:
             kube.patch("settings.harvesterhci.io", None, "upgrade-config", {"value": orig})
             step("upgrade", "running", "upgrade-config set back to its value before the upgrade")
             return
-        _settle_migration_policy(kube, kube.get(hup.K_UPGRADE, hup.NS, uname))
+        _settle_migration_policy(kube, u)
     except (KubeError, subprocess.SubprocessError, OSError) as e:
         step("upgrade", "running", f"upgrade-config not set back yet ({type(e).__name__}): its value before the "
                                    f"upgrade is kept on {uname}; follow or dismiss {uname} to set it back")
@@ -3016,6 +3019,12 @@ def cmd_upgrade(args):
             if not v["can_abort"]:
                 raise ValueError("Harvester refuses to stop an upgrade once its hosts are being upgraded"
                                  if v["completed"] is None else "the upgrade is already over")
+            # relecture finale I-1 : l'annotation part avec l'objet, la
+            # valeur d'origine est rendue avant la suppression
+            ann = (u.get("metadata") or {}).get("annotations") or {}
+            if hup.A_CONFIG_BEFORE in ann:
+                kube.patch("settings.harvesterhci.io", None, "upgrade-config", {"value": ann[hup.A_CONFIG_BEFORE]})
+                step("upgrade", "running", "upgrade-config set back to its value before the upgrade")
             kube.delete(hup.K_UPGRADE, hup.NS, name)
             step("upgrade", "running", f"{name} deleted: Harvester cleans up (repository, ISO image, logs)")
             return _wait(kube, hup.K_UPGRADE, hup.NS, name,
@@ -3113,6 +3122,11 @@ def cmd_upgrade(args):
             _upgrade_checks_191(kube, current, name, args)
             man = hup.upgrade_manifest(version=name, log=not args.no_log, skip_single=args.skip_single_replica)
             target = name
+        # relecture finale m2 : une valeur laissée par une mise à jour finie
+        # est rendue d'abord, elle ne doit pas devenir « l'origine »
+        left = hup.policy_pending(ups)
+        if left:
+            _settle_migration_policy(kube, kube.get(hup.K_UPGRADE, hup.NS, left))
         pol = getattr(args, "shutdown_vm_on_migration_failure", None)
         orig = _set_migration_policy(kube, pol) if pol is not None else None
         if orig is not None:

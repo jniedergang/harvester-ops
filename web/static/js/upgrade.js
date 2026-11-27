@@ -264,7 +264,9 @@ const Upgrade = (() => {
     const C = CHECK191();
     box.innerHTML = tchecks.map(c => `<li class="${c.level === 'info' ? 'upg-ok' : 'upg-fail'}" data-check="${esc(c.key)}">${icon(c.level === 'info' ? 'info' : 'warn')} ${esc(C[c.key] || c.key)}
         ${c.text ? `<span class="res-dim">${esc(c.text)}</span>` : ''}</li>`).join('');
-    f.querySelectorAll('[data-upg-when="191"]').forEach(el => { el.style.display = tchecks.length ? '' : 'none'; });
+    // relecture finale m1 : la case suit la cible 1.9.1 (seule à lire la clé), pas le nombre de contrôles
+    const reads = tchecks.some(c => c.key === 'vm-migration-failure-policy');
+    f.querySelectorAll('[data-upg-when="191"]').forEach(el => { el.style.display = reads ? '' : 'none'; });
     const block = tchecks.some(c => c.level === 'block');
     f.querySelector('[data-upg="force-wrap"]').style.display = block ? '' : 'none';
     const forced = f.querySelector('[name="force_lvm"]').checked;

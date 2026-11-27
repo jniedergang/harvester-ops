@@ -425,3 +425,110 @@ def test_api_says_a_value_left_to_set_back(monkeypatch):
     monkeypatch.setattr(wapp, "_kubectl_json", kj)
     d = wapp.app.test_client().get("/api/upgrade/h1").get_json()
     assert d["migration_policy_pending"] == "hvst-upgrade-x"
+
+
+# ---------------------------------------------------------------------------
+# Relecture finale I-1 : une Upgrade supprimée (Arrêter dans la console, ou
+# suppression depuis Harvester) ne doit pas laisser la valeur de la mise à
+# jour dans `upgrade-config`. L'action de démarrage rend la valeur qu'elle a
+# gardée en mémoire ; l'action Arrêter rend celle de l'annotation AVANT de
+# supprimer l'objet (l'annotation part avec lui).
+# ---------------------------------------------------------------------------
+class KD(KU):
+    """KU avec suppression et liste des Upgrades."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.deleted = []
+        self.finished = []                  # Upgrades finies déjà là (m2)
+
+    def delete(self, kind, ns, name):
+        self.deleted.append((kind, name, self.cfg))
+        if kind == hu.K_UPGRADE and self.upgrade and self.upgrade["metadata"]["name"] == name:
+            self.upgrade = None
+
+    def list(self, kind, ns=None, selector=None):
+        if kind == hu.K_UPGRADE:
+            return json.loads(json.dumps(self.finished))
+        return super().list(kind, ns, selector)
+
+    def get(self, kind, ns, name):
+        if kind == hu.K_UPGRADE and not self.silent:
+            for u in self.finished:
+                if u["metadata"]["name"] == name:
+                    return json.loads(json.dumps(u))
+        return super().get(kind, ns, name)
+
+    def patch(self, kind, ns, name, patch):
+        if kind == hu.K_UPGRADE:
+            for u in self.finished:
+                if u["metadata"]["name"] == name:
+                    self.patches.append((name, patch))
+                    ann = u["metadata"].setdefault("annotations", {})
+                    for key, v in ((patch.get("metadata") or {}).get("annotations") or {}).items():
+                        ann.pop(key, None) if v is None else ann.__setitem__(key, v)
+                    return
+        super().patch(kind, ns, name, patch)
+
+
+def test_abort_during_start_sets_the_value_back(cli, monkeypatch):
+    k = KD(settle=False)
+
+    def follow(kube, name, timeout):
+        cli.cmd_upgrade(_args(action="abort", name=name))          # Arrêter depuis la fenêtre
+        return 1                                                   # « the upgrade object disappeared »
+    _start(cli, monkeypatch, k, follow, shutdown_vm_on_migration_failure=True)
+    assert k.upgrade is None
+    assert k.cfg == ORIG
+
+
+def test_abort_from_a_separate_action_sets_the_value_back_before_deleting(cli, monkeypatch):
+    k = KD(settle=False)
+
+    def follow(kube, name, timeout):
+        raise SystemExit(143)                                      # console redémarrée : plus de processus
+    with pytest.raises(SystemExit):
+        _start(cli, monkeypatch, k, follow, shutdown_vm_on_migration_failure=True)
+    assert json.loads(k.cfg)["shutdownVMOnMigrationFailure"] is True
+    cli.cmd_upgrade(_args(action="abort", name="hvst-upgrade-x"))
+    assert k.cfg == ORIG
+    assert k.deleted and k.deleted[0][2] == ORIG                   # rendue AVANT la suppression
+
+
+def test_upgrade_deleted_in_harvester_during_start_sets_the_value_back(cli, monkeypatch):
+    k = KD(settle=False)
+
+    def follow(kube, name, timeout):
+        k.upgrade = None                                           # supprimée depuis l'interface de Harvester
+        return 1
+    _start(cli, monkeypatch, k, follow, shutdown_vm_on_migration_failure=True)
+    assert k.cfg == ORIG
+
+
+def test_abort_without_kept_value_never_touches_upgrade_config(cli, monkeypatch):
+    k = KD(settle=False)
+    k.upgrade = {"metadata": {"name": "hvst-upgrade-x"}}
+    monkeypatch.setattr(cli, "kube_from", lambda a: k)
+    cli.cmd_upgrade(_args(action="abort", name="hvst-upgrade-x"))
+    assert not [p for p in k.patches if p[0] == "upgrade-config"]
+    assert k.upgrade is None
+
+
+# Relecture finale m2 : une Upgrade finie qui garde encore une valeur à rendre
+# est réglée AVANT de lire la valeur d'origine de la nouvelle mise à jour ;
+# sinon la valeur laissée deviendrait « l'origine ».
+@pytest.mark.parametrize("box", [True, None])
+def test_start_settles_a_value_left_by_a_finished_upgrade_first(cli, monkeypatch, box):
+    left = '{"restoreVM":false,"shutdownVMOnMigrationFailure":true}'
+    k = KD(cfg=left)
+    k.finished = [{"metadata": {"name": "hvst-upgrade-old", "labels": {hu.L_STATE: "Succeeded"},
+                                "annotations": {hu.A_CONFIG_BEFORE: ORIG}},
+                   "status": {"conditions": [{"type": "Completed", "status": "True"}]}}]
+    seen = []
+    _start(cli, monkeypatch, k, lambda kube, name, timeout: seen.append(k.cfg) or 0,
+           shutdown_vm_on_migration_failure=box)
+    assert hu.A_CONFIG_BEFORE not in k.finished[0]["metadata"]["annotations"]
+    if box:
+        assert k.created[-1]["metadata"]["annotations"][hu.A_CONFIG_BEFORE] == ORIG   # la vraie origine
+        assert json.loads(seen[0])["shutdownVMOnMigrationFailure"] is True
+    assert k.cfg == ORIG
