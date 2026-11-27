@@ -28,6 +28,11 @@ def counts(rows):
     return c
 
 
+def fr_count(n, word):
+    """« 1 manquante », « 3 manquantes » (0 et 1 au singulier en français)."""
+    return f"{n} {word}" if n <= 1 else f"{n} {word}s"
+
+
 def md(lang):
     L = LABEL[lang]
     all_rows = [r for s in d.S for r in s["rows"] if s["key"] != "console"]
@@ -37,8 +42,9 @@ def md(lang):
         out = ["# Parité avec l'interface de Harvester", "",
                f"État au {d.DATE}, console **v{d.AS_OF}**, comparée à l'interface de **Harvester v1.9.1** "
                "(menus relevés dans le code de harvester-ui-extension v1.9.1 et la documentation v1.9).", "",
-               f"Sur {comparable} fonctions de l'interface de Harvester : **{c['ok']} faites**, "
-               f"**{c['part']} partielles**, **{c['todo']} manquantes** ; {c['na']} hors périmètre. "
+               f"Sur {comparable} fonctions de l'interface de Harvester : **{fr_count(c['ok'], 'faite')}**, "
+               f"**{fr_count(c['part'], 'partielle')}**, **{fr_count(c['todo'], 'manquante')}** ; "
+               f"{c['na']} hors périmètre. "
                "Une fonction manquante porte la version où elle est prévue, ou « pas encore ».", "",
                "Statuts : Fait, Partiel (ce qui manque est dit), Manquant (version prévue), "
                "Console seulement (ce que Harvester n'a pas), Hors périmètre.", ""]

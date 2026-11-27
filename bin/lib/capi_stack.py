@@ -23,7 +23,7 @@ from pathlib import Path
 
 from capi_cluster import K_HARVESTERCLUSTER
 from capi_services import K_HCP
-from kube import KubeError, is_missing_type
+from kube import KubeError
 
 K_CAPIPROVIDER = "capiproviders.turtles-capi.cattle.io"
 K_CLUSTER = "clusters.cluster.x-k8s.io"
@@ -371,13 +371,7 @@ def _pose_shim(kube, vip):
     cleanupIngressExpose, v1.9.0 et v1.9.1 ; vu sur harv1 le 27/11/2026) :
     le constat revient après chaque redémarrage, la pose reste un geste."""
     import hv_upgrade
-    try:
-        ups = kube.list(hv_upgrade.K_UPGRADE, hv_upgrade.NS)
-    except KubeError as e:
-        if not is_missing_type(e):
-            raise
-        ups = []
-    busy = hv_upgrade.running(ups)
+    busy = hv_upgrade.running(kube.list(hv_upgrade.K_UPGRADE, hv_upgrade.NS))   # missing_ok par défaut
     if busy:
         raise RuntimeError(f"upgrade-running: {busy}: Harvester is upgrading; repair the address "
                            "for CAPHV once the upgrade is over")

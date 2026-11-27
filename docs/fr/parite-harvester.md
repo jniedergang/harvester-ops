@@ -2,7 +2,7 @@
 
 État au 2026-11-27, console **v2.10.1**, comparée à l'interface de **Harvester v1.9.1** (menus relevés dans le code de harvester-ui-extension v1.9.1 et la documentation v1.9).
 
-Sur 139 fonctions de l'interface de Harvester : **134 faites**, **4 partielles**, **1 manquantes** ; 1 hors périmètre. Une fonction manquante porte la version où elle est prévue, ou « pas encore ».
+Sur 139 fonctions de l'interface de Harvester : **134 faites**, **4 partielles**, **1 manquante** ; 1 hors périmètre. Une fonction manquante porte la version où elle est prévue, ou « pas encore ».
 
 Statuts : Fait, Partiel (ce qui manque est dit), Manquant (version prévue), Console seulement (ce que Harvester n'a pas), Hors périmètre.
 
