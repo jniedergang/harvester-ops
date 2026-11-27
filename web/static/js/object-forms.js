@@ -95,7 +95,12 @@ const ObjectForms = (() => {
         + `<label class="bk-check tip" data-f="expand_online" data-tip="${esc(tr('sc.t.expandOnline'))}"><input type="checkbox" name="expand_online"> <span>${esc(tr('sc.f.expandOnline'))}</span></label>`
         + field('node', tr('sc.f.node'), `<select name="node">${opts(nodes)}</select>`, tr('sc.t.node'))
         + field('vg', tr('sc.f.vg'), `<select name="vg">${opts((o.lvm_groups || []).map(g => g.vg))}</select>`, tr('sc.t.vg'))
-        + field('lvm_type', tr('sc.f.lvmType'), `<select name="lvm_type">${opts(['striped', 'dm-thin'], 'striped')}</select>`, tr('sc.t.lvmType'))
+        // 2.10.1 : dm-thin par défaut ; striped déprécié, refusé à partir de 1.9.1
+        + field('lvm_type', tr('sc.f.lvmType'), (() => {
+          const refused = ((o.lvm_types || {}).striped) === 'refused';
+          return `<select name="lvm_type"><option value="dm-thin" selected>dm-thin</option>
+            <option value="striped" ${refused ? 'disabled' : ''}>${esc(refused ? tr('sc.lvmStripedRefused') : tr('sc.lvmStripedOld'))}</option></select>`;
+        })(), tr('sc.t.lvmType'))
         + field('reclaim', tr('res.col.reclaim'), `<select name="reclaim">${opts(['Delete', 'Retain'], 'Delete')}</select>`, tr('of.t.reclaim'))
         + field('binding', tr('res.col.binding'), `<select name="binding">${opts(['Immediate', 'WaitForFirstConsumer'], 'Immediate')}</select>`, tr('of.t.binding'))
         + field('topology', tr('sc.f.topology'), `<input name="topology" placeholder="topology.kubernetes.io/zone=zone-a,zone-b">`, tr('sc.t.topology'))

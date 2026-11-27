@@ -22595,7 +22595,8 @@ def api_storage_options(cluster):
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
     from concurrent.futures import ThreadPoolExecutor
     reads = {"csi": ("csidrivers",), "v2": ("settings.longhorn.io", "v2-data-engine", "-n", "longhorn-system"),
-             "vgs": ("lvmvolumegroups.harvesterhci.io", "-A"), "secrets": ("secrets", "-A")}
+             "vgs": ("lvmvolumegroups.harvesterhci.io", "-A"), "secrets": ("secrets", "-A"),
+             "version": ("settings.harvesterhci.io", "server-version")}
     with ThreadPoolExecutor(max_workers=len(reads)) as pool:
         futs = {k: pool.submit(_kubectl_json, kc, "get", *a, cluster=cluster) for k, a in reads.items()}
         got = {k: f.result() for k, f in futs.items()}
@@ -22605,7 +22606,9 @@ def api_storage_options(cluster):
     secrets = [f"{(s.get('metadata') or {}).get('namespace')}/{(s.get('metadata') or {}).get('name')}"
                for s in (got["secrets"] or {}).get("items") or [] if _hadv.crypto_secret_ok(s)]
     return jsonify({"longhorn_v2": str((got["v2"] or {}).get("value")) == "true",
-                    "lvm": _hadv.LVM in drivers, "lvm_groups": vgs, "crypto_secrets": sorted(secrets)})
+                    "lvm": _hadv.LVM in drivers, "lvm_groups": vgs, "crypto_secrets": sorted(secrets),
+                    # 2.10.1 : dm-thin par défaut, striped refusé à partir de 1.9.1
+                    "lvm_types": _hadv.lvm_type_policy((got["version"] or {}).get("value"))})
 
 
 @app.route("/api/storageclass/<cluster>", methods=["POST"])

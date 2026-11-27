@@ -166,3 +166,29 @@ def test_launching_a_version_fills_the_creation_window(ui):
     assert asked and asked[-1].endswith("?version=default%2Fweb-3")
     c.locator('.vm-edit-nav button[data-section="cloudinit"]').click()
     expect(c.locator('[data-ci="userData"]')).to_have_value("#cloud-config\npackages: [nginx]\n")
+
+
+@pytest.mark.parametrize("policy,disabled", [("warn", False), ("refused", True)])
+def test_lvm_type_defaults_to_dm_thin(ui, policy, disabled):
+    """2.10.1 (point 324 A) : dm-thin par défaut, striped refusé à partir de
+    Harvester v1.9.1 (version lue par la console)."""
+    page, sent = ui
+    page.unroute("**/api/storage-options/harv-fake")
+    page.route("**/api/storage-options/harv-fake", lambda r, q: fulfill(r, {
+        "longhorn_v2": False, "lvm": True, "lvm_groups": [{"node": "n1", "vg": "vg-data"}], "crypto_secrets": [],
+        "lvm_types": {"default": "dm-thin", "striped": policy}}))
+    page.evaluate("ObjectForms.openNew('storageclass', 'harv-fake', {})")
+    w = page.locator("#fp-new-storageclass-harv-fake")
+    w.locator('[name="name"]').wait_for(timeout=8000)
+    w.locator('[name="engine"]').select_option("lvm")
+    expect(w.locator('[name="lvm_type"]')).to_have_value("dm-thin")
+    opt = w.locator('[name="lvm_type"] option[value="striped"]')
+    if disabled:
+        expect(opt).to_have_attribute("disabled", "")
+    else:
+        expect(opt).not_to_have_attribute("disabled", "")
+    w.locator('[name="name"]').fill("local")
+    w.locator('button[type="submit"]').click()
+    page.wait_for_timeout(500)
+    path, body = sent[-1]
+    assert path == "api/storageclass/harv-fake" and body["engine"] == "lvm" and body["lvm_type"] == "dm-thin"

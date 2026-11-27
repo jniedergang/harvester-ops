@@ -2290,7 +2290,9 @@ def cmd_cloudtpl(args):
 def cmd_storageclass(args):
     kube = kube_from(args)
     spec = _read_json(args.spec)
-    obj = hadv.storage_class(spec)
+    # 2.10.1 : le type LVM striped est refusé à partir de Harvester 1.9.1
+    ver = (kube.get("settings.harvesterhci.io", None, "server-version") or {}).get("value")
+    obj = hadv.storage_class(spec, harvester_version=ver)
     if kube.get(hs.K_SC, None, obj["metadata"]["name"]) is not None:
         raise ValueError(f"the storage class {obj['metadata']['name']} already exists")
     if spec.get("encrypted"):

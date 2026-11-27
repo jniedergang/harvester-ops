@@ -150,7 +150,47 @@ def crypto_secret(name, ns, key_value, cipher="aes-xts-plain64", key_hash="sha25
             "metadata": {"name": name, "namespace": ns}, "stringData": vals}
 
 
-def storage_class(spec):
+# 2.10.1 (point 324 A) : Harvester 1.9.1 déprécie le type LVM `striped` et
+# exige `dm-thin` (notes de version v1.9.1, pilote CSI LVM en GA).
+LVM_DM_THIN_ONLY = (1, 9, 1)
+
+
+def _dm_thin_only(version):
+    import hv_upgrade
+    v = hv_upgrade.parse_version(version)
+    if v == "dev":
+        return True
+    return isinstance(v, tuple) and v[:3] >= LVM_DM_THIN_ONLY
+
+
+def lvm_type_policy(version):
+    """Ce que le formulaire propose pour le type LVM, selon la version lue
+    du cluster : `dm-thin` par défaut ; `striped` refusé à partir de 1.9.1,
+    averti avant (version illisible : averti)."""
+    return {"default": "dm-thin", "striped": "refused" if _dm_thin_only(version) else "warn"}
+
+
+def lvm_volumes(storageclasses, pvs):
+    """Volumes LVM d'un cluster, pour le contrôle de mise à jour : `lvm`
+    (réclamations `ns/nom` des volumes au pilote LVM ; sur un cluster d'avant
+    1.9.1, ce sont des volumes d'avant la GA) et `striped` (ceux d'une classe
+    `type: striped`)."""
+    striped = {(_meta(c).get("name")) for c in storageclasses or []
+               if c.get("provisioner") == LVM and (c.get("parameters") or {}).get("type") == "striped"}
+    out = {"lvm": [], "striped": []}
+    for p in pvs or []:
+        sp = p.get("spec") or {}
+        if (sp.get("csi") or {}).get("driver") != LVM:
+            continue
+        ref = sp.get("claimRef") or {}
+        who = f"{ref.get('namespace')}/{ref.get('name')}" if ref.get("name") else _meta(p).get("name")
+        out["lvm"].append(who)
+        if sp.get("storageClassName") in striped:
+            out["striped"].append(who)
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def storage_class(spec, harvester_version=None):
     """Le formulaire de classe de Harvester : Longhorn v1 ou v2 (réplicas,
     sélecteurs, chiffrement), ou LVM (nœud, groupe de volumes, type),
     topologies permises, liaison, politique de récupération, description."""
@@ -199,9 +239,11 @@ def storage_class(spec):
         vg = str(spec.get("vg") or "")
         if not node or not vg:
             raise ValueError("LVM: choose the node and its volume group")
-        lvtype = spec.get("lvm_type") or "striped"
+        lvtype = spec.get("lvm_type") or "dm-thin"
         if lvtype not in ("striped", "dm-thin"):
             raise ValueError("LVM type: striped or dm-thin")
+        if lvtype == "striped" and _dm_thin_only(harvester_version):
+            raise ValueError("LVM type: Harvester v1.9.1 and later accept dm-thin only (striped is deprecated)")
         out["provisioner"] = LVM
         out["allowVolumeExpansion"] = bool(spec.get("expansion", False))
         out["parameters"] = {"vgName": vg, "type": lvtype}
