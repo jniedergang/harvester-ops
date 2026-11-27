@@ -31,8 +31,13 @@ from pathlib import Path
 try:
     import tf_guard as _tfg
 except ImportError:                     # appelé hors de la console (ligne de commande, tests)
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "web"))
-    import tf_guard as _tfg
+    # 2.10.1 : dans le conteneur livré, bin/ est dans /usr/local/bin et web/
+    # dans /opt/harvester-ops/web ; web_loader connaît les deux dispositions
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import web_loader as _wl
+    _tfg = _wl.load("tf_guard")
+    if _tfg is None:
+        raise
 
 # noms de secrets : affectation (`=` ou `:`), clé entre guillemets, clé YAML
 # ou variable d'environnement dans un heredoc
