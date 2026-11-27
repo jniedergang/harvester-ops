@@ -94,8 +94,7 @@ const CAPI = (() => {
       : (drift.needed && !drift.present ? `
       <div class="sto-finding sev-critical" style="margin-top:10px;" data-capi-shim="missing"><div class="sto-finding-title">
         ${esc(tr('capi.stack.shimDrift', { clusters: atRisk }))}
-        <button type="button" class="btn btn-primary btn-sm tip" id="btn-capi-repair-shim" ${admin && drift.repair ? '' : 'disabled'}
-                data-tip="${esc(!admin ? tr('capi.stack.t.repairAdmin') : drift.repair ? tr('capi.stack.t.repairShim') : tr('capi.stack.t.repairNoVip'))}">${Icons.svg('build')} ${esc(tr('capi.stack.repairShim'))}</button>
+        <span class="tip" data-tip="${esc(!admin ? tr('capi.stack.t.repairAdmin') : drift.repair ? tr('capi.stack.t.repairShim') : tr('capi.stack.t.repairNoVip'))}"><button type="button" class="btn btn-primary btn-sm" id="btn-capi-repair-shim" ${admin && drift.repair ? '' : 'disabled'}>${Icons.svg('build')} ${esc(tr('capi.stack.repairShim'))}</button></span>
       </div></div>` : '');
     const shimLine = driftBox ? driftBox : shim.present && shim.ours
       ? `<p class="form-hint">${Icons.svg('info', { size: 12 })} ${esc(tr('capi.stack.shim'))}</p>`

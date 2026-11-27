@@ -54,6 +54,7 @@ const Upgrade = (() => {
     'lvm-pre-ga-volumes': tr('upg.chk.lvmPreGa'), 'lvm-striped-volumes': tr('upg.chk.lvmStriped'),
     'rancher-vcluster-deprecated': tr('upg.chk.vcluster'), 'ingress-nginx-objects': tr('upg.chk.nginxIngress'),
     'vm-migration-failure-policy': tr('upg.chk.migrationPolicy'),
+    'console-ingress-expose-present': tr('upg.chk.consoleShim'),
   });
 
   const BODY = () => `<div class="upg-win">
@@ -219,7 +220,8 @@ const Upgrade = (() => {
         </div>
         <label class="bk-check tip" data-tip="${esc(tr('upg.t.log'))}"><input type="checkbox" name="log" checked> <span>${esc(tr('upg.log'))}</span></label>
         <label class="bk-check tip" data-tip="${esc(tr('upg.t.skip'))}"><input type="checkbox" name="skip"> <span>${esc(tr('upg.skip'))}</span></label>
-        <label class="bk-check tip" data-upg-when="191" style="display:none" data-tip="${esc(tr('upg.t.shutdownVm'))}"><input type="checkbox" name="shutdown_vm"> <span>${esc(tr('upg.shutdownVm'))}</span></label>
+        <label class="bk-check tip" data-upg-when="191" style="display:none" data-tip="${esc(tr('upg.t.shutdownVm'))}"><input type="checkbox" name="shutdown_vm" ${d.migration_policy === true ? 'checked' : ''}> <span>${esc(tr('upg.shutdownVm'))}</span></label>
+        ${d.migration_policy_pending ? `<p class="form-hint" data-upg="policy-pending">${icon('warn')} ${esc(tr('upg.policyPending', { name: d.migration_policy_pending }))}</p>` : ''}
         <h4 class="hs-sub">${esc(tr('upg.checks'))}</h4>
         <ul class="upg-checks">${checks}</ul>
         <ul class="upg-checks" data-upg="checks191"></ul>
@@ -303,7 +305,12 @@ const Upgrade = (() => {
       const src = w.source;
       const body = { log: f.querySelector('[name="log"]').checked, skip_single_replica: f.querySelector('[name="skip"]').checked };
       const sv = f.querySelector('[name="shutdown_vm"]');
-      if (sv && sv.closest('label').style.display !== 'none' && sv.checked) body.shutdown_vm_on_migration_failure = true;
+      // relecture I-4 : la case part de la valeur en place ; décochée sur une
+      // valeur vraie, elle envoie false (posé puis rendu comme true)
+      if (sv && sv.closest('label').style.display !== 'none') {
+        if (sv.checked) body.shutdown_vm_on_migration_failure = true;
+        else if (w.data && w.data.migration_policy === true) body.shutdown_vm_on_migration_failure = false;
+      }
       const fl = f.querySelector('[name="force_lvm"]');
       if (fl && fl.closest('label').style.display !== 'none' && fl.checked) body.force_lvm_pre_ga = true;
       if (src === 'version') body.version = val(f, 'version');

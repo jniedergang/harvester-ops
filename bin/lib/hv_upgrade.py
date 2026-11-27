@@ -36,6 +36,10 @@ L_READ = "harvesterhci.io/read-message"
 A_SKIP_SINGLE = "harvesterhci.io/skipSingleReplicaDetachedVol"
 A_PAUSE = "harvesterhci.io/node-upgrade-pause-map"
 A_OS_IMAGE = "harvesterhci.io/os-upgrade-image"
+# 2.10.1 (relecture I-2) : valeur de `upgrade-config` d'avant la mise à jour,
+# gardée sur l'Upgrade créée par la console (JSON brut, sans secret) pour la
+# rendre même si le processus qui suivait la mise à jour est perdu
+A_CONFIG_BEFORE = "harvester-ops.io/upgrade-config-before"
 CONDITIONS = ("LogReady", "ImageReady", "RepoReady", "NodesPrepared", "SystemServicesUpgraded",
               "NodesUpgraded", "Completed")
 SHA512_RE = re.compile(r"^[0-9a-f]{128}$")
@@ -365,7 +369,9 @@ def prechecks(nodes=(), volumes=(), vmbackups=(), schedules=(), addons=(), chart
 # ---------------------------------------------------------------------------
 
 TARGET_191 = (1, 9, 1)
-MIGRATION_POLICY_KEY = "shutdownVMOnMigrationFailure"     # hypothèse à relire sur 1.9.1 (tâche 1, essai 9)
+# Clé au premier niveau du défaut de `upgrade-config` (lu sur harvlab et harv1
+# en 1.9.1 le 27/11/2026 : `"shutdownVMOnMigrationFailure": false`)
+MIGRATION_POLICY_KEY = "shutdownVMOnMigrationFailure"
 VCLUSTER_ADDON = "rancher-vcluster"
 NGINX_ANN_PREFIX = "nginx.ingress.kubernetes.io/"
 
@@ -375,10 +381,22 @@ def _at_least(v, ref):
     return p == "dev" or (isinstance(p, tuple) and p[:3] >= ref)
 
 
+# Ingress de Harvester et de Rancher : la mise à jour les migre elle-même
+# (upgrade_manifests.sh v1.9.1, ensure_ingress_class_name pour rancher-expose ;
+# vu sur harvlab et harv1 en 1.9.1 : rancher-expose passé en traefik).
+SYSTEM_INGRESS_NAMESPACES = ("kube-system", "harvester-system", "longhorn-system")
+
+
+def _system_ns(ns):
+    return ns in SYSTEM_INGRESS_NAMESPACES or str(ns or "").startswith("cattle-")
+
+
 def _nginx_ingresses(ingresses):
     out = []
     for i in ingresses or []:
         md = _meta(i)
+        if _system_ns(md.get("namespace")):
+            continue
         cls = (i.get("spec") or {}).get("ingressClassName") or \
             (md.get("annotations") or {}).get("kubernetes.io/ingress.class")
         if cls == "nginx" or any(str(k).startswith(NGINX_ANN_PREFIX) for k in md.get("annotations") or {}):
@@ -386,15 +404,23 @@ def _nginx_ingresses(ingresses):
     return sorted(out)
 
 
-def target_checks(current, target, lvm=None, addons=(), ingresses=(), ingress=None):
+def target_checks(current, target, lvm=None, addons=(), ingresses=(), ingress=None, console_shim=False):
     """[{key, ok, level, forcible, text}] d'une mise à jour vers `target`
-    (version lue : nom de la Version, release de l'ISO). Rien si la cible
-    est illisible ou en dessous de v1.9.1. `lvm` : hv_advanced.lvm_volumes ;
-    `ingress` : hv_settings.ingress_kind du cluster."""
-    if not _at_least(target, TARGET_191):
-        return []
-    lvm = lvm or {}
+    (version lue : nom de la Version, release de l'ISO). Contrôles 1.9.1 :
+    rien si la cible est illisible ou en dessous de v1.9.1. `lvm` :
+    hv_advanced.lvm_volumes ; `ingress` : hv_settings.ingress_kind du
+    cluster. `console_shim` (relecture I-3, toute cible) : le service
+    `ingress-expose` de la console pour CAPHV v0.10.1 existe ; Harvester le
+    supprime au redémarrage de son contrôleur quand Traefik est là
+    (pkg/controller/master/rancher/register.go, v1.9.0 et v1.9.1), il se
+    repose après par « Réparer »."""
     out = []
+    if console_shim:
+        out.append({"key": "console-ingress-expose-present", "ok": False, "level": "warn",
+                    "forcible": False, "text": "kube-system/ingress-expose"})
+    if not _at_least(target, TARGET_191):
+        return out
+    lvm = lvm or {}
     if (lvm.get("lvm") or []) and not _at_least(current, TARGET_191):
         out.append({"key": "lvm-pre-ga-volumes", "ok": False, "level": "block", "forcible": True,
                     "text": ", ".join(lvm["lvm"][:5]) + (" ..." if len(lvm["lvm"]) > 5 else "")})
@@ -412,6 +438,16 @@ def target_checks(current, target, lvm=None, addons=(), ingresses=(), ingress=No
                     "text": ", ".join(ngx[:5]) + (" ..." if len(ngx) > 5 else "")})
     out.append({"key": "vm-migration-failure-policy", "ok": True, "level": "info", "forcible": False, "text": ""})
     return out
+
+
+def policy_pending(upgrades):
+    """Nom d'une Upgrade finie qui porte encore la valeur d'origine de
+    `upgrade-config` (à rendre par follow ou dismiss), ou None."""
+    for u in upgrades or []:
+        if A_CONFIG_BEFORE in (_meta(u).get("annotations") or {}) \
+                and _labels(u).get(L_STATE) in ("Succeeded", "Failed"):
+            return _meta(u).get("name")
+    return None
 
 
 def migration_policy_value(setting, on):

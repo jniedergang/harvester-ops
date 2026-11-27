@@ -184,3 +184,36 @@ def test_target_191_checks_the_lvm_block_and_the_migration_box(ui):
                                                            "shutdown_vm_on_migration_failure": True,
                                                            "force_lvm_pre_ga": True})
     assert page.evaluate("() => window.__pwned") is None
+
+
+@pytest.mark.parametrize("policy,uncheck,sent_value", [
+    (True, True, False),        # relecture I-4 : décochée sur une valeur vraie -> false envoyé
+    (True, False, True),
+    (False, False, None),       # valeur fausse, case laissée : rien n'est touché
+])
+def test_migration_box_starts_from_the_value_in_place(ui, policy, uncheck, sent_value):
+    import copy
+    page, sent, state = ui
+    d = copy.deepcopy(IDLE)
+    d["current"] = "v1.9.0"
+    d["migration_policy"] = policy
+    d["migration_policy_pending"] = "hvst-<b>old</b>" if policy else None
+    d["versions"].insert(0, dict(d["versions"][0], name="v1.9.1", checks=[
+        {"key": "vm-migration-failure-policy", "ok": True, "level": "info", "forcible": False, "text": ""}]))
+    state["data"] = d
+    page.locator("#btn-upgrade").click()
+    f = page.locator('#tab-hupgrade .upg-win [data-upg="form"]')
+    expect(f).to_be_visible(timeout=8000)
+    f.locator('[name="version"]').select_option("v1.9.1")
+    box = f.locator('[name="shutdown_vm"]')
+    (expect(box).to_be_checked() if policy else expect(box).not_to_be_checked())
+    if policy:
+        expect(f.locator('[data-upg="policy-pending"]')).to_contain_text("hvst-<b>old</b>")
+    if uncheck:
+        box.uncheck()
+    f.locator('[name="read"]').check()
+    f.locator('[data-upg="start"]').click()
+    page.wait_for_timeout(500)
+    got = sent[-1][1]
+    assert got.get("shutdown_vm_on_migration_failure") == sent_value, got
+    assert ("shutdown_vm_on_migration_failure" in got) is (sent_value is not None)

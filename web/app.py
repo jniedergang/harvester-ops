@@ -21529,8 +21529,14 @@ def api_upgrade(cluster):
     ingress = _hset.ingress_kind(None if got["hcharts"] is None else items("hcharts"),
                                  None if got["ksvc"] is None else items("ksvc"))
 
+    # relecture I-3 : service de remplacement de la console pour CAPHV v0.10.1
+    console_shim = any((s.get("metadata") or {}).get("name") == "ingress-expose"
+                       and ((s.get("metadata") or {}).get("labels") or {}).get("harvester-ops.io/shim")
+                       == "caphv-ingress-expose" for s in items("ksvc"))
+
     def checks(target):
-        return _hup.target_checks(current, target, lvm, items("addons"), items("ingresses"), ingress)
+        return _hup.target_checks(current, target, lvm, items("addons"), items("ingresses"), ingress,
+                                  console_shim=console_shim)
     ups = items("upgrades")
     lat = _hup.latest(ups)
     img = None
@@ -21552,6 +21558,7 @@ def api_upgrade(cluster):
                     "checker": ((got["checker"] or {}).get("value") or (got["checker"] or {}).get("default") or "true") == "true",
                     "versions": [dict(v, checks=checks(v["name"])) for v in _hup.version_rows(items("versions"), current)],
                     "migration_policy": _upgrade_migration_policy(got["ucfg"]),
+                    "migration_policy_pending": _hup.policy_pending(ups),
                     "upgrade": _hup.upgrade_view(lat, img, items("nodes")) if lat else None,
                     "running": _hup.running(ups), "history": len(ups),
                     "isos": isos, "os_images": os_images,
@@ -21622,6 +21629,9 @@ def api_upgrade_do(cluster, action):
             # 2.10.1 : point 325 A et contrôle lvm-pre-ga-volumes forcé
             if b.get("shutdown_vm_on_migration_failure") is True:
                 args.append("--shutdown-vm-on-migration-failure")
+            elif b.get("shutdown_vm_on_migration_failure") is False:
+                # relecture I-4 : case décochée sur une valeur vraie
+                args.append("--no-shutdown-vm-on-migration-failure")
             if b.get("force_lvm_pre_ga") is True:
                 args.append("--force-lvm-pre-ga")
         elif action == "logs":

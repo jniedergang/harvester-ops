@@ -311,3 +311,89 @@ def test_deploy_read_asks_kubectl_for_the_managed_fields():
     body = src[src.index("def _deploy_read_capi("):]
     body = body[body.index("def ingress_expose():"):body.index("def providers():")]
     assert '"--show-managed-fields"' in body
+
+
+# ---------------------------------------------------------------------------
+# Relecture I-3 : la pose du service de remplacement ne prend jamais un objet
+# existant (création seule, gestionnaire harvester-ops) et attend la fin d'une
+# mise à jour de Harvester. Harvester 1.9.x supprime `ingress-expose` à chaque
+# démarrage de son contrôleur rancher quand `rke2-traefik` existe
+# (pkg/controller/master/rancher/register.go, registerExposeService ->
+# cleanupIngressExpose, v1.9.0 et v1.9.1) : vu sur harv1 (1.9.1) le 27/11/2026,
+# service posé à 17:07 UTC, supprimé à 17:12 UTC par
+# system:serviceaccount:harvester-system:harvester au redémarrage de son pod.
+# ---------------------------------------------------------------------------
+
+def _upgrade(kube, state):
+    labels = {"harvesterhci.io/latestUpgrade": "true"}
+    if state:
+        labels["harvesterhci.io/upgradeState"] = state
+    kube.put("upgrades.harvesterhci.io", "harvester-system", "hvst-upgrade-x", {"metadata": {"labels": labels}})
+
+
+def test_repair_creates_only_with_the_console_manager(tmp_path):
+    d = desc(tmp_path)
+    kube = FakeKube(traefik_ip="172.16.2.60")
+    installed(kube)
+    cs.repair_shim(kube, d["providers"], steps()[1])
+    assert kube.applied == []
+    assert kube.created == [("Service", "kube-system", "ingress-expose", "harvester-ops")]
+
+
+def test_repair_refuses_a_service_that_appeared_meanwhile(tmp_path, monkeypatch):
+    """Course : le service apparaît entre la lecture et l'écriture ; jamais
+    écrasé (avant : apply --force-conflicts)."""
+    d = desc(tmp_path)
+    kube = FakeKube(traefik_ip="172.16.2.60")
+    installed(kube)
+    real = cs.shim_drift
+
+    def drift_then_appears(*a, **kw):
+        out = real(*a, **kw)
+        kube.put("services", "kube-system", "ingress-expose", NATIVE)
+        return out
+    monkeypatch.setattr(cs, "shim_drift", drift_then_appears)
+    with pytest.raises(RuntimeError, match="ingress-expose-appeared"):
+        cs.repair_shim(kube, d["providers"], steps()[1])
+    assert kube.applied == [] and kube.created == []
+    assert "harvester-ops.io/shim" not in (kube.get("services", "kube-system", "ingress-expose")
+                                           ["metadata"].get("labels") or {})
+
+
+@pytest.mark.parametrize("label,state,refused", [
+    ("upgrade without state yet", None, True),
+    ("upgrade running", "UpgradingNodes", True),
+    ("last upgrade succeeded", "Succeeded", False),
+    ("last upgrade failed", "Failed", False),
+])
+def test_repair_waits_for_a_running_upgrade(tmp_path, label, state, refused):
+    d = desc(tmp_path)
+    kube = FakeKube(traefik_ip="172.16.2.60")
+    installed(kube)
+    _upgrade(kube, state)
+    if refused:
+        with pytest.raises(RuntimeError, match="upgrade-running: hvst-upgrade-x"):
+            cs.repair_shim(kube, d["providers"], steps()[1])
+        assert kube.created == []
+    else:
+        cs.repair_shim(kube, d["providers"], steps()[1])
+        assert len(kube.created) == 1, label
+
+
+def test_install_does_not_pose_the_shim_during_an_upgrade(tmp_path):
+    d = desc(tmp_path)
+    kube = FakeKube()
+    _upgrade(kube, "UpgradingSystemService")
+    with pytest.raises(RuntimeError, match="upgrade-running"):
+        cs.install(kube, d, steps()[1], wait=False)
+    assert kube.created == [] and ("Service", "kube-system", "ingress-expose") not in kube.applied
+
+
+def test_real_kube_create_names_the_field_manager(monkeypatch):
+    from kube import Kube
+    calls = []
+    monkeypatch.setattr(Kube, "run", lambda self, *a, **kw: calls.append(a) or "{}")
+    Kube("/dev/null").create({"kind": "Service"}, field_manager="harvester-ops")
+    Kube("/dev/null").create({"kind": "Service"})
+    assert "--field-manager=harvester-ops" in calls[0]
+    assert not any(str(x).startswith("--field-manager") for x in calls[1])

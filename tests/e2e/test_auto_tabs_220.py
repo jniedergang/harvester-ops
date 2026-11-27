@@ -282,7 +282,9 @@ def test_installation_says_the_drift_and_repairs_by_a_tracked_action(context, fl
         expect(box).to_contain_text("helm")
         expect(btn).to_have_count(0)
         return
-    assert btn.get_attribute("data-tip")
+    # relecture M-4 : un bouton désactivé ne reçoit pas le survol, l'info-bulle
+    # est portée par son enveloppe
+    assert btn.evaluate("b => b.parentElement.classList.contains('tip') && !!b.parentElement.dataset.tip")
     if not enabled:
         expect(btn).to_be_disabled()
         return

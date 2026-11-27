@@ -23,7 +23,7 @@ from pathlib import Path
 
 from capi_cluster import K_HARVESTERCLUSTER
 from capi_services import K_HCP
-from kube import KubeError
+from kube import KubeError, is_missing_type
 
 K_CAPIPROVIDER = "capiproviders.turtles-capi.cattle.io"
 K_CLUSTER = "clusters.cluster.x-k8s.io"
@@ -352,12 +352,42 @@ def repair_shim(kube, wanted, step):
     if not d["vip"]:
         raise RuntimeError("cannot find the Harvester VIP (services kube-system/rke2-traefik "
                            "and ingress-expose have no address)")
-    kube.apply([shim_manifest(d["vip"])])
+    _pose_shim(kube, d["vip"])
     msg = f"ingress-expose recreated for CAPHV (VIP {d['vip']})"
     if d["clusters_at_risk"]:
         msg += "; clusters served again: " + ", ".join(d["clusters_at_risk"])
     step("compatibility", "done", msg)
     return shim_drift(kube, wanted, found)
+
+
+def _pose_shim(kube, vip):
+    """Pose le service de remplacement (2.10.1, relecture I-3) : jamais
+    pendant une mise à jour de Harvester (`upgrade-running`), création seule
+    (un service apparu entre la lecture et l'écriture n'est jamais écrasé :
+    `ingress-expose-appeared`), gestionnaire `harvester-ops`.
+    Harvester 1.9.x supprime `ingress-expose` à chaque démarrage de son
+    contrôleur rancher quand `rke2-traefik` existe
+    (pkg/controller/master/rancher/register.go, registerExposeService ->
+    cleanupIngressExpose, v1.9.0 et v1.9.1 ; vu sur harv1 le 27/11/2026) :
+    le constat revient après chaque redémarrage, la pose reste un geste."""
+    import hv_upgrade
+    try:
+        ups = kube.list(hv_upgrade.K_UPGRADE, hv_upgrade.NS)
+    except KubeError as e:
+        if not is_missing_type(e):
+            raise
+        ups = []
+    busy = hv_upgrade.running(ups)
+    if busy:
+        raise RuntimeError(f"upgrade-running: {busy}: Harvester is upgrading; repair the address "
+                           "for CAPHV once the upgrade is over")
+    try:
+        kube.create(shim_manifest(vip), field_manager="harvester-ops")
+    except KubeError as e:
+        if "AlreadyExists" in str(e) or "already exists" in str(e):
+            raise RuntimeError("ingress-expose-appeared: kube-system/ingress-expose was created "
+                               "meanwhile; the console does not overwrite it") from None
+        raise
 
 
 def shim_manifest(vip):
@@ -482,7 +512,7 @@ def install(kube, desc, step, wait=True, timeout=300, now=time.time, sleep=time.
         if not shim["vip"]:
             raise RuntimeError("cannot find the Harvester VIP (services kube-system/rke2-traefik "
                                "and ingress-expose have no address)")
-        kube.apply([shim_manifest(shim["vip"])])
+        _pose_shim(kube, shim["vip"])
         step("compatibility", "done", f"ingress-expose recreated for CAPHV (VIP {shim['vip']})")
     for left in contract_state(kube, providers):
         kube.patch(K_CRD, None, left["crd"], {"metadata": {"labels": {left["label"]: None}}})

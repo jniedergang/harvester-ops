@@ -2935,26 +2935,51 @@ def _upgrade_checks_191(kube, current, target, args):
                          f"after the upgrade to {target} ({c['text']}); move them first, or force")
 
 
-def _set_migration_policy(kube):
+def _set_migration_policy(kube, on):
     """Point 325 A : `shutdownVMOnMigrationFailure` posé dans upgrade-config
-    pour cette mise à jour ; rend la valeur d'origine."""
+    pour cette mise à jour (vrai, ou faux quand la case est décochée sur une
+    valeur vraie, relecture I-4) ; rend la valeur d'origine."""
     cur = kube.get("settings.harvesterhci.io", None, "upgrade-config") or {}
-    new, orig = hup.migration_policy_value(cur, True)
+    new, orig = hup.migration_policy_value(cur, on)
     kube.patch("settings.harvesterhci.io", None, "upgrade-config", {"value": new})
-    step("upgrade", "running", "upgrade-config: VMs whose migration fails are shut down during this upgrade")
+    step("upgrade", "running", "upgrade-config: VMs whose migration fails are "
+                               + ("shut down" if on else "not shut down") + " during this upgrade")
     return orig
+
+
+def _settle_migration_policy(kube, u):
+    """Relecture I-2 : rend la valeur d'origine gardée sur l'Upgrade
+    (annotation) quand la mise à jour est finie, puis retire l'annotation.
+    Rend True si la valeur a été rendue, False si elle reste à rendre, None
+    sans valeur gardée."""
+    ann = (((u or {}).get("metadata") or {}).get("annotations") or {})
+    if hup.A_CONFIG_BEFORE not in ann:
+        return None
+    name = u["metadata"]["name"]
+    if hup.settled(u)[0] is None:
+        step("upgrade", "running", "upgrade-config left with the upgrade's shutdownVMOnMigrationFailure while "
+                                   f"{name} runs: follow or dismiss it once it is over to set it back")
+        return False
+    kube.patch("settings.harvesterhci.io", None, "upgrade-config", {"value": ann[hup.A_CONFIG_BEFORE]})
+    kube.patch(hup.K_UPGRADE, hup.NS, name, {"metadata": {"annotations": {hup.A_CONFIG_BEFORE: None}}})
+    step("upgrade", "running", "upgrade-config set back to its value before the upgrade")
+    return True
 
 
 def _restore_migration_policy(kube, uname, orig):
     """Valeur d'origine rendue quand la mise à jour est finie (réussie ou
-    échouée) ou n'a pas été créée ; laissée tant qu'elle tourne."""
-    u = kube.get(hup.K_UPGRADE, hup.NS, uname) if uname else None
-    if uname and u is not None and hup.settled(u)[0] is None:
-        step("upgrade", "running", "upgrade-config left with shutdownVMOnMigrationFailure while the upgrade "
-                                   "runs: set it back once it is over")
-        return
-    kube.patch("settings.harvesterhci.io", None, "upgrade-config", {"value": orig})
-    step("upgrade", "running", "upgrade-config set back to its value before the upgrade")
+    échouée) ou n'a pas été créée ; laissée tant qu'elle tourne (gardée sur
+    l'Upgrade, follow et dismiss la rendent). Jamais d'exception : appelée
+    dans un finally, elle ne doit pas masquer le code de retour."""
+    try:
+        if not uname:
+            kube.patch("settings.harvesterhci.io", None, "upgrade-config", {"value": orig})
+            step("upgrade", "running", "upgrade-config set back to its value before the upgrade")
+            return
+        _settle_migration_policy(kube, kube.get(hup.K_UPGRADE, hup.NS, uname))
+    except (KubeError, subprocess.SubprocessError, OSError) as e:
+        step("upgrade", "running", f"upgrade-config not set back yet ({type(e).__name__}): its value before the "
+                                   f"upgrade is kept on {uname}; follow or dismiss {uname} to set it back")
 
 
 def cmd_upgrade(args):
@@ -2983,6 +3008,7 @@ def cmd_upgrade(args):
         if act == "dismiss":
             if v["completed"] is None:
                 raise ValueError("the upgrade is still running")
+            _settle_migration_policy(kube, u)
             kube.patch(hup.K_UPGRADE, hup.NS, name, {"metadata": {"labels": {hup.L_READ: "true"}}})
             step("upgrade", "done", f"{name} dismissed: Harvester removes its log collector and volume")
             return EXIT_OK
@@ -3000,7 +3026,12 @@ def cmd_upgrade(args):
             step("upgrade", "done", f"{args.node} resumed")
             return EXIT_OK
         if act == "follow":
-            return _follow_upgrade(kube, name, args.timeout)
+            rc = _follow_upgrade(kube, name, args.timeout)
+            try:
+                _settle_migration_policy(kube, kube.get(hup.K_UPGRADE, hup.NS, name))
+            except (KubeError, subprocess.SubprocessError, OSError):
+                pass
+            return rc
         # journaux : fabriquer une archive puis la télécharger (proxy de service)
         log = v["log_name"]
         if not log:
@@ -3082,7 +3113,10 @@ def cmd_upgrade(args):
             _upgrade_checks_191(kube, current, name, args)
             man = hup.upgrade_manifest(version=name, log=not args.no_log, skip_single=args.skip_single_replica)
             target = name
-        orig = _set_migration_policy(kube) if getattr(args, "shutdown_vm_on_migration_failure", False) else None
+        pol = getattr(args, "shutdown_vm_on_migration_failure", None)
+        orig = _set_migration_policy(kube, pol) if pol is not None else None
+        if orig is not None:
+            man.setdefault("metadata", {}).setdefault("annotations", {})[hup.A_CONFIG_BEFORE] = orig
         uname = None
         try:
             made = kube.create(man)
@@ -4016,8 +4050,9 @@ def main(argv=None):
                     help="start: skip Harvester's check of detached single-replica volumes")
     sp.add_argument("--force-lvm-pre-ga", action="store_true",
                     help="start: upgrade to v1.9.1 or later although LVM volumes predate the GA driver")
-    sp.add_argument("--shutdown-vm-on-migration-failure", action="store_true",
-                    help="start: shut down VMs whose migration fails (upgrade-config), set back afterwards")
+    sp.add_argument("--shutdown-vm-on-migration-failure", action=argparse.BooleanOptionalAction, default=None,
+                    help="start: shut down (or, with --no-..., keep) VMs whose migration fails (upgrade-config), "
+                         "set back afterwards")
     sp.add_argument("--node", help="resume-node: the paused host")
     sp.add_argument("--out", help="logs: where to write the archive (mode 0600)")
     sp.add_argument("--timeout", type=int, default=6 * 3600)
