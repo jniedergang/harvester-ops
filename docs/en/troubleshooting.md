@@ -368,14 +368,26 @@ rolling update, remediation) is refused, the existing ones keep running.
 The CAPHV log says `user "system:serviceaccount:<ns>:caphv-identity" is not
 authorized to access image <image-ns>/<image>`. Clusters created by 2.10.1
 have the right. For an older cluster, add it to the identity Role of the
-image namespace (`caphv-identity-<cluster namespace>`, or `caphv-identity`
-when the image is in `<cluster namespace>-vms`):
+image namespace. That Role is `caphv-identity` when the image is in the
+cluster namespace, and `caphv-identity-<cluster namespace>` in any other
+namespace (`<cluster namespace>-vms` included). The commands below find it
+by its labels, so they work in both cases. `<image>` is the object name
+(`image-xxxxx`, the one in the error message), never the display name:
 
 ```bash
-kubectl -n <image-ns> patch role caphv-identity-<cluster-ns> --type json -p \
-  '[{"op":"add","path":"/rules/-","value":{"apiGroups":["harvesterhci.io"],
-     "resources":["virtualmachineimages"],"verbs":["get"],"resourceNames":["<image>"]}}]'
+ROLE=$(kubectl -n <image-ns> get role -o name \
+  -l harvester-ops.io/caphv-cluster=<cluster>,harvester-ops.io/caphv-namespace=<cluster-ns>)
+if [ "$(printf '%s\n' "$ROLE" | grep -c .)" = 1 ]; then
+  kubectl -n <image-ns> patch "$ROLE" --type json -p \
+    '[{"op":"add","path":"/rules/-","value":{"apiGroups":["harvesterhci.io"],
+       "resources":["virtualmachineimages"],"verbs":["get"],"resourceNames":["<image>"]}}]'
+else echo "expected one Role, got: $ROLE"; fi
 ```
+
+A request that names the image by its display name (`namespace/display
+name`, in a script, a template or a plan) is brought back to the object
+name before the identity is written; a display name shared by several
+images is refused (`image-ambiguous`).
 
 Checked on harv1 (1.9.1): with the rule removed a new worker was refused,
 with the rule added the worker VM was created ten seconds later.

@@ -834,6 +834,9 @@ def check(spec, facts):
     img = (facts.get("images") or {}).get(spec.get("image"))
     if spec.get("image") and img is None:
         out.append(finding("image-missing", "block", image=spec.get("image")))
+    elif img and img.get("ambiguous"):
+        # relecture finale 2.10.1 (I-2) : nom affiché porté par plusieurs images
+        out.append(finding("image-ambiguous", "block", image=spec.get("image"), refs=", ".join(img["ambiguous"])))
     elif img and img.get("iso"):
         out.append(finding("image-iso", "block", image=spec.get("image")))
     elif img and not img.get("ready"):

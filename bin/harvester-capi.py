@@ -249,14 +249,33 @@ def _image_rank(i):
 def _image_facts(images):
     """Une demande peut nommer l'image par son objet (ce que propose la
     console) ou par son nom affiché (ce qu'écrit un script à la main)."""
-    out = {}
+    out, shown = {}, {}
     for i in images:
-        info = {"ready": i["ready"], "iso": i["iso"], "os": i.get("os"),
+        info = {"ready": i["ready"], "iso": i["iso"], "os": i.get("os"), "ref": i["ref"],
                 "storage_class": i.get("storage_class"), "virtual_size": i.get("virtual_size")}
         ns = i["ref"].split("/", 1)[0]
-        out.setdefault(f"{ns}/{i['display_name']}", info)
+        shown.setdefault(f"{ns}/{i['display_name']}", []).append(info)
         out[i["ref"]] = info
+    # relecture finale 2.10.1 (I-2) : un nom affiché porté par plusieurs
+    # images ne désigne aucune d'elles (`ambiguous`, refusé par le contrôle)
+    for key, infos in shown.items():
+        if key not in out:
+            out[key] = infos[0] if len(infos) == 1 else dict(infos[0], ambiguous=sorted(x["ref"] for x in infos))
     return out
+
+
+def resolve_image(spec, images):
+    """Relecture finale 2.10.1 (I-2) : ramène `spec["image"]` donné par son
+    nom affiché à la référence de l'objet (`<ns>/image-xxxxx`). Le webhook
+    de Harvester v1.9.1 vérifie `get` sur l'objet du volumeClaimTemplate
+    (pkg/webhook/resources/virtualmachine/validator.go), donc la règle de
+    l'identité, ses revues d'accès et le rendu nomment l'objet. Une image
+    absente ou ambiguë reste telle quelle : le contrôle la refuse
+    (`image-missing`, `image-ambiguous`)."""
+    img = (images or {}).get(spec.get("image"))
+    if img and img.get("ref") and not img.get("ambiguous"):
+        spec["image"] = img["ref"]
+    return spec
 
 
 SSH_USERS = {"sles": "sles", "opensuse": "opensuse", "rocky": "rocky", "rhel": "cloud-user",
@@ -896,8 +915,10 @@ def _check(kube, spec, desc, identity="console", harvester=None):
     if inv.get("unreachable"):
         findings = [cc.finding("cluster-unreachable", "block")]
         return {"findings": findings, "blocked": True, "amount": amount(spec), "spec": spec}
-    findings = cc.check(spec, facts_from(inv)) + registry_findings(kube, spec, harvester) + \
+    facts = facts_from(inv)
+    findings = cc.check(spec, facts) + registry_findings(kube, spec, harvester) + \
         _session_findings(kube, spec) + offline_findings(spec)
+    resolve_image(spec, facts["images"])
     version = ci.caphv_version(inv.get("stack"), desc)
     if identity == "restricted":
         findings += ci.findings(spec, version, identity, _cloud_provider_bindings(kube, spec["name"]),

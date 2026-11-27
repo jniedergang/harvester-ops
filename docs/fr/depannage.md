@@ -381,14 +381,27 @@ place continuent. Le journal de CAPHV dit `user
 "system:serviceaccount:<ns>:caphv-identity" is not authorized to access
 image <ns-image>/<image>`. Les clusters créés par la 2.10.1 ont ce droit.
 Pour un cluster plus ancien, l'ajouter au Role d'identité du namespace de
-l'image (`caphv-identity-<namespace du cluster>`, ou `caphv-identity` quand
-l'image est dans `<namespace du cluster>-vms`) :
+l'image. Ce Role est `caphv-identity` quand l'image est dans le namespace
+du cluster, et `caphv-identity-<namespace du cluster>` dans tout autre
+namespace (`<namespace du cluster>-vms` compris). Les commandes ci-dessous
+le trouvent par ses étiquettes : elles valent dans les deux cas. `<image>`
+est le nom de l'objet (`image-xxxxx`, celui du message d'erreur), jamais le
+nom affiché :
 
 ```bash
-kubectl -n <ns-image> patch role caphv-identity-<ns-cluster> --type json -p \
-  '[{"op":"add","path":"/rules/-","value":{"apiGroups":["harvesterhci.io"],
-     "resources":["virtualmachineimages"],"verbs":["get"],"resourceNames":["<image>"]}}]'
+ROLE=$(kubectl -n <ns-image> get role -o name \
+  -l harvester-ops.io/caphv-cluster=<cluster>,harvester-ops.io/caphv-namespace=<ns-cluster>)
+if [ "$(printf '%s\n' "$ROLE" | grep -c .)" = 1 ]; then
+  kubectl -n <ns-image> patch "$ROLE" --type json -p \
+    '[{"op":"add","path":"/rules/-","value":{"apiGroups":["harvesterhci.io"],
+       "resources":["virtualmachineimages"],"verbs":["get"],"resourceNames":["<image>"]}}]'
+else echo "un seul Role attendu, trouvé : $ROLE"; fi
 ```
+
+Une demande qui nomme l'image par son nom affiché (`namespace/nom
+affiché`, dans un script, un modèle ou un plan) est ramenée au nom de
+l'objet avant que l'identité soit écrite ; un nom affiché porté par
+plusieurs images est refusé (`image-ambiguous`).
 
 Vérifié sur harv1 (1.9.1) : règle retirée, un nouveau worker était refusé ;
 règle ajoutée, la VM du worker était créée dix secondes plus tard.
