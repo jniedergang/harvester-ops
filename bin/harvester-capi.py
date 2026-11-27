@@ -4449,7 +4449,13 @@ def cmd_eso_status(args):
             with ca.session(kube, ns, cluster) as path:
                 child = Kube(path)
                 try:
-                    out["stores"] = ce.store_status(child.list(K_SS))
+                    stores = child.list(K_SS)
+                    out["stores"] = ce.store_status(stores)
+                    if out["auth"] is not None:
+                        # 2.10.1 : magasins de chaque namespace activé Ready (même
+                        # lecture que le mode B1) ; le badge du mode A en dépend
+                        ok, _ = ce.stores_ready(stores, out["namespaces"])
+                        out["auth"]["stores_ready"] = bool(ok and out["namespaces"])
                     out["externalsecrets"] = ce.status(child.list(K_ES))
                 except KubeError as err:
                     if not is_missing_type(err):

@@ -1733,6 +1733,20 @@ def _secret_store_refused(e):
     return jsonify({"error": str(e)[:300], "code": e.code}), status
 
 
+@app.errorhandler(_sst.SecretMissing)
+def _secret_store_missing(e):
+    """2.10.1 : un secret référencé absent du magasin (restauration qui l'a
+    perdu, par exemple sur le test SSH d'un cluster) est un 409 qui nomme la
+    classe et la référence, jamais une valeur, au lieu d'une erreur 500."""
+    ref = getattr(e, "ref", "")
+    try:
+        cls = _sst.parse_ref(ref)[0]
+    except ValueError:
+        cls = None
+    return jsonify({"error": f"secret not found: {ref}"[:300], "code": "secret-missing", "class": cls,
+                    "reference": ref, "hint": "store the secret again (Settings, Secrets) or restore it"}), 409
+
+
 def _secret_error_status(e):
     """Statut HTTP d'une SecretError. 2.10.0 (revue M8) : un refus fait à
     une personne (OpenBao a refusé SON jeton, ou la connexion personnelle a

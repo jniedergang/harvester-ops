@@ -532,11 +532,20 @@ def mode_a_commands(addr, mount, prefix, cid, console_cidr):
         "ACCESSOR=$(bao read -field=accessor sys/auth/token)",
         f"bao policy write {tf} - <<EOF\n{tf_child_policy(cid, '$ACCESSOR')}EOF",
         f"bao write auth/approle/role/{role} token_policies={role} {_kv_args(console_role_params(console_cidr))}",
-        f"bao write auth/token/roles/{tf} {_kv_args(tf_token_role_params(cid))}",
+        # 2.10.1 (point 327 A) : jetons enfants liés à l'adresse de la console,
+        # comme en B1 (127.0.0.1/32)
+        f"bao write auth/token/roles/{tf} {_kv_args(tf_token_role_params(cid, [console_cidr]))}",
         *[f"bao write sys/config/auditing/request-headers/{h} hmac=false" for h in AUDIT_HEADERS],
         f"bao read -field=role_id auth/approle/role/{role}/role-id",
         f"bao write -wrap-ttl={WRAP_TTL} -f auth/approle/role/{role}/secret-id",
     ]
+
+
+def _jwt_enable_line(mount):
+    """2.10.1 : `bao auth enable` gardé par une lecture, pour que les mêmes
+    commandes se rejouent sans « path is already in use ». `bao auth list
+    -format=json` nomme chaque montage `<chemin>/`."""
+    return f"bao auth list -format=json | grep -q '\"{mount}/\"' || bao auth enable -path={mount} jwt"
 
 
 def _heredoc_json(cmd, body):
@@ -563,8 +572,8 @@ def person_token_commands(addr, cid, rancher, client_id, issuer, ca_pem, console
     role = oj.person_role_params(client_id, console_cidr, cid)
     return [
         _addr_line(addr),
-        f"# Méthode jwt du Rancher {rancher} (sautez la ligne suivante si le montage {pm}/ existe déjà)",
-        f"bao auth enable -path={pm} jwt",
+        f"# Méthode jwt du Rancher {rancher} (montage {pm}/ créé s'il manque)",
+        _jwt_enable_line(pm),
         f"bao policy write {person_policy_name(cid)} - <<'EOF'\n{person_policy(mount, prefix, cid, groups_only)}EOF",
         *(jwks_check_lines(issuer, jwks_sha256) if keys else []),
         _heredoc_json(f"bao write auth/{pm}/config", config),
@@ -640,8 +649,8 @@ def eso_cluster_commands(addr, mount, prefix, cid, key, issuer, pubkeys, namespa
     policy = eso_policy(mount, prefix, cid, key, "$ACCESSOR")
     return [
         _addr_line(addr),
-        f"# External Secrets du cluster enfant de clé {key} (sautez la ligne suivante si {jm}/ existe déjà)",
-        f"bao auth enable -path={jm} jwt",
+        f"# External Secrets du cluster enfant de clé {key} (montage {jm}/ créé s'il manque)",
+        _jwt_enable_line(jm),
         f"ACCESSOR=$(bao read -field=accessor sys/auth/{jm})",
         f"bao policy write {eso_policy_name(cid, key)} - <<EOF\n{policy}EOF",
         _heredoc_json(f"bao write auth/{jm}/config", config),

@@ -260,6 +260,10 @@ const CapiEso = (() => {
 
   function authHtml(a) {
     if (!a) return `<span class="form-hint">${esc(tr('eso.auth.none', 'not set up'))}</span>`;
+    if (!a.applied && a.stores_ready) {
+      // 2.10.1 : mode A, les commandes ont été passées (magasins Ready)
+      return `<span class="badge ok tip" data-eso-auth="ready" data-tip="${esc(tr('eso.t.authReady', 'The stores of every enabled namespace are ready: the administrator of OpenBao has run the commands'))}">${esc(tr('eso.auth.ready', 'ready'))}</span>`;
+    }
     if (!a.applied) {
       return `<span class="badge warn tip" data-eso-auth="waiting" data-tip="${esc(tr('eso.t.authWaiting', 'The commands given by the set-up must be run by the administrator of OpenBao'))}">${esc(tr('eso.auth.waiting', 'waiting for the OpenBao administrator'))}</span>`;
     }
