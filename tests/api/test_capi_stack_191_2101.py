@@ -40,13 +40,27 @@ OURS = {"metadata": {"labels": {cs.SHIM_LABEL: "caphv-ingress-expose", cs.MANAGE
 FOREIGN = {"metadata": {"labels": {cs.SHIM_LABEL: "caphv-ingress-expose"},
                         "annotations": {cs.VIP_ANNOTATION: "172.16.3.100"},
                         "managedFields": [{"manager": "harvester-ops", "operation": "Apply"},
-                                          {"manager": "helm", "operation": "Update"},
+                                          {"manager": "helm", "operation": "Update",
+                                           "fieldsV1": {"f:metadata": {"f:labels": {}}, "f:spec": {"f:ports": {}}}},
                                           {"manager": "kube-vip", "operation": "Update", "subresource": "status"}]}}
 STATUS_ONLY = {"metadata": {"labels": {cs.SHIM_LABEL: "caphv-ingress-expose"},
                             "annotations": {cs.VIP_ANNOTATION: "172.16.3.100"},
                             "managedFields": [{"manager": "harvester-ops", "operation": "Apply"},
                                               {"manager": "kube-vip", "operation": "Update",
                                                "subresource": "status"}]}}
+
+# 2.10.1, relevé sur harv1 (1.9.1) le 27/11/2026 : kube-ovn-controller annote
+# tout service à adresse de cluster (`ovn.kubernetes.io/vpc`), kube-vip pose
+# `kube-vip.io/vipHost` ; ces écritures d'annotations seules ne reprennent
+# pas le service (shim recréé en ClusterIP normal par la session CAPHV le 12/10)
+ANNOTATED = {"metadata": {"labels": {cs.SHIM_LABEL: "caphv-ingress-expose"},
+                          "annotations": {cs.VIP_ANNOTATION: "172.16.3.100"},
+                          "managedFields": [
+                              {"manager": "harvester-ops", "operation": "Apply"},
+                              {"manager": "kube-ovn-controller", "operation": "Update",
+                               "fieldsV1": {"f:metadata": {"f:annotations": {"f:ovn.kubernetes.io/vpc": {}}}}},
+                              {"manager": "kube-vip", "operation": "Update",
+                               "fieldsV1": {"f:metadata": {"f:annotations": {"f:kube-vip.io/vipHost": {}}}}}]}}
 
 
 def installed(kube, version="v0.10.1"):
@@ -85,6 +99,8 @@ def _no_workaround(d):
      {"needed": False, "present": True, "ours": True, "foreign": True, "repair": False, "clusters_at_risk": []}),
     ("kube-vip writing the status only is not foreign", "172.16.3.100", STATUS_ONLY, "v0.10.1", None,
      {"needed": True, "present": True, "foreign": False, "repair": False}),
+    ("annotation-only writers (kube-ovn, kube-vip) are not foreign", "172.16.3.100", ANNOTATED, "v0.10.1", None,
+     {"needed": True, "present": True, "ours": True, "foreign": False, "managers": []}),
     ("no CAPHV installed", "172.16.3.100", None, None, None,
      {"needed": False, "present": False, "repair": False, "clusters_at_risk": []}),
     ("CAPHV without the workaround", "172.16.3.100", None, "v0.11.0", _no_workaround,
@@ -258,3 +274,40 @@ def test_deploy_ready_ingress_expose_missing(label, phases, expose, wanted, code
     if code:
         assert "Repair the address for CAPHV" in got[0]["detail"]
         assert "ingress-expose-missing" in dr.CODES
+
+
+def test_real_kube_reads_the_managed_fields(monkeypatch):
+    """kubectl >= 1.21 omet managedFields sans --show-managed-fields (vu sur
+    harv1 le 27/11/2026) : sans le drapeau, un service repris par Harvester
+    passait pour le nôtre et la règle `foreign` ne voyait jamais rien."""
+    import json as _json
+    from kube import Kube
+    calls = []
+    svc = _json.loads(_json.dumps(FOREIGN))
+    svc["metadata"]["name"] = "ingress-expose"
+    caphv = {"items": [{"metadata": {"name": "harvester", "namespace": "caphv-system"},
+                        "spec": {"name": "harvester", "type": "infrastructure", "version": "v0.10.1"},
+                        "status": {"phase": "Ready", "installedVersion": "v0.10.1",
+                                   "conditions": [{"type": "Ready", "status": "True"}]}}]}
+
+    def run(self, *args, input=None, timeout=None):
+        calls.append(args)
+        if "ingress-expose" in args:
+            o = _json.loads(_json.dumps(svc))
+            if "--show-managed-fields" not in args:
+                o["metadata"].pop("managedFields")
+            return _json.dumps(o)
+        if args[1] == cs.K_CAPIPROVIDER:
+            return _json.dumps(caphv)
+        return _json.dumps({"items": []})
+    monkeypatch.setattr(Kube, "run", run)
+    got = cs.shim_drift(Kube("/dev/null"), WANT, [])
+    assert got["foreign"] is True and got["managers"] == ["helm"], got
+    assert any("ingress-expose" in a and "--show-managed-fields" in a for a in calls)
+
+
+def test_deploy_read_asks_kubectl_for_the_managed_fields():
+    src = (ROOT / "web" / "app.py").read_text()
+    body = src[src.index("def _deploy_read_capi("):]
+    body = body[body.index("def ingress_expose():"):body.index("def providers():")]
+    assert '"--show-managed-fields"' in body

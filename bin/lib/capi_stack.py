@@ -255,14 +255,28 @@ def _foreign_managers(svc):
     """Gestionnaires `managedFields` du service autres que la console, hors
     sous-ressource `status` (kube-vip y écrit l'adresse). Un `ingress-expose`
     reposé par Harvester par-dessus notre service garde notre étiquette mais
-    porte son propre gestionnaire (hypothèse de la 2.10.1, à relire sur
-    harvlab en 1.9.1)."""
+    porte son propre gestionnaire. Lu avec `--show-managed-fields` : kubectl
+    l'omet sinon et la règle ne voyait rien (vu sur harv1 le 27/11/2026)."""
     out = []
     for m in ((svc or {}).get("metadata") or {}).get("managedFields") or []:
         if m.get("subresource") == "status" or m.get("manager") in (None, "", "harvester-ops"):
             continue
+        if _annotations_only(m.get("fieldsV1")):
+            continue
         out.append(m["manager"])
     return sorted(set(out))
+
+
+def _annotations_only(fields):
+    """Vrai si une entrée managedFields ne possède que des annotations : vu
+    sur harv1 (1.9.1) le 27/11/2026, kube-ovn-controller annote tout service
+    à adresse de cluster (`ovn.kubernetes.io/vpc`) et kube-vip pose
+    `kube-vip.io/vipHost` ; ils ne reprennent pas le service. Entrée sans
+    `fieldsV1` lue : comptée comme une reprise (prudence)."""
+    if not isinstance(fields, dict) or not fields:
+        return False
+    md = fields.get("f:metadata")
+    return set(fields) == {"f:metadata"} and isinstance(md, dict) and set(md) == {"f:annotations"}
 
 
 def _caphv_clusters(clusters):
@@ -304,7 +318,7 @@ def shim_drift(kube, wanted=(), clusters=(), states=None):
     needed_by = [w for w in wanted or [] if "ingress-expose" in (w.get("workarounds") or [])
                  and any(p["name"] == w["name"] and p["type"] == w["type"] and p["version"] == w.get("version")
                          for p in providers)]
-    svc = kube.get("services", SHIM_NS, SHIM_NAME)
+    svc = kube.get("services", SHIM_NS, SHIM_NAME, managed_fields=True)
     present = svc is not None
     ours = present and _labels(svc).get(SHIM_LABEL) == "caphv-ingress-expose"
     managers = _foreign_managers(svc) if ours else []

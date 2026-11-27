@@ -57,11 +57,16 @@ class FakeKube:
             md["namespace"] = ns
         self.objs[(kind, ns, name)] = body
 
-    def get(self, kind, ns, name):
+    def get(self, kind, ns, name, managed_fields=False):
         if kind == cs.K_CAPIPROVIDER and not self.turtles:
             raise KubeError("the server doesn't have a resource type \"capiproviders\"")
         o = self.objs.get((kind, ns, name))
-        return json.loads(json.dumps(o)) if o is not None else None
+        o = json.loads(json.dumps(o)) if o is not None else None
+        # comme kubectl >= 1.21 : managedFields seulement avec --show-managed-fields
+        # (vu sur harv1 le 27/11/2026)
+        if o is not None and not managed_fields:
+            o.get("metadata", {}).pop("managedFields", None)
+        return o
 
     def list(self, kind, ns=None, selector=None):
         if kind == cs.K_CAPIPROVIDER and not self.turtles:

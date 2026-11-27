@@ -37964,8 +37964,9 @@ def _deploy_read_capi(kc, cluster):
 
     def ingress_expose():
         # cluster mis à jour depuis 1.8 : l'adresse est là, pas sur rke2-traefik
-        return _kubectl_json(kc, "get", "services", "-n", "kube-system", "ingress-expose", timeout=20,
-                             cluster=cluster)
+        # --show-managed-fields : la règle ingress-expose-foreign les lit (2.10.1)
+        return _kubectl_json(kc, "get", "services", "-n", "kube-system", "ingress-expose",
+                             "--show-managed-fields", timeout=20, cluster=cluster)
 
     def providers():
         d = _kubectl_json(kc, "get", "capiproviders.turtles-capi.cattle.io", "-A", timeout=30, cluster=cluster)

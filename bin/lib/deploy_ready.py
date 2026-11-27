@@ -58,7 +58,7 @@ class _ReadsKube:
     def __init__(self, reads):
         self.reads = reads
 
-    def get(self, kind, ns, name):
+    def get(self, kind, ns, name, managed_fields=False):
         if kind == "settings.harvesterhci.io" and name == "server-version":
             v = self.reads.get("server_version")
             return {"value": v} if v else None

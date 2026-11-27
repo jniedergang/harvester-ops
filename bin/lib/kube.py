@@ -59,9 +59,11 @@ class Kube:
     def _ns(ns):
         return ["-n", ns] if ns else []
 
-    def get(self, kind, ns, name):
+    def get(self, kind, ns, name, managed_fields=False):
+        # kubectl >= 1.21 omet metadata.managedFields sans --show-managed-fields
+        extra = ["--show-managed-fields"] if managed_fields else []
         try:
-            return json.loads(self.run("get", kind, name, *self._ns(ns), "-o", "json"))
+            return json.loads(self.run("get", kind, name, *self._ns(ns), "-o", "json", *extra))
         except KubeError as e:
             if "NotFound" in str(e) or "not found" in str(e):
                 return None
