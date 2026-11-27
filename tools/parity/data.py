@@ -1,10 +1,12 @@
-# Parité harvester-ops / interface de Harvester v1.9 : source unique du tableau
+# Parité harvester-ops / interface de Harvester v1.9.1 : source unique du tableau
 # (Artifact + docs/en/harvester-parity.md + docs/fr/parite-harvester.md).
 # Statuts : ok (fait), part (partiel), todo (manquant), plus (console seulement), na (hors périmètre).
 # v : version où c'est arrivé (ok/part) ou prévue (todo).
 
-AS_OF = "2.10.0"
-DATE = "2026-11-09"
+AS_OF = "2.10.1"
+DATE = "2026-11-27"
+# 2.10.1 : lignes v1.9.1 relevées par git diff v1.9.0..v1.9.1 de harvester-ui-extension
+# (config, models, edit, dialog), le 27/11/2026
 
 S = []  # sections
 
@@ -94,6 +96,10 @@ r("ok", "1.60", "Clés SSH à la création", "SSH keys at creation")
 r("ok", "1.60", "Installer l'agent invité", "Install guest agent")
 r("ok", "1.62", "Windows : unattend et sysprep", "Windows unattend and sysprep", "fichier de réponses à la création, lecteur sysprep", "answer file at creation, sysprep drive")
 r("ok", "1.12", "TPM, EFI, Secure Boot, tablette USB", "TPM, EFI, Secure Boot, USB tablet")
+r("todo", "2.11", "Options de performance des disques et de la VM (cache, E/S, fils d'E/S, profil haute performance, v1.9.1)",
+  "Disk and VM performance options (cache, I/O mode, I/O threads, high-performance profile, v1.9.1)",
+  "DiskPerformanceOptions et VMPerformanceOptions de harvester-ui-extension v1.9.1 (drapeau highPerformanceStorage), annotations harvesterhci.io/disk-cache-mode",
+  "DiskPerformanceOptions and VMPerformanceOptions of harvester-ui-extension v1.9.1 (highPerformanceStorage flag), harvesterhci.io/disk-cache-mode annotations")
 
 sec("volumes", "Volumes", "Volumes", "Volumes", "Volumes")
 r("ok", "1.40", "Liste : répliques, santé, VM, place écrite", "List: replicas, health, VM, written size")
@@ -176,6 +182,9 @@ r("ok", "1.64", "Modèles de configuration cloud (user / network data)", "Cloud 
 r("part", "1.74", "Classes de stockage (Longhorn v1, chiffrement, topologies, LVM, par défaut, supprimer)", "Storage classes (Longhorn v1, encryption, topologies, LVM, default, delete)",
   "LVM vérifié en réel en 1.74 (add-on expérimental, disque de réserve) ; Longhorn v2 proposé mais pas vérifié (absent des bancs)",
   "LVM verified for real in 1.74 (experimental add-on, spare disk); Longhorn v2 offered but not verified (absent from the benches)")
+r("ok", "2.10.1", "Type LVM dm-thin seul à partir de v1.9.1", "LVM type dm-thin only from v1.9.1",
+  "comme le drapeau lvmDmThinOnly de harvester-ui-extension v1.9.1 : dm-thin par défaut, striped refusé à partir de v1.9.1 (version lue), dit déprécié avant ; pas encore vérifié sur harvlab",
+  "as the lvmDmThinOnly flag of harvester-ui-extension v1.9.1: dm-thin by default, striped refused from v1.9.1 (version read), said deprecated before; not verified on harvlab yet")
 r("ok", "1.68", "Périphériques PCI", "PCI devices", "activer ou désactiver le passthrough, par sélection ; groupe IOMMU et VMs qui s'en servent dits", "enable or disable passthrough, by selection; IOMMU group and the VMs using them said")
 r("ok", "1.68", "SR-IOV réseau (nombre de VF)", "SR-IOV network devices (VF count)", "carte igb émulée sur le banc", "emulated igb card on the bench")
 r("part", "1.92", "GPU SR-IOV, vGPU, configurations MIG", "SR-IOV GPU, vGPU, MIG configurations",
@@ -183,10 +192,16 @@ r("part", "1.92", "GPU SR-IOV, vGPU, configurations MIG", "SR-IOV GPU, vGPU, MIG
   "read-only: GPU tab (whole GPUs, vGPUs, MIG instances, container GPUs, free or used). Verified against Harvester's object shapes, not on vGPU or MIG hardware (none on the benches). Enabling a vGPU or configuring MIG: not shipped")
 r("ok", "1.68", "Périphériques USB (passthrough)", "USB devices (passthrough)")
 r("ok", "1.57", "Add-ons : activer, désactiver, configurer", "Add-ons: enable, disable, configure")
+r("part", "1.57", "Add-on rancher-k3k (v1.9.1) et sa fenêtre d'activation", "rancher-k3k add-on (v1.9.1) and its enable window",
+  "activé et configuré comme tout add-on ; la fenêtre HarvesterEnableK3k (nom d'hôte de Rancher) n'est pas reprise",
+  "enabled and configured as any add-on; the HarvesterEnableK3k window (Rancher host name) is not reproduced")
 r("ok", "1.64", "Secrets (Opaque, TLS, Basic, Registry, SSH, chiffrement : créer, nouvelles valeurs, supprimer)", "Secrets (Opaque, TLS, Basic, Registry, SSH, encryption: create, new values, delete)")
 r("ok", "1.67", "Réglages de Harvester (les 40 : NTP, proxy, CA, TLS, overcommit…)", "Harvester settings (all 40: NTP, proxy, CA, TLS, overcommit…)",
   "formulaires typés, contrôlés d'avance comme le webhook, état appliqué, secrets masqués, avertissement des réglages qui coupent un accès",
   "typed forms, checked beforehand as the webhook would, applied state, masked secrets, warning on settings that can cut an access")
+r("plus", "2.10.1", "Réglages TLS dits sans effet selon le contrôleur d'ingress du cluster", "TLS settings said to have no effect according to the ingress controller of the cluster",
+  "ssl-parameters sous Traefik, traefik-default-tls-options sous ingress-nginx, lu sur le cluster (chart et service de RKE2) ; Harvester ne le dit pas",
+  "ssl-parameters under Traefik, traefik-default-tls-options under ingress-nginx, read on the cluster (RKE2 chart and service); Harvester does not say it")
 
 sec("upgrade", "Mise à jour de Harvester", "Harvester upgrade", "Upgrade", "Upgrade")
 r("ok", "1.69", "Mettre à jour (version, notes, suivi par nœud, journaux)", "Upgrade (version, notes, per-node progress, logs)",
@@ -195,6 +210,12 @@ r("ok", "1.69", "Mettre à jour (version, notes, suivi par nœud, journaux)", "U
 r("ok", "1.69", "Mise à jour airgap (image envoyée)", "Air-gapped upgrade (uploaded image)",
   "ISO du magasin de la console, SHA-512 vérifié, servi par le guichet de la console",
   "ISO from the console's store, SHA-512 checked, served by the console's counter")
+r("plus", "2.10.1", "Choix shutdownVMOnMigrationFailure à la mise à jour (v1.9.1)", "shutdownVMOnMigrationFailure choice at upgrade (v1.9.1)",
+  "case de la fenêtre, décochée comme Harvester, écrite dans upgrade-config puis rendue ; absent de l'interface de Harvester v1.9.1",
+  "box of the window, unchecked as in Harvester, written in upgrade-config then set back; absent from the Harvester v1.9.1 UI")
+r("plus", "2.10.1", "Contrôles d'une mise à jour vers v1.9.1", "Checks of an upgrade to v1.9.1",
+  "volumes LVM d'avant la GA (bloquant, forçable), volumes striped, add-on rancher-vcluster déprécié, Ingress nginx migrées vers Traefik",
+  "LVM volumes that predate the GA (blocking, can be forced), striped volumes, deprecated rancher-vcluster add-on, nginx Ingresses moved to Traefik")
 
 sec("support", "Support", "Support", "Support", "Support")
 r("ok", "1.67", "Bundle de support", "Support bundle", "celui de Harvester (créer, suivre, télécharger, supprimer) et celui de la console (anonymisé)", "Harvester's (create, follow, download, delete) and the console's own (anonymised)")

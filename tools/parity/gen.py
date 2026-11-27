@@ -35,8 +35,8 @@ def md(lang):
     comparable = c["ok"] + c["part"] + c["todo"]
     if lang == "fr":
         out = ["# Parité avec l'interface de Harvester", "",
-               f"État au {d.DATE}, console **v{d.AS_OF}**, comparée à l'interface de **Harvester v1.9** "
-               "(menus relevés dans le code de harvester-ui-extension v1.9.0 et la documentation v1.9).", "",
+               f"État au {d.DATE}, console **v{d.AS_OF}**, comparée à l'interface de **Harvester v1.9.1** "
+               "(menus relevés dans le code de harvester-ui-extension v1.9.1 et la documentation v1.9).", "",
                f"Sur {comparable} fonctions de l'interface de Harvester : **{c['ok']} faites**, "
                f"**{c['part']} partielles**, **{c['todo']} manquantes** ; {c['na']} hors périmètre. "
                "Une fonction manquante porte la version où elle est prévue.", "",
@@ -44,8 +44,8 @@ def md(lang):
                "Console seulement (ce que Harvester n'a pas), Hors périmètre.", ""]
     else:
         out = ["# Parity with the Harvester UI", "",
-               f"Status on {d.DATE}, console **v{d.AS_OF}**, compared with the **Harvester v1.9** UI "
-               "(menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).", "",
+               f"Status on {d.DATE}, console **v{d.AS_OF}**, compared with the **Harvester v1.9.1** UI "
+               "(menus taken from the harvester-ui-extension v1.9.1 source and the v1.9 documentation).", "",
                f"Of {comparable} functions of the Harvester UI: **{c['ok']} done**, **{c['part']} partial**, "
                f"**{c['todo']} missing**; {c['na']} out of scope. A missing function shows the version it is planned for.", "",
                "Statuses: Done, Partial (what is missing is said), Missing (planned version), "
@@ -127,15 +127,15 @@ footer{margin-top:36px;color:var(--muted);font-size:13px;border-top:1px solid va
 JS = r"""
 const D = JSON.parse(document.getElementById('data').textContent);
 const T = {
- fr:{title:"Parité avec l'interface de Harvester",sub:(a,dt)=>`La console harvester-ops v${a}, fonction par fonction, face à l'interface de Harvester v1.9 : ce qui est fait, ce qui manque encore et la version où il arrive. Menus relevés dans le code de harvester-ui-extension v1.9.0. État au ${dt}.`,
+ fr:{title:"Parité avec l'interface de Harvester",sub:(a,dt)=>`La console harvester-ops v${a}, fonction par fonction, face à l'interface de Harvester v1.9.1 : ce qui est fait, ce qui manque encore et la version où il arrive. Menus relevés dans le code de harvester-ui-extension v1.9.1. État au ${dt}.`,
      search:"Chercher une fonction…",fn:"Fonction",st:"Statut",v:"Version",n:"Précision",planned:"prévue ",menu:"Menu Harvester :",none:"Rien ne correspond à ce filtre.",
      tiles:{ok:"faites",part:"partielles",todo:"manquantes",plus:"console seulement"},
-     foot:"Source : harvester-ui-extension v1.9.0 (config, models, edit, dialog) et docs.harvesterhci.io/v1.9. Chaque ligne manquante porte la version où elle est prévue ; la page est remise à jour à chaque release.",
+     foot:"Source : harvester-ui-extension v1.9.1 (config, models, edit, dialog) et docs.harvesterhci.io/v1.9. Chaque ligne manquante porte la version où elle est prévue ; la page est remise à jour à chaque release.",
      L:{ok:"Fait",part:"Partiel",todo:"Manquant",plus:"Console seulement",na:"Hors périmètre"}},
- en:{title:"Parity with the Harvester UI",sub:(a,dt)=>`The harvester-ops console v${a}, function by function, against the Harvester v1.9 UI: what is done, what is still missing and the version it comes in. Menus taken from the harvester-ui-extension v1.9.0 source. Status on ${dt}.`,
+ en:{title:"Parity with the Harvester UI",sub:(a,dt)=>`The harvester-ops console v${a}, function by function, against the Harvester v1.9.1 UI: what is done, what is still missing and the version it comes in. Menus taken from the harvester-ui-extension v1.9.1 source. Status on ${dt}.`,
      search:"Find a function…",fn:"Function",st:"Status",v:"Version",n:"Note",planned:"planned ",menu:"Harvester menu:",none:"Nothing matches this filter.",
      tiles:{ok:"done",part:"partial",todo:"missing",plus:"console only"},
-     foot:"Source: harvester-ui-extension v1.9.0 (config, models, edit, dialog) and docs.harvesterhci.io/v1.9. Each missing line shows the version it is planned for; the page is updated at every release.",
+     foot:"Source: harvester-ui-extension v1.9.1 (config, models, edit, dialog) and docs.harvesterhci.io/v1.9. Each missing line shows the version it is planned for; the page is updated at every release.",
      L:{ok:"Done",part:"Partial",todo:"Missing",plus:"Console only",na:"Out of scope"}}};
 let lang = 'fr', q = '', on = {ok:true,part:true,todo:true,plus:true,na:true};
 try { lang = localStorage.getItem('parity-lang') || 'fr'; } catch (e) {}
