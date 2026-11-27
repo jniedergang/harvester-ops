@@ -517,6 +517,14 @@ def cmd_status(args):
         print("ready" if st["ready"] else "missing: " + ", ".join(st["missing"]))
         if st["legacy"]:
             print("legacy installation: " + ", ".join(st["legacy_namespaces"]))
+        drift = st.get("shim_drift") or {}
+        if drift.get("foreign"):
+            print("ingress-expose-foreign: kube-system/ingress-expose is also managed by "
+                  + ", ".join(drift.get("managers") or []))
+        elif drift.get("needed") and not drift.get("present"):
+            print("ingress-expose missing for CAPHV" + (": run repair-shim" if drift.get("repair") else "")
+                  + (" (clusters at risk: " + ", ".join(drift["clusters_at_risk"]) + ")"
+                     if drift.get("clusters_at_risk") else ""))
     return EXIT_OK if st["ready"] else EXIT_FAIL
 
 
@@ -533,6 +541,25 @@ def cmd_install(args):
         cs.install(kube, desc, step, wait=not args.no_wait, timeout=args.timeout, pushed=args.push_images)
     except (RuntimeError, KubeError) as e:
         step("providers", "error", str(e)[:300])
+        return EXIT_FAIL
+    return EXIT_OK
+
+
+def cmd_repair_shim(args):
+    """2.10.1 (point 321 B) : repose `kube-system/ingress-expose` pour le
+    CAPHV installé quand Harvester l'a retiré après l'installation (mise à
+    jour en 1.9.1 d'un cluster venu de 1.8). Action suivie, jamais une tâche
+    de fond ; refus si le service porte un autre gestionnaire."""
+    if _refuse_during_uninstall(args, "providers"):
+        return EXIT_BLOCKED
+    kube, _, _ = kube_from(args)
+    desc = components_from(args.components)
+    if desc is None:
+        raise SystemExit("--components is required")
+    try:
+        cs.repair_shim(kube, desc.get("providers") or [], step)
+    except (RuntimeError, KubeError) as e:
+        step("compatibility", "error", str(e)[:300])
         return EXIT_FAIL
     return EXIT_OK
 
@@ -4499,6 +4526,7 @@ def main(argv=None):
     for name, fn, extra in (
             ("status", cmd_status, ("components", "json")),
             ("install", cmd_install, ("components", "install")),
+            ("repair-shim", cmd_repair_shim, ("components",)),
             ("cleanup-legacy", cmd_cleanup, ("dry",)),
             ("uninstall", cmd_uninstall, ("dry", "json", "uninstall")),
             ("inventory", cmd_inventory, ("components", "json")),

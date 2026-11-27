@@ -150,6 +150,12 @@ def stack_status(kube, wanted=()):
     out["legacy"] = bool(out["legacy_namespaces"])
     shim = shim_state(kube, wanted)
     out["shim"] = shim
+    try:
+        found = kube.list(K_CLUSTER)
+    except KubeError:
+        found = []
+    # 2.10.1 : contournement devenu nécessaire après l'installation (lecture)
+    out["shim_drift"] = shim_drift(kube, wanted, found, states)
     if shim["needed"] and not shim["present"]:
         out["missing"].append("compatibility/ingress-expose")
     out["contract"] = contract_state(kube, wanted)
@@ -243,6 +249,101 @@ def shim_state(kube, wanted=()):
     ours = present and _labels(svc).get(SHIM_LABEL) == "caphv-ingress-expose"
     return {"needed": bool(needed_by) and (not present or ours),
             "present": present, "ours": ours, "vip": vip}
+
+
+def _foreign_managers(svc):
+    """Gestionnaires `managedFields` du service autres que la console, hors
+    sous-ressource `status` (kube-vip y écrit l'adresse). Un `ingress-expose`
+    reposé par Harvester par-dessus notre service garde notre étiquette mais
+    porte son propre gestionnaire (hypothèse de la 2.10.1, à relire sur
+    harvlab en 1.9.1)."""
+    out = []
+    for m in ((svc or {}).get("metadata") or {}).get("managedFields") or []:
+        if m.get("subresource") == "status" or m.get("manager") in (None, "", "harvester-ops"):
+            continue
+        out.append(m["manager"])
+    return sorted(set(out))
+
+
+def _caphv_clusters(clusters):
+    """`ns/nom` des clusters Cluster API servis par CAPHV (infrastructure
+    HarvesterCluster, ou sans infrastructure lue) ; jamais `fleet-local/local`
+    (le cluster de Rancher)."""
+    out = []
+    for c in clusters or []:
+        md = c.get("metadata") or {}
+        ref = (c.get("spec") or {}).get("infrastructureRef") or {}
+        if (md.get("namespace"), md.get("name")) == ("fleet-local", "local"):
+            continue
+        if ref.get("kind") and ref["kind"] != "HarvesterCluster":
+            continue
+        out.append(f"{md.get('namespace')}/{md.get('name')}")
+    return sorted(out)
+
+
+def shim_drift(kube, wanted=(), clusters=(), states=None):
+    """2.10.1 (point 321 B) : le service de remplacement est-il nécessaire
+    MAINTENANT, pour le CAPHV installé, et pas seulement à l'installation ?
+    Une mise à jour en 1.9.1 d'un cluster venu de 1.8 peut retirer
+    `ingress-expose` après la pose de la pile : CAPHV v0.10.1 échoue alors en
+    boucle (« problem in getting the ingress-expose service »).
+
+    `wanted` : fournisseurs du paquet (leurs `workarounds`) ; seul compte un
+    fournisseur installé dans la version du paquet qui porte le
+    contournement. `clusters` : objets Cluster lus. Lecture seule : la
+    réparation est l'action `repair-shim` (jamais une tâche de fond).
+    `states` : états des fournisseurs déjà lus (stack_status), sinon relus.
+    Rend {needed, present, ours, foreign, managers, vip, repair,
+    clusters_at_risk}."""
+    providers = states
+    if providers is None:
+        try:
+            providers = [provider_state(p) for p in kube.list(K_CAPIPROVIDER)]
+        except KubeError:
+            providers = []
+    needed_by = [w for w in wanted or [] if "ingress-expose" in (w.get("workarounds") or [])
+                 and any(p["name"] == w["name"] and p["type"] == w["type"] and p["version"] == w.get("version")
+                         for p in providers)]
+    svc = kube.get("services", SHIM_NS, SHIM_NAME)
+    present = svc is not None
+    ours = present and _labels(svc).get(SHIM_LABEL) == "caphv-ingress-expose"
+    managers = _foreign_managers(svc) if ours else []
+    foreign = bool(managers)
+    needed = bool(needed_by) and (not present or ours) and not foreign
+    vip = harvester_vip(kube) if needed and not present else None
+    return {"needed": needed, "present": present, "ours": ours, "foreign": foreign, "managers": managers,
+            "vip": vip, "repair": needed and not present and bool(vip),
+            "clusters_at_risk": _caphv_clusters(clusters) if needed and not present else []}
+
+
+def repair_shim(kube, wanted, step):
+    """Action `repair-shim` : repose le service de remplacement quand
+    `shim_drift` le dit nécessaire et absent. Refus (RuntimeError) : service
+    reposé par un autre gestionnaire (`ingress-expose-foreign`, jamais
+    réparé d'office), VIP introuvable. Rend l'état relu."""
+    try:
+        found = kube.list(K_CLUSTER)
+    except KubeError:
+        found = []
+    d = shim_drift(kube, wanted, found)
+    if d["foreign"]:
+        raise RuntimeError("ingress-expose-foreign: kube-system/ingress-expose is also managed by "
+                           + ", ".join(d["managers"]) + "; the console does not overwrite it")
+    if not d["needed"] or d["present"]:
+        step("compatibility", "done", "nothing to repair: " + (
+            "the compatibility service is present" if d["present"] and d["ours"] else
+            "Harvester has its own ingress-expose" if d["present"] else
+            "no installed provider needs ingress-expose"))
+        return d
+    if not d["vip"]:
+        raise RuntimeError("cannot find the Harvester VIP (services kube-system/rke2-traefik "
+                           "and ingress-expose have no address)")
+    kube.apply([shim_manifest(d["vip"])])
+    msg = f"ingress-expose recreated for CAPHV (VIP {d['vip']})"
+    if d["clusters_at_risk"]:
+        msg += "; clusters served again: " + ", ".join(d["clusters_at_risk"])
+    step("compatibility", "done", msg)
+    return shim_drift(kube, wanted, found)
 
 
 def shim_manifest(vip):

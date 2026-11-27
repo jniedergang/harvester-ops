@@ -247,6 +247,52 @@ def test_capi_banner_when_the_stack_is_not_installed(context, flask_server, stac
     assert page.evaluate("location.hash") == "#automation/capi/installation"
 
 
+# 2.10.1 (point 321 B) : ingress-expose retiré après l'installation
+DRIFT = {"needed": True, "present": False, "ours": False, "foreign": False, "managers": [], "vip": "172.16.2.60",
+         "repair": True, "clusters_at_risk": ["apps/a", "web/<b>"]}
+STACK_DRIFT = dict(STACK_READY, ready=False, missing=["compatibility/ingress-expose"], shim={"needed": True},
+                   shim_drift=DRIFT)
+
+
+def test_capi_banner_names_the_clusters_at_risk(context, flask_server):
+    page = open_auto(context, flask_server, "#automation/capi", stack=STACK_DRIFT)
+    box = page.locator("#capi-stack-banner .capi-stack-missing")
+    expect(box.locator("[data-capi-at-risk]")).to_contain_text("apps/a, web/<b>")
+
+
+@pytest.mark.parametrize("role,drift,state,enabled", [
+    ("admin", DRIFT, "missing", True),
+    ("operator", DRIFT, "missing", False),                                   # bouton grisé, info-bulle
+    ("admin", dict(DRIFT, repair=False, vip=None), "missing", False),
+    ("admin", dict(DRIFT, needed=False, present=True, ours=True, foreign=True, managers=["helm"], repair=False,
+                   clusters_at_risk=[]), "foreign", None),
+])
+def test_installation_says_the_drift_and_repairs_by_a_tracked_action(context, flask_server, role, drift, state,
+                                                                       enabled):
+    posted = []
+    context.route(re.compile(r".*/api/whoami$"), lambda r, q: fulfill(
+        r, {"role": role, "roles_active": True, "user": "u", "auth": "local"}))
+    page = open_auto(context, flask_server, "#automation/capi/installation", stack=dict(STACK_DRIFT, shim_drift=drift))
+    page.route(re.compile(r".*/api/capi/harv-fake/repair-shim$"),
+               lambda r, q: (posted.append(q.method), fulfill(r, {"action_id": "r1"}, 201)))
+    box = page.locator(f'[data-capi-shim="{state}"]')
+    expect(box).to_be_visible(timeout=8000)
+    btn = box.locator("#btn-capi-repair-shim")
+    if enabled is None:
+        expect(box).to_contain_text("helm")
+        expect(btn).to_have_count(0)
+        return
+    assert btn.get_attribute("data-tip")
+    if not enabled:
+        expect(btn).to_be_disabled()
+        return
+    expect(box).to_contain_text("apps/a, web/<b>")
+    page.evaluate("window.confirm = () => true")
+    btn.click()
+    expect(page.locator("#capi-install-result")).to_contain_text("r1")
+    assert posted == ["POST"]
+
+
 # --- historique ----------------------------------------------------------------------------
 
 TF_ACT = {

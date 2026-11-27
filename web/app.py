@@ -1292,6 +1292,8 @@ ADMIN_ONLY_PREFIXES = (
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
+                       # 2.10.1 : reposer le service de compatibilité de CAPHV
+                       "/repair-shim",
                        # 2.9.0 : remettre l'état chiffré d'une déclaration en clair
                        "/decrypt-state",
                        # 2.9.0 : oublier les secrets gardés d'un déroulé arrêté
@@ -23895,6 +23897,27 @@ def api_capi_cleanup_legacy(cluster):
     return jsonify({"action_id": run.id, "dry_run": dry}), 201
 
 
+@app.route("/api/capi/<cluster>/repair-shim", methods=["POST"])
+@requires_auth
+@_rate_limit("6 per minute")
+def api_capi_repair_shim(cluster):
+    """2.10.1 (point 321 B) : repose kube-system/ingress-expose pour le
+    CAPHV installé quand Harvester l'a retiré après l'installation (mise à
+    jour en 1.9.1). Action suivie `capi-repair-shim:` ; administrateur
+    (suffixe dans ADMIN_ONLY_SUFFIXES)."""
+    comp = _capi_components_dir()
+    if comp is None:
+        return jsonify({"error": "the active bundle has no Turtles providers",
+                        "hint": "build or activate a bundle (harvester-ops 1.48 or later)"}), 412
+    cmd, err = _capi_base(cluster, "repair-shim")
+    if err:
+        return err
+    run, err = _capi_action(cluster, f"capi-repair-shim:{cluster}", cmd + ["--components", str(comp)])
+    if err:
+        return err
+    return jsonify({"action_id": run.id}), 201
+
+
 @app.route("/api/capi/<cluster>/cluster/<namespace>/<name>/scale", methods=["POST"])
 @requires_auth
 def api_capi_cluster_scale(cluster, namespace, name):
@@ -38006,6 +38029,8 @@ def _deploy_readiness_phase(cluster, kc_ref, plan, expected=None):
         reads = _deploy_read_cluster(kc, cluster)
         if capi_on:
             reads.update(_deploy_read_capi(kc, cluster))
+            # 2.10.1 : contournements du paquet actif (ingress-expose-missing)
+            reads["capi_wanted"] = _capi_bundle_providers()
         return _drd.evaluate(reads, expected_nodes=expected, phases=capi_on)
 
     def execute(ctx, state):

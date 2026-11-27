@@ -25,6 +25,11 @@ Constats (code, détail) :
   neuve de 1.9) ni `kube-system/ingress-expose` (cluster mis à jour depuis
   1.8) ne donne l'adresse de Harvester (capi_stack.harvester_vip, d'où la
   console tire l'adresse de l'identité restreinte) ;
+- `ingress-expose-missing` (2.10.1, point 321 B), phase `clusters` sans
+  phase `capi` : le CAPHV installé (version du paquet, lu dans
+  `capi_wanted`) a besoin de `kube-system/ingress-expose`, retiré par
+  Harvester après l'installation (mise à jour en 1.9.1) ; règle de
+  capi_stack.shim_drift. Avec la phase `capi`, l'installation le recrée ;
 - `turtles-not-ready` : aucun `CAPIProvider` lisible, ou cœur Cluster API
   pas prêt. Règle de capi_stack.stack_status, appelée sur les objets lus
   (jamais recopiée). Une pile de fournisseurs absente n'est PAS un constat
@@ -41,7 +46,7 @@ CAPI_READS = ("server_version", "traefik", "ingress_expose", "capi_providers")
 CAPI_PHASES = ("capi", "clusters")
 CODES = ("api-unreachable", "read-failed", "nodes-missing", "nodes-not-ready", "charts-not-ready",
          "longhorn-not-schedulable", "no-default-storageclass",
-         "harvester-too-old", "rke2-traefik-no-address", "turtles-not-ready")
+         "harvester-too-old", "rke2-traefik-no-address", "ingress-expose-missing", "turtles-not-ready")
 MIN_HARVESTER = (1, 9)
 
 
@@ -79,7 +84,7 @@ def harvester_too_old(ver):
     return isinstance(parsed, tuple) and parsed[:2] < MIN_HARVESTER
 
 
-def capi_unmet(reads):
+def capi_unmet(reads, phases=()):
     """Constats Cluster API de la disponibilité (voir l'en-tête)."""
     unmet = []
     ver = reads.get("server_version")
@@ -92,6 +97,12 @@ def capi_unmet(reads):
     if not capi_stack.harvester_vip(kube):
         unmet.append({"code": "rke2-traefik-no-address",
                       "detail": "neither kube-system/rke2-traefik nor ingress-expose gives the Harvester address"})
+    if "capi" not in (phases or ()):
+        drift = capi_stack.shim_drift(kube, reads.get("capi_wanted") or [])
+        if drift["needed"] and not drift["present"]:
+            unmet.append({"code": "ingress-expose-missing",
+                          "detail": "CAPHV needs kube-system/ingress-expose, which Harvester removed after the "
+                                    "installation: Installation tab, Repair the address for CAPHV"})
     st = capi_stack.stack_status(kube)
     if not st["turtles"] or not (st["core"] or {}).get("ready"):
         unmet.append({"code": "turtles-not-ready",
@@ -167,5 +178,5 @@ def evaluate(reads, expected_nodes=None, phases=()):
             ((s.get("metadata") or {}).get("annotations") or {}).get(DEFAULT_CLASS_ANN) == "true" for s in scs):
         unmet.append({"code": "no-default-storageclass", "detail": "no storage class is marked as default"})
     if any(p in CAPI_PHASES for p in phases or ()):
-        unmet.extend(capi_unmet(reads))
+        unmet.extend(capi_unmet(reads, phases))
     return {"ready": not unmet, "unmet": unmet}
