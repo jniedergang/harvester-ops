@@ -46,11 +46,13 @@ INGRESS_NAMESPACE = "kube-system"
 INGRESS_POD_LABELS = {"app.kubernetes.io/name": "rke2-ingress-nginx",
                       "app.kubernetes.io/component": "controller"}
 # 2.10.1 (point 322 A) : RKE2 v1.36 déploie Traefik par défaut sur un cluster
-# neuf (docs RKE2, networking_services), chart rke2-traefik dans kube-system ;
-# étiquette de sélection du chart amont traefik (`traefik.labelselector`,
-# app.kubernetes.io/name = nom du chart). Hypothèse à relire sur un enfant
-# v1.36.4 (plan 2.10.1, tâche 1, essai 7).
-TRAEFIK_POD_LABELS = {"app.kubernetes.io/name": "traefik"}
+# neuf (docs RKE2, networking_services), chart rke2-traefik dans kube-system.
+# Étiquettes relevées sur l'enfant hops-c136 (RKE2 v1.36.4+rke2r1, chart
+# rke2-traefik-40.1.010, harv1 en 1.9.1, 27/11/2026), les mêmes sur Harvester
+# 1.9.1 (RKE2 v1.36.6, chart rke2-traefik-40.1.022). `traefik` seul est
+# l'étiquette du chart de k3s.
+TRAEFIK_POD_LABELS = {"app.kubernetes.io/name": "rke2-traefik",
+                      "app.kubernetes.io/instance": "rke2-traefik-kube-system"}
 INGRESS_CONTROLLERS = (INGRESS_POD_LABELS, TRAEFIK_POD_LABELS)
 DNS_POD_LABELS = {"k8s-app": "kube-dns"}
 

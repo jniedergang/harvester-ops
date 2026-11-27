@@ -8,9 +8,10 @@ d'équipe en délai dépassé. Les politiques déjà posées sur un enfant ne so
 pas réécrites en silence : la console les dit périmées
 (`child-ingress-policy-stale`), elles se repassent par le chemin de la 2.7.0.
 
-Hypothèse à confirmer au banc (tâche 1, essai 7, enfant v1.36.4) : les pods
-du chart rke2-traefik portent `app.kubernetes.io/name: traefik` (étiquette de
-sélection du chart amont traefik, `traefik.labelselector`), dans kube-system.
+Relevé au banc (tâche 1, essai 7, enfant v1.36.4 sur harv1, 27/11/2026) : les
+pods du chart rke2-traefik portent `app.kubernetes.io/name: rke2-traefik` et
+`app.kubernetes.io/instance: rke2-traefik-kube-system`, dans kube-system
+(l'hypothèse `traefik` était fausse : c'est l'étiquette de k3s).
 
 Mutations rapportées (rapport 2.10.1, tâche 4) : « étiquette Traefik
 retirée » -> `test_ingress_admits_both_controllers[traefik]` échoue ;
@@ -30,7 +31,15 @@ import rke2_offline as ro  # noqa: E402
 KS = {"kubernetes.io/metadata.name": "kube-system"}
 NGINX = {"app.kubernetes.io/name": "rke2-ingress-nginx", "app.kubernetes.io/component": "controller",
          "app.kubernetes.io/instance": "rke2-ingress-nginx"}
-TRAEFIK = {"app.kubernetes.io/name": "traefik", "app.kubernetes.io/instance": "rke2-traefik-kube-system"}
+# Étiquettes relevées en réel (jamais la constante du module) : pod
+# rke2-traefik-slxkz de l'enfant hops-c136 (RKE2 v1.36.4+rke2r1, chart
+# rke2-traefik-40.1.010, harv1 en 1.9.1, 27/11/2026), mêmes valeurs sur
+# Harvester 1.9.1 lui-même (RKE2 v1.36.6, chart rke2-traefik-40.1.022).
+TRAEFIK = {"app.kubernetes.io/instance": "rke2-traefik-kube-system", "app.kubernetes.io/managed-by": "Helm",
+           "app.kubernetes.io/name": "rke2-traefik", "controller-revision-hash": "b647d6d8b",
+           "helm.sh/chart": "rke2-traefik-40.1.010", "pod-template-generation": "1"}
+# k3s : chart `traefik`, pas un contrôleur de RKE2
+K3S_TRAEFIK = {"app.kubernetes.io/name": "traefik", "app.kubernetes.io/instance": "traefik-kube-system"}
 
 
 def _matches(peer, ns_labels, pod_labels):
@@ -53,7 +62,8 @@ def test_selectors_exact():
          "podSelector": {"matchLabels": {"app.kubernetes.io/name": "rke2-ingress-nginx",
                                          "app.kubernetes.io/component": "controller"}}},
         {"namespaceSelector": {"matchLabels": KS},
-         "podSelector": {"matchLabels": {"app.kubernetes.io/name": "traefik"}}}]
+         "podSelector": {"matchLabels": {"app.kubernetes.io/name": "rke2-traefik",
+                                         "app.kubernetes.io/instance": "rke2-traefik-kube-system"}}}]
     assert _allow_ingress()["spec"]["ingress"] == [{"from": cp.ingress_selectors()}]
 
 
@@ -63,6 +73,7 @@ def test_selectors_exact():
     ("nginx outside kube-system", {"kubernetes.io/metadata.name": "equipe-b"}, NGINX, False),
     ("traefik outside kube-system", {"kubernetes.io/metadata.name": "equipe-b"}, TRAEFIK, False),
     ("another kube-system pod", KS, {"k8s-app": "kube-dns"}, False),
+    ("k3s traefik is not RKE2's", KS, K3S_TRAEFIK, False),
     ("nginx admission webhook", KS, dict(NGINX, **{"app.kubernetes.io/component": "admission-webhook"}), False),
 ])
 def test_ingress_admits_both_controllers(label, ns, pod, admitted):
