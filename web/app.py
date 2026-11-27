@@ -21175,9 +21175,21 @@ def api_hv_settings(cluster):
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
     if _cluster_reachable(kc) is False:
         return jsonify(_unreachable_payload(cluster, kc)), 200
-    got = _kubectl_json(kc, "get", _hset.K_SETTING, timeout=30, cluster=cluster) or {}
-    return jsonify({"cluster": cluster, "groups": list(_hset.GROUPS),
-                    "items": _hset.rows(got.get("items") or [], show_hidden=request.args.get("hidden") == "1")})
+    from concurrent.futures import ThreadPoolExecutor
+
+    def items(*args):
+        d = _kubectl_json(kc, "get", *args, timeout=30, cluster=cluster)
+        return None if d is None else (d.get("items") or [])
+    # 2.10.1 : contrôleur d'ingress de Harvester (chart et service de RKE2),
+    # pour dire quel réglage TLS est sans effet
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_set = pool.submit(items, _hset.K_SETTING)
+        f_chart = pool.submit(items, "helmcharts.helm.cattle.io", "-n", "kube-system")
+        f_svc = pool.submit(items, "services", "-n", "kube-system")
+        got, charts, services = f_set.result() or [], f_chart.result(), f_svc.result()
+    ingress = _hset.ingress_kind(charts, services)
+    return jsonify({"cluster": cluster, "groups": list(_hset.GROUPS), "ingress": ingress,
+                    "items": _hset.rows(got, show_hidden=request.args.get("hidden") == "1", ingress=ingress)})
 
 
 def _private_file(files, text, prefix):
