@@ -80,6 +80,9 @@ EXPECTED = [
     ("web-vms", "", "persistentvolumeclaims", ["list", "delete"], None),
     ("web-vms", "loadbalancer.harvesterhci.io", "loadbalancers", ["get", "create", "delete"], None),
     ("default", "harvesterhci.io", "virtualmachineimages", ["list"], None),
+    # 2.10.1 : Harvester v1.9.1 exige `get` sur l'image d'un volumeClaimTemplate
+    # (webhook, vu sur harv1 1.9.1 le 27/11/2026 : création refusée sans lui)
+    ("default", "harvesterhci.io", "virtualmachineimages", ["get"], ["image-abc"]),
     ("default", "harvesterhci.io", "keypairs", ["get"], ["ju"]),
     ("harvester-system", "apps", "deployments", ["get"], ["harvester"]),
     ("kube-system", "", "services", ["get"], ["ingress-expose"]),
@@ -167,8 +170,8 @@ def test_minimal_demand_objects_and_labels():
 
 
 @pytest.mark.parametrize("image,key,side", [
-    ("default/img", "default/ju", {"default": ["virtualmachineimages", "keypairs"]}),
-    ("images/img", "keys/ju", {"images": ["virtualmachineimages"], "keys": ["keypairs"]}),
+    ("default/img", "default/ju", {"default": ["virtualmachineimages", "virtualmachineimages", "keypairs"]}),
+    ("images/img", "keys/ju", {"images": ["virtualmachineimages", "virtualmachineimages"], "keys": ["keypairs"]}),
     ("web-vms/img", "web-vms/ju", {}),   # dans le namespace des VMs : rôle de ce namespace
 ])
 def test_image_and_key_namespaces(image, key, side):
