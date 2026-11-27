@@ -4,6 +4,186 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.10.1] - 2026-11-27 - Remaining real checks and Harvester 1.9.1
+
+### Fixed
+- **Cluster API machines refused on Harvester 1.9.1** (found on the bench).
+  Harvester v1.9.1 adds a webhook check that whoever creates a VM may `get`
+  the image behind each volume claim template
+  (`pkg/webhook/resources/virtualmachine/validator.go`). The restricted
+  CAPHV identity had `list` on images only: on 1.9.1 no machine of a new
+  cluster was ever created (`is not authorized to access image`). New
+  clusters get `get` on their image. **Clusters created by 2.10.0 or
+  earlier keep their old identity Role**: on a Harvester upgraded to 1.9.1,
+  their new machines (scale, rolling update, remediation) are refused until
+  the rule is added; the console does not rewrite an existing identity. The
+  `kubectl patch` to run is in Troubleshooting ("Cluster API machines
+  refused on Harvester 1.9.1"); checked on harv1: refused without the rule,
+  machine created ten seconds after it.
+- **`harvester-registry` and `harvester-plans` did not start in the shipped
+  container** (found on the bench, also in the 2.9.1 image). The image puts
+  `bin/` in `/usr/local/bin` and `web/` in `/opt/harvester-ops/web`;
+  `hcl_guard` and `deploy_plans` looked for `web/` next to `bin/` and died
+  on import (`tf_guard` not found): bootstrap registries, publishing and
+  deployment plans failed in a packaged console. Both now load the console
+  modules through `web_loader`, which knows both layouts.
+- **`ingress-expose` for CAPHV v0.10.1 after a Harvester 1.9.1 upgrade or
+  restart.** Harvester 1.9.x deletes `kube-system/ingress-expose` each time
+  its controller starts while `rke2-traefik` exists
+  (`pkg/controller/master/rancher/register.go`; seen on harv1: the
+  stand-in deleted five minutes after it was posed, at a cold boot), so the
+  finding comes back after every Harvester reboot, not only after the
+  upgrade. The Installation tab, the Clusters banner and the plan readiness
+  say it (`ingress-expose-missing`, clusters at risk named) and **Repair the
+  address for CAPHV** (administrators, tracked action, `harvester-capi
+  repair-shim`) creates the stand-in again: create only, never over an
+  existing Service, refused while an upgrade runs (`upgrade-running`), a
+  Service owned by another manager is left alone (`ingress-expose-foreign`,
+  now read with `--show-managed-fields`: kubectl omitted them and the rule
+  saw nothing; annotation-only writers such as kube-ovn-controller and
+  kube-vip do not count). No silent re-creation (decision 321 B).
+- **Ingress policy of child clusters**: `hops-allow-ingress` admits RKE2's
+  Traefik by the labels its chart really sets
+  (`app.kubernetes.io/name: rke2-traefik`,
+  `app.kubernetes.io/instance: rke2-traefik-kube-system`, read on a v1.36.4
+  child), next to ingress-nginx. A policy laid before is said outdated
+  (`child-ingress-policy-stale`) and updated by applying the policies again.
+- **TLS settings follow the ingress controller read on the cluster**:
+  `ssl-parameters` is marked without effect under Traefik only,
+  `traefik-default-tls-options` under ingress-nginx only.
+- **LVM storage classes** are created `dm-thin` by default; `striped` is
+  refused from Harvester 1.9.1 and warned before.
+- **Upgrade to 1.9.1**: checks judged on the version read from the target
+  (`lvm-pre-ga-volumes` blocking and forcible, `lvm-striped-volumes`,
+  `rancher-vcluster-deprecated`, `ingress-nginx-objects` without Harvester's
+  and Rancher's own Ingresses, `vm-migration-failure-policy`), and for any
+  target `console-ingress-expose-present`. The box **Shut down VMs whose
+  migration fails** starts from the value in place and sends `false` when
+  unticked on `true`; the previous `upgrade-config` is kept on the
+  `Upgrade` object and set back by the start action, **Follow** or
+  **Dismiss**, so a cancelled action, a timeout, a silent API or a console
+  restart no longer leave the policy behind.
+- **Mode A commands replay as they are**: every `bao auth enable` and
+  `bao secrets enable` (assistant, personal tokens, External Secrets) is
+  guarded by a read of the mount list; the External Secrets tab says
+  **ready** once every store is `Ready`; the OpenTofu child-token role of
+  mode A is bound to the console range (`token_bound_cidrs`, decision 327).
+- **A secret lost in OpenBao** (restore that lost it) answers 409
+  `secret-missing` with the class and the reference (never a value) instead
+  of 500. Some routes that answered 404 or 500 on a missing secret reference
+  now answer 409.
+- The Repair button keeps its tooltip when it is disabled.
+
+### Changed
+- Parity table against harvester-ui-extension v1.9.1 (`AS_OF` 2.10.1); the
+  missing disk and VM performance options say "not yet", no version is
+  promised.
+- Kubernetes v1.36.4 is marked tested in the Cluster API bundle notes
+  (Traefik default); the default stays v1.34.11 (decision 323).
+
+### Upgrade notes
+- Clusters created by Cluster API with 2.10.0 or earlier on a Harvester
+  upgraded to 1.9.1: add `get` on their image to the identity Role
+  (Troubleshooting) before scaling them or rolling their machines.
+- After every reboot of a Harvester 1.9 that runs CAPHV v0.10.1 clusters:
+  **Repair the address for CAPHV**.
+- Before an upgrade of a Harvester that carries the console's
+  `ingress-expose` (warning `console-ingress-expose-present`): repair it
+  once the upgrade is over.
+- Rotating Rancher's OIDC signing key: the private key must be PKCS#1
+  (`BEGIN RSA PRIVATE KEY`); with static keys in mode A, person reads fail
+  from the rotation to **Update the keys** (Secrets doc).
+
+### Tests
+- API: managedFields read for real, annotation-only writers, create-only
+  repair with the console field manager, race with a Service that appears,
+  refusal during an upgrade, console stand-in warning for any target, value
+  of `upgrade-config` kept on the Upgrade and set back by follow and dismiss
+  after cancel, timeout, silent API and restart, unticked box on `true`,
+  restricted identity with `get` on the image, Traefik labels as read on a
+  child (not the module constant), every tool started in the container
+  layout, base mode A commands guarded. E2E: Repair tooltip on its wrapper,
+  migration box from the value in place.
+- Mutations replayed: Traefik label `traefik`, `parents[2] / "web"`,
+  managedFields without the flag, repair by apply.
+- Full suites before the version commit: API 15620 passed, 10 skipped; E2E
+  1427 passed.
+
+### Verified for real
+- **Harvester 1.9.1** (harv1, upgraded from a fresh 1.9.0, and harvlab,
+  upgraded from 1.8 through 1.9.0): no `ingress-expose`, VIP on
+  `rke2-traefik`, IngressClass `traefik`, HelmChart and service of
+  ingress-nginx gone; `upgrade-config` default carries
+  `shutdownVMOnMigrationFailure: false`; Kube-OVN add-on 1.16.2 with
+  `pingerExternalAddress: 1.1.1.1` and `pingerExternalDomain: google.com.`;
+  storage options say `dm-thin` default and `striped` refused.
+- **Cluster API on harv1 1.9.1**: Repair the address for CAPHV (twice, the
+  second time create only with the console manager), children v1.36.4 and
+  v1.34.11 Available, an identity of 2.10.0 refused then fixed by the
+  documented patch.
+- **Team Ingress on a v1.36.4 child**: 200 through `hops-allow-ingress`,
+  time-out with the 2.10.0 policy and with the `traefik` label; the policy
+  stored by 2.10.0 said outdated, then updated by applying the policies
+  again (200).
+- **TLS settings on harvlab**: `traefik-default-tls-options` changed the
+  `kube-system/default` TLSOption in 20 s, `ssl-parameters` left it as it
+  was; badges right on harv1, harvlab and harvlab2.
+- **Per-person token by Terraform (R4 of 2.10.0)**: a KVM declaration on
+  node2 (OpenTofu 1.12.9, libvirt provider 0.9.9 of the package, state
+  encrypted by transit in mode A) planned, applied, decrypted and destroyed
+  by the Rancher administrator signed in by single sign-on, with the person
+  token revoked a few seconds after each launch and the Rancher session
+  signed out during `destroy` and `decrypt-state`: actions done, Activity
+  "personal token", one read of `ssh-kvm` by the person at each launch in
+  the OpenBao audit and none after.
+- **Real rotation of Rancher's OIDC signing key** (rancher-manager, Rancher
+  v2.14.1, agreement of the product owner): key2 added, key retired;
+  discovery without break; static keys: person reads refused until the
+  banner and **Update the keys**, then **Confirm the keys**; Rancher healthy
+  after (clusters, auth config and OIDC clients unchanged apart from the
+  key). A PKCS#8 key stopped Rancher's token exchange for 71 s (rewritten
+  in PKCS#1).
+- **External Secrets in B1 end to end** on the client VM hops-upd (2.10.1
+  package installed by hand, B1, listener on its static address, chart
+  2.14.0 published to a bootstrap registry on harvlab2, child created by
+  the console): two namespaces, one refused on the other's path, rotation
+  reached the synced Secret within 10 s, removal kept the Secrets and turned
+  the listener off; hops-upd then back on 2.10.0 by `install.sh --upgrade`.
+- **External Secrets in mode A**: the commands of the window run twice as
+  they are (`set -e`, exit 0) on OpenBao 2.7.2, stores `Ready`, tab
+  "ready", a value written from the tab synced.
+- The commands guard on Vault 1.14.2 too; a lost `ssh-cluster` secret gave
+  409 `secret-missing` on a real cluster SSH test.
+- Transfer check harv1 (1.9.1) to harvlab2 (1.9.0): `version-older`.
+
+### Not verified for real
+- Groups fed by Rancher's `groups` claim; Rancher behind Active Directory or
+  SAML; Harvester 1.9.1 Prime (community build only); an upgrade 1.9.0 to
+  1.9.1 started from the console (harvlab and harv1 were upgraded before);
+  a child cluster with ESO on a Harvester with several nodes; the
+  **Défaire** of a plan with External Secrets (the B1 child was created
+  directly); the real copy to the clipboard of the mode A window (the
+  commands run were the action's, which the window copies unchanged).
+- LVM: no LVM add-on on any bench (driver GA names and topology read in
+  harvester-ui-extension v1.9.1 only); a pre-GA LVM volume really lost.
+- `rancher-vcluster` (absent from every bench); replication check across
+  versions (the transfer check was).
+- A KVM declaration outliving the 15-minute person token (none lasts that
+  long; expiry replaced by revocation).
+
+### Known limits
+- External Secrets chosen at cluster creation cannot find team namespaces on
+  a new cluster: the chart is installed and the action ends with
+  `eso-namespace-missing`; set ESO from the tab once the namespaces exist,
+  or use a plan whose Artefacts phase creates them first.
+- Harvester 1.9.1's Traefik refuses TLS 1.2 with its ECDSA certificate:
+  `maxVersion: VersionTLS12` in `traefik-default-tls-options` makes the VIP
+  unreachable.
+- A cluster upgraded from 1.8 to 1.9.0 can be left without any ingress
+  controller (harvlab2: `chart-content-rke2-traefik` missing, Harvester
+  issue #11741, fixed in 1.9.1); the console works through the Kubernetes
+  API.
+
 ## [2.10.0] - 2026-11-09 - Per-person OpenBao token and External Secrets Operator
 
 ### Added
