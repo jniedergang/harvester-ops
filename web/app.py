@@ -21515,12 +21515,22 @@ def api_upgrade(cluster):
              "nodes": ("nodes",), "volumes": ("volumes.longhorn.io", "-n", "longhorn-system"),
              "backups": ("virtualmachinebackups.harvesterhci.io", "-A"), "schedules": ("schedulevmbackups.harvesterhci.io", "-A"),
              "addons": ("addons.harvesterhci.io", "-A"), "charts": ("managedcharts.management.cattle.io", "-n", "fleet-local"),
-             "images": (_hup.K_IMAGE, "-n", _hup.NS)}
+             "images": (_hup.K_IMAGE, "-n", _hup.NS),
+             # 2.10.1 : contrôles d'une cible v1.9.1 ou plus
+             "scs": ("storageclasses",), "pvs": ("persistentvolumes",), "ingresses": ("ingresses", "-A"),
+             "hcharts": ("helmcharts.helm.cattle.io", "-n", "kube-system"), "ksvc": ("services", "-n", "kube-system"),
+             "ucfg": ("settings.harvesterhci.io", "upgrade-config")}
     with ThreadPoolExecutor(max_workers=len(reads)) as pool:
         futs = {k: pool.submit(_kubectl_json, kc, "get", *a, timeout=30, cluster=cluster) for k, a in reads.items()}
         got = {k: f.result() for k, f in futs.items()}
     items = lambda k: (got[k] or {}).get("items") or []  # noqa: E731
     current = (got["sv"] or {}).get("value") or ""
+    lvm = _hadv.lvm_volumes(items("scs"), items("pvs"))
+    ingress = _hset.ingress_kind(None if got["hcharts"] is None else items("hcharts"),
+                                 None if got["ksvc"] is None else items("ksvc"))
+
+    def checks(target):
+        return _hup.target_checks(current, target, lvm, items("addons"), items("ingresses"), ingress)
     ups = items("upgrades")
     lat = _hup.latest(ups)
     img = None
@@ -21534,18 +21544,29 @@ def api_upgrade(cluster):
             continue
         ok, why = _hup.eligible(current, rel["harvester"], rel["min_upgradable"])
         isos.append({"name": p.name, "size": p.stat().st_size, "release": rel, "eligible": ok, "reason": why,
-                     "sha512": _iso_sha512(p.name)})
+                     "sha512": _iso_sha512(p.name), "checks": checks(rel["harvester"])})
     os_images = [{"name": (i.get("metadata") or {}).get("name"), "display": (i.get("spec") or {}).get("displayName"),
                   "progress": (i.get("status") or {}).get("progress")}
                  for i in items("images") if ((i.get("metadata") or {}).get("annotations") or {}).get(_hup.A_OS_IMAGE) == "True"]
     return jsonify({"cluster": cluster, "current": current,
                     "checker": ((got["checker"] or {}).get("value") or (got["checker"] or {}).get("default") or "true") == "true",
-                    "versions": _hup.version_rows(items("versions"), current),
+                    "versions": [dict(v, checks=checks(v["name"])) for v in _hup.version_rows(items("versions"), current)],
+                    "migration_policy": _upgrade_migration_policy(got["ucfg"]),
                     "upgrade": _hup.upgrade_view(lat, img, items("nodes")) if lat else None,
                     "running": _hup.running(ups), "history": len(ups),
                     "isos": isos, "os_images": os_images,
                     "prechecks": _hup.prechecks(items("nodes"), items("volumes"), items("backups"), items("schedules"),
                                                 items("addons"), items("charts"), ups)})
+
+
+def _upgrade_migration_policy(setting):
+    """Valeur courante de shutdownVMOnMigrationFailure dans upgrade-config
+    (2.10.1), None si le réglage ne la porte pas ou est illisible."""
+    try:
+        doc = json.loads((setting or {}).get("value") or (setting or {}).get("default") or "{}")
+    except ValueError:
+        return None
+    return doc.get(_hup.MIGRATION_POLICY_KEY) if isinstance(doc, dict) else None
 
 
 @app.route("/api/upgrade/<cluster>/do/<action>", methods=["POST"])
@@ -21598,6 +21619,11 @@ def api_upgrade_do(cluster, action):
                 args.append("--no-log")
             if b.get("skip_single_replica"):
                 args.append("--skip-single-replica")
+            # 2.10.1 : point 325 A et contrôle lvm-pre-ga-volumes forcé
+            if b.get("shutdown_vm_on_migration_failure") is True:
+                args.append("--shutdown-vm-on-migration-failure")
+            if b.get("force_lvm_pre_ga") is True:
+                args.append("--force-lvm-pre-ga")
         elif action == "logs":
             name = _hup.check_name(b.get("name"), "upgrade")
             _kc_sweep()

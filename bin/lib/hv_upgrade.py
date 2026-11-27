@@ -354,3 +354,76 @@ def prechecks(nodes=(), volumes=(), vmbackups=(), schedules=(), addons=(), chart
                            for x in (c.get("status") or {}).get("conditions") or [])]
     out.append({"ok": not notready, "key": "charts", "text": ", ".join(notready)})
     return out
+
+
+# ---------------------------------------------------------------------------
+# 2.10.1 : contrôles propres à une cible v1.9.1 ou plus (notes de version
+# v1.9.1 : pilote CSI LVM en GA, volumes d'avant la GA perdus ; type LVM
+# striped déprécié ; add-on rancher-vcluster déprécié, retiré en v1.10.0 ;
+# ingress-nginx remplacé par Traefik ; upgrade-config gagne
+# shutdownVMOnMigrationFailure). Jugés sur la version LUE de la cible.
+# ---------------------------------------------------------------------------
+
+TARGET_191 = (1, 9, 1)
+MIGRATION_POLICY_KEY = "shutdownVMOnMigrationFailure"     # hypothèse à relire sur 1.9.1 (tâche 1, essai 9)
+VCLUSTER_ADDON = "rancher-vcluster"
+NGINX_ANN_PREFIX = "nginx.ingress.kubernetes.io/"
+
+
+def _at_least(v, ref):
+    p = parse_version(v)
+    return p == "dev" or (isinstance(p, tuple) and p[:3] >= ref)
+
+
+def _nginx_ingresses(ingresses):
+    out = []
+    for i in ingresses or []:
+        md = _meta(i)
+        cls = (i.get("spec") or {}).get("ingressClassName") or \
+            (md.get("annotations") or {}).get("kubernetes.io/ingress.class")
+        if cls == "nginx" or any(str(k).startswith(NGINX_ANN_PREFIX) for k in md.get("annotations") or {}):
+            out.append(f"{md.get('namespace')}/{md.get('name')}")
+    return sorted(out)
+
+
+def target_checks(current, target, lvm=None, addons=(), ingresses=(), ingress=None):
+    """[{key, ok, level, forcible, text}] d'une mise à jour vers `target`
+    (version lue : nom de la Version, release de l'ISO). Rien si la cible
+    est illisible ou en dessous de v1.9.1. `lvm` : hv_advanced.lvm_volumes ;
+    `ingress` : hv_settings.ingress_kind du cluster."""
+    if not _at_least(target, TARGET_191):
+        return []
+    lvm = lvm or {}
+    out = []
+    if (lvm.get("lvm") or []) and not _at_least(current, TARGET_191):
+        out.append({"key": "lvm-pre-ga-volumes", "ok": False, "level": "block", "forcible": True,
+                    "text": ", ".join(lvm["lvm"][:5]) + (" ..." if len(lvm["lvm"]) > 5 else "")})
+    if lvm.get("striped"):
+        out.append({"key": "lvm-striped-volumes", "ok": False, "level": "warn", "forcible": False,
+                    "text": ", ".join(lvm["striped"][:5])})
+    on = [f"{_meta(a).get('namespace')}/{_meta(a).get('name')}" for a in addons or []
+          if _meta(a).get("name") == VCLUSTER_ADDON and (a.get("spec") or {}).get("enabled")]
+    if on:
+        out.append({"key": "rancher-vcluster-deprecated", "ok": False, "level": "warn", "forcible": False,
+                    "text": ", ".join(on)})
+    ngx = _nginx_ingresses(ingresses) if ingress in ("nginx", "both") else []
+    if ngx:
+        out.append({"key": "ingress-nginx-objects", "ok": False, "level": "warn", "forcible": False,
+                    "text": ", ".join(ngx[:5]) + (" ..." if len(ngx) > 5 else "")})
+    out.append({"key": "vm-migration-failure-policy", "ok": True, "level": "info", "forcible": False, "text": ""})
+    return out
+
+
+def migration_policy_value(setting, on):
+    """(nouvelle valeur, valeur d'origine) du réglage `upgrade-config` avec
+    `shutdownVMOnMigrationFailure` = `on` ; la valeur d'origine est rendue
+    telle quelle après la mise à jour (vide = défaut de Harvester)."""
+    orig = (setting or {}).get("value") or ""
+    try:
+        doc = json.loads(orig or (setting or {}).get("default") or "{}")
+    except ValueError:
+        raise ValueError("upgrade-config: not valid JSON, fix the setting first") from None
+    if not isinstance(doc, dict):
+        raise ValueError("upgrade-config: a JSON object is expected")
+    doc[MIGRATION_POLICY_KEY] = bool(on)
+    return json.dumps(doc, separators=(",", ":")), orig

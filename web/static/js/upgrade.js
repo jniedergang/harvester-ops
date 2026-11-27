@@ -49,6 +49,12 @@ const Upgrade = (() => {
     'nodes-schedulable': tr('upg.chk.nodesSched'), volumes: tr('upg.chk.volumes'), backups: tr('upg.chk.backups'),
     schedules: tr('upg.chk.schedules'), addons: tr('upg.chk.addons'), charts: tr('upg.chk.charts'),
   });
+  // 2.10.1 : contrôles d'une cible v1.9.1 ou plus (version lue de la cible)
+  const CHECK191 = () => ({
+    'lvm-pre-ga-volumes': tr('upg.chk.lvmPreGa'), 'lvm-striped-volumes': tr('upg.chk.lvmStriped'),
+    'rancher-vcluster-deprecated': tr('upg.chk.vcluster'), 'ingress-nginx-objects': tr('upg.chk.nginxIngress'),
+    'vm-migration-failure-policy': tr('upg.chk.migrationPolicy'),
+  });
 
   const BODY = () => `<div class="upg-win">
         <div class="upg-head" data-upg="head"></div>
@@ -213,8 +219,11 @@ const Upgrade = (() => {
         </div>
         <label class="bk-check tip" data-tip="${esc(tr('upg.t.log'))}"><input type="checkbox" name="log" checked> <span>${esc(tr('upg.log'))}</span></label>
         <label class="bk-check tip" data-tip="${esc(tr('upg.t.skip'))}"><input type="checkbox" name="skip"> <span>${esc(tr('upg.skip'))}</span></label>
+        <label class="bk-check tip" data-upg-when="191" style="display:none" data-tip="${esc(tr('upg.t.shutdownVm'))}"><input type="checkbox" name="shutdown_vm"> <span>${esc(tr('upg.shutdownVm'))}</span></label>
         <h4 class="hs-sub">${esc(tr('upg.checks'))}</h4>
         <ul class="upg-checks">${checks}</ul>
+        <ul class="upg-checks" data-upg="checks191"></ul>
+        <label class="bk-check tip" data-upg="force-wrap" style="display:none" data-tip="${esc(tr('upg.t.forceLvm'))}"><input type="checkbox" name="force_lvm"> <span>${esc(tr('upg.forceLvm'))}</span></label>
         ${blocked ? `<p class="form-hint">${esc(tr('upg.blocked'))}</p>` : ''}
         <div class="sto-finding sev-action"><div class="sto-finding-title">${icon('warn')} ${esc(tr('upg.warning'))}</div>
           <p class="upg-notes" data-upg="notes"></p>
@@ -234,10 +243,14 @@ const Upgrade = (() => {
     f.querySelectorAll('[data-when]').forEach(el => { el.hidden = el.dataset.when !== src; });
     const d = w.data;
     let target = '';
-    if (src === 'version') target = val(f, 'version');
-    else {
+    let tchecks = [];
+    if (src === 'version') {
+      target = val(f, 'version');
+      tchecks = ((d.versions || []).find(v => v.name === target) || {}).checks || [];
+    } else {
       const i = d.isos.find(x => x.name === val(f, 'iso'));
       target = i ? i.release.harvester : '';
+      tchecks = (i && i.checks) || [];
       const sum = f.querySelector('[name="checksum"]');
       if (sum && i && !sum.value && i.sha512) sum.value = i.sha512;
     }
@@ -245,15 +258,26 @@ const Upgrade = (() => {
     notes.innerHTML = target && /^v\d/.test(target)
       ? `<a href="https://github.com/harvester/harvester/releases/tag/${esc(target)}" target="_blank" rel="noopener noreferrer" class="tip"
           data-tip="${esc(tr('upg.t.notes'))}">${icon('doc')} ${esc(tr('upg.notesFor', { v: target }))}</a>` : '';
+    const box = f.querySelector('[data-upg="checks191"]');
+    const C = CHECK191();
+    box.innerHTML = tchecks.map(c => `<li class="${c.level === 'info' ? 'upg-ok' : 'upg-fail'}" data-check="${esc(c.key)}">${icon(c.level === 'info' ? 'info' : 'warn')} ${esc(C[c.key] || c.key)}
+        ${c.text ? `<span class="res-dim">${esc(c.text)}</span>` : ''}</li>`).join('');
+    f.querySelectorAll('[data-upg-when="191"]').forEach(el => { el.style.display = tchecks.length ? '' : 'none'; });
+    const block = tchecks.some(c => c.level === 'block');
+    f.querySelector('[data-upg="force-wrap"]').style.display = block ? '' : 'none';
+    const forced = f.querySelector('[name="force_lvm"]').checked;
     const read = f.querySelector('[name="read"]');
-    f.querySelector('[data-upg="start"]').disabled = !target || !read.checked;
+    f.querySelector('[data-upg="start"]').disabled = !target || !read.checked || (block && !forced);
   }
 
   function onChange(w, e) {
     const f = w.root.querySelector('[data-upg="form"]');
     if (!f || !f.contains(e.target)) return;
     // la case « j'ai lu » se décoche à chaque changement de cible, comme dans Harvester
-    if (['source', 'version', 'iso'].includes(e.target.name)) f.querySelector('[name="read"]').checked = false;
+    if (['source', 'version', 'iso'].includes(e.target.name)) {
+      f.querySelector('[name="read"]').checked = false;
+      f.querySelector('[name="force_lvm"]').checked = false;       // 2.10.1 : le forçage vaut pour une cible
+    }
     syncForm(w);
   }
 
@@ -278,6 +302,10 @@ const Upgrade = (() => {
     if (act === 'start' && f) {
       const src = w.source;
       const body = { log: f.querySelector('[name="log"]').checked, skip_single_replica: f.querySelector('[name="skip"]').checked };
+      const sv = f.querySelector('[name="shutdown_vm"]');
+      if (sv && sv.closest('label').style.display !== 'none' && sv.checked) body.shutdown_vm_on_migration_failure = true;
+      const fl = f.querySelector('[name="force_lvm"]');
+      if (fl && fl.closest('label').style.display !== 'none' && fl.checked) body.force_lvm_pre_ga = true;
       if (src === 'version') body.version = val(f, 'version');
       else { body.iso = val(f, 'iso'); body.checksum = val(f, 'checksum').trim() || undefined; }
       if (!confirm(tr('upg.confirm', { cluster: w.cluster }))) return;

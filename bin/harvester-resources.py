@@ -2918,6 +2918,45 @@ def _follow_upgrade(kube, name, timeout, sleep=None, now=None, api_grace=2700):
     return EXIT_FAIL
 
 
+def _upgrade_checks_191(kube, current, target, args):
+    """2.10.1 : contrôles d'une cible v1.9.1 ou plus que l'outil peut tenir
+    seul ; seul `lvm-pre-ga-volumes` bloque (forçable par
+    --force-lvm-pre-ga), les avertissements sont dits par la fenêtre."""
+    if not hup.target_checks(current, target):
+        return
+    lvm = hadv.lvm_volumes(kube.list("storageclasses"), kube.list("persistentvolumes"))
+    for c in hup.target_checks(current, target, lvm):
+        if c["level"] != "block":
+            continue
+        if getattr(args, "force_lvm_pre_ga", False):
+            step("upgrade", "running", f"{c['key']} forced: {c['text']}")
+            continue
+        raise ValueError(f"{c['key']}: LVM volumes created before the LVM driver went GA cannot be recovered "
+                         f"after the upgrade to {target} ({c['text']}); move them first, or force")
+
+
+def _set_migration_policy(kube):
+    """Point 325 A : `shutdownVMOnMigrationFailure` posé dans upgrade-config
+    pour cette mise à jour ; rend la valeur d'origine."""
+    cur = kube.get("settings.harvesterhci.io", None, "upgrade-config") or {}
+    new, orig = hup.migration_policy_value(cur, True)
+    kube.patch("settings.harvesterhci.io", None, "upgrade-config", {"value": new})
+    step("upgrade", "running", "upgrade-config: VMs whose migration fails are shut down during this upgrade")
+    return orig
+
+
+def _restore_migration_policy(kube, uname, orig):
+    """Valeur d'origine rendue quand la mise à jour est finie (réussie ou
+    échouée) ou n'a pas été créée ; laissée tant qu'elle tourne."""
+    u = kube.get(hup.K_UPGRADE, hup.NS, uname) if uname else None
+    if uname and u is not None and hup.settled(u)[0] is None:
+        step("upgrade", "running", "upgrade-config left with shutdownVMOnMigrationFailure while the upgrade "
+                                   "runs: set it back once it is over")
+        return
+    kube.patch("settings.harvesterhci.io", None, "upgrade-config", {"value": orig})
+    step("upgrade", "running", "upgrade-config set back to its value before the upgrade")
+
+
 def cmd_upgrade(args):
     kube = kube_from(args)
     act = args.action
@@ -3003,6 +3042,7 @@ def cmd_upgrade(args):
             ok, why = hup.eligible(current, rel["harvester"], rel["min_upgradable"])
             if ok is False:
                 raise ValueError(f"{iso.name} ({rel['harvester']}) cannot upgrade this cluster ({current}): {why}")
+            _upgrade_checks_191(kube, current, rel["harvester"], args)
             if args.checksum:
                 step("upgrade", "running", f"checking the SHA-512 of {iso.name}")
                 if _sha512(iso) != args.checksum.strip().lower():
@@ -3039,17 +3079,24 @@ def cmd_upgrade(args):
             ok, why = hup.eligible(current, name, (ver.get("spec") or {}).get("minUpgradableVersion"))
             if ok is False:
                 raise ValueError(f"{name} cannot upgrade this cluster ({current}): {why}")
+            _upgrade_checks_191(kube, current, name, args)
             man = hup.upgrade_manifest(version=name, log=not args.no_log, skip_single=args.skip_single_replica)
             target = name
-        made = kube.create(man)
-        uname = made["metadata"]["name"]
-        step("upgrade", "running", f"{uname}: {current} -> {target} started")
-        if srv is not None:
-            # l'ISO est importé : le guichet n'est plus utile
-            srv.shutdown()
-            srv.server_close()
-            srv = None
-        return _follow_upgrade(kube, uname, args.timeout)
+        orig = _set_migration_policy(kube) if getattr(args, "shutdown_vm_on_migration_failure", False) else None
+        uname = None
+        try:
+            made = kube.create(man)
+            uname = made["metadata"]["name"]
+            step("upgrade", "running", f"{uname}: {current} -> {target} started")
+            if srv is not None:
+                # l'ISO est importé : le guichet n'est plus utile
+                srv.shutdown()
+                srv.server_close()
+                srv = None
+            return _follow_upgrade(kube, uname, args.timeout)
+        finally:
+            if orig is not None:
+                _restore_migration_policy(kube, uname, orig)
     finally:
         if srv is not None:
             srv.shutdown()
@@ -3967,6 +4014,10 @@ def main(argv=None):
     sp.add_argument("--no-log", action="store_true", help="start: do not collect the upgrade logs")
     sp.add_argument("--skip-single-replica", action="store_true",
                     help="start: skip Harvester's check of detached single-replica volumes")
+    sp.add_argument("--force-lvm-pre-ga", action="store_true",
+                    help="start: upgrade to v1.9.1 or later although LVM volumes predate the GA driver")
+    sp.add_argument("--shutdown-vm-on-migration-failure", action="store_true",
+                    help="start: shut down VMs whose migration fails (upgrade-config), set back afterwards")
     sp.add_argument("--node", help="resume-node: the paused host")
     sp.add_argument("--out", help="logs: where to write the archive (mode 0600)")
     sp.add_argument("--timeout", type=int, default=6 * 3600)

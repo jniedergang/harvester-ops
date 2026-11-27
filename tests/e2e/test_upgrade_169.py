@@ -146,3 +146,41 @@ def test_a_finished_upgrade_can_be_dismissed(ui):
     w.locator('[data-upg="dismiss"]').click()
     page.wait_for_timeout(500)
     assert sent[-1] == ("api/upgrade/harv-fake/do/dismiss", {"name": "hvst-upgrade-abcde"})
+
+
+def test_target_191_checks_the_lvm_block_and_the_migration_box(ui):
+    """2.10.1 : contrôles de la cible v1.9.1 (version lue), blocage LVM
+    forçable, case shutdownVMOnMigrationFailure décochée par défaut."""
+    import copy
+    page, sent, state = ui
+    d = copy.deepcopy(IDLE)
+    d["current"] = "v1.9.0"
+    d["versions"].insert(0, dict(d["versions"][0], name="v1.9.1", checks=[
+        {"key": "lvm-pre-ga-volumes", "ok": False, "level": "block", "forcible": True, "text": "default/<b>data</b>"},
+        {"key": "rancher-vcluster-deprecated", "ok": False, "level": "warn", "forcible": False, "text": "x/rancher-vcluster"},
+        {"key": "vm-migration-failure-policy", "ok": True, "level": "info", "forcible": False, "text": ""}]))
+    state["data"] = d
+    page.locator("#btn-upgrade").click()
+    f = page.locator('#tab-hupgrade .upg-win [data-upg="form"]')
+    expect(f).to_be_visible(timeout=8000)
+    box = f.locator('[data-upg="checks191"]')
+    f.locator('[name="version"]').select_option("v1.9.0")
+    expect(box.locator("li")).to_have_count(0)                          # cible 1.9.0 : rien de propre à 1.9.1
+    expect(f.locator('[name="shutdown_vm"]')).to_be_hidden()
+    f.locator('[name="version"]').select_option("v1.9.1")
+    expect(box.locator('[data-check="lvm-pre-ga-volumes"]')).to_contain_text("default/<b>data</b>")
+    expect(box.locator('[data-check="rancher-vcluster-deprecated"]')).to_contain_text("rancher-k3k")
+    expect(f.locator('[name="shutdown_vm"]')).not_to_be_checked()
+    f.locator('[name="read"]').check()
+    start = f.locator('[data-upg="start"]')
+    expect(start).to_be_disabled()                                       # bloquant tant qu'il n'est pas forcé
+    assert f.locator('[data-upg="force-wrap"]').get_attribute("data-tip")
+    f.locator('[name="force_lvm"]').check()
+    expect(start).to_be_enabled()
+    f.locator('[name="shutdown_vm"]').check()
+    start.click()
+    page.wait_for_timeout(500)
+    assert sent[-1] == ("api/upgrade/harv-fake/do/start", {"log": True, "skip_single_replica": False, "version": "v1.9.1",
+                                                           "shutdown_vm_on_migration_failure": True,
+                                                           "force_lvm_pre_ga": True})
+    assert page.evaluate("() => window.__pwned") is None
