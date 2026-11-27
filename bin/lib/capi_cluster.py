@@ -863,7 +863,8 @@ def check(spec, facts):
         # 2.7.0 (m-17) : rendu aussi avec disk-smaller-than-image (un `elif`
         # le cachait). Vu sur harv1 : une image SLES non enregistrée n'a aucun dépôt,
         # cloud-init n'installe ni iptables ni qemu-guest-agent, et les pods
-        # à port d'hôte (ingress-nginx) restent en ContainerCreating.
+        # à port d'hôte (contrôleur d'ingress de RKE2 : ingress-nginx, ou
+        # Traefik à partir de v1.36) restent en ContainerCreating.
         # 2.8.1 : pas en `skip` sans Internet, offline-node-packages le dit
         # déjà (et le conseil d'une image Leap n'y vaudrait rien).
         out.append(finding("image-sles-repos", "warn", image=spec.get("image")))

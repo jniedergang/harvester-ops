@@ -2496,6 +2496,9 @@ def cmd_manifests(args):
                                 "role": roles.get((o["metadata"].get("namespace"),
                                                    "hops-sa-" + str(o["metadata"].get("name"))))}
                                for o in objs if o.get("kind") == "ServiceAccount" and o.get("metadata")]
+            # 2.10.1 : hops-allow-ingress posée avant Traefik (constat
+            # child-ingress-policy-stale ; jamais réécrite en silence)
+            row["stale_ingress"] = cp.stale_ingress(objs)
         out.append(row)
     print(json.dumps(out) if args.json else json.dumps(out, indent=1))
     return EXIT_OK

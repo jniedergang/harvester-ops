@@ -45,6 +45,13 @@ NETWORK = {"default_deny": True, "allow_ingress": True}
 INGRESS_NAMESPACE = "kube-system"
 INGRESS_POD_LABELS = {"app.kubernetes.io/name": "rke2-ingress-nginx",
                       "app.kubernetes.io/component": "controller"}
+# 2.10.1 (point 322 A) : RKE2 v1.36 déploie Traefik par défaut sur un cluster
+# neuf (docs RKE2, networking_services), chart rke2-traefik dans kube-system ;
+# étiquette de sélection du chart amont traefik (`traefik.labelselector`,
+# app.kubernetes.io/name = nom du chart). Hypothèse à relire sur un enfant
+# v1.36.4 (plan 2.10.1, tâche 1, essai 7).
+TRAEFIK_POD_LABELS = {"app.kubernetes.io/name": "traefik"}
+INGRESS_CONTROLLERS = (INGRESS_POD_LABELS, TRAEFIK_POD_LABELS)
 DNS_POD_LABELS = {"k8s-app": "kube-dns"}
 
 _CPU_RE = re.compile(r"^(\d+(\.\d+)?|\d+m)$")
@@ -60,11 +67,26 @@ def _quantity_re(key):
     return _COUNT_RE
 
 
-def ingress_selector():
-    """Sélecteur (namespace et pods) du contrôleur d'ingress du cluster
-    enfant, pour `hops-allow-ingress`."""
-    return {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": INGRESS_NAMESPACE}},
-            "podSelector": {"matchLabels": dict(INGRESS_POD_LABELS)}}
+def ingress_selectors():
+    """Sélecteurs (namespace et pods) des contrôleurs d'ingress de RKE2 du
+    cluster enfant, ingress-nginx et Traefik, pour `hops-allow-ingress`
+    (2.10.1 : un enfant neuf v1.36, un enfant mis à jour et le mode double
+    de v1.37 sont couverts)."""
+    return [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": INGRESS_NAMESPACE}},
+             "podSelector": {"matchLabels": dict(labels)}} for labels in INGRESS_CONTROLLERS]
+
+
+def stale_ingress(objs):
+    """Namespaces dont la politique `hops-allow-ingress` rangée (objets d'un
+    ConfigMap `art-hops-policies`) n'admet pas les contrôleurs d'aujourd'hui :
+    posée avant la 2.10.1, elle laisse Traefik dehors. Lecture seule ; la
+    politique se repasse par le chemin de la 2.7.0 (modification d'une
+    équipe), jamais en silence."""
+    want = [{"from": ingress_selectors()}]
+    return sorted({(o.get("metadata") or {}).get("namespace") or "" for o in objs or []
+                   if o.get("kind") == "NetworkPolicy"
+                   and (o.get("metadata") or {}).get("name") == "hops-allow-ingress"
+                   and (o.get("spec") or {}).get("ingress") != want})
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +260,7 @@ def _team_objects(t):
     ]
     if t["network"]["allow_ingress"]:
         out.append(_np(ns, "hops-allow-ingress", {"podSelector": {}, "policyTypes": ["Ingress"],
-                                                  "ingress": [{"from": [ingress_selector()]}]}))
+                                                  "ingress": [{"from": ingress_selectors()}]}))
     return out
 
 
