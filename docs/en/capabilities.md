@@ -1866,8 +1866,13 @@ previous `upgrade-config` on the `Upgrade` object (annotation
 is over: at the end of the start action, or, when that action was
 cancelled, timed out, lost the cluster API or the console restarted, at the
 end of a **Follow** of the running upgrade or at its **Dismiss** once it is
-over. The window says when a finished upgrade still has a
-value to set back. Harvester 1.9.0 accepts the key (server dry-run on
+over. **Abort** sets the value back before it deletes the `Upgrade` (the
+annotation goes with the object), and the start action sets back the value
+it kept when the `Upgrade` was deleted elsewhere (Harvester's interface).
+A new upgrade first sets back a value left by a finished one, so that value
+never becomes the "previous" one. The window says when a finished upgrade
+still has a value to set back, and shows the box only for a target that
+reads the key (1.9.1 or later). Harvester 1.9.0 accepts the key (server dry-run on
 harvlab2).
 
 Harvester 1.9.1 also installs Kube-OVN v1.16.2, whose add-on pings

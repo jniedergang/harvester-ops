@@ -2054,8 +2054,14 @@ sur une valeur `true`, la console écrit `false`. L'action de démarrage
 mise à jour est finie : à la fin de l'action, ou, quand cette action a été
 annulée, a dépassé son délai, a perdu l'API du cluster ou que la console a
 redémarré, à la fin d'un **Suivre** de la mise à jour en cours ou à son
-**Classer** une fois finie. La fenêtre dit quand une mise à
-jour finie a encore une valeur à rendre. Harvester 1.9.0 accepte la clé
+**Classer** une fois finie. **Abandonner** rend la valeur avant de supprimer
+l'`Upgrade` (l'annotation part avec l'objet), et l'action de démarrage rend
+la valeur qu'elle a gardée quand l'`Upgrade` a été supprimée ailleurs
+(interface de Harvester). Une nouvelle mise à jour rend d'abord la valeur
+laissée par une mise à jour finie : elle ne devient jamais « celle d'avant ».
+La fenêtre dit quand une mise à jour finie a encore une valeur à rendre, et
+ne montre la case que pour une cible qui lit la clé (1.9.1 ou plus).
+Harvester 1.9.0 accepte la clé
 (dry-run serveur sur harvlab2).
 
 Harvester 1.9.1 pose aussi Kube-OVN v1.16.2, dont l'add-on sonde `1.1.1.1`

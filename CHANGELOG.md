@@ -13,12 +13,18 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   (`pkg/webhook/resources/virtualmachine/validator.go`). The restricted
   CAPHV identity had `list` on images only: on 1.9.1 no machine of a new
   cluster was ever created (`is not authorized to access image`). New
-  clusters get `get` on their image. **Clusters created by 2.10.0 or
+  clusters get `get` on their image, always by its object name
+  (`image-xxxxx`): a request that names the image by its display name
+  (script, template, plan) is brought back to the object before the
+  identity, its access reviews and the render, and a display name shared by
+  several images is refused (`image-ambiguous`). **Clusters created by 2.10.0 or
   earlier keep their old identity Role**: on a Harvester upgraded to 1.9.1,
   their new machines (scale, rolling update, remediation) are refused until
   the rule is added; the console does not rewrite an existing identity. The
   `kubectl patch` to run is in Troubleshooting ("Cluster API machines
-  refused on Harvester 1.9.1"); checked on harv1: refused without the rule,
+  refused on Harvester 1.9.1"); it finds the identity Role by its labels
+  (`caphv-identity` in the cluster namespace, `caphv-identity-<namespace>`
+  anywhere else); checked on harv1: refused without the rule,
   machine created ten seconds after it.
 - **`harvester-registry` and `harvester-plans` did not start in the shipped
   container** (found on the bench, also in the 2.9.1 image). The image puts
@@ -59,10 +65,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   and Rancher's own Ingresses, `vm-migration-failure-policy`), and for any
   target `console-ingress-expose-present`. The box **Shut down VMs whose
   migration fails** starts from the value in place and sends `false` when
-  unticked on `true`; the previous `upgrade-config` is kept on the
-  `Upgrade` object and set back by the start action, **Follow** or
-  **Dismiss**, so a cancelled action, a timeout, a silent API or a console
-  restart no longer leave the policy behind.
+  unticked on `true`, and shows only for a target that reads the key
+  (1.9.1 or later); the previous `upgrade-config` is kept on the `Upgrade`
+  object and set back by the start action, **Follow** or **Dismiss**, so a
+  cancelled action, a timeout, a silent API or a console restart no longer
+  leave the policy behind. **Abort** sets it back before it deletes the
+  `Upgrade`, the start action sets back the value it kept when the
+  `Upgrade` was deleted elsewhere, and a new upgrade first sets back a value
+  left by a finished one (which then never becomes the "previous" value).
 - **Mode A commands replay as they are**: every `bao auth enable` and
   `bao secrets enable` (assistant, personal tokens, External Secrets) is
   guarded by a read of the mount list; the External Secrets tab says
@@ -73,6 +83,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   of 500. Some routes that answered 404 or 500 on a missing secret reference
   now answer 409.
 - The Repair button keeps its tooltip when it is disabled.
+- The French parity page agrees its counts in number ("1 manquante").
 
 ### Changed
 - Parity table against harvester-ui-extension v1.9.1 (`AS_OF` 2.10.1); the
@@ -102,12 +113,24 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   after cancel, timeout, silent API and restart, unticked box on `true`,
   restricted identity with `get` on the image, Traefik labels as read on a
   child (not the module constant), every tool started in the container
-  layout, base mode A commands guarded. E2E: Repair tooltip on its wrapper,
-  migration box from the value in place.
+  layout, base mode A commands guarded, abort during the start action and
+  from a separate action, `Upgrade` deleted in Harvester, value left by a
+  finished upgrade settled first, image named by its display name (object
+  in the Role, the access reviews and the render), display name shared by
+  two images refused, documented fix checked against the Roles the console
+  writes, French parity counts. E2E: Repair tooltip on its wrapper,
+  migration box from the value in place, migration box hidden for a target
+  before 1.9.1.
 - Mutations replayed: Traefik label `traefik`, `parents[2] / "web"`,
-  managedFields without the flag, repair by apply.
+  managedFields without the flag, repair by apply, no restore when the
+  `Upgrade` is gone, Abort without restore, start without settling a left
+  value, no image resolution, no `image-ambiguous` finding, box shown on any
+  target check, plural French counts.
 - Full suites before the version commit: API 15620 passed, 10 skipped; E2E
   1427 passed.
+- After the last fixes: API 15641 passed, 10 skipped (`test_vnc_mux`, a
+  known timing test, failed once in parallel and passed alone three times);
+  related E2E (upgrade, Cluster API creation, templates, plans) 45 passed.
 
 ### Verified for real
 - **Harvester 1.9.1** (harv1, upgraded from a fresh 1.9.0, and harvlab,
@@ -159,7 +182,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 ### Not verified for real
 - Groups fed by Rancher's `groups` claim; Rancher behind Active Directory or
   SAML; Harvester 1.9.1 Prime (community build only); an upgrade 1.9.0 to
-  1.9.1 started from the console (harvlab and harv1 were upgraded before);
+  1.9.1 started from the console (harvlab and harv1 were upgraded before),
+  so the `harvester-ops.io/upgrade-config-before` annotation was never set
+  on a real `Upgrade` and Abort never set a value back for real;
+  a cluster created from a request that names its image by display name;
   a child cluster with ESO on a Harvester with several nodes; the
   **Défaire** of a plan with External Secrets (the B1 child was created
   directly); the real copy to the clipboard of the mode A window (the
