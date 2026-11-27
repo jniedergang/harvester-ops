@@ -522,12 +522,14 @@ def mode_a_commands(addr, mount, prefix, cid, console_cidr):
     role, tf = console_role(cid), tf_role(cid)
     return [
         f"export BAO_ADDR={addr.rstrip('/')}",
-        "# Montage KV v2 (sautez si le montage existe déjà en version 2)",
-        f"bao secrets enable -path={m} -version=2 kv",
+        # 2.10.1 : montages gardés par une lecture (relu sur OpenBao 2.7.2 :
+        # rejouées, les trois lignes échouaient « path is already in use ») ;
+        # un montage déjà présent doit être un KV v2, la vérification le dit
+        "# Montage KV v2, transit (états OpenTofu chiffrés) et AppRole, créés s'ils manquent",
+        _mount_enable_line(m, f"-path={m} -version=2 kv"),
         f"bao write {m}/config max_versions={MAX_VERSIONS}",
-        "# Transit (états OpenTofu chiffrés) et AppRole (sautez s'ils existent)",
-        f"bao secrets enable -path={TRANSIT} transit",
-        "bao auth enable approle",
+        _mount_enable_line(TRANSIT, f"-path={TRANSIT} transit"),
+        "bao auth list -format=json | grep -q '\"approle/\"' || bao auth enable approle",
         f"bao policy write {role} - <<'EOF'\n{console_policy(m, prefix, cid)}EOF",
         "ACCESSOR=$(bao read -field=accessor sys/auth/token)",
         f"bao policy write {tf} - <<EOF\n{tf_child_policy(cid, '$ACCESSOR')}EOF",
@@ -539,6 +541,12 @@ def mode_a_commands(addr, mount, prefix, cid, console_cidr):
         f"bao read -field=role_id auth/approle/role/{role}/role-id",
         f"bao write -wrap-ttl={WRAP_TTL} -f auth/approle/role/{role}/secret-id",
     ]
+
+
+def _mount_enable_line(mount, args):
+    """2.10.1 : `bao secrets enable` gardé par une lecture de la liste des
+    montages (`bao secrets list -format=json` nomme chacun `<chemin>/`)."""
+    return f"bao secrets list -format=json | grep -q '\"{mount}/\"' || bao secrets enable {args}"
 
 
 def _jwt_enable_line(mount):

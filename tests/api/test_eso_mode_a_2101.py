@@ -97,3 +97,19 @@ def test_badge_ready_when_stores_ready():
     body = src[i:src.index("function stateHtml", i)]
     assert body.index("a.stores_ready") < body.index('data-eso-auth="waiting"')
     assert 'data-eso-auth="ready"' in body
+
+
+# Relu au banc le 27/11/2026 (essai 4) : les commandes de base du mode A
+# rejouées telles quelles sur OpenBao 2.7.2 échouaient sur trois lignes
+# (« path is already in use » : KV, transit, approle). Elles se gardent
+# comme les montages jwt, par une lecture de la liste des montages.
+def test_mode_a_base_commands_replay_without_error():
+    import openbao_policy as op
+    c = op.mode_a_commands("https://127.0.0.1:8210", "harvester-ops", "consoles/abcdef012345",
+                              "abcdef012345", "127.0.0.1/32")
+    assert "bao secrets list -format=json | grep -q '\"harvester-ops/\"' || " \
+           "bao secrets enable -path=harvester-ops -version=2 kv" in c
+    assert "bao secrets list -format=json | grep -q '\"transit/\"' || bao secrets enable -path=transit transit" in c
+    assert "bao auth list -format=json | grep -q '\"approle/\"' || bao auth enable approle" in c
+    assert not any("sautez" in x for x in c)
+    assert not [x for x in c if x.startswith(("bao secrets enable", "bao auth enable"))]
