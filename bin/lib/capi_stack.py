@@ -398,8 +398,8 @@ def shim_manifest(vip):
             "labels": {SHIM_LABEL: "caphv-ingress-expose", MANAGED: "true"},
             "annotations": {
                 "kube-vip.io/loadbalancerIPs": vip,
-                "harvester-ops.io/why": ("CAPHV <= v0.10.1 reads the Harvester VIP here; "
-                                         "Harvester 1.9 moved it to rke2-traefik"),
+                "harvester-ops.io/why": ("CAPHV <= v0.10.1 reads the Harvester VIP here; Harvester 1.9 "
+                                         "deletes it whenever its controller starts with rke2-traefik"),
             },
         },
         "spec": {"type": "ClusterIP", "clusterIP": "None",
