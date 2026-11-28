@@ -103,3 +103,33 @@ def test_a_busy_declaration_is_still_refused(decl, monkeypatch, case):
         assert 0.35 <= took < 2           # attendu le temps borné, pas davantage
     else:
         assert took < 0.3                 # refus immédiat, aucune attente
+
+
+@pytest.mark.parametrize("case", ["a run starts", "a plan reserves it"])
+def test_the_wait_ends_as_soon_as_the_declaration_is_busy_again(decl, monkeypatch, case):
+    """Revue M-8 : pendant l'attente du `finally`, une autre action de la
+    déclaration démarre (ou un déroulé la réserve) : refus 409 tout de suite,
+    pas au bout de TF_DECL_SETTLE_S."""
+    d, started = decl
+    monkeypatch.setattr(wapp, "TF_DECL_SETTLE_S", 5)
+    previous(d, "done")
+
+    def busy():
+        time.sleep(0.2)
+        if case == "a run starts":
+            run = wapp.ActionRun("q" + d["id"][:11], f"tf-apply-decl:{d['name']}:1", "harv1", [])
+            run.result = {"declaration_id": d["id"], "mode": "apply"}
+            run.status = "running"
+            with wapp.ACTIONS_LOCK:
+                wapp.ACTIONS[run.id] = run
+        else:
+            with wapp.TF_DECL_RUNNING_LOCK:
+                wapp.TF_DECL_HELD[d["id"]] = "plan-run-other"
+    t = threading.Thread(target=busy, daemon=True)
+    t.start()
+    t0 = time.time()
+    with pytest.raises(wapp.TfLaunchError) as e:
+        launch(d, holder="plan-run-mine")
+    t.join()
+    assert e.value.status == 409 and e.value.payload["code"] == "running"
+    assert time.time() - t0 < 1.5 and started == []

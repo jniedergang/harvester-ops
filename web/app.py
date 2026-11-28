@@ -31949,7 +31949,12 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
                                 {"error": str(e)[:300], "code": e.code}) from None
 
     if _tf_decl_settling(decl["id"]):
-        _tf_decl_wait_idle(decl["id"], timeout=TF_DECL_SETTLE_S)
+        # revue M-8 : l'attente s'arrête dès que la déclaration est rendue,
+        # mais aussi dès qu'une action en cours ou une réservation apparaît
+        # (refus 409 tout de suite, pas au bout des 30 s)
+        end = time.time() + TF_DECL_SETTLE_S
+        while time.time() < end and _tf_decl_settling(decl["id"]):
+            time.sleep(0.05)
     with TF_DECL_RUNNING_LOCK:
         if _tf_decl_busy(decl["id"], holder):
             raise TfLaunchError(409, {"error": "this declaration is already running",
