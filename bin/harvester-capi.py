@@ -4664,6 +4664,12 @@ def cmd_eso_status(args):
             out["error"] = err.code
         except KubeError as err:
             out["error"] = f"child-unreachable: {str(err)[:160]}"
+    if present and not out["namespaces"] and out.get("error") != "eso-cluster-missing":
+        # 2.10.2 (point 332 A) : chart posé (à la création, par un plan) et
+        # aucun namespace activé : ils s'activent depuis l'onglet, une fois
+        # créés dans le cluster enfant
+        out.setdefault("findings", []).append({"code": "eso-namespaces-none", "level": "warn",
+                                               "facts": {"cluster": f"{ns}/{cluster}"}})
     if active and out["namespaces"]:
         prefix = s.get("prefix") or f"consoles/{s.get('console_id')}"
         out["example"] = ce.example(out["namespaces"][0], key, prefix)

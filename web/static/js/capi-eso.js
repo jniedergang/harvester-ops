@@ -48,6 +48,8 @@ const CapiEso = (() => {
     'eso-namespace-gone': (v) => tr('eso.fd.eso-namespace-gone', 'The enabled namespace {namespace} is gone from the child cluster: remove it here before anyone creates it again.', v),
     'eso-account-changed': (v) => tr('eso.fd.eso-account-changed', 'The hops-eso account of {namespace} was created again (new namespace or account): OpenBao refuses it until an administrator enables the namespace again.', v),
     'eso-account-missing': (v) => tr('eso.fd.eso-account-missing', 'The hops-eso account is missing in {namespace}.', v),
+    // 2.10.2 (point 332 A) : chart posé, aucun namespace activé
+    'eso-namespaces-none': (v) => tr('eso.fd.eso-namespaces-none', 'External Secrets are installed on this child cluster but no namespace is enabled: create the team namespaces in the cluster, then enable them here (Set up External Secrets).', v),
     // source du chart : constats partagés avec l'onglet Services
     'service-registry-unknown': (v) => tr('svc.fd.service-registry-unknown', 'The registry {registry} is not declared in the console.', v),
     'service-registry-no-charts': (v) => tr('svc.fd.service-registry-no-charts', 'The registry {registry} does not serve charts.', v),
@@ -69,14 +71,21 @@ const CapiEso = (() => {
     'openbao-person-no-token': () => tr('eso.err.openbao-person-no-token', 'Your session carries no token for OpenBao: sign in to the console again.'),
     'openbao-person-expired': () => tr('eso.err.openbao-person-expired', 'Your OpenBao token has expired: sign in to the console again.'),
   };
+  // Info-bulle des constats qui en portent une (texte littéral, parité des traductions)
+  const FINDING_TIPS = {
+    'eso-namespaces-none': () => tr('eso.t.fd.eso-namespaces-none', 'Without an enabled namespace there is no store, and no ExternalSecret can sync. Namespaces chosen at creation do not exist yet on a new cluster.'),
+  };
   const LEVEL_CLASS = { block: 'sev-critical', warn: 'sev-watch', ok: 'sev-info' };
   const findingText = (f) => {
     const fn = FINDINGS[f && f.code];
     const facts = Object.assign({}, (f && f.facts) || {});
     return fn ? fn(facts) : String((f && f.code) || '');
   };
-  const findingsHtml = (fs) => (fs || []).map(f => `<div class="sto-finding ${LEVEL_CLASS[f.level] || 'sev-critical'}" data-code="${esc(f.code)}"
-      data-level="${esc(f.level)}"><div class="sto-finding-title">${esc(findingText(f))}</div></div>`).join('');
+  const findingsHtml = (fs) => (fs || []).map(f => {
+    const tip = FINDING_TIPS[f.code] ? FINDING_TIPS[f.code]() : '';
+    return `<div class="sto-finding ${LEVEL_CLASS[f.level] || 'sev-critical'}${tip ? ' tip' : ''}" data-code="${esc(f.code)}"
+      data-level="${esc(f.level)}"${tip ? ` data-tip="${esc(tip)}"` : ''}><div class="sto-finding-title">${esc(findingText(f))}</div></div>`;
+  }).join('');
   /** Texte d'une réponse refusée : code connu, sinon message du serveur. */
   const errText = (r, facts) => {
     const code = r && r.d && r.d.code;
@@ -310,6 +319,7 @@ const CapiEso = (() => {
     const tip = !admin ? adminTip() : !set ? tr('eso.t.nsNotSet', 'Set up External Secrets first') : tr('eso.t.nsAdd', 'Enable this team namespace: the console poses a store in it');
     return `<div class="card sx-card eso-card"><h5>${icon('namespace', 14)} ${esc(tr('eso.nsTitle', 'Enabled namespaces'))}</h5>
       <div class="eso-chips">${chips || `<span class="form-hint">${esc(tr('eso.nsNone', 'No namespace enabled yet.'))}</span>`}</div>
+      <p class="form-hint" data-eso-reminder>${icon('info', 12)} ${esc(tr('eso.reminder', 'A namespace is enabled once it exists in the child cluster: create it there first, then enable it here.'))}</p>
       <div class="eso-inline">
         <input type="text" class="tip" data-eso-ns-input spellcheck="false" autocomplete="off" placeholder="equipe-a" ${tipAttr(tr('eso.t.nsInput', 'A team namespace of the child cluster (lower case RFC 1123), never a system namespace'))}${off ? ' disabled' : ''}>
         ${btn('data-eso-ns-add', 'btn-secondary', 'add', tr('eso.nsAdd', 'Enable a namespace'), tip, off)}

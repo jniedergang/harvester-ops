@@ -846,4 +846,8 @@ at start (`<state>/console-paths.json`), unless
   action ends with `eso-namespace-missing` and asks to set ESO from the tab
   once the namespaces exist (policies base, or the teams). A deployment plan
   whose Artefacts phase creates the team namespaces first does not have the
-  problem.
+  problem. Since 2.10.2 (decision 332 A, activation stays per namespace from
+  the tab) the creation window and the External Secrets tab say it: create
+  the namespaces in the cluster once it exists, then enable each one from
+  the tab. A child cluster whose `eso` chart is installed with no namespace
+  enabled shows the warning `eso-namespaces-none` in the tab.
