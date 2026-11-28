@@ -904,4 +904,10 @@ a notée au démarrage (`<state>/console-paths.json`), sauf si
   installé, puis l'action finit sur `eso-namespace-missing` et demande de
   poser ESO depuis l'onglet une fois les namespaces présents (socle de
   politiques, ou les équipes). Un plan de déploiement dont la phase Artefacts
-  crée d'abord les namespaces d'équipe n'a pas ce problème.
+  crée d'abord les namespaces d'équipe n'a pas ce problème. Depuis la 2.10.2
+  (décision 332 A, l'activation reste par namespace depuis l'onglet), la
+  fenêtre de création et l'onglet Secrets externes le disent : créer les
+  namespaces dans le cluster une fois qu'il existe, puis activer chacun
+  depuis l'onglet. Un cluster enfant dont le chart `eso` est installé sans
+  namespace activé montre l'avertissement `eso-namespaces-none` dans
+  l'onglet.

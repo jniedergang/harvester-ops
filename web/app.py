@@ -1294,6 +1294,8 @@ ADMIN_ONLY_PREFIXES = (
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
                        # 2.10.1 : reposer le service de compatibilité de CAPHV
                        "/repair-shim",
+                       # 2.10.2 : ajouter aux identités CAPHV la règle de leur image
+                       "/identity-update",
                        # 2.9.0 : remettre l'état chiffré d'une déclaration en clair
                        "/decrypt-state",
                        # 2.9.0 : oublier les secrets gardés d'un déroulé arrêté
@@ -23969,6 +23971,132 @@ def api_capi_repair_shim(cluster):
     return jsonify({"action_id": run.id}), 201
 
 
+# ---------------------------------------------------------------------------
+# 2.10.2 (point 331 B) : identités CAPHV restreintes posées avant la 2.10.1
+# (sans `get` sur leur image, exigé par Harvester 1.9.1). Relevé en lecture,
+# mise à jour en action suivie `capi-identity-update:` réservée aux
+# administrateurs (suffixe dans ADMIN_ONLY_SUFFIXES), `harvester-capi
+# identity-check|identity-update` (parité CLI). Contrôle au démarrage : il
+# relève et journalise, ne corrige jamais.
+# ---------------------------------------------------------------------------
+CAPI_IDENTITY_STARTUP = {}          # cluster -> {"at", "outdated", "blocked", "unreachable"}
+CAPI_IDENTITY_STARTUP_DELAY = 60    # secondes après le démarrage
+
+
+def _capi_identity_name():
+    """`namespace/nom` d'un cluster enfant pris dans la requête, "" pour
+    tous ; (None, réponse 400) s'il est mal formé."""
+    raw = request.args.get("name") if request.method == "GET" else (request.get_json(silent=True) or {}).get("name")
+    name = str(raw or "").strip()
+    if name and not _cc.NS_NAME_RE.match(name):
+        return None, (jsonify({"error": "name expects namespace/name", "code": "invalid-name"}), 400)
+    return name, None
+
+
+CAPI_IDENTITY_FRESH_MIN = 10       # s : `?fresh=1` relit au plus une fois par période
+
+
+@app.route("/api/capi/<cluster>/identities")
+@requires_auth
+@shared_read(query_keys=("name",), fresh_min=CAPI_IDENTITY_FRESH_MIN)
+def api_capi_identities(cluster):
+    """État de l'identité de chaque cluster enfant (`identity-check`) :
+    à jour, à mettre à jour (changements exacts), bloquée (geste humain),
+    non posée par la console. `?name=ns/nom` : un seul cluster."""
+    name, err = _capi_identity_name()
+    if err:
+        return err
+    cmd, err = _capi_base(cluster, "identity-check")
+    if err:
+        return err
+    got, err = _capi_run_json(cmd + ["--json"] + (["--name", name] if name else []), timeout=120)
+    if err:
+        return err
+    out, _rc = got
+    out["startup"] = _capi_identity_startup_view(CAPI_IDENTITY_STARTUP.get(cluster), out)
+    return jsonify(out)
+
+
+def _capi_identity_startup_view(entry, report):
+    """Le contrôle du démarrage lit avec le kubeconfig de la console ; on ne
+    rend à la personne que les clusters de SON relevé (revue M-5)."""
+    if not entry:
+        return None
+    mine = {c.get("cluster") for c in report.get("clusters") or []}
+    return {"at": entry.get("at"), "unreachable": bool(entry.get("unreachable")),
+            "outdated": [c for c in entry.get("outdated") or [] if c in mine],
+            "blocked": [c for c in entry.get("blocked") or [] if c in mine]}
+
+
+@app.route("/api/capi/<cluster>/identity-update", methods=["POST"])
+@requires_auth
+@_rate_limit("6 per minute")
+def api_capi_identity_update(cluster):
+    """Ajoute aux identités posées avant la 2.10.1 la règle `get` sur leur
+    image. Corps : {"name": "ns/nom" (vide : tous), "dry_run": bool,
+    "changes": ["ns/cluster=ns/Role/image", ...] (ceux de l'aperçu)}. Action
+    suivie `capi-identity-update:<ns/nom ou cluster>` ; administrateur."""
+    name, err = _capi_identity_name()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    dry = bool(body.get("dry_run"))
+    # revue M-2 : seuls les changements de l'aperçu, encore identiques, sont
+    # faits ; un changement apparu depuis attend un nouvel aperçu
+    changes = body.get("changes")
+    if (not isinstance(changes, list) or not changes or len(changes) > 500
+            or not all(isinstance(x, str) and _ci.CHANGE_RE.match(x) for x in changes)):
+        return jsonify({"error": "changes expects the list shown by the preview "
+                                 "(namespace/cluster=namespace/role/image)", "code": "invalid-changes"}), 400
+    cmd, err = _capi_base(cluster, "identity-update")
+    if err:
+        return err
+    run, err = _capi_action(cluster, f"capi-identity-update:{name or cluster}",
+                            cmd + (["--name", name] if name else []) + (["--dry-run"] if dry else [])
+                            + [a for x in dict.fromkeys(changes) for a in ("--change", x)],
+                            dry_run=dry)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "dry_run": dry, "name": name}), 201
+
+
+def _capi_identity_startup_check(sleep=time.sleep, delay=None):
+    """Au démarrage : relève, cluster après cluster, les identités à mettre
+    à jour et le journalise ; ne corrige rien (la mise à jour reste une
+    action d'administrateur). Un cluster éteint ou injoignable est noté
+    comme tel, sans bruit."""
+    sleep(CAPI_IDENTITY_STARTUP_DELAY if delay is None else delay)
+    if _capi_script() is None:
+        return
+    for c in load_config_ro().get("clusters", []):
+        name = c.get("name")
+        kc = _cluster_kubeconfig_path(c, purpose="capi-identity-check", missing_ok=True)
+        cmd = _capi_cmd(kc, "identity-check", name) if kc else None
+        if not cmd:
+            continue
+        try:
+            proc = subprocess.run(cmd + ["--json"], capture_output=True, text=True, timeout=180)
+            rep = json.loads(proc.stdout)
+        except (subprocess.TimeoutExpired, OSError, ValueError) as e:
+            log.warning("capi identity check of %s failed: %s", name, type(e).__name__)
+            continue
+        entry = {"at": time.time(), "unreachable": bool(rep.get("unreachable")),
+                 "outdated": [x["cluster"] for x in rep.get("clusters") or [] if x.get("state") == "outdated"],
+                 "blocked": [x["cluster"] for x in rep.get("clusters") or [] if x.get("state") == "blocked"]}
+        CAPI_IDENTITY_STARTUP[name] = entry
+        if entry["outdated"]:
+            log.warning("%s: CAPHV identities created before 2.10.1 lack get on their image (Harvester 1.9.1 "
+                        "refuses their new machines): %s; an administrator updates them from Cluster API > "
+                        "Clusters, or harvester-capi identity-update", name, ", ".join(entry["outdated"]))
+        if entry["blocked"]:
+            log.warning("%s: CAPHV identities that need a manual fix: %s", name, ", ".join(entry["blocked"]))
+
+
+def _start_capi_identity_check():
+    """Lancé depuis le point d'entrée, jamais à l'import."""
+    threading.Thread(target=_capi_identity_startup_check, daemon=True, name="capi-identity-check").start()
+
+
 @app.route("/api/capi/<cluster>/cluster/<namespace>/<name>/scale", methods=["POST"])
 @requires_auth
 def api_capi_cluster_scale(cluster, namespace, name):
@@ -29585,6 +29713,27 @@ def _tf_decl_wait_idle(decl_id, timeout=30, sleep=None):
     return False
 
 
+# 2.10.2 (banc 2.10.1) : un destroy lancé juste après son dry-run, rendu
+# « done », recevait 409 `running` : le fil écrit le statut final avant son
+# `finally` (session OpenBao, chiffrement, nettoyage KVM), qui seul rend la
+# déclaration. Quand toutes ses actions connues sont finies, le lancement
+# attend ce `finally`, au plus TF_DECL_SETTLE_S secondes.
+TF_DECL_SETTLE_S = 30
+_TF_FINAL = ("done", "error", "cancelled")
+
+
+def _tf_decl_settling(decl_id):
+    """Vrai si la déclaration est encore tenue alors que chacune de ses
+    actions de ce processus est finie (fil dans son `finally`). Lu hors de
+    TF_DECL_RUNNING_LOCK (jamais ACTIONS_LOCK sous ce verrou)."""
+    with TF_DECL_RUNNING_LOCK:
+        if decl_id not in TF_DECL_RUNNING or decl_id in TF_DECL_HELD:
+            return False
+    with ACTIONS_LOCK:
+        runs = [r for r in ACTIONS.values() if (r.result or {}).get("declaration_id") == decl_id]
+    return bool(runs) and all(r.status in _TF_FINAL for r in runs)
+
+
 def _tf_decl_unlock_if_idle(decl_id):
     """Rend le verrou de fichier quand la déclaration ne tourne plus et n'est
     plus réservée dans ce processus. Sous TF_DECL_RUNNING_LOCK."""
@@ -30379,19 +30528,24 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(),
     for k in drop_env:
         env.pop(k, None)
     env.update(extra_env or {})
-    sess, temp = None, None
-    if (ws_dir / _tfe.ENCRYPTION_FILE).exists():
-        sess = _tf_bao_session_of(ws_dir)
-        if sess is None:
-            sess = temp = _TfBaoSession(_tf_ws_decl_id(ws_dir), timeout)
-        try:
-            env.update(sess.env())
-        except (_sst.SecretError, _oc.OpenBaoError, ValueError, KeyError) as e:
-            if temp is not None:
-                temp.revoke()
-            code = getattr(e, "code", None) or type(e).__name__
-            return 125, "", f"state encryption: OpenBao child token unavailable ({code})"
+    sess, temp, sock_dir = None, None, None
     try:
+        # revue M-7 : répertoire des sockets créé DANS le try, retiré par le
+        # finally quoi qu'il arrive ensuite (session OpenBao comprise)
+        try:
+            sock_dir = _tf_socket_dir()
+        except OSError as e:
+            return 125, "", str(e)
+        env["PLUGIN_UNIX_SOCKET_DIR"] = sock_dir
+        if (ws_dir / _tfe.ENCRYPTION_FILE).exists():
+            sess = _tf_bao_session_of(ws_dir)
+            if sess is None:
+                sess = temp = _TfBaoSession(_tf_ws_decl_id(ws_dir), timeout)
+            try:
+                env.update(sess.env())
+            except (_sst.SecretError, _oc.OpenBaoError, ValueError, KeyError) as e:
+                code = getattr(e, "code", None) or type(e).__name__
+                return 125, "", f"state encryption: OpenBao child token unavailable ({code})"
         # umask 077 : état, copies et plans que crée tofu naissent en 0600
         r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env, input=stdin_text,
                            capture_output=True, text=True, timeout=timeout, umask=0o077)
@@ -30416,6 +30570,8 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(),
     finally:
         if temp is not None:
             temp.revoke()
+        if sock_dir:
+            shutil.rmtree(sock_dir, ignore_errors=True)
         _tf_secure_ws(ws_dir)
 
 
@@ -30426,6 +30582,27 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(),
 _TF_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ",
                 "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
                 "SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
+# 2.10.2 (banc 2.10.1) : go-plugin crée le socket Unix de chaque provider
+# dans `PLUGIN_UNIX_SOCKET_DIR`, à défaut dans TMPDIR. Sous l'espace
+# (`<espace>/.tmp`), un chemin long dépasse la limite d'une adresse Unix (108
+# octets) : « Failed to read any lines from plugin's stdout ». TMPDIR reste
+# dans l'espace (le provider libvirt y écrit les ISO cloud-init, dont le
+# chemin est dans le plan gardé) ; le socket va dans un répertoire court,
+# propre à la commande (0700), retiré à la fin. Lu par les deux providers
+# embarqués (go-plugin v1.7.0 et v1.8.0).
+TF_SOCKET_DIR_MAX = 64
+_TF_SOCKET_BASES = ("/tmp", "/var/tmp")
+
+
+def _tf_socket_dir():
+    """Répertoire privé et court pour les sockets des providers d'une
+    commande ; à retirer par l'appelant."""
+    for base in _TF_SOCKET_BASES + (tempfile.gettempdir(),):
+        if len(base) <= TF_SOCKET_DIR_MAX - 20 and os.path.isdir(base) and os.access(base, os.W_OK | os.X_OK):
+            return tempfile.mkdtemp(prefix="hops-tf-", dir=base)
+    raise OSError("no short temporary directory for the provider sockets (/tmp, /var/tmp)")
 
 
 def _tf_env(ws_dir):
@@ -31771,6 +31948,13 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
             raise TfLaunchError(_secret_error_status(e),
                                 {"error": str(e)[:300], "code": e.code}) from None
 
+    if _tf_decl_settling(decl["id"]):
+        # revue M-8 : l'attente s'arrête dès que la déclaration est rendue,
+        # mais aussi dès qu'une action en cours ou une réservation apparaît
+        # (refus 409 tout de suite, pas au bout des 30 s)
+        end = time.time() + TF_DECL_SETTLE_S
+        while time.time() < end and _tf_decl_settling(decl["id"]):
+            time.sleep(0.05)
     with TF_DECL_RUNNING_LOCK:
         if _tf_decl_busy(decl["id"], holder):
             raise TfLaunchError(409, {"error": "this declaration is already running",
@@ -41131,6 +41315,25 @@ def api_artefacts_settings_put():
     return jsonify(dict(conf, action_id=aid))
 
 
+def _art_drop_stale_sig(archive):
+    """Après l'écriture d'une archive qui en remplace une autre : la `.sig`
+    déjà là ne reste que si elle vaut pour cette archive (même contrôle
+    ssh-keygen que la pré-vérification : `valid` ou `unknown-key`) ; sinon
+    elle appartenait à l'archive remplacée et part, le paquet est vu non
+    signé comme en 2.10.1. Une `.sig` arrivée sans archive en place n'est pas
+    passée ici : elle vaut pour l'archive qui vient (2.10.2, banc 2.10.1 et
+    revue I-1 : l'ordre réel A, sig A, A' rendait `invalid`)."""
+    sig = Path(str(archive) + ".sig")
+    if not sig.is_file():
+        return
+    try:
+        trust = _art.verify_trust(archive, str(sig), str(_art.signers_path(_art_state())))
+    except _art.ArtefactError:
+        return                                   # la pré-vérification dira pourquoi
+    if trust["state"] == "invalid":
+        sig.unlink(missing_ok=True)
+
+
 @app.route("/api/artefacts/upload", methods=["POST"])
 @requires_auth
 @_rate_limit("5/minute")
@@ -41162,7 +41365,7 @@ def api_artefacts_upload():
     need = 2 * length + (1 << 30)              # archive puis extraction (contraintes communes du plan)
     if st.f_bavail * st.f_frsize < need:
         return jsonify({"error": "not enough room to receive and extract the package", "need": need}), 507
-    (inc / (name + ".sig")).unlink(missing_ok=True)          # une ancienne signature ne vaut pas pour celle-ci
+    replaces = (inc / name).is_file()          # une archive de ce nom est déjà en place
     part = inc / (name + ".part")
     label = f"artefacts-import:{base[:-len('.tar.gz')]}"
     run = ActionRun(uuid.uuid4().hex[:12], label, "", ["upload", name])
@@ -41176,6 +41379,8 @@ def api_artefacts_upload():
     try:
         res = _receive_archive(run, request.stream, length, part)
         os.replace(part, inc / name)
+        if replaces:
+            _art_drop_stale_sig(inc / name)
     except (_UploadCancelled, ValueError, OSError) as e:
         part.unlink(missing_ok=True)
         run.status, run.exit_code = "error", 1
@@ -41965,6 +42170,10 @@ if __name__ == "__main__":
         _start_plan_secrets_sweeper()            # 2.9.0 : secrets des déroulés finis ou expirés
     except Exception as _e:                      # noqa: BLE001
         log.warning("secret originals sweeper startup failed: %s", _e)
+    try:
+        _start_capi_identity_check()             # 2.10.2 : identités CAPHV d'avant la 2.10.1 (relevé seul)
+    except Exception as _e:                      # noqa: BLE001
+        log.warning("capi identity check startup failed: %s", _e)
     try:
         _tf_decl_startup_audit()
     except Exception as _e:                      # noqa: BLE001

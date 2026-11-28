@@ -367,8 +367,45 @@ restricted CAPHV identity of a cluster created by 2.10.0 or earlier has
 rolling update, remediation) is refused, the existing ones keep running.
 The CAPHV log says `user "system:serviceaccount:<ns>:caphv-identity" is not
 authorized to access image <image-ns>/<image>`. Clusters created by 2.10.1
-have the right. For an older cluster, add it to the identity Role of the
-image namespace. That Role is `caphv-identity` when the image is in the
+have the right.
+
+**Since 2.10.2 the console updates them.** Cluster API > Clusters says
+**Identity outdated** on each cluster concerned (also in its details, and
+in the console log at start-up: the start-up check reports, it never
+fixes). **Update identity** (one cluster) or **Update all identities**
+opens a preview of the exact change (Role and rule added); **Dry run only**
+sends each change to the server in dry run. Administrators only, tracked
+action; the CLI does the same:
+
+```bash
+harvester-capi identity-check  --cluster <harvester> [--name <ns>/<cluster>] [--json]
+harvester-capi identity-update --cluster <harvester> [--name <ns>/<cluster>] [--dry-run] \
+    [--change <ns>/<cluster>=<ns>/<role>/<image> ...]
+```
+
+The console sends the changes of its preview (`--change`): only those
+that are still the same are made. A change that appeared after the
+preview, or one whose image or Role changed since, is left for a new
+preview; one made meanwhile is said already done. Without `--change` the
+CLI makes every change it finds.
+
+The update adds `get` on the image object (`image-xxxxx`, a display name
+in the topology is brought back to its object) to the identity Role of the
+image namespace, nothing else, and only to a Role that carries the labels
+of the cluster (an identity the console did not create is left alone). The
+patch carries the version of the Role it read; running it again changes
+nothing. It does not create a missing Role (`identity-role-missing`), never
+changes a Role without the labels of the cluster (`identity-role-foreign`),
+never guesses between images that share a display name
+(`identity-image-unresolved`), and only adds the rule to the Role that
+already lets the identity list images: an image now in another namespace
+is said (`identity-image-namespace-changed`), the identity is not extended
+to it (bring the image back, or grant that namespace by hand as below).
+A read refused by your rights is said per cluster
+(`identity-unreadable`); the other clusters are still reported.
+
+By hand (a console older than 2.10.2), add the rule to the identity Role
+of the image namespace. That Role is `caphv-identity` when the image is in the
 cluster namespace, and `caphv-identity-<cluster namespace>` in any other
 namespace (`<cluster namespace>-vms` included). The commands below find it
 by its labels, so they work in both cases. `<image>` is the object name

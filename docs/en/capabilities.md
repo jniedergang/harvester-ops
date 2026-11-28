@@ -2750,7 +2750,10 @@ Drive the Terraform provider for Harvester from saved declarations.
   authority variables only, with `HOME` and `TMPDIR` inside the 0700
   workspace and the per-workspace CLI configuration: providers come from
   the workspace mirror and from nowhere else (no direct download, no plugin
-  cache).
+  cache). Since 2.10.2 the providers' sockets go to a short private
+  directory created for each command (`/tmp/hops-tf-*`, 0700, removed at the
+  end, `PLUGIN_UNIX_SOCKET_DIR`): a long workspace path no longer breaks the
+  provider handshake ("Failed to read any lines from plugin's stdout").
 - **Networks, storage classes and IP pools (2.4.0)**: three more forms,
   with the fields of the embedded provider 1.9.0. **VM network**
   (`harvester_network`): cluster network, VLAN id from 0 to 4094, route

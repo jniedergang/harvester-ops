@@ -35,6 +35,13 @@ os.environ.setdefault("HARVESTER_OPS_REPLICATION_FOLLOW", "0")
 # écrire dans les espaces Terraform ni les déclarations réels (audit D17).
 import tempfile as _tempfile  # noqa: E402
 _TF_TEST_DIR = _tempfile.mkdtemp(prefix="hops-tf-tests-")
+# 2.10.2 : le dossier était laissé à chaque passage (16 000 accumulés dans
+# /tmp) ; seul le processus qui l'a créé le retire à sa sortie.
+import atexit as _atexit  # noqa: E402
+import shutil as _shutil  # noqa: E402
+_TF_TEST_PID = os.getpid()
+_atexit.register(lambda: os.getpid() == _TF_TEST_PID
+                 and _shutil.rmtree(_TF_TEST_DIR, ignore_errors=True))
 os.environ.setdefault("HARVESTER_OPS_TF_WORKSPACES", _TF_TEST_DIR + "/terraform")
 os.environ.setdefault("HARVESTER_OPS_TF_DB", _TF_TEST_DIR + "/tf-declarations.db")
 # v1.57.0 : la console exige une connexion ; les tests qui n'éprouvent pas

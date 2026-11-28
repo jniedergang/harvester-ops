@@ -493,6 +493,7 @@ const CapiCreate = (() => {
           ${field('version', tr('capi.eso.f.version'), '1.0.0', tr('capi.eso.t.version'))}
         </div>
         <p class="tf-desc">${esc(T ? tr('capi.eso.noteTemplate') : tr('capi.eso.note'))}</p>
+        <p class="tf-desc capi-eso-reminder" data-e-reminder="1">${esc(tr('capi.eso.reminder'))}</p>
         <p class="tf-desc capi-eso-reason" data-e-reason="1" hidden></p>
       </fieldset>`;
   }

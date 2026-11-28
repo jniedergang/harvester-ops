@@ -3004,7 +3004,12 @@ sauvegardées.
   de chemin, de proxy et d'autorités de certification, avec `HOME` et
   `TMPDIR` dans l'espace (0700) et la configuration de l'espace : les
   providers viennent du miroir de l'espace et de nulle part ailleurs (aucun
-  téléchargement direct, aucun cache de greffons).
+  téléchargement direct, aucun cache de greffons). Depuis la 2.10.2, les
+  sockets des providers vont dans un répertoire court et privé créé pour
+  chaque commande (`/tmp/hops-tf-*`, 0700, retiré à la fin,
+  `PLUGIN_UNIX_SOCKET_DIR`) : un chemin d'espace long ne casse plus la
+  poignée de main du provider (« Failed to read any lines from plugin's
+  stdout »).
 - **Réseaux, classes de stockage et pools d'adresses (2.4.0)** : trois
   formulaires de plus, aux champs du provider embarqué 1.9.0. **Réseau de
   VM** (`harvester_network`) : réseau de cluster, VLAN de 0 à 4094, mode de

@@ -4,6 +4,191 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.10.2] - 2026-11-28 - CAPHV identities updated by the console
+
+### Added
+- **The console updates the CAPHV identities it created before 2.10.1**
+  (decision 331 B). Harvester 1.9.1 refuses a new machine (scale, rolling
+  update, remediation) whose identity cannot `get` its image; identities
+  created by 2.10.0 or earlier only `list` images. Cluster API > Clusters
+  says **Identity outdated** on each cluster concerned (badge and finding
+  `identity-outdated`, also in the cluster details), and **Update
+  identity** (one cluster) or **Update all identities** opens a preview of
+  the exact change (Role and rule added) with an optional server dry run.
+  Administrators only, tracked action `capi-identity-update`, same as
+  `harvester-capi identity-check` and `identity-update [--name ns/cluster]
+  [--dry-run]`. The update adds `get` on the image object (a display name
+  in the topology is brought back to its object) to the identity Role of
+  the image namespace, and nothing else; only a Role that carries the
+  labels of the cluster is changed, by a patch that carries the version of
+  the Role read; running it again changes nothing. Not changed, said
+  instead: a missing Role (`identity-role-missing`), a Role without the
+  cluster labels (`identity-role-foreign`), an image not found or a display
+  name shared by several images (`identity-image-unresolved`), a CAPHV
+  version whose rules are not known (`identity-rules-unknown`), an image
+  now in a namespace where the identity does not list images
+  (`identity-image-namespace-changed`: `get` is only added to the Role that
+  already holds the `list` rule on images). A read refused by the rights of
+  the person is said for that cluster (`identity-unreadable`), the others
+  are still reported. An identity the console did not create is left
+  alone. The console sends the changes of its preview and only those still
+  the same are made (`identity-update --change`); a change that appeared
+  since waits for a new preview, one made meanwhile is said done.
+- **Start-up check of the identities**: about a minute after it starts, the
+  console reads the identities of each Harvester cluster and logs the
+  outdated ones and those that need a manual fix. It never updates them.
+  Cluster API > Clusters shows only the clusters of the reader's own
+  report from that check. The list of clusters is drawn first; the
+  identity badges are filled in when their report arrives (shared read,
+  forced refresh at most every 10 s).
+- **External Secrets chosen at creation** (decision 332 A): activation
+  stays per namespace from the External Secrets tab. The creation window
+  and the tab now say that the team namespaces are enabled once they exist
+  in the new cluster, and a child cluster whose `eso` chart is installed
+  with no namespace enabled shows the warning `eso-namespaces-none` (with
+  its tooltip) in the tab.
+
+### Fixed
+- **A long Terraform workspace path broke the provider handshake**
+  ("Failed to read any lines from plugin's stdout", seen on the 2.10.1
+  bench). go-plugin binds the provider socket in `TMPDIR`, which is in the
+  workspace; past 108 bytes the Unix address is refused. Each OpenTofu
+  command now gets a short private socket directory (`/tmp/hops-tf-*`,
+  0700, `PLUGIN_UNIX_SOCKET_DIR`, removed at the end, timeout and a failed
+  OpenBao session included);
+  `TMPDIR` stays in the workspace for the cloud-init ISOs of the libvirt
+  provider, whose path is in the saved plan. Both bundled providers read
+  the variable (go-plugin v1.7.0 and v1.8.0).
+- **A destroy started right after its dry run got 409 `running`.** The run
+  writes its final status before its `finally` (OpenBao session, state
+  encryption, KVM cleanup) releases the declaration. When every known run of
+  the declaration has ended, a launch now waits for that release (30 s at
+  most); a running run or a reservation by another plan is still refused at
+  once, also when it appears during that wait.
+- **A package signature sent before its archive was lost**: the archive
+  upload deleted any `.sig` of the same name and the package looked
+  unsigned. A `.sig` sent with no archive in place is now kept for the
+  archive that comes. When an archive replaces one already sent, the `.sig`
+  in place stays only if it checks against the new archive (same
+  `ssh-keygen` check as the pre-check); otherwise it is dropped and the
+  package shows as unsigned, as in 2.10.1. The two files can be sent in
+  either order.
+
+### Changed
+- Troubleshooting ("Cluster API machines refused on Harvester 1.9.1") now
+  points to **Update identity** first; the `kubectl patch` stays for a
+  console older than 2.10.2.
+- Parity table `AS_OF` 2.10.2 (no line changed).
+
+### Upgrade notes
+- Clusters created by Cluster API with 2.10.0 or earlier: open Cluster API
+  > Clusters and run **Update all identities** (or `harvester-capi
+  identity-update --cluster <harvester>`) before scaling them or rolling
+  their machines on Harvester 1.9.1.
+- Decision 330 (`ingress-expose` after a Harvester reboot) is still open:
+  **Repair the address for CAPHV** stays a manual, tracked action.
+
+### Tests
+- API: identity report (2.10.0, 2.10.1, console identity, account of
+  someone else, image deleted, Role deleted, Role of someone else, unknown
+  CAPHV rules, unreachable cluster, several clusters and one selected),
+  images read from the topology (variable, worker override, storage class
+  volume, missing `volumeType`, no topology), what grants `get`, Role name
+  per image namespace checked against the Roles the console writes, exact
+  change and facts, display name brought back to the object, shared display
+  name not guessed; update adds only the missing rule, idempotent, other
+  Roles untouched, result identical to a 2.10.1 identity, server dry run
+  writes nothing, one cluster only, Role changed meanwhile read again,
+  refusals (foreign Role, image deleted, escalation refused by the server,
+  unknown cluster, unreachable, uninstall running, identity not created by
+  the console); routes (admin only, tracked action, dry run, bad names, read
+  only report) and the start-up check (reports, never updates, unreachable
+  and kubeconfig-less clusters). ESO status finding with and without chart,
+  with the child unreadable. Provider socket for workspace paths of 80, 120
+  and 200 characters, removed on timeout, short with a long console
+  `TMPDIR`. Launch after a finished run (done, error, cancelled), still
+  refused when running, never released or held by another plan. Signature
+  in either order, in the real order archive A, its signature, archive A'
+  (signature dropped, `unsigned`, not `invalid`), same archive sent again
+  (kept), signature of A' sent while A is in place (kept, also for an
+  unknown key), wrong signature sent before its archive (`invalid`).
+  Review: image moved to a namespace the identity does not list, what lists
+  images, Role gone, no longer the console's, no longer listing images or
+  write undone between report and apply, only previewed changes applied
+  (new change waits, changed image not applied, change made meanwhile said
+  done, malformed change refused, route needs the preview list), forbidden
+  read per cluster (account, images, CAPI providers) while another read
+  error still fails, start-up result limited to the reader's report,
+  shared read keyed by `name`; socket directory removed when the OpenBao
+  session fails; settling wait left at once when a run or a reservation
+  appears.
+- E2E: identity summary, badges and escaped texts, preview then action for
+  one cluster, for all and in dry run (the preview list is sent), list
+  drawn before the identities answer, review findings with their tooltip, operator greyed with the tooltip on
+  the wrapper, nothing to change, failed read keeps the list, cluster
+  details; ESO reminder in the creation window and the tab, finding and its
+  tooltip.
+- Mutations replayed (all detected): Role and account ownership not
+  checked, display name kept, no `resourceVersion`, dry run not passed,
+  existing rules replaced, no conflict retry, already granted not skipped,
+  worker overrides ignored, operator allowed to update, dry run not sent,
+  blocked findings hidden in the preview, badge tooltip not escaped; ESO
+  finding without the chart check or only when the child is readable,
+  finding tooltip and tab reminder dropped; socket directory not removed;
+  settling wait on a running run, held reservation ignored; stale `.sig`
+  never dropped, then (review) replaced archive not checked, signature
+  without an archive checked, unknown-key or valid signature dropped; `list`
+  rule not checked (report and apply), named `list` counted, post-write
+  check dropped, preview filter ignored, stale keys not said, change made
+  meanwhile counted stale, change format or route list not checked,
+  changes not passed by the route, forbidden read not caught or every error
+  caught, start-up result not filtered, shared read keys dropped, socket
+  directory leaked, settling wait not left; interface: preview list not
+  sent, new finding tooltip dropped, list waiting for the identities. Before each fix the new tests failed as the bench saw it
+  (`AF_UNIX path too long`, 409 `running`, `unsigned`).
+- Full suites after the review fixes and the bench: API 15751 passed, 10
+  skipped; E2E 1441 passed (twice each, no failure).
+
+### Verified
+- **Identity update on harv1 (Harvester 1.9.1, CAPHV v0.10.1)**, with a
+  console instance of its own: child cluster `hops-i2102` created by the
+  console, the `get` image rule removed from its identity Role by hand (a
+  2.10.0 identity). Scaling to one worker was refused by the Harvester
+  webhook ("not authorized to access image default/opensuse-leap-cloud").
+  The start-up check then logged the cluster as outdated for harv1 and
+  noted harvlab2 (off) as unreachable without a log line. A server dry run
+  by a delegated administrator (impersonated `cluster-admin` account) was
+  accepted and left the Role unchanged; the same dry run by a delegated
+  account that may only read was refused by the server (`cannot patch
+  roles`), so the impersonation reaches the patch. **Update all
+  identities** from the browser sent the previewed change only, added the
+  rule (action as the impersonated user), and the worker VM was created
+  within 10 s and running 20 s after. A second run and a resent old preview changed
+  nothing (Role version unchanged, "already grants"). A delegated reader
+  without rights on service accounts got `identity-unreadable` per cluster
+  instead of a failed report. The child cluster was deleted afterwards.
+- **KVM declaration on node2 with a 177-character provider socket path**
+  (OpenTofu 1.12.9, libvirt provider 0.9.9 of the 2.10.1 package): plan
+  and apply done, VM running; the provider process carried
+  `PLUGIN_UNIX_SOCKET_DIR=/tmp/hops-tf-*` and bound its socket there
+  (OpenTofu passes the variable to the provider), and no socket directory
+  was left after each command.
+- **Destroy from the interface 0.2 s after its dry run ended**: started at
+  once and destroyed the VM, no 409.
+- **Signature order in the browser** (Import window, plus one `.sig` sent
+  first from the page): `.sig` first then the archive alone = signed;
+  archive A and its `.sig` = signed; archive A' alone after it = unsigned
+  (warning, not refused); A' with its `.sig` = signed.
+
+### Not verified
+- External Secrets chosen at creation on a real child cluster (the warning
+  of the creation window and `eso-namespaces-none` with the chart
+  installed): it needs OpenBao and a published `eso` package, not set up
+  for this patch bench. Only the case without the chart was read on
+  `hops-i2102` (no finding). Covered by API and E2E tests.
+- The provider socket directory in the shipped container (checked from the
+  source tree with the packaged OpenTofu and providers).
+
 ## [2.10.1] - 2026-11-27 - Remaining real checks and Harvester 1.9.1
 
 ### Fixed

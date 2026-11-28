@@ -230,7 +230,12 @@ paquet accepté par acquittement ne peut plus être publié
 
 **Importer dans la console.** Cluster API > Artefacts > **Importer** :
 envoyer l'archive et sa `.sig` (**Envoyer et vérifier**), lire l'état de
-confiance, puis **Accepter**. La console vérifie avant la réception qu'il y
+confiance, puis **Accepter**. Les deux fichiers s'envoient dans n'importe
+quel ordre (2.10.2) : une `.sig` envoyée avant l'archive est gardée pour
+elle. Quand une archive en remplace une déjà envoyée, la `.sig` en place
+ne reste que si elle se vérifie sur la nouvelle archive ; sinon elle
+appartenait à l'archive remplacée et part, et le paquet est vu non signé
+jusqu'à l'envoi de sa propre `.sig`. La console vérifie avant la réception qu'il y
 a la place pour deux fois l'archive plus 1 Gio (507 sinon). Le paquet est
 extrait et vérifié dans `<état>/artefacts.d/<nom>-<version>/` (0700), avec
 `trust.json` et sa `.sig` ; l'archive envoyée est ensuite supprimée. Un
