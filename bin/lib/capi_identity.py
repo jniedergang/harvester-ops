@@ -522,3 +522,155 @@ def caphv_version(stack, desc=None):
         if p.get("type") == "infrastructure" and p.get("name") == "harvester":
             return p.get("version")
     return None
+
+
+# ---------------------------------------------------------------------------
+# 2.10.2 (point 331 B) : mise à jour des identités posées avant la 2.10.1
+#
+# Harvester v1.9.1 exige `get` sur l'image du volumeClaimTemplate de chaque
+# VM créée (règle « image » de RULES). Les identités posées par la 2.10.0 ou
+# avant n'ont que `list` : leurs nouvelles machines sont refusées. La
+# console ajoute la seule règle manquante au Role du namespace de l'image,
+# jamais sur un objet qu'elle n'a pas posé (étiquettes du cluster), par un
+# patch qui porte la version de l'objet lu (aucune écriture concurrente
+# écrasée). Pur : les lectures sont faites par l'appelant.
+# ---------------------------------------------------------------------------
+
+K_ROLE = "roles.rbac.authorization.k8s.io"
+IMAGE_GROUP, IMAGE_RESOURCE = "harvesterhci.io", "virtualmachineimages"
+
+
+def owned(obj, name, namespace):
+    """Vrai si l'objet porte les étiquettes que la console pose sur
+    l'identité de ce cluster (`labels`)."""
+    lab = ((obj or {}).get("metadata") or {}).get("labels") or {}
+    return (lab.get(GENERATED) == "true" and lab.get(L_CLUSTER) == name
+            and lab.get(L_NAMESPACE) == namespace)
+
+
+def needs_image_get(version):
+    """Vrai si les règles de cette version de CAPHV accordent `get` sur
+    l'image (None : version non relue)."""
+    rules = rules_for(version)
+    if rules is None:
+        return None
+    return any(r["resource"] == IMAGE_RESOURCE and r["names"] == "image" and "get" in r["verbs"]
+               for r in rules)
+
+
+def cluster_images(cluster):
+    """Images des machines d'un Cluster à topologie : valeurs `imageName`
+    des volumes de type image de la variable `volumes`, et de ses
+    remplacements (plan de contrôle, chaque MachineDeployment). Ce que les
+    prochaines machines utiliseront, triées, sans doublon."""
+    topo = ((cluster or {}).get("spec") or {}).get("topology") or {}
+    lists = [topo.get("variables") or []]
+    lists.append(((topo.get("controlPlane") or {}).get("variables") or {}).get("overrides") or [])
+    for md in ((topo.get("workers") or {}).get("machineDeployments") or []):
+        lists.append(((md.get("variables") or {}).get("overrides") or []))
+    out = set()
+    for variables in lists:
+        for v in variables:
+            if v.get("name") != "volumes" or not isinstance(v.get("value"), list):
+                continue
+            for vol in v["value"]:
+                if (isinstance(vol, dict) and (vol.get("volumeType") or "image") == "image"
+                        and vol.get("imageName")):
+                    out.add(str(vol["imageName"]))
+    return sorted(out)
+
+
+def image_role_name(namespace, image_namespace):
+    """Le Role de l'identité dans le namespace de l'image (`docs`) :
+    `caphv-identity` dans le namespace du cluster, `caphv-identity-<ns>`
+    partout ailleurs."""
+    return IDENTITY if image_namespace == namespace else side_role_name({"namespace": namespace})
+
+
+def grants_image_get(role, image):
+    """Vrai si une règle du Role accorde `get` sur cette image (objet)."""
+    for r in (role or {}).get("rules") or []:
+        groups, res, verbs = r.get("apiGroups") or [], r.get("resources") or [], r.get("verbs") or []
+        names = r.get("resourceNames")
+        if ((IMAGE_GROUP in groups or "*" in groups) and (IMAGE_RESOURCE in res or "*" in res)
+                and ("get" in verbs or "*" in verbs) and (not names or image in names)):
+            return True
+    return False
+
+
+def image_rule(image):
+    return _rbac_rule(IMAGE_GROUP, IMAGE_RESOURCE, ["get"], [image])
+
+
+def identity_plan(namespace, name, sa, images, facts, roles, version):
+    """État de l'identité d'un cluster et ce que la mise à jour changerait.
+
+    `sa` : le compte `caphv-identity` du namespace (ou None) ; `images` :
+    `cluster_images` ; `facts` : {référence (objet ou nom affiché): {"ref",
+    "ambiguous"?}} (`_image_facts` de harvester-capi) ; `roles` :
+    {(namespace, nom): Role ou None} lus pour chaque image ; `version` : de
+    CAPHV. Rend {"cluster", "state", "changes", "findings"} ; `state` :
+    `current`, `outdated` (changements à faire), `blocked` (rien ne peut être
+    fait sans un geste humain), `not-managed` (identité que la console n'a
+    pas posée : jamais touchée)."""
+    out = {"cluster": f"{namespace}/{name}", "state": "current", "changes": [], "findings": []}
+    if sa is None or not owned(sa, name, namespace):
+        out["state"] = "not-managed"
+        return out
+    need = needs_image_get(version)
+    if need is None:
+        out["state"] = "blocked"
+        out["findings"].append({"code": "identity-rules-unknown", "level": "block",
+                                "facts": {"version": version or "?", "known": ", ".join(sorted(RULES))}})
+        return out
+    if not need:
+        return out
+    if not images:
+        out["state"] = "blocked"
+        out["findings"].append({"code": "identity-image-unknown", "level": "block",
+                                "facts": {"cluster": out["cluster"]}})
+        return out
+    for ref in images:
+        info = (facts or {}).get(ref)
+        if not info or info.get("ambiguous"):
+            out["findings"].append({"code": "identity-image-unresolved", "level": "block",
+                                    "facts": {"cluster": out["cluster"], "image": ref,
+                                              "candidates": ", ".join((info or {}).get("ambiguous") or [])}})
+            continue
+        ins, _, obj = info["ref"].partition("/")
+        rname = image_role_name(namespace, ins)
+        role = (roles or {}).get((ins, rname))
+        where = f"{ins}/{rname}"
+        if role is None:
+            out["findings"].append({"code": "identity-role-missing", "level": "block",
+                                    "facts": {"cluster": out["cluster"], "role": where, "image": info["ref"]}})
+            continue
+        if not owned(role, name, namespace):
+            out["findings"].append({"code": "identity-role-foreign", "level": "block",
+                                    "facts": {"cluster": out["cluster"], "role": where}})
+            continue
+        if grants_image_get(role, obj):
+            continue
+        if any(c["namespace"] == ins and c["role"] == rname and c["image"] == obj for c in out["changes"]):
+            continue
+        out["changes"].append({"namespace": ins, "role": rname, "image": obj, "rule": image_rule(obj),
+                               "resource_version": (role.get("metadata") or {}).get("resourceVersion")})
+    if out["changes"]:
+        out["state"] = "outdated"
+        out["findings"].insert(0, {"code": "identity-outdated", "level": "warn",
+                                   "facts": {"cluster": out["cluster"],
+                                             "roles": ", ".join(sorted({f"{c['namespace']}/{c['role']}"
+                                                                        for c in out["changes"]})),
+                                             "images": ", ".join(sorted({c["image"] for c in out["changes"]}))}})
+    elif out["findings"]:
+        out["state"] = "blocked"
+    return out
+
+
+def identity_patch(role, change):
+    """Corps du patch de fusion d'un changement : les règles du Role lu
+    plus la règle de l'image, avec la version de l'objet lu (le serveur
+    refuse si le Role a changé depuis : Conflict)."""
+    rules = list((role or {}).get("rules") or [])
+    return {"metadata": {"resourceVersion": (role.get("metadata") or {}).get("resourceVersion")},
+            "rules": rules + [change["rule"]]}

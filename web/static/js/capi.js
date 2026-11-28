@@ -737,6 +737,9 @@ const CAPI = (() => {
       if (acc) { e.preventDefault(); openAccess(acc.dataset.ns, acc.dataset.name); }
       const ren = e.target.closest('.capi-cluster-renew');
       if (ren) { e.preventDefault(); openRenew(ren.dataset.ns, ren.dataset.name); }
+      // 2.10.2 : identités CAPHV d'avant la 2.10.1 (un cluster, ou tous)
+      const idu = e.target.closest('[data-capi-identity-update]');
+      if (idu && !idu.disabled) { e.preventDefault(); openIdentityUpdate(idu.dataset.capiIdentityUpdate || ''); }
     });
     // Upload input change handler — delegated wiring done once
     document.addEventListener('change', (e) => {
@@ -933,6 +936,7 @@ const CAPI = (() => {
       case 'capi-uninstall': return tr('capi.hist.kind.uninstall');
       case 'capi-cleanup-legacy': return tr('capi.hist.kind.cleanup');
       case 'capi-repair-shim': return tr('capi.hist.kind.repairShim');
+      case 'capi-identity-update': return tr('capi.hist.kind.identityUpdate');
       case 'capi-bundle-build': return tr('capi.hist.kind.bundle');
       case 'capi-cluster-create': return tr('capi.hist.kind.create');
       case 'capi-cluster-scale': return tr('capi.hist.kind.scale');
@@ -1044,9 +1048,17 @@ const CAPI = (() => {
   const enc = encodeURIComponent;
 
   async function k8sClustersInner(out, cluster) {
-    let diag;
-    try { diag = await fetch(`/api/capi/${enc(cluster)}/diag`).then(r => r.json()); }
-    catch (e) { out.innerHTML = `<div class="summary-bar bad">${esc(e.message)}</div>`; return; }
+    let diag, ids = null;
+    try {
+      // 2.10.2 : état des identités CAPHV lu en même temps ; un échec de
+      // cette lecture ne cache pas la liste
+      [diag, ids] = await Promise.all([
+        fetch(`/api/capi/${enc(cluster)}/diag`).then(r => r.json()),
+        fetch(`/api/capi/${enc(cluster)}/identities`).then(r => (r.ok ? r.json() : null)).catch(() => null),
+      ]);
+    } catch (e) { out.innerHTML = `<div class="summary-bar bad">${esc(e.message)}</div>`; return; }
+    const idOf = {};
+    ((ids && ids.clusters) || []).forEach(c => { idOf[c.cluster] = c; });
 
     const clusters = diag.capi_clusters || [];
     if (clusters.length === 0) {
@@ -1057,7 +1069,7 @@ const CAPI = (() => {
       const ref = `data-ns="${esc(c.namespace)}" data-name="${esc(c.name)}"`;
       return `
       <tr>
-        <td><code>${esc(c.namespace)}/${esc(c.name)}</code></td>
+        <td><code>${esc(c.namespace)}/${esc(c.name)}</code>${identityBadge(idOf[`${c.namespace}/${c.name}`])}</td>
         <td><span class="phase ${phaseClass(c.phase, 'Provisioned')}">${esc(c.phase)}</span></td>
         <td>${c.ready ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + '</span>' : '<span class="badge warn">…</span>'}</td>
         <td><code>${esc(c.clusterClass || '—')}</code></td>
@@ -1072,7 +1084,7 @@ const CAPI = (() => {
         </td>
       </tr>`;
     }).join('');
-    out.innerHTML = `
+    out.innerHTML = `${identitySummary(ids)}
       <table class="data-table">
         <thead><tr>
           <th>${esc(tr('capi.v.col.name'))}</th>
@@ -1084,6 +1096,160 @@ const CAPI = (() => {
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
+  }
+
+  // -------------------------------------------------------------------------
+  // 2.10.2 (point 331 B) : identités CAPHV posées avant la 2.10.1, sans `get`
+  // sur leur image (Harvester 1.9.1 refuse alors leurs nouvelles machines).
+  // Constat sur la ligne du cluster, dans ses détails et en tête de liste ;
+  // « Mettre à jour l'identité » ouvre un aperçu des changements exacts
+  // (administrateurs, action suivie, essai à blanc du serveur au choix).
+  // -------------------------------------------------------------------------
+  const ID_FINDINGS = {
+    'identity-outdated': (v) => tr('capi.id.fd.identity-outdated', v),
+    'identity-image-unresolved': (v) => tr('capi.id.fd.identity-image-unresolved', v),
+    'identity-image-unknown': (v) => tr('capi.id.fd.identity-image-unknown', v),
+    'identity-role-missing': (v) => tr('capi.id.fd.identity-role-missing', v),
+    'identity-role-foreign': (v) => tr('capi.id.fd.identity-role-foreign', v),
+    'identity-rules-unknown': (v) => tr('capi.id.fd.identity-rules-unknown', v),
+  };
+  const ID_TIPS = {
+    'identity-outdated': () => tr('capi.id.t.fd.identity-outdated'),
+    'identity-image-unresolved': () => tr('capi.id.t.fd.identity-image-unresolved'),
+    'identity-image-unknown': () => tr('capi.id.t.fd.identity-image-unknown'),
+    'identity-role-missing': () => tr('capi.id.t.fd.identity-role-missing'),
+    'identity-role-foreign': () => tr('capi.id.t.fd.identity-role-foreign'),
+    'identity-rules-unknown': () => tr('capi.id.t.fd.identity-rules-unknown'),
+  };
+  const isAdminNow = () => !!(window.App && App.role && App.role() === 'admin');
+
+  function identityFindingHtml(f) {
+    const text = ID_FINDINGS[f.code] ? ID_FINDINGS[f.code](Object.assign({}, f.facts || {})) : f.code;
+    const tip = ID_TIPS[f.code] ? ID_TIPS[f.code]() : '';
+    return `<div class="sto-finding ${f.level === 'warn' ? 'sev-watch' : 'sev-critical'}${tip ? ' tip' : ''}" data-code="${esc(f.code)}"${
+      tip ? ` data-tip="${esc(tip)}"` : ''}><div class="sto-finding-title">${esc(text)}</div></div>`;
+  }
+
+  function identityButton(name, all) {
+    const admin = isAdminNow();
+    const tip = !admin ? tr('capi.id.t.adminOnly') : all ? tr('capi.id.t.updateAll') : tr('capi.id.t.update');
+    return `<span class="tip" data-tip="${esc(tip)}"><button type="button" class="btn btn-primary btn-sm"
+      data-capi-identity-update="${esc(name)}" ${admin ? '' : 'disabled'}>${Icons.svg('key')} ${
+      esc(all ? tr('capi.id.updateAll') : tr('capi.id.update'))}</button></span>`;
+  }
+
+  /** Constats d'un cluster (détails) ; `withButton` : bouton s'il y a à faire. */
+  function identityFindings(c, withButton) {
+    if (!c || !(c.findings || []).length) return '';
+    return (c.findings || []).map(identityFindingHtml).join('')
+      + (withButton && c.state === 'outdated' ? `<div class="apply-bar" style="margin:6px 0 0;">${identityButton(c.cluster, false)}</div>` : '');
+  }
+
+  function identityBadge(c) {
+    if (!c || (c.state !== 'outdated' && c.state !== 'blocked')) return '';
+    const outdated = c.state === 'outdated';
+    const tip = (c.findings || []).map(f => (ID_FINDINGS[f.code] ? ID_FINDINGS[f.code](Object.assign({}, f.facts || {})) : f.code)).join(' ');
+    return ` <span class="badge ${outdated ? 'warn' : 'fail'} tip" data-capi-identity-state="${esc(c.state)}" data-tip="${esc(tip)}">${
+      Icons.svg('warn', { size: 12 })} ${esc(outdated ? tr('capi.id.badge') : tr('capi.id.blockedBadge'))}</span>${
+      outdated ? ' ' + identityButton(c.cluster, false) : ''}`;
+  }
+
+  function identitySummary(ids) {
+    const list = (ids && ids.clusters) || [];
+    const outdated = list.filter(c => c.state === 'outdated');
+    if (!outdated.length) return '';
+    return `<div class="sto-finding sev-watch tip" data-capi-identity-summary data-tip="${esc(tr('capi.id.t.summary'))}"
+      style="margin-bottom:10px;"><div class="sto-finding-title">${esc(tr('capi.id.summary', {
+      n: outdated.length, clusters: outdated.map(c => c.cluster).join(', ') }))} ${identityButton('', true)}</div></div>`;
+  }
+
+  let idGen = 0;
+  function closeIdentityUpdate() {
+    idGen += 1;
+    document.querySelector('#capi-identity-modal')?.remove();
+  }
+
+  function identityPreviewHtml(rep) {
+    const list = (rep && rep.clusters) || [];
+    const rows = [];
+    list.forEach(c => (c.changes || []).forEach(x => rows.push(`<tr data-capi-identity-change>
+      <td><code>${esc(c.cluster)}</code></td><td><code>${esc(x.namespace)}/${esc(x.role)}</code></td>
+      <td><code>${esc(tr('capi.id.change', { image: x.image }))}</code></td></tr>`)));
+    const blocked = list.filter(c => (c.findings || []).some(f => f.level === 'block'));
+    return (rows.length ? `<table class="data-table"><thead><tr><th>${esc(tr('capi.id.col.cluster'))}</th>
+        <th>${esc(tr('capi.id.col.role'))}</th><th>${esc(tr('capi.id.col.change'))}</th></tr></thead>
+        <tbody>${rows.join('')}</tbody></table>`
+      : `<p class="form-hint" data-capi-identity-none>${esc(tr('capi.id.none'))}</p>`)
+      + (blocked.length ? `<h4>${esc(tr('capi.id.blocked'))}</h4>${blocked.map(c => (c.findings || [])
+        .filter(f => f.level === 'block').map(identityFindingHtml).join('')).join('')}` : '');
+  }
+
+  function openIdentityUpdate(name) {
+    const cluster = mgmtCluster();
+    if (!cluster) return;
+    closeIdentityUpdate();
+    const gen = idGen;
+    const m = document.createElement('div');
+    m.className = 'modal-overlay active';
+    m.id = 'capi-identity-modal';
+    m.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="capi-id-title">
+        <div class="modal-header"><div><h3 id="capi-id-title">${Icons.svg('key')} ${esc(tr('capi.id.title'))}</h3>
+          <div class="modal-subtitle">${esc(name || cluster)} · ${esc(tr('capi.id.sub'))}</div></div>
+          <button type="button" class="btn-close tip" data-x="close" data-tip="${esc(tr('common.cancel'))}" aria-label="${esc(tr('common.cancel'))}">×</button></div>
+        <div class="modal-body"><div data-x="plan"><p class="form-hint">${esc(tr('capi.id.loading'))}</p></div>
+          <label class="apply-dry tip" data-tip="${esc(tr('capi.id.t.dry'))}"><input type="checkbox" data-x="dry"> ${esc(tr('capi.id.dry'))}</label></div>
+        <div class="modal-footer apply-bar" style="margin:0;">
+          <button type="button" class="btn btn-secondary btn-sm tip" data-x="close" data-tip="${esc(tr('common.cancel'))}">${esc(tr('common.cancel'))}</button>
+          <span class="tip" data-x="gowrap" data-tip="${esc(tr('capi.id.t.go'))}"><button type="button" class="btn btn-primary btn-sm" data-x="go" disabled>${Icons.svg('key')} ${esc(tr('capi.id.go'))}</button></span>
+          <span class="apply-result" data-x="feedback"></span>
+        </div>
+      </div>`;
+    document.body.appendChild(m);
+    const q = (x) => m.querySelector(`[data-x="${x}"]`);
+    let changes = 0;
+    const sync = () => {
+      const admin = isAdminNow();
+      q('go').disabled = !(admin && changes > 0);
+      q('gowrap').dataset.tip = !admin ? tr('capi.id.t.adminOnly') : changes ? tr('capi.id.t.go') : tr('capi.id.none');
+    };
+    m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-x="close"]')) closeIdentityUpdate(); });
+    m.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeIdentityUpdate(); });
+    fetch(`/api/capi/${enc(cluster)}/identities${name ? `?name=${enc(name)}` : ''}`).then(async (r) => {
+      const d = await r.json().catch(() => ({}));
+      if (gen !== idGen) return;
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      if (d.unreachable) throw new Error(tr('overview.clusterUnreachable', { name: cluster }));
+      changes = ((d.clusters || []).reduce((n, c) => n + (c.changes || []).length, 0));
+      q('plan').innerHTML = identityPreviewHtml(d);
+      sync();
+    }).catch((e) => {
+      if (gen !== idGen) return;
+      q('plan').innerHTML = `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(tr('capi.id.failed', { msg: e.message }))}</div></div>`;
+    });
+    q('go').addEventListener('click', async () => {
+      if (q('go').disabled) return;
+      q('go').disabled = true;
+      const dry = q('dry').checked;
+      try {
+        const r = await fetch(`/api/capi/${enc(cluster)}/identity-update`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, dry_run: dry }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (gen !== idGen) return;
+        if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        closeIdentityUpdate();
+        if (typeof Dock !== 'undefined' && Dock.poll) Dock.poll();
+        const res = document.querySelector('#capi-k8s-body');
+        if (res) res.insertAdjacentHTML('afterbegin', `<p class="form-hint" data-capi-identity-started>${Icons.svg('ok', { size: 14 })} ${
+          esc(dry ? tr('capi.id.startedDry', { id: d.action_id }) : tr('capi.id.started', { id: d.action_id }))}</p>`);
+      } catch (e) {
+        if (gen !== idGen) return;
+        q('feedback').innerHTML = failLine(e.message);
+        sync();
+      }
+    });
   }
 
   async function showClusterDetails(namespace, name) {
@@ -1118,6 +1284,7 @@ const CAPI = (() => {
             ${esc(tr('capi.v.details.ready'))} ${d.ready ? Icons.svg('ok', { size: 14 }) : '…'} ·
             ${esc(tr('capi.v.details.endpoint'))} <code>${esc(ep.host || '—')}:${esc(ep.port || '—')}</code>
           </div>
+          <div data-capi-identity-box></div>
           ${d.identity ? `<p class="capi-identity tip" data-identity="${esc(d.identity)}" data-tip="${esc(d.identity === 'restricted'
             ? tr('capi.v.details.t.identityRestricted') : tr('capi.v.details.t.identityConsole'))}">${Icons.svg(d.identity === 'restricted' ? 'ok' : 'warn', { size: 13 })}
             ${esc(d.identity === 'restricted' ? tr('capi.v.details.identityRestricted') : tr('capi.v.details.identityConsole'))}</p>` : ''}
@@ -1130,6 +1297,15 @@ const CAPI = (() => {
             <pre class="dock-action-log" style="display:block;max-height:200px;">${esc(JSON.stringify(d.topology, null, 2))}</pre>
           </details>
         </div>`);
+      if (d.identity === 'restricted') {
+        // 2.10.2 : constat de l'identité de ce cluster (lecture à part, jamais bloquante)
+        fetch(`/api/capi/${enc(cluster)}/identities?name=${enc(`${namespace}/${name}`)}`)
+          .then(r => (r.ok ? r.json() : null)).catch(() => null).then(rep => {
+            const c = rep && (rep.clusters || [])[0];
+            const box = api.el && api.el.querySelector('[data-capi-identity-box]');
+            if (c && box) box.innerHTML = identityFindings(c, true);
+          });
+      }
     } catch (e) {
       api.setBody(`<div style="padding:16px;"><span style="color:var(--danger)">${esc(tr('capi.v.failedMsg', { msg: e.message }))}</span></div>`);
     }
@@ -1642,7 +1818,7 @@ const CAPI = (() => {
   document.addEventListener('DOMContentLoaded', initSubtabs);
 
   return { init, refresh, reactivate, setTab, tab: () => tab, refreshK8s: refreshK8sClustersPanel, openCreate, openUninstall,
-    openAccess, openRenew };
+    openAccess, openRenew, openIdentityUpdate };
 })();
 
 document.addEventListener('DOMContentLoaded', CAPI.init);

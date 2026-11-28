@@ -1294,6 +1294,8 @@ ADMIN_ONLY_PREFIXES = (
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
                        # 2.10.1 : reposer le service de compatibilité de CAPHV
                        "/repair-shim",
+                       # 2.10.2 : ajouter aux identités CAPHV la règle de leur image
+                       "/identity-update",
                        # 2.9.0 : remettre l'état chiffré d'une déclaration en clair
                        "/decrypt-state",
                        # 2.9.0 : oublier les secrets gardés d'un déroulé arrêté
@@ -23969,6 +23971,108 @@ def api_capi_repair_shim(cluster):
     return jsonify({"action_id": run.id}), 201
 
 
+# ---------------------------------------------------------------------------
+# 2.10.2 (point 331 B) : identités CAPHV restreintes posées avant la 2.10.1
+# (sans `get` sur leur image, exigé par Harvester 1.9.1). Relevé en lecture,
+# mise à jour en action suivie `capi-identity-update:` réservée aux
+# administrateurs (suffixe dans ADMIN_ONLY_SUFFIXES), `harvester-capi
+# identity-check|identity-update` (parité CLI). Contrôle au démarrage : il
+# relève et journalise, ne corrige jamais.
+# ---------------------------------------------------------------------------
+CAPI_IDENTITY_STARTUP = {}          # cluster -> {"at", "outdated", "blocked", "unreachable"}
+CAPI_IDENTITY_STARTUP_DELAY = 60    # secondes après le démarrage
+
+
+def _capi_identity_name():
+    """`namespace/nom` d'un cluster enfant pris dans la requête, "" pour
+    tous ; (None, réponse 400) s'il est mal formé."""
+    raw = request.args.get("name") if request.method == "GET" else (request.get_json(silent=True) or {}).get("name")
+    name = str(raw or "").strip()
+    if name and not _cc.NS_NAME_RE.match(name):
+        return None, (jsonify({"error": "name expects namespace/name", "code": "invalid-name"}), 400)
+    return name, None
+
+
+@app.route("/api/capi/<cluster>/identities")
+@requires_auth
+@shared_read()
+def api_capi_identities(cluster):
+    """État de l'identité de chaque cluster enfant (`identity-check`) :
+    à jour, à mettre à jour (changements exacts), bloquée (geste humain),
+    non posée par la console. `?name=ns/nom` : un seul cluster."""
+    name, err = _capi_identity_name()
+    if err:
+        return err
+    cmd, err = _capi_base(cluster, "identity-check")
+    if err:
+        return err
+    got, err = _capi_run_json(cmd + ["--json"] + (["--name", name] if name else []), timeout=120)
+    if err:
+        return err
+    out, _rc = got
+    out["startup"] = CAPI_IDENTITY_STARTUP.get(cluster)
+    return jsonify(out)
+
+
+@app.route("/api/capi/<cluster>/identity-update", methods=["POST"])
+@requires_auth
+@_rate_limit("6 per minute")
+def api_capi_identity_update(cluster):
+    """Ajoute aux identités posées avant la 2.10.1 la règle `get` sur leur
+    image. Corps : {"name": "ns/nom" (vide : tous), "dry_run": bool}. Action
+    suivie `capi-identity-update:<ns/nom ou cluster>` ; administrateur."""
+    name, err = _capi_identity_name()
+    if err:
+        return err
+    dry = bool((request.get_json(silent=True) or {}).get("dry_run"))
+    cmd, err = _capi_base(cluster, "identity-update")
+    if err:
+        return err
+    run, err = _capi_action(cluster, f"capi-identity-update:{name or cluster}",
+                            cmd + (["--name", name] if name else []) + (["--dry-run"] if dry else []),
+                            dry_run=dry)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "dry_run": dry, "name": name}), 201
+
+
+def _capi_identity_startup_check(sleep=time.sleep, delay=None):
+    """Au démarrage : relève, cluster après cluster, les identités à mettre
+    à jour et le journalise ; ne corrige rien (la mise à jour reste une
+    action d'administrateur). Un cluster éteint ou injoignable est noté
+    comme tel, sans bruit."""
+    sleep(CAPI_IDENTITY_STARTUP_DELAY if delay is None else delay)
+    if _capi_script() is None:
+        return
+    for c in load_config_ro().get("clusters", []):
+        name = c.get("name")
+        kc = _cluster_kubeconfig_path(c, purpose="capi-identity-check", missing_ok=True)
+        cmd = _capi_cmd(kc, "identity-check", name) if kc else None
+        if not cmd:
+            continue
+        try:
+            proc = subprocess.run(cmd + ["--json"], capture_output=True, text=True, timeout=180)
+            rep = json.loads(proc.stdout)
+        except (subprocess.TimeoutExpired, OSError, ValueError) as e:
+            log.warning("capi identity check of %s failed: %s", name, type(e).__name__)
+            continue
+        entry = {"at": time.time(), "unreachable": bool(rep.get("unreachable")),
+                 "outdated": [x["cluster"] for x in rep.get("clusters") or [] if x.get("state") == "outdated"],
+                 "blocked": [x["cluster"] for x in rep.get("clusters") or [] if x.get("state") == "blocked"]}
+        CAPI_IDENTITY_STARTUP[name] = entry
+        if entry["outdated"]:
+            log.warning("%s: CAPHV identities created before 2.10.1 lack get on their image (Harvester 1.9.1 "
+                        "refuses their new machines): %s; an administrator updates them from Cluster API > "
+                        "Clusters, or harvester-capi identity-update", name, ", ".join(entry["outdated"]))
+        if entry["blocked"]:
+            log.warning("%s: CAPHV identities that need a manual fix: %s", name, ", ".join(entry["blocked"]))
+
+
+def _start_capi_identity_check():
+    """Lancé depuis le point d'entrée, jamais à l'import."""
+    threading.Thread(target=_capi_identity_startup_check, daemon=True, name="capi-identity-check").start()
+
+
 @app.route("/api/capi/<cluster>/cluster/<namespace>/<name>/scale", methods=["POST"])
 @requires_auth
 def api_capi_cluster_scale(cluster, namespace, name):
@@ -42030,6 +42134,10 @@ if __name__ == "__main__":
         _start_plan_secrets_sweeper()            # 2.9.0 : secrets des déroulés finis ou expirés
     except Exception as _e:                      # noqa: BLE001
         log.warning("secret originals sweeper startup failed: %s", _e)
+    try:
+        _start_capi_identity_check()             # 2.10.2 : identités CAPHV d'avant la 2.10.1 (relevé seul)
+    except Exception as _e:                      # noqa: BLE001
+        log.warning("capi identity check startup failed: %s", _e)
     try:
         _tf_decl_startup_audit()
     except Exception as _e:                      # noqa: BLE001
