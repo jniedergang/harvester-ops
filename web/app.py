@@ -41182,6 +41182,20 @@ def api_artefacts_settings_put():
     return jsonify(dict(conf, action_id=aid))
 
 
+def _art_drop_stale_sig(archive):
+    """Retire la `.sig` de l'archive que ce téléversement remplace : plus
+    ancienne que l'archive en place, elle lui appartenait. Une `.sig` arrivée
+    sans archive, ou après la dernière archive, vaut pour celle qui vient
+    (2.10.2, banc 2.10.1 : la signature téléversée d'abord était effacée et
+    le paquet vu non signé)."""
+    sig = Path(str(archive) + ".sig")
+    try:
+        if sig.is_file() and archive.is_file() and sig.stat().st_mtime <= archive.stat().st_mtime:
+            sig.unlink()
+    except FileNotFoundError:
+        pass
+
+
 @app.route("/api/artefacts/upload", methods=["POST"])
 @requires_auth
 @_rate_limit("5/minute")
@@ -41213,7 +41227,7 @@ def api_artefacts_upload():
     need = 2 * length + (1 << 30)              # archive puis extraction (contraintes communes du plan)
     if st.f_bavail * st.f_frsize < need:
         return jsonify({"error": "not enough room to receive and extract the package", "need": need}), 507
-    (inc / (name + ".sig")).unlink(missing_ok=True)          # une ancienne signature ne vaut pas pour celle-ci
+    _art_drop_stale_sig(inc / name)
     part = inc / (name + ".part")
     label = f"artefacts-import:{base[:-len('.tar.gz')]}"
     run = ActionRun(uuid.uuid4().hex[:12], label, "", ["upload", name])

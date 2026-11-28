@@ -226,7 +226,9 @@ that was accepted by acknowledgement can no longer be published
 
 **Importing in the console.** Cluster API > Artefacts > **Import**: send
 the archive and its `.sig` (**Send and check**), read the trust state, then
-**Accept**. The console checks there is room for twice the archive plus
+**Accept**. The two files can be sent in either order (2.10.2): a `.sig`
+sent before the archive is kept for it; a `.sig` older than an archive sent
+again belonged to the replaced archive and is dropped with it. The console checks there is room for twice the archive plus
 1 GiB before receiving it (507 otherwise). The package is extracted and
 checked into `<state>/artefacts.d/<name>-<version>/` (0700), with
 `trust.json` and its `.sig`; the uploaded archive is then deleted. A
