@@ -146,25 +146,48 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   directory leaked, settling wait not left; interface: preview list not
   sent, new finding tooltip dropped, list waiting for the identities. Before each fix the new tests failed as the bench saw it
   (`AF_UNIX path too long`, 409 `running`, `unsigned`).
-- Full suites before the version commit: API 15714 passed, 10 skipped
-  (`test_vnc_mux`, a known timing test, failed once in parallel on an
-  earlier run and passed alone three times); E2E 1439 passed.
+- Full suites after the review fixes and the bench: API 15751 passed, 10
+  skipped; E2E 1441 passed (twice each, no failure).
 
 ### Verified
-- Nothing on a cluster or a machine (no bench for this patch release): every
-  item is **verified by tests only**. The bundled providers were checked to
-  read `PLUGIN_UNIX_SOCKET_DIR` (strings of the 2.10.1 bundle binaries).
+- **Identity update on harv1 (Harvester 1.9.1, CAPHV v0.10.1)**, with a
+  console instance of its own: child cluster `hops-i2102` created by the
+  console, the `get` image rule removed from its identity Role by hand (a
+  2.10.0 identity). Scaling to one worker was refused by the Harvester
+  webhook ("not authorized to access image default/opensuse-leap-cloud").
+  The start-up check then logged the cluster as outdated for harv1 and
+  noted harvlab2 (off) as unreachable without a log line. A server dry run
+  by a delegated administrator (impersonated `cluster-admin` account) was
+  accepted and left the Role unchanged; the same dry run by a delegated
+  account that may only read was refused by the server (`cannot patch
+  roles`), so the impersonation reaches the patch. **Update all
+  identities** from the browser sent the previewed change only, added the
+  rule (action as the impersonated user), and the worker VM was created
+  within 10 s and running 20 s after. A second run and a resent old preview changed
+  nothing (Role version unchanged, "already grants"). A delegated reader
+  without rights on service accounts got `identity-unreadable` per cluster
+  instead of a failed report. The child cluster was deleted afterwards.
+- **KVM declaration on node2 with a 177-character provider socket path**
+  (OpenTofu 1.12.9, libvirt provider 0.9.9 of the 2.10.1 package): plan
+  and apply done, VM running; the provider process carried
+  `PLUGIN_UNIX_SOCKET_DIR=/tmp/hops-tf-*` and bound its socket there
+  (OpenTofu passes the variable to the provider), and no socket directory
+  was left after each command.
+- **Destroy from the interface 0.2 s after its dry run ended**: started at
+  once and destroyed the VM, no 409.
+- **Signature order in the browser** (Import window, plus one `.sig` sent
+  first from the page): `.sig` first then the archive alone = signed;
+  archive A and its `.sig` = signed; archive A' alone after it = unsigned
+  (warning, not refused); A' with its `.sig` = signed.
 
 ### Not verified
-- Identity update on a real Harvester 1.9.1 with a cluster created by
-  2.10.0 (a new worker refused before, created after), its server dry run
-  with an impersonated administrator, and the start-up check log.
-- A Terraform plan and apply of a KVM declaration with a long workspace
-  path (provider socket under `/tmp/hops-tf-*`), and in the shipped
-  container.
-- Destroy right after its dry run through the interface; `.sig` before the
-  archive in the browser.
-- The ESO reminder and `eso-namespaces-none` on a real child cluster.
+- External Secrets chosen at creation on a real child cluster (the warning
+  of the creation window and `eso-namespaces-none` with the chart
+  installed): it needs OpenBao and a published `eso` package, not set up
+  for this patch bench. Only the case without the chart was read on
+  `hops-i2102` (no finding). Covered by API and E2E tests.
+- The provider socket directory in the shipped container (checked from the
+  source tree with the packaged OpenTofu and providers).
 
 ## [2.10.1] - 2026-11-27 - Remaining real checks and Harvester 1.9.1
 
