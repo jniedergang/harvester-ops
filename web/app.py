@@ -30379,6 +30379,11 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(),
     for k in drop_env:
         env.pop(k, None)
     env.update(extra_env or {})
+    try:
+        sock_dir = _tf_socket_dir()
+    except OSError as e:
+        return 125, "", str(e)
+    env["PLUGIN_UNIX_SOCKET_DIR"] = sock_dir
     sess, temp = None, None
     if (ws_dir / _tfe.ENCRYPTION_FILE).exists():
         sess = _tf_bao_session_of(ws_dir)
@@ -30390,6 +30395,7 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(),
             if temp is not None:
                 temp.revoke()
             code = getattr(e, "code", None) or type(e).__name__
+            shutil.rmtree(sock_dir, ignore_errors=True)
             return 125, "", f"state encryption: OpenBao child token unavailable ({code})"
     try:
         # umask 077 : état, copies et plans que crée tofu naissent en 0600
@@ -30416,6 +30422,7 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(),
     finally:
         if temp is not None:
             temp.revoke()
+        shutil.rmtree(sock_dir, ignore_errors=True)
         _tf_secure_ws(ws_dir)
 
 
@@ -30426,6 +30433,27 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(),
 _TF_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "TZ",
                 "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
                 "SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
+# 2.10.2 (banc 2.10.1) : go-plugin crée le socket Unix de chaque provider
+# dans `PLUGIN_UNIX_SOCKET_DIR`, à défaut dans TMPDIR. Sous l'espace
+# (`<espace>/.tmp`), un chemin long dépasse la limite d'une adresse Unix (108
+# octets) : « Failed to read any lines from plugin's stdout ». TMPDIR reste
+# dans l'espace (le provider libvirt y écrit les ISO cloud-init, dont le
+# chemin est dans le plan gardé) ; le socket va dans un répertoire court,
+# propre à la commande (0700), retiré à la fin. Lu par les deux providers
+# embarqués (go-plugin v1.7.0 et v1.8.0).
+TF_SOCKET_DIR_MAX = 64
+_TF_SOCKET_BASES = ("/tmp", "/var/tmp")
+
+
+def _tf_socket_dir():
+    """Répertoire privé et court pour les sockets des providers d'une
+    commande ; à retirer par l'appelant."""
+    for base in _TF_SOCKET_BASES + (tempfile.gettempdir(),):
+        if len(base) <= TF_SOCKET_DIR_MAX - 20 and os.path.isdir(base) and os.access(base, os.W_OK | os.X_OK):
+            return tempfile.mkdtemp(prefix="hops-tf-", dir=base)
+    raise OSError("no short temporary directory for the provider sockets (/tmp, /var/tmp)")
 
 
 def _tf_env(ws_dir):
