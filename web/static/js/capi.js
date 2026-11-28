@@ -1048,17 +1048,13 @@ const CAPI = (() => {
   const enc = encodeURIComponent;
 
   async function k8sClustersInner(out, cluster) {
-    let diag, ids = null;
-    try {
-      // 2.10.2 : état des identités CAPHV lu en même temps ; un échec de
-      // cette lecture ne cache pas la liste
-      [diag, ids] = await Promise.all([
-        fetch(`/api/capi/${enc(cluster)}/diag`).then(r => r.json()),
-        fetch(`/api/capi/${enc(cluster)}/identities`).then(r => (r.ok ? r.json() : null)).catch(() => null),
-      ]);
-    } catch (e) { out.innerHTML = `<div class="summary-bar bad">${esc(e.message)}</div>`; return; }
-    const idOf = {};
-    ((ids && ids.clusters) || []).forEach(c => { idOf[c.cluster] = c; });
+    let diag;
+    // 2.10.2 (revue M-6) : la liste est dessinée dès le diagnostic ; l'état
+    // des identités CAPHV, lu à part, remplit ensuite badges et résumé (un
+    // échec ou une lenteur de cette lecture ne retient pas la liste)
+    const ids = fetch(`/api/capi/${enc(cluster)}/identities`).then(r => (r.ok ? r.json() : null)).catch(() => null);
+    try { diag = await fetch(`/api/capi/${enc(cluster)}/diag`).then(r => r.json()); }
+    catch (e) { out.innerHTML = `<div class="summary-bar bad">${esc(e.message)}</div>`; return; }
 
     const clusters = diag.capi_clusters || [];
     if (clusters.length === 0) {
@@ -1069,7 +1065,7 @@ const CAPI = (() => {
       const ref = `data-ns="${esc(c.namespace)}" data-name="${esc(c.name)}"`;
       return `
       <tr>
-        <td><code>${esc(c.namespace)}/${esc(c.name)}</code>${identityBadge(idOf[`${c.namespace}/${c.name}`])}</td>
+        <td><code>${esc(c.namespace)}/${esc(c.name)}</code><span data-capi-identity-slot="${esc(`${c.namespace}/${c.name}`)}"></span></td>
         <td><span class="phase ${phaseClass(c.phase, 'Provisioned')}">${esc(c.phase)}</span></td>
         <td>${c.ready ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + '</span>' : '<span class="badge warn">…</span>'}</td>
         <td><code>${esc(c.clusterClass || '—')}</code></td>
@@ -1084,7 +1080,7 @@ const CAPI = (() => {
         </td>
       </tr>`;
     }).join('');
-    out.innerHTML = `${identitySummary(ids)}
+    out.innerHTML = `<div data-capi-identity-summary-slot></div>
       <table class="data-table">
         <thead><tr>
           <th>${esc(tr('capi.v.col.name'))}</th>
@@ -1096,6 +1092,18 @@ const CAPI = (() => {
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
+    const table = out.firstElementChild && out.firstElementChild.nextElementSibling;
+    ids.then((rep) => {
+      // liste redessinée entre-temps (autre cluster, rafraîchissement) : rien
+      if (!table || !table.isConnected) return;
+      const idOf = {};
+      ((rep && rep.clusters) || []).forEach(c => { idOf[c.cluster] = c; });
+      out.querySelectorAll('[data-capi-identity-slot]').forEach(slot => {
+        slot.innerHTML = identityBadge(idOf[slot.dataset.capiIdentitySlot]);
+      });
+      const sum = out.querySelector('[data-capi-identity-summary-slot]');
+      if (sum) sum.innerHTML = identitySummary(rep);
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1112,6 +1120,8 @@ const CAPI = (() => {
     'identity-role-missing': (v) => tr('capi.id.fd.identity-role-missing', v),
     'identity-role-foreign': (v) => tr('capi.id.fd.identity-role-foreign', v),
     'identity-rules-unknown': (v) => tr('capi.id.fd.identity-rules-unknown', v),
+    'identity-image-namespace-changed': (v) => tr('capi.id.fd.identity-image-namespace-changed', v),
+    'identity-unreadable': (v) => tr('capi.id.fd.identity-unreadable', v),
   };
   const ID_TIPS = {
     'identity-outdated': () => tr('capi.id.t.fd.identity-outdated'),
@@ -1120,6 +1130,8 @@ const CAPI = (() => {
     'identity-role-missing': () => tr('capi.id.t.fd.identity-role-missing'),
     'identity-role-foreign': () => tr('capi.id.t.fd.identity-role-foreign'),
     'identity-rules-unknown': () => tr('capi.id.t.fd.identity-rules-unknown'),
+    'identity-image-namespace-changed': () => tr('capi.id.t.fd.identity-image-namespace-changed'),
+    'identity-unreadable': () => tr('capi.id.t.fd.identity-unreadable'),
   };
   const isAdminNow = () => !!(window.App && App.role && App.role() === 'admin');
 
@@ -1207,11 +1219,13 @@ const CAPI = (() => {
       </div>`;
     document.body.appendChild(m);
     const q = (x) => m.querySelector(`[data-x="${x}"]`);
-    let changes = 0;
+    // revue M-2 : changements montrés par l'aperçu (`ns/cluster=ns/Role/image`),
+    // seuls envoyés ; le serveur ne fait que ceux qui sont encore identiques
+    let changes = [];
     const sync = () => {
       const admin = isAdminNow();
-      q('go').disabled = !(admin && changes > 0);
-      q('gowrap').dataset.tip = !admin ? tr('capi.id.t.adminOnly') : changes ? tr('capi.id.t.go') : tr('capi.id.none');
+      q('go').disabled = !(admin && changes.length > 0);
+      q('gowrap').dataset.tip = !admin ? tr('capi.id.t.adminOnly') : changes.length ? tr('capi.id.t.go') : tr('capi.id.none');
     };
     m.addEventListener('click', (e) => { if (e.target === m || e.target.closest('[data-x="close"]')) closeIdentityUpdate(); });
     m.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeIdentityUpdate(); });
@@ -1220,7 +1234,8 @@ const CAPI = (() => {
       if (gen !== idGen) return;
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       if (d.unreachable) throw new Error(tr('overview.clusterUnreachable', { name: cluster }));
-      changes = ((d.clusters || []).reduce((n, c) => n + (c.changes || []).length, 0));
+      changes = [];
+      (d.clusters || []).forEach(c => (c.changes || []).forEach(x => changes.push(`${c.cluster}=${x.namespace}/${x.role}/${x.image}`)));
       q('plan').innerHTML = identityPreviewHtml(d);
       sync();
     }).catch((e) => {
@@ -1234,7 +1249,7 @@ const CAPI = (() => {
       try {
         const r = await fetch(`/api/capi/${enc(cluster)}/identity-update`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, dry_run: dry }),
+          body: JSON.stringify({ name, dry_run: dry, changes }),
         });
         const d = await r.json().catch(() => ({}));
         if (gen !== idGen) return;

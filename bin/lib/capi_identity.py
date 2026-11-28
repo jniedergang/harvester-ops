@@ -598,8 +598,46 @@ def grants_image_get(role, image):
     return False
 
 
+def grants_image_list(role):
+    """Vrai si le Role porte la règle `list` des images (règle « image » de
+    RULES, posée à la création dans le Role du namespace de l'image) : c'est
+    le Role où la mise à jour ajoute `get`, jamais un autre (revue M-1)."""
+    for r in (role or {}).get("rules") or []:
+        groups, res, verbs = r.get("apiGroups") or [], r.get("resources") or [], r.get("verbs") or []
+        if ((IMAGE_GROUP in groups or "*" in groups) and (IMAGE_RESOURCE in res or "*" in res)
+                and ("list" in verbs or "*" in verbs) and not r.get("resourceNames")):
+            return True
+    return False
+
+
 def image_rule(image):
     return _rbac_rule(IMAGE_GROUP, IMAGE_RESOURCE, ["get"], [image])
+
+
+_DNS = r"[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?"
+CHANGE_RE = re.compile(rf"^(?P<cluster>{_DNS}/{_DNS})=(?P<namespace>{_DNS})/(?P<role>{_DNS})/(?P<image>{_DNS})$")
+
+
+def change_key(cluster, change):
+    """Clé d'un changement montré dans l'aperçu : `ns/cluster=ns/Role/image`
+    (forme de `identity-update --change`)."""
+    return f"{cluster}={change['namespace']}/{change['role']}/{change['image']}"
+
+
+def parse_change(text):
+    """`ns/cluster=ns/Role/image` validé (RFC 1123) ; ValueError sinon."""
+    m = CHANGE_RE.match(str(text or ""))
+    if not m:
+        raise ValueError(f"--change expects namespace/cluster=namespace/role/image, got {str(text)[:120]!r}")
+    return text
+
+
+def unreadable_plan(namespace, name, reason):
+    """Identité qu'on ne peut pas lire avec ces droits (revue M-4) : constat
+    de ce cluster, le relevé des autres continue."""
+    return {"cluster": f"{namespace}/{name}", "state": "blocked", "changes": [],
+            "findings": [{"code": "identity-unreadable", "level": "block",
+                          "facts": {"cluster": f"{namespace}/{name}", "reason": str(reason)[:200]}}]}
 
 
 def identity_plan(namespace, name, sa, images, facts, roles, version):
@@ -650,6 +688,13 @@ def identity_plan(namespace, name, sa, images, facts, roles, version):
                                     "facts": {"cluster": out["cluster"], "role": where}})
             continue
         if grants_image_get(role, obj):
+            continue
+        if not grants_image_list(role):
+            # l'image n'est plus dans le namespace où l'identité liste les
+            # images : y ajouter `get` étendrait ses droits à un namespace
+            # qu'elle n'avait pas (revue M-1)
+            out["findings"].append({"code": "identity-image-namespace-changed", "level": "block",
+                                    "facts": {"cluster": out["cluster"], "role": where, "image": info["ref"]}})
             continue
         if any(c["namespace"] == ins and c["role"] == rname and c["image"] == obj for c in out["changes"]):
             continue

@@ -379,8 +379,15 @@ action; the CLI does the same:
 
 ```bash
 harvester-capi identity-check  --cluster <harvester> [--name <ns>/<cluster>] [--json]
-harvester-capi identity-update --cluster <harvester> [--name <ns>/<cluster>] [--dry-run]
+harvester-capi identity-update --cluster <harvester> [--name <ns>/<cluster>] [--dry-run] \
+    [--change <ns>/<cluster>=<ns>/<role>/<image> ...]
 ```
+
+The console sends the changes of its preview (`--change`): only those
+that are still the same are made. A change that appeared after the
+preview, or one whose image or Role changed since, is left for a new
+preview; one made meanwhile is said already done. Without `--change` the
+CLI makes every change it finds.
 
 The update adds `get` on the image object (`image-xxxxx`, a display name
 in the topology is brought back to its object) to the identity Role of the
@@ -389,8 +396,13 @@ of the cluster (an identity the console did not create is left alone). The
 patch carries the version of the Role it read; running it again changes
 nothing. It does not create a missing Role (`identity-role-missing`), never
 changes a Role without the labels of the cluster (`identity-role-foreign`),
-and never guesses between images that share a display name
-(`identity-image-unresolved`).
+never guesses between images that share a display name
+(`identity-image-unresolved`), and only adds the rule to the Role that
+already lets the identity list images: an image now in another namespace
+is said (`identity-image-namespace-changed`), the identity is not extended
+to it (bring the image back, or grant that namespace by hand as below).
+A read refused by your rights is said per cluster
+(`identity-unreadable`); the other clusters are still reported.
 
 By hand (a console older than 2.10.2), add the rule to the identity Role
 of the image namespace. That Role is `caphv-identity` when the image is in the

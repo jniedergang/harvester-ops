@@ -80,9 +80,9 @@ def test_the_list_says_which_identities_are_outdated(context, flask_server):
 
 
 @pytest.mark.parametrize("which,dry,body", [
-    ("row", False, {"name": "web/web", "dry_run": False}),
-    ("all", False, {"name": "", "dry_run": False}),
-    ("all", True, {"name": "", "dry_run": True}),
+    ("row", False, {"name": "web/web", "dry_run": False, "changes": ["web/web=default/caphv-identity-web/image-abc"]}),
+    ("all", False, {"name": "", "dry_run": False, "changes": ["web/web=default/caphv-identity-web/image-abc"]}),
+    ("all", True, {"name": "", "dry_run": True, "changes": ["web/web=default/caphv-identity-web/image-abc"]}),
 ])
 def test_update_shows_the_exact_change_then_starts_the_action(context, flask_server, which, dry, body):
     posted = []
@@ -144,3 +144,43 @@ def test_the_cluster_details_say_it_too(context, flask_server):
     expect(box.locator('[data-code="identity-outdated"]')).to_contain_text("image-abc", timeout=8000)
     assert box.locator('[data-code="identity-outdated"]').get_attribute("data-tip")
     expect(box.locator('[data-capi-identity-update="web/web"]')).to_be_enabled()
+
+
+def test_the_list_is_drawn_before_the_identities_answer(context, flask_server):
+    """Revue M-6 : la liste n'attend pas le relevé des identités ; badges et
+    résumé arrivent ensuite, dans la liste déjà dessinée."""
+    context.route(re.compile(r".*/api/whoami$"), lambda r, q: fulfill(
+        r, {"role": "admin", "roles_active": True, "user": "u", "auth": "local"}))
+    held = []
+    context.route(re.compile(r".*/api/capi/harv-fake/identities.*"), lambda r, q: held.append(r))
+    page = open_auto(context, flask_server, "#automation/capi/clusters", diag=DIAG)
+    body = page.locator("#capi-k8s-body")
+    expect(body.locator("tbody tr")).to_have_count(3, timeout=8000)
+    expect(body.locator("[data-capi-identity-state]")).to_have_count(0)
+    assert held
+    first = body.locator("tbody tr").first.element_handle()
+    for r in held:
+        fulfill(r, REPORT)
+    expect(body.locator('[data-capi-identity-state="outdated"]')).to_have_count(1, timeout=8000)
+    expect(body.locator("[data-capi-identity-summary]")).to_be_visible()
+    assert first.evaluate("e => e.isConnected")                     # même liste, complétée
+
+
+def test_review_findings_are_said_with_their_tooltip(context, flask_server):
+    report = dict(REPORT, clusters=[
+        {"cluster": "web/web", "state": "blocked", "changes": [], "findings": [
+            {"code": "identity-image-namespace-changed", "level": "block",
+             "facts": {"cluster": "web/web", "role": "web-vms/caphv-identity-web", "image": "web-vms/image-new"}}]},
+        {"cluster": "api/api", "state": "blocked", "changes": [], "findings": [
+            {"code": "identity-unreadable", "level": "block",
+             "facts": {"cluster": "api/api", "reason": "serviceaccounts is forbidden"}}]}])
+    page = open_clusters(context, flask_server, report=report)
+    page.evaluate("CAPI.openIdentityUpdate('')")
+    modal = page.locator("#capi-identity-modal")
+    moved = modal.locator('[data-code="identity-image-namespace-changed"]')
+    expect(moved).to_contain_text("web-vms/image-new", timeout=8000)
+    assert moved.get_attribute("data-tip")
+    unread = modal.locator('[data-code="identity-unreadable"]')
+    expect(unread).to_contain_text("forbidden")
+    assert unread.get_attribute("data-tip")
+    expect(modal.locator('[data-x="go"]')).to_be_disabled()

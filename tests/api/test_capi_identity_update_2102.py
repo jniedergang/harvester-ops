@@ -140,7 +140,7 @@ def world(cli):
 
 
 def args(**kw):
-    a = dict(cluster=None, kubeconfig="/x", name="", dry_run=False, json=True, state_dir=None)
+    a = dict(cluster=None, kubeconfig="/x", name="", dry_run=False, json=True, state_dir=None, change=None)
     a.update(kw)
     return argparse.Namespace(**a)
 
@@ -416,17 +416,21 @@ def test_the_update_route_is_admin_only(wapp):
     assert wapp.required_role_for("/api/capi/h1/identities", "GET") != "admin"
 
 
+CH = "web/web=default/caphv-identity-web/image-abc"
+
+
 @pytest.mark.parametrize("label,body,code,label_cmd", [
-    ("all clusters", {}, 201, ("capi-identity-update:h1", ["harvester-capi", "identity-update", "--cluster", "h1"],
-                               {"dry_run": False})),
-    ("one cluster", {"name": "web/web"}, 201,
-     ("capi-identity-update:web/web", ["harvester-capi", "identity-update", "--cluster", "h1", "--name", "web/web"],
+    ("all clusters", {"changes": [CH]}, 201,
+     ("capi-identity-update:h1", ["harvester-capi", "identity-update", "--cluster", "h1", "--change", CH],
       {"dry_run": False})),
-    ("dry run", {"name": "web/web", "dry_run": True}, 201,
+    ("one cluster", {"name": "web/web", "changes": [CH]}, 201,
      ("capi-identity-update:web/web", ["harvester-capi", "identity-update", "--cluster", "h1", "--name", "web/web",
-                                       "--dry-run"], {"dry_run": True})),
-    ("bad name", {"name": "web"}, 400, None),
-    ("name with a slash too many", {"name": "a/b/c"}, 400, None),
+                                       "--change", CH], {"dry_run": False})),
+    ("dry run", {"name": "web/web", "dry_run": True, "changes": [CH]}, 201,
+     ("capi-identity-update:web/web", ["harvester-capi", "identity-update", "--cluster", "h1", "--name", "web/web",
+                                       "--dry-run", "--change", CH], {"dry_run": True})),
+    ("bad name", {"name": "web", "changes": [CH]}, 400, None),
+    ("name with a slash too many", {"name": "a/b/c", "changes": [CH]}, 400, None),
 ])
 def test_the_update_route_starts_a_tracked_action(wapp, label, body, code, label_cmd):
     r = wapp.app.test_client().post("/api/capi/h1/identity-update", json=body)
@@ -451,7 +455,7 @@ def test_the_report_route_reads_only(wapp, monkeypatch, query, argv, code):
     r = wapp.app.test_client().get(f"/api/capi/h1/identities{query}")
     assert r.status_code == code
     if argv:
-        assert seen == [argv] and r.get_json()["startup"] == {"outdated": ["web/web"]}
+        assert seen == [argv] and r.get_json()["startup"]["outdated"] == []     # web/web absent du relevé
     assert wapp._test_calls == []                       # aucune action
 
 

@@ -25,11 +25,22 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   instead: a missing Role (`identity-role-missing`), a Role without the
   cluster labels (`identity-role-foreign`), an image not found or a display
   name shared by several images (`identity-image-unresolved`), a CAPHV
-  version whose rules are not known (`identity-rules-unknown`). An identity
-  the console did not create is left alone.
+  version whose rules are not known (`identity-rules-unknown`), an image
+  now in a namespace where the identity does not list images
+  (`identity-image-namespace-changed`: `get` is only added to the Role that
+  already holds the `list` rule on images). A read refused by the rights of
+  the person is said for that cluster (`identity-unreadable`), the others
+  are still reported. An identity the console did not create is left
+  alone. The console sends the changes of its preview and only those still
+  the same are made (`identity-update --change`); a change that appeared
+  since waits for a new preview, one made meanwhile is said done.
 - **Start-up check of the identities**: about a minute after it starts, the
   console reads the identities of each Harvester cluster and logs the
   outdated ones and those that need a manual fix. It never updates them.
+  Cluster API > Clusters shows only the clusters of the reader's own
+  report from that check. The list of clusters is drawn first; the
+  identity badges are filled in when their report arrives (shared read,
+  forced refresh at most every 10 s).
 - **External Secrets chosen at creation** (decision 332 A): activation
   stays per namespace from the External Secrets tab. The creation window
   and the tab now say that the team namespaces are enabled once they exist
@@ -43,7 +54,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   bench). go-plugin binds the provider socket in `TMPDIR`, which is in the
   workspace; past 108 bytes the Unix address is refused. Each OpenTofu
   command now gets a short private socket directory (`/tmp/hops-tf-*`,
-  0700, `PLUGIN_UNIX_SOCKET_DIR`, removed at the end, timeout included);
+  0700, `PLUGIN_UNIX_SOCKET_DIR`, removed at the end, timeout and a failed
+  OpenBao session included);
   `TMPDIR` stays in the workspace for the cloud-init ISOs of the libvirt
   provider, whose path is in the saved plan. Both bundled providers read
   the variable (go-plugin v1.7.0 and v1.8.0).
@@ -52,7 +64,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   encryption, KVM cleanup) releases the declaration. When every known run of
   the declaration has ended, a launch now waits for that release (30 s at
   most); a running run or a reservation by another plan is still refused at
-  once.
+  once, also when it appears during that wait.
 - **A package signature sent before its archive was lost**: the archive
   upload deleted any `.sig` of the same name and the package looked
   unsigned. A `.sig` sent with no archive in place is now kept for the
@@ -100,8 +112,19 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   (signature dropped, `unsigned`, not `invalid`), same archive sent again
   (kept), signature of A' sent while A is in place (kept, also for an
   unknown key), wrong signature sent before its archive (`invalid`).
+  Review: image moved to a namespace the identity does not list, what lists
+  images, Role gone, no longer the console's, no longer listing images or
+  write undone between report and apply, only previewed changes applied
+  (new change waits, changed image not applied, change made meanwhile said
+  done, malformed change refused, route needs the preview list), forbidden
+  read per cluster (account, images, CAPI providers) while another read
+  error still fails, start-up result limited to the reader's report,
+  shared read keyed by `name`; socket directory removed when the OpenBao
+  session fails; settling wait left at once when a run or a reservation
+  appears.
 - E2E: identity summary, badges and escaped texts, preview then action for
-  one cluster, for all and in dry run, operator greyed with the tooltip on
+  one cluster, for all and in dry run (the preview list is sent), list
+  drawn before the identities answer, review findings with their tooltip, operator greyed with the tooltip on
   the wrapper, nothing to change, failed read keeps the list, cluster
   details; ESO reminder in the creation window and the tab, finding and its
   tooltip.
@@ -114,7 +137,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   finding tooltip and tab reminder dropped; socket directory not removed;
   settling wait on a running run, held reservation ignored; stale `.sig`
   never dropped, then (review) replaced archive not checked, signature
-  without an archive checked, unknown-key or valid signature dropped. Before each fix the new tests failed as the bench saw it
+  without an archive checked, unknown-key or valid signature dropped; `list`
+  rule not checked (report and apply), named `list` counted, post-write
+  check dropped, preview filter ignored, stale keys not said, change made
+  meanwhile counted stale, change format or route list not checked,
+  changes not passed by the route, forbidden read not caught or every error
+  caught, start-up result not filtered, shared read keys dropped, socket
+  directory leaked, settling wait not left; interface: preview list not
+  sent, new finding tooltip dropped, list waiting for the identities. Before each fix the new tests failed as the bench saw it
   (`AF_UNIX path too long`, 409 `running`, `unsigned`).
 - Full suites before the version commit: API 15714 passed, 10 skipped
   (`test_vnc_mux`, a known timing test, failed once in parallel on an

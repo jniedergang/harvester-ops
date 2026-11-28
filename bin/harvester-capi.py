@@ -5,7 +5,7 @@
     harvester-capi install   --cluster C --components DIR [--push-images]
     harvester-capi cleanup-legacy --cluster C [--dry-run]
     harvester-capi identity-check  --cluster C [--name ns/cluster] [--json]
-    harvester-capi identity-update --cluster C [--name ns/cluster] [--dry-run]
+    harvester-capi identity-update --cluster C [--name ns/cluster] [--dry-run] [--change ns/cluster=ns/role/image ...]
     harvester-capi uninstall --cluster C [--dry-run] [--remove-images] [--timeout 600] [--json] [--id ID]
     harvester-capi inventory --cluster C [--components DIR] --json
     harvester-capi check     --cluster C --spec FICHIER [--components DIR] [--identity I] [--many] [--json]
@@ -589,14 +589,26 @@ def cmd_repair_shim(args):
 # 2.10.2 (point 331 B) : identités posées avant la 2.10.1
 # ---------------------------------------------------------------------------
 
+def _forbidden(err):
+    text = str(err)
+    return "Forbidden" in text or "forbidden" in text
+
+
 def identity_report(kube, only=None):
     """État de l'identité de chaque cluster Cluster API (`ci.identity_plan`) :
     {"unreachable", "caphv_version", "clusters"}. Lecture seule ; `only` :
-    (namespace, nom) d'un seul cluster."""
+    (namespace, nom) d'un seul cluster. Une lecture refusée (Forbidden : droits
+    de la personne) devient le constat `identity-unreadable` du cluster
+    concerné, jamais l'échec du relevé entier (revue M-4)."""
     if not _reachable(kube):
         return {"unreachable": True, "caphv_version": None, "clusters": []}
-    providers = [cs.provider_state(p) for p in kube.list(cs.K_CAPIPROVIDER)]
-    version = ci.caphv_version({"providers": providers})
+    try:
+        providers = [cs.provider_state(p) for p in kube.list(cs.K_CAPIPROVIDER)]
+        version, version_err = ci.caphv_version({"providers": providers}), None
+    except KubeError as e:
+        if not _forbidden(e):
+            raise
+        version, version_err = None, f"CAPIProvider: {str(e)[:160]}"
     facts = None
     out = []
     for cl in kube.list(cs.K_CLUSTER):
@@ -604,18 +616,27 @@ def identity_report(kube, only=None):
         ns, name = md.get("namespace"), md.get("name")
         if (only and (ns, name) != tuple(only)) or md.get("deletionTimestamp"):
             continue
-        sa = kube.get("serviceaccounts", ns, ci.IDENTITY)
-        images, roles = ci.cluster_images(cl), {}
-        if sa is not None and ci.owned(sa, name, ns):
-            if facts is None:
-                facts = _image_facts([_image_info(i) for i in kube.list("virtualmachineimages.harvesterhci.io")])
-            for ref in images:
-                info = facts.get(ref)
-                if info and not info.get("ambiguous"):
-                    ins = info["ref"].partition("/")[0]
-                    key = (ins, ci.image_role_name(ns, ins))
-                    if key not in roles:
-                        roles[key] = kube.get(ci.K_ROLE, *key)
+        if version_err:
+            out.append(ci.unreadable_plan(ns, name, version_err))
+            continue
+        try:
+            sa = kube.get("serviceaccounts", ns, ci.IDENTITY)
+            images, roles = ci.cluster_images(cl), {}
+            if sa is not None and ci.owned(sa, name, ns):
+                if facts is None:
+                    facts = _image_facts([_image_info(i) for i in kube.list("virtualmachineimages.harvesterhci.io")])
+                for ref in images:
+                    info = facts.get(ref)
+                    if info and not info.get("ambiguous"):
+                        ins = info["ref"].partition("/")[0]
+                        key = (ins, ci.image_role_name(ns, ins))
+                        if key not in roles:
+                            roles[key] = kube.get(ci.K_ROLE, *key)
+        except KubeError as e:
+            if not _forbidden(e):
+                raise
+            out.append(ci.unreadable_plan(ns, name, str(e)))
+            continue
         out.append(ci.identity_plan(ns, name, sa, images, facts or {}, roles, version))
     return {"unreachable": False, "caphv_version": version, "clusters": out}
 
@@ -660,6 +681,8 @@ def _identity_apply(kube, cname, change, dry_run):
             return f"identity-role-missing: Role {where} is gone"
         if not ci.owned(role, name, ns):
             return f"identity-role-foreign: Role {where} does not carry the labels of {cname}"
+        if not ci.grants_image_list(role):
+            return f"identity-image-namespace-changed: Role {where} no longer lists images"
         if ci.grants_image_get(role, change["image"]):
             step(f"identity-{cname}", "done", f"Role {where} already grants get on image {change['image']}")
             return None
@@ -698,7 +721,11 @@ def cmd_identity_update(args):
     if only and not rep["clusters"]:
         step("identity", "error", f"cluster {only[0]}/{only[1]} not found")
         return EXIT_FAIL
-    failed = blocked = done = 0
+    # revue M-2 : la console envoie les changements de l'aperçu ; seuls ceux
+    # qui sont encore identiques (cluster, namespace, Role, image) sont faits
+    expected = None if args.change is None else {ci.parse_change(x) for x in args.change}
+    failed = blocked = done = stale = 0
+    seen = set()
     for c in rep["clusters"]:
         cname = c["cluster"]
         stops = [f for f in c["findings"] if f["level"] == "block"]
@@ -714,6 +741,13 @@ def cmd_identity_update(args):
             step(f"identity-{cname}", "done", "identity up to date")
             continue
         for ch in c["changes"]:
+            key = ci.change_key(cname, ch)
+            if expected is not None and key not in expected:
+                stale += 1
+                step(f"identity-{cname}", "error", f"not in the preview: get on image {ch['image']} in Role "
+                     f"{ch['namespace']}/{ch['role']} left for a new preview")
+                continue
+            seen.add(key)
             try:
                 why = _identity_apply(kube, cname, ch, args.dry_run)
             except KubeError as e:
@@ -723,10 +757,24 @@ def cmd_identity_update(args):
                 step(f"identity-{cname}", "error", why)
             else:
                 done += 1
+    for key in sorted((expected or set()) - seen):
+        m = ci.CHANGE_RE.match(key)
+        cns, _, cnm = m.group("cluster").partition("/")
+        try:
+            role = kube.get(ci.K_ROLE, m.group("namespace"), m.group("role"))
+        except KubeError:
+            role = None
+        if role is not None and ci.owned(role, cnm, cns) and ci.grants_image_get(role, m.group("image")):
+            step(f"identity-{m.group('cluster')}", "done", f"Role {m.group('namespace')}/{m.group('role')} "
+                 f"already grants get on image {m.group('image')}")
+            continue
+        stale += 1
+        step("identity", "error", f"changed since the preview, not applied: {key}")
     verb = "would update" if args.dry_run else "updated"
-    step("identity", "error" if failed or blocked else "done",
-         f"{verb} {done} rule(s); {failed} failed; {blocked} need a manual fix")
-    return EXIT_FAIL if failed else EXIT_BLOCKED if blocked else EXIT_OK
+    step("identity", "error" if failed or blocked or stale else "done",
+         f"{verb} {done} rule(s); {failed} failed; {blocked} need a manual fix"
+         + (f"; {stale} changed since the preview" if stale else ""))
+    return EXIT_FAIL if failed else EXIT_BLOCKED if blocked or stale else EXIT_OK
 
 
 def push_images(entry, desc):
@@ -4789,6 +4837,10 @@ def main(argv=None):
                             else "namespace/cluster/entry")
         if "optname" in extra:
             sp.add_argument("--name", default="", help="namespace/cluster of one child cluster (default: all)")
+        if name == "identity-update":
+            sp.add_argument("--change", action="append", default=None, metavar="NS/CLUSTER=NS/ROLE/IMAGE",
+                            help="apply only this change of the preview if it is still the same (repeatable; "
+                                 "default: every change found now)")
         if "gspec" in extra:
             sp.add_argument("--spec", required=True, help="JSON request (cluster, entry, secrets, role, origin, by), "
                                                           "'-' for stdin")

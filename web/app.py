@@ -23993,9 +23993,12 @@ def _capi_identity_name():
     return name, None
 
 
+CAPI_IDENTITY_FRESH_MIN = 10       # s : `?fresh=1` relit au plus une fois par période
+
+
 @app.route("/api/capi/<cluster>/identities")
 @requires_auth
-@shared_read()
+@shared_read(query_keys=("name",), fresh_min=CAPI_IDENTITY_FRESH_MIN)
 def api_capi_identities(cluster):
     """État de l'identité de chaque cluster enfant (`identity-check`) :
     à jour, à mettre à jour (changements exacts), bloquée (geste humain),
@@ -24010,8 +24013,19 @@ def api_capi_identities(cluster):
     if err:
         return err
     out, _rc = got
-    out["startup"] = CAPI_IDENTITY_STARTUP.get(cluster)
+    out["startup"] = _capi_identity_startup_view(CAPI_IDENTITY_STARTUP.get(cluster), out)
     return jsonify(out)
+
+
+def _capi_identity_startup_view(entry, report):
+    """Le contrôle du démarrage lit avec le kubeconfig de la console ; on ne
+    rend à la personne que les clusters de SON relevé (revue M-5)."""
+    if not entry:
+        return None
+    mine = {c.get("cluster") for c in report.get("clusters") or []}
+    return {"at": entry.get("at"), "unreachable": bool(entry.get("unreachable")),
+            "outdated": [c for c in entry.get("outdated") or [] if c in mine],
+            "blocked": [c for c in entry.get("blocked") or [] if c in mine]}
 
 
 @app.route("/api/capi/<cluster>/identity-update", methods=["POST"])
@@ -24019,17 +24033,27 @@ def api_capi_identities(cluster):
 @_rate_limit("6 per minute")
 def api_capi_identity_update(cluster):
     """Ajoute aux identités posées avant la 2.10.1 la règle `get` sur leur
-    image. Corps : {"name": "ns/nom" (vide : tous), "dry_run": bool}. Action
+    image. Corps : {"name": "ns/nom" (vide : tous), "dry_run": bool,
+    "changes": ["ns/cluster=ns/Role/image", ...] (ceux de l'aperçu)}. Action
     suivie `capi-identity-update:<ns/nom ou cluster>` ; administrateur."""
     name, err = _capi_identity_name()
     if err:
         return err
-    dry = bool((request.get_json(silent=True) or {}).get("dry_run"))
+    body = request.get_json(silent=True) or {}
+    dry = bool(body.get("dry_run"))
+    # revue M-2 : seuls les changements de l'aperçu, encore identiques, sont
+    # faits ; un changement apparu depuis attend un nouvel aperçu
+    changes = body.get("changes")
+    if (not isinstance(changes, list) or not changes or len(changes) > 500
+            or not all(isinstance(x, str) and _ci.CHANGE_RE.match(x) for x in changes)):
+        return jsonify({"error": "changes expects the list shown by the preview "
+                                 "(namespace/cluster=namespace/role/image)", "code": "invalid-changes"}), 400
     cmd, err = _capi_base(cluster, "identity-update")
     if err:
         return err
     run, err = _capi_action(cluster, f"capi-identity-update:{name or cluster}",
-                            cmd + (["--name", name] if name else []) + (["--dry-run"] if dry else []),
+                            cmd + (["--name", name] if name else []) + (["--dry-run"] if dry else [])
+                            + [a for x in dict.fromkeys(changes) for a in ("--change", x)],
                             dry_run=dry)
     if err:
         return err
