@@ -55,8 +55,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   once.
 - **A package signature sent before its archive was lost**: the archive
   upload deleted any `.sig` of the same name and the package looked
-  unsigned. A `.sig` is now dropped only when it is older than the archive
-  it replaces (it belonged to that archive); the two files can be sent in
+  unsigned. A `.sig` sent with no archive in place is now kept for the
+  archive that comes. When an archive replaces one already sent, the `.sig`
+  in place stays only if it checks against the new archive (same
+  `ssh-keygen` check as the pre-check); otherwise it is dropped and the
+  package shows as unsigned, as in 2.10.1. The two files can be sent in
   either order.
 
 ### Changed
@@ -93,8 +96,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   and 200 characters, removed on timeout, short with a long console
   `TMPDIR`. Launch after a finished run (done, error, cancelled), still
   refused when running, never released or held by another plan. Signature
-  in either order, signature of a replaced archive dropped, new signature
-  for a replaced archive kept.
+  in either order, in the real order archive A, its signature, archive A'
+  (signature dropped, `unsigned`, not `invalid`), same archive sent again
+  (kept), signature of A' sent while A is in place (kept, also for an
+  unknown key), wrong signature sent before its archive (`invalid`).
 - E2E: identity summary, badges and escaped texts, preview then action for
   one cluster, for all and in dry run, operator greyed with the tooltip on
   the wrapper, nothing to change, failed read keeps the list, cluster
@@ -108,7 +113,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   finding without the chart check or only when the child is readable,
   finding tooltip and tab reminder dropped; socket directory not removed;
   settling wait on a running run, held reservation ignored; stale `.sig`
-  never dropped. Before each fix the new tests failed as the bench saw it
+  never dropped, then (review) replaced archive not checked, signature
+  without an archive checked, unknown-key or valid signature dropped. Before each fix the new tests failed as the bench saw it
   (`AF_UNIX path too long`, 409 `running`, `unsigned`).
 - Full suites before the version commit: API 15714 passed, 10 skipped
   (`test_vnc_mux`, a known timing test, failed once in parallel on an

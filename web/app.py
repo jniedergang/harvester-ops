@@ -41287,17 +41287,22 @@ def api_artefacts_settings_put():
 
 
 def _art_drop_stale_sig(archive):
-    """Retire la `.sig` de l'archive que ce téléversement remplace : plus
-    ancienne que l'archive en place, elle lui appartenait. Une `.sig` arrivée
-    sans archive, ou après la dernière archive, vaut pour celle qui vient
-    (2.10.2, banc 2.10.1 : la signature téléversée d'abord était effacée et
-    le paquet vu non signé)."""
+    """Après l'écriture d'une archive qui en remplace une autre : la `.sig`
+    déjà là ne reste que si elle vaut pour cette archive (même contrôle
+    ssh-keygen que la pré-vérification : `valid` ou `unknown-key`) ; sinon
+    elle appartenait à l'archive remplacée et part, le paquet est vu non
+    signé comme en 2.10.1. Une `.sig` arrivée sans archive en place n'est pas
+    passée ici : elle vaut pour l'archive qui vient (2.10.2, banc 2.10.1 et
+    revue I-1 : l'ordre réel A, sig A, A' rendait `invalid`)."""
     sig = Path(str(archive) + ".sig")
+    if not sig.is_file():
+        return
     try:
-        if sig.is_file() and archive.is_file() and sig.stat().st_mtime <= archive.stat().st_mtime:
-            sig.unlink()
-    except FileNotFoundError:
-        pass
+        trust = _art.verify_trust(archive, str(sig), str(_art.signers_path(_art_state())))
+    except _art.ArtefactError:
+        return                                   # la pré-vérification dira pourquoi
+    if trust["state"] == "invalid":
+        sig.unlink(missing_ok=True)
 
 
 @app.route("/api/artefacts/upload", methods=["POST"])
@@ -41331,7 +41336,7 @@ def api_artefacts_upload():
     need = 2 * length + (1 << 30)              # archive puis extraction (contraintes communes du plan)
     if st.f_bavail * st.f_frsize < need:
         return jsonify({"error": "not enough room to receive and extract the package", "need": need}), 507
-    _art_drop_stale_sig(inc / name)
+    replaces = (inc / name).is_file()          # une archive de ce nom est déjà en place
     part = inc / (name + ".part")
     label = f"artefacts-import:{base[:-len('.tar.gz')]}"
     run = ActionRun(uuid.uuid4().hex[:12], label, "", ["upload", name])
@@ -41345,6 +41350,8 @@ def api_artefacts_upload():
     try:
         res = _receive_archive(run, request.stream, length, part)
         os.replace(part, inc / name)
+        if replaces:
+            _art_drop_stale_sig(inc / name)
     except (_UploadCancelled, ValueError, OSError) as e:
         part.unlink(missing_ok=True)
         run.status, run.exit_code = "error", 1
