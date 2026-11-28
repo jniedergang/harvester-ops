@@ -1,6 +1,6 @@
 # Parity with the Harvester UI
 
-Status on 2026-11-27, console **v2.10.1**, compared with the **Harvester v1.9.1** UI (menus taken from the harvester-ui-extension v1.9.1 source and the v1.9 documentation).
+Status on 2026-11-27, console **v2.10.2**, compared with the **Harvester v1.9.1** UI (menus taken from the harvester-ui-extension v1.9.1 source and the v1.9 documentation).
 
 Of 139 functions of the Harvester UI: **134 done**, **4 partial**, **1 missing**; 1 out of scope. A missing function shows the version it is planned for, or "not yet".
 

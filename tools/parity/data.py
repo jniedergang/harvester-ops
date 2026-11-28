@@ -3,7 +3,7 @@
 # Statuts : ok (fait), part (partiel), todo (manquant), plus (console seulement), na (hors périmètre).
 # v : version où c'est arrivé (ok/part) ou prévue (todo).
 
-AS_OF = "2.10.1"
+AS_OF = "2.10.2"
 DATE = "2026-11-27"
 # 2.10.1 : lignes v1.9.1 relevées par git diff v1.9.0..v1.9.1 de harvester-ui-extension
 # (config, models, edit, dialog), le 27/11/2026
