@@ -29585,6 +29585,27 @@ def _tf_decl_wait_idle(decl_id, timeout=30, sleep=None):
     return False
 
 
+# 2.10.2 (banc 2.10.1) : un destroy lancé juste après son dry-run, rendu
+# « done », recevait 409 `running` : le fil écrit le statut final avant son
+# `finally` (session OpenBao, chiffrement, nettoyage KVM), qui seul rend la
+# déclaration. Quand toutes ses actions connues sont finies, le lancement
+# attend ce `finally`, au plus TF_DECL_SETTLE_S secondes.
+TF_DECL_SETTLE_S = 30
+_TF_FINAL = ("done", "error", "cancelled")
+
+
+def _tf_decl_settling(decl_id):
+    """Vrai si la déclaration est encore tenue alors que chacune de ses
+    actions de ce processus est finie (fil dans son `finally`). Lu hors de
+    TF_DECL_RUNNING_LOCK (jamais ACTIONS_LOCK sous ce verrou)."""
+    with TF_DECL_RUNNING_LOCK:
+        if decl_id not in TF_DECL_RUNNING or decl_id in TF_DECL_HELD:
+            return False
+    with ACTIONS_LOCK:
+        runs = [r for r in ACTIONS.values() if (r.result or {}).get("declaration_id") == decl_id]
+    return bool(runs) and all(r.status in _TF_FINAL for r in runs)
+
+
 def _tf_decl_unlock_if_idle(decl_id):
     """Rend le verrou de fichier quand la déclaration ne tourne plus et n'est
     plus réservée dans ce processus. Sous TF_DECL_RUNNING_LOCK."""
@@ -31799,6 +31820,8 @@ def _tf_decl_launch(cluster, kc, decl_id, mode, plan_hash=None, user="", cluster
             raise TfLaunchError(_secret_error_status(e),
                                 {"error": str(e)[:300], "code": e.code}) from None
 
+    if _tf_decl_settling(decl["id"]):
+        _tf_decl_wait_idle(decl["id"], timeout=TF_DECL_SETTLE_S)
     with TF_DECL_RUNNING_LOCK:
         if _tf_decl_busy(decl["id"], holder):
             raise TfLaunchError(409, {"error": "this declaration is already running",
