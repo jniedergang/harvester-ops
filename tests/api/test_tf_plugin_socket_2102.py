@@ -116,3 +116,40 @@ def test_the_socket_dir_is_private(tmp_path, fake_tofu):
         assert len(d) <= wapp.TF_SOCKET_DIR_MAX
     finally:
         os.rmdir(d)
+
+
+class _Boom(Exception):
+    pass
+
+
+@pytest.mark.parametrize("label,session_of,want", [
+    ("OpenBao child token refused", "secret-error", (125, "state encryption: OpenBao child token unavailable")),
+    ("session lookup raises", "raise", None),
+])
+def test_the_socket_dir_is_removed_when_the_state_session_fails(tmp_path, monkeypatch, fake_tofu, label,
+                                                                session_of, want):
+    """Revue M-7 : l'espace chiffré dont la session OpenBao échoue (refus
+    connu ou erreur inattendue) ne laisse pas de répertoire de sockets."""
+    made = []
+    real = wapp._tf_socket_dir
+    monkeypatch.setattr(wapp, "_tf_socket_dir", lambda: made.append(real()) or made[-1])
+    ws = long_ws(tmp_path, 60)
+    (ws / wapp._tfe.ENCRYPTION_FILE).write_text("")
+    monkeypatch.setattr(wapp._tfg, "check_workspace", lambda *a, **kw: [])
+
+    class Sess:
+        def env(self):
+            raise wapp._sst.SecretError("bao-down", "no token")
+
+    def lookup(ws_dir):
+        if session_of == "raise":
+            raise _Boom("unexpected")
+        return Sess()
+    monkeypatch.setattr(wapp, "_tf_bao_session_of", lookup)
+    if want is None:
+        with pytest.raises(_Boom):
+            wapp._tf_run_cmd(ws, "", ["version"], timeout=30)
+    else:
+        rc, _out, err = wapp._tf_run_cmd(ws, "", ["version"], timeout=30)
+        assert (rc, err.split(" (")[0]) == want, label
+    assert made and not Path(made[0]).exists(), label

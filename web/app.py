@@ -30528,25 +30528,24 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(),
     for k in drop_env:
         env.pop(k, None)
     env.update(extra_env or {})
+    sess, temp, sock_dir = None, None, None
     try:
-        sock_dir = _tf_socket_dir()
-    except OSError as e:
-        return 125, "", str(e)
-    env["PLUGIN_UNIX_SOCKET_DIR"] = sock_dir
-    sess, temp = None, None
-    if (ws_dir / _tfe.ENCRYPTION_FILE).exists():
-        sess = _tf_bao_session_of(ws_dir)
-        if sess is None:
-            sess = temp = _TfBaoSession(_tf_ws_decl_id(ws_dir), timeout)
+        # revue M-7 : répertoire des sockets créé DANS le try, retiré par le
+        # finally quoi qu'il arrive ensuite (session OpenBao comprise)
         try:
-            env.update(sess.env())
-        except (_sst.SecretError, _oc.OpenBaoError, ValueError, KeyError) as e:
-            if temp is not None:
-                temp.revoke()
-            code = getattr(e, "code", None) or type(e).__name__
-            shutil.rmtree(sock_dir, ignore_errors=True)
-            return 125, "", f"state encryption: OpenBao child token unavailable ({code})"
-    try:
+            sock_dir = _tf_socket_dir()
+        except OSError as e:
+            return 125, "", str(e)
+        env["PLUGIN_UNIX_SOCKET_DIR"] = sock_dir
+        if (ws_dir / _tfe.ENCRYPTION_FILE).exists():
+            sess = _tf_bao_session_of(ws_dir)
+            if sess is None:
+                sess = temp = _TfBaoSession(_tf_ws_decl_id(ws_dir), timeout)
+            try:
+                env.update(sess.env())
+            except (_sst.SecretError, _oc.OpenBaoError, ValueError, KeyError) as e:
+                code = getattr(e, "code", None) or type(e).__name__
+                return 125, "", f"state encryption: OpenBao child token unavailable ({code})"
         # umask 077 : état, copies et plans que crée tofu naissent en 0600
         r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env, input=stdin_text,
                            capture_output=True, text=True, timeout=timeout, umask=0o077)
@@ -30571,7 +30570,8 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=(),
     finally:
         if temp is not None:
             temp.revoke()
-        shutil.rmtree(sock_dir, ignore_errors=True)
+        if sock_dir:
+            shutil.rmtree(sock_dir, ignore_errors=True)
         _tf_secure_ws(ws_dir)
 
 
